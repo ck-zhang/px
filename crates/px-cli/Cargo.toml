@@ -1,0 +1,25 @@
+[package]
+name = "px-cli"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "px"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+color-eyre.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+px-core = { path = "../px-core" }
+atty = "0.2"
+
+[dev-dependencies]
+assert_cmd.workspace = true
+tempfile.workspace = true
+toml_edit = "0.22"

@@ -1,0 +1,27 @@
+[package]
+name = "px-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+camino.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+px-python = { path = "../px-python" }
+px-runtime = { path = "../px-runtime" }
+px-resolver = { path = "../px-resolver" }
+dirs-next.workspace = true
+toml_edit = "0.22"
+time = { version = "0.3", features = ["formatting"] }
+pep440_rs.workspace = true
+px-store = { path = "../px-store" }
+reqwest.workspace = true
+sha2.workspace = true
+pep508_rs = "0.5"
+
+[features]
+default = []

@@ -1,0 +1,9 @@
+[project]
+name = "workspace-root"
+version = "0.1.0"
+description = "Workspace root for px integration tests"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.px.workspace]
+members = ["member_alpha", "member_beta"]

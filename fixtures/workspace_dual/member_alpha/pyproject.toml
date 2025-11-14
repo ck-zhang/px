@@ -1,0 +1,13 @@
+[project]
+name = "member-alpha"
+version = "0.1.0"
+description = "Workspace member alpha"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+member-alpha-cli = "member_alpha.cli:main"
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
