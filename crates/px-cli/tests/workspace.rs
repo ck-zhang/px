@@ -66,6 +66,44 @@ fn workspace_verify_detects_and_clears_drift() {
 }
 
 #[test]
+fn workspace_verify_human_messages_reflect_state() {
+    let (_tmp, root) = prepare_workspace_fixture("ws-verify-human");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .args(["workspace", "verify"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("px workspace verify: all members clean"),
+        "clean verify output should mention all members clean: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("Hint:"),
+        "clean verify should not emit a hint: {stdout:?}"
+    );
+
+    let beta = root.join("member_beta");
+    fs::remove_file(beta.join("px.lock")).expect("remove px.lock");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .args(["workspace", "verify"])
+        .assert()
+        .failure();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("px workspace verify: drift in member-beta"),
+        "drift output should mention member-beta drift: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("Hint: run `px workspace install`"),
+        "drift output should emit remediation hint: {stdout:?}"
+    );
+}
+
+#[test]
 fn workspace_install_restores_missing_locks() {
     let (_tmp, root) = prepare_workspace_fixture("ws-install-members");
     let alpha_lock = root.join("member_alpha/px.lock");

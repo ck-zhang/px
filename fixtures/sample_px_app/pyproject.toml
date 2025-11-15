@@ -8,7 +8,9 @@ authors = [
   { name = "Code Fixture", email = "fixtures@example.com" },
 ]
 license = { text = "MIT" }
-dependencies = []
+dependencies = [
+  "rich==13.7.1",
+]
 
 [project.scripts]
 sample-px-app = "sample_px_app.cli:main"

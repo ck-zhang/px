@@ -52,6 +52,46 @@ fn cache_prune_respects_dry_run_and_all() {
     assert!(!store.join("nested").join("b.bin").exists());
 }
 
+#[test]
+fn cache_path_human_output_is_prefixed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cache_dir = temp.path().join("cache");
+    fs::create_dir_all(&cache_dir).expect("dirs");
+
+    let assert = cargo_bin_cmd!("px")
+        .env("PX_CACHE_PATH", &cache_dir)
+        .args(["cache", "path"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("px infra cache: path"),
+        "cache path output should include prefixed summary: {stdout:?}"
+    );
+}
+
+#[test]
+fn cache_prune_dry_run_human_message_is_concise() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = temp.path().join("store");
+    populate_cache(&store);
+
+    let assert = cargo_bin_cmd!("px")
+        .env("PX_CACHE_PATH", &store)
+        .args(["cache", "prune", "--all", "--dry-run"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("px infra cache: would remove"),
+        "dry-run output should mention would-remove summary: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("Hint:"),
+        "dry-run success should not emit Hint: {stdout:?}"
+    );
+}
+
 fn populate_cache(store: &Path) {
     fs::create_dir_all(store.join("nested")).expect("dirs");
     write_bytes(&store.join("a.bin"), 4);

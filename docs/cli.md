@@ -13,7 +13,12 @@ while `--json` emits the envelope described below.
 | `-v, --verbose` | Increase logging (stackable; `-vv` reaches trace). |
 | `--trace` | Force trace logging regardless of `-v`/`-q`. |
 | `--json` | Emit machine-friendly envelopes instead of plain text. |
+| `--no-color` | Disable colored human output (`NO_COLOR` also supported). |
 | `--config <path>` | Optional px config file (future use). |
+
+px uses a muted palette for status lines, hints, and table headers when stdout
+is a TTY. Colors are automatically disabled when piping output, when the
+`NO_COLOR` environment variable is set, or when you pass `--no-color`.
 
 ## UX conventions
 
@@ -54,6 +59,7 @@ while `--json` emits the envelope described below.
 - **Workflow:** `px run`, `px test`
 - **Quality:** `px fmt`, `px lint`, `px tidy`
 - **Delivery:** `px build`, `px publish`
+- **Migrate:** `px migrate` (preview how px would import a repo)
 - **Support:** `px env {python,info,paths}`, `px cache {path,stats,prune}`
 - **Workspace:** `px workspace list`, `px workspace verify`
 
@@ -120,12 +126,44 @@ Use `--json` with either mode to capture the full envelope.
 
 ### Running the sample app
 
+`px run` infers the entrypoint from `[project.scripts]` (and falls back to
+`<package>.cli`), so you can omit `ENTRY` and still forward arguments
+after `--`:
+
 ```bash
-$ cargo run -q -- run sample_px_app.cli -- -n PxTest
+$ cargo run -q -- run -- -n PxTest
 Hello, PxTest!
 ```
 
-Arguments after `--` are forwarded verbatim to the Python entrypoint.
+`--json` shows the same invocation envelope, including the inferred entry:
+
+```bash
+$ cargo run -q -- --json run -- -n PxTest
+{
+  "status": "ok",
+  "message": "px workflow run: Hello, PxTest!",
+  "details": {
+    "mode": "module",
+    "entry": "sample_px_app.cli",
+    "script": "sample-px-app",
+    "defaulted": true,
+    "args": ["-n", "PxTest"],
+    "stdout": "Hello, PxTest!\n",
+    "stderr": "",
+    "code": 0,
+    "target": "sample_px_app.cli",
+    "passthrough": true
+  }
+}
+```
+
+Need to run a raw executable instead? Put it before the `--` separator and px
+will pass through the rest with the managed env:
+
+```bash
+$ cargo run -q -- run python -- -m sample_px_app.cli -n PxPass
+Hello, PxPass!
+```
 
 ### Testing (pytest + fallback)
 
@@ -147,13 +185,15 @@ Project commands run from the directory that should contain `pyproject.toml`. Us
 
 ```bash
 $ mkdir -p /tmp/demo && cd /tmp/demo
-$ cargo run -q -- project init --package demo_pkg
-Initialized project demo_pkg
+$ cargo run -q -- project init
+px project init: initialized project demo
+Hint: Pass --package <name> to override the inferred module name.
 ```
 
-`--package` is required and must contain ASCII letters/numbers/underscores; `--py`
-accepts a version floor (e.g., `--py 3.10` writes `>=3.10`). `--json` lists the
-files created (`pyproject.toml`, package module, tests, `.gitignore`).
+`px project init` infers the package name by sanitizing the directory name. Use
+`--package demo_pkg` to override the module and `--py 3.10` to change the
+`requires-python` floor (defaults to `>=3.12`). `--json` lists the files created
+(`pyproject.toml`, package module, tests, `.gitignore`).
 
 #### Add dependencies
 
@@ -223,13 +263,226 @@ $ cargo run -q -- --json install --frozen
 - v1 remains the default output for `px install` until the resolver/store grow
   full graph support. Mixed repos are safe because the diff/frozen flows accept
   either version.
-- `px lock diff`, `px install --frozen`, and `px tidy --frozen` normalize both
+- `px lock diff`, `px install --frozen`, and `px tidy` normalize both
   versions before comparing, so a project can upgrade gradually without noisy
   drift reports.
 - `--frozen` still surfaces drift, and it now also fails when cached wheels are
   missing or their hashes/size do not match the locked artifact data.
 - Online integration tests (and the CLI examples above) expect
   `PX_ONLINE=1`; without it the network-backed tests are skipped.
+
+### Migrate existing projects
+
+`px migrate` inspects `pyproject.toml`, `requirements.txt`, and
+`requirements-dev.txt` (when present) and prints a plan without touching files.
+Run it before adopting px so you can preview the pins and sources it detects.
+`px onboard` remains as a temporary alias and prints a deprecation note.
+
+Flags:
+
+- `--dry-run` (default) previews the plan only.
+- `--write` applies the plan, writes `px.lock`, and saves backups first.
+- `--yes` / `--no-input` accept prompts automatically.
+- `--source <path>` overrides `requirements.txt` discovery.
+- `--dev-source <path>` overrides `requirements-dev.txt` discovery.
+- `--json` emits `{status,message,details}` output for tooling.
+- `--allow-dirty` skips the git clean check (use with care).
+- `--lock-only` writes `px.lock` without touching `pyproject.toml`.
+- `--no-autopin` disables automatic `name==version` pinning and leaves loose
+  specs untouched (the command will fail if ranges remain).
+
+Auto-pinning only considers requirements whose PEP 508 markers match the
+current interpreter. Marker-mismatched specs (for example,
+`tomli>=1.1.0; python_version<'3.11'` while running under Python 3.13) are left
+as-is and never reported as missing pins.
+
+Human example:
+
+```bash
+$ cargo run -q -- migrate --source requirements.txt
+px migrate: plan ready (prod: 2, dev: 1, sources: 1, project: requirements)
+Hint: Preview confirmed; rerun with --write to apply
+
+Package  Source            Requested        Scope
+-------  ----------------  ---------------  -----
+rich     requirements.txt  rich==13.7.1     prod
+pytest   requirements.txt  pytest==8.2      dev
+```
+
+JSON example:
+
+```json
+{
+  "status": "ok",
+  "command": "px migrate",
+  "details": {
+    "project_type": "requirements",
+    "sources": [
+      { "kind": "requirements", "path": "requirements.txt", "count": 2 }
+    ],
+    "packages": [
+      {
+        "name": "rich",
+        "requested": "rich==13.7.1",
+        "scope": "prod",
+        "source": "requirements.txt"
+      }
+    ],
+    "write_requested": false,
+    "dry_run": true
+  }
+}
+```
+
+### Package delivery
+
+#### `px build`
+
+`px build` writes sdists and wheels into `build/`. Set `PX_SKIP_TESTS=1` to
+skip project tests before packaging. The CLI prints the leading artifact’s
+size + sha256, and `--json` lists every file.
+
+```bash
+$ PX_SKIP_TESTS=1 px build
+px build: wrote 2 artifacts (755 B, sha256=bc77…)
+```
+
+```json
+{
+  "status": "ok",
+  "message": "px build: wrote 2 artifacts (755 B, sha256=bc77…)",
+  "details": {
+    "artifacts": [
+      {
+        "path": "build/sample-px-app-0.1.0.tar.gz",
+        "bytes": 755,
+        "sha256": "bc77dd37e3e72ae8db1e55e5bce4373481eb18ebe5ee890e782a2b2870db6632"
+      },
+      {
+        "path": "build/sample_px_app-0.1.0-py3-none-any.whl",
+        "bytes": 492,
+        "sha256": "0fdb4a91dd52f14587093656f91e55b8cbde7f10b29d95a7e1a0822de9b18881"
+      }
+    ],
+    "out_dir": "build",
+    "format": "both",
+    "dry_run": false,
+    "skip_tests": "1"
+  }
+}
+```
+
+#### `px publish`
+
+`px publish --dry-run` reports which artifacts would be uploaded. Real
+uploads require `PX_ONLINE=1` plus credentials (default `PX_PUBLISH_TOKEN`).
+When those gates are missing the command returns a `user-error` with a hint.
+
+```bash
+$ px publish --dry-run
+px publish: dry-run to pypi (2 artifacts)
+```
+
+```json
+{
+  "status": "ok",
+  "message": "px publish: dry-run to pypi (2 artifacts)",
+  "details": {
+    "registry": "pypi",
+    "token_env": "PX_PUBLISH_TOKEN",
+    "dry_run": true,
+    "artifacts": [
+      {
+        "path": "build/sample-px-app-0.1.0.tar.gz",
+        "bytes": 755,
+        "sha256": "bc77dd37e3e72ae8db1e55e5bce4373481eb18ebe5ee890e782a2b2870db6632"
+      },
+      {
+        "path": "build/sample_px_app-0.1.0-py3-none-any.whl",
+        "bytes": 492,
+        "sha256": "0fdb4a91dd52f14587093656f91e55b8cbde7f10b29d95a7e1a0822de9b18881"
+      }
+    ]
+  }
+}
+```
+
+If you rerun without `PX_ONLINE=1` or without the token env, the CLI responds
+with hints such as `px publish: PX_ONLINE=1 required for uploads` or
+`px publish: PX_PUBLISH_TOKEN must be set`.
+
+Apply the plan with `--write` (requires a clean git worktree unless you pass
+`--allow-dirty`). px backs up any touched files under
+`.px/onboard-backups/<timestamp>/` before mutating them.
+
+```bash
+$ cargo run -q -- migrate --write --source requirements.txt
+px migrate: plan applied (prod: 2, dev: 1)
+Hint: Backups stored under .px/onboard-backups/20251114T120001
+```
+
+```json
+{
+  "status": "ok",
+  "command": "px migrate",
+  "details": {
+    "actions": {
+      "pyproject_updated": true,
+      "lock_written": true,
+      "backups": [
+        ".px/onboard-backups/20251114T120001/pyproject.toml"
+      ]
+    },
+    "write_requested": true,
+    "dry_run": false,
+    "hint": "Backups stored under .px/onboard-backups/20251114T120001"
+  }
+}
+```
+
+#### Auto-pinning on write
+
+`px migrate --write` auto-pins every loose requirement it finds (anything with
+`>=`, `<=`, etc.). The command rewrites those specs to `name==version`, updates
+`pyproject.toml`, and then writes `px.lock`. Git must be clean unless you pass
+`--allow-dirty`. Backups still land under `.px/onboard-backups/<timestamp>/`.
+Use `--no-autopin` if you want the previous “pins required” failure mode.
+
+```bash
+$ cargo run -q -- migrate --write
+px migrate: plan applied (prod: 1, dev: 1)
+Hint: .px/onboard-backups/20251114T1205 • Pinned packaging==23.2, pytest==7.4.3
+```
+
+```json
+{
+  "status": "ok",
+  "details": {
+    "autopinned": [
+      {
+        "name": "packaging",
+        "scope": "prod",
+        "from": "packaging>=23.0",
+        "to": "packaging==23.2"
+      },
+      {
+        "name": "pytest",
+        "scope": "dev",
+        "from": "pytest>=7.0",
+        "to": "pytest==7.4.3"
+      }
+    ],
+    "actions": {
+      "pyproject_updated": true,
+      "lock_written": true,
+      "backups": [
+        ".px/onboard-backups/20251114T120500/pyproject.toml"
+      ]
+    },
+    "hint": "Backups stored under .px/onboard-backups/20251114T120500"
+  }
+}
+```
 
 ### Lock diff
 
@@ -260,12 +513,17 @@ can annotate builds.
 
 ```bash
 $ cargo run -q -- lock upgrade
-upgraded px.lock to version 2
+px lock upgrade: upgraded lock to version 2
 
 $ cargo run -q -- --json lock upgrade
 {
   "status": "ok",
-  "details": { "lockfile": "/tmp/demo/px.lock", "version": 2 }
+  "message": "px lock upgrade: upgraded lock to version 2",
+  "details": {
+    "lockfile": "/tmp/demo/px.lock",
+    "version": 2,
+    "status": "upgraded"
+  }
 }
 ```
 
@@ -292,6 +550,7 @@ workspace members: member-alpha, member-beta
 $ cargo run -q -- --json workspace verify
 {
   "status": "ok",
+  "message": "px workspace verify: all 2 members clean",
   "details": {
     "workspace": {
       "root": "/tmp/workspace_dual",
@@ -337,6 +596,7 @@ $ cargo run -q -- --json workspace install --frozen
 $ cargo run -q -- --json workspace tidy
 {
   "status": "ok",
+  "message": "px workspace tidy: all 2 members clean",
   "details": {
     "workspace": {
       "members": [ { "name": "member-alpha", "status": "tidied" }, ... ]
@@ -357,13 +617,13 @@ $ cargo run -q -- --json workspace tidy
 
 ```bash
 $ cargo run -q -- tidy
-px quality tidy: workspace tidy
+px quality tidy: px.lock matches pyproject
 
 $ cargo run -q -- --json tidy
 {
   "status": "ok",
-  "message": "px quality tidy: workspace tidy",
-  "details": { "lockfile": "/tmp/demo/px.lock" }
+  "message": "px quality tidy: px.lock matches pyproject",
+  "details": { "lockfile": "/tmp/demo/px.lock", "status": "clean" }
 }
 ```
 
@@ -394,7 +654,7 @@ create the directory if necessary and echo the resolved absolute path.
 $ cargo run -q -- --json cache stats
 {
   "status": "ok",
-  "message": "px infra cache: cache stats: 0 files, 0 bytes",
+  "message": "px infra cache: stats: 0 files, 0 bytes",
   "details": {
     "cache_path": "/tmp/px-cache",
     "cache_exists": true,
@@ -404,10 +664,10 @@ $ cargo run -q -- --json cache stats
 }
 
 $ cargo run -q -- cache prune --all --dry-run
-px infra cache: cache prune (dry-run): would remove 12 files (81920 bytes)
+px infra cache: would remove 12 files (81920 bytes)
 
 $ cargo run -q -- cache prune --all
-px infra cache: cache prune: removed 12 files (81920 bytes)
+px infra cache: removed 12 files (81920 bytes)
 ```
 
 `px cache stats` walks the resolved cache directory (honoring `PX_CACHE_PATH`) to
@@ -420,7 +680,7 @@ entry under the cache root and reports how much space was reclaimed. Forgetting
 
 ```bash
 $ px store prefetch --dry-run
-prefetch dry-run: 12 artifacts (11 hit)
+px store prefetch: dry-run 12 artifacts (11 cached)
 ```
 
 - Reads `px.lock` and hydrates every artifact referenced by the lock into the
@@ -434,6 +694,9 @@ prefetch dry-run: 12 artifacts (11 hit)
 - Pass `--json` to obtain per-run stats; with `--workspace` the payload adds
   per-member entries plus aggregated `workspace.totals` counts you can feed to
   dashboards.
+- When `PX_ONLINE=1` is missing the command errors with
+  `px store prefetch: PX_ONLINE=1 required for downloads` and hints to either
+  export the variable or rerun with `--dry-run`.
 
 ```bash
 $ px --json store prefetch --workspace

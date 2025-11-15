@@ -44,12 +44,28 @@ Use `--json` to capture the same data programmatically.
 
 ## 3. Run the package
 
+`px run` infers the lone `[project.scripts]` entry (`sample_px_app.cli`), so you
+can omit `ENTRY` and still forward args after `--`:
+
 ```bash
-$ cargo run -q -- run sample_px_app.cli -- -n PxTest
+$ cargo run -q -- run -- -n PxTest
 Hello, PxTest!
+
+$ cargo run -q -- --json run -- -n PxTest
+{
+  "status": "ok",
+  "message": "px workflow run: Hello, PxTest!",
+  "details": {
+    "mode": "module",
+    "entry": "sample_px_app.cli",
+    "defaulted": true,
+    "args": ["-n", "PxTest"]
+  }
+}
 ```
 
-Arguments after `--` are forwarded directly to the Python entrypoint.
+Need to run a raw executable instead? Put it before the separator: `cargo run -q
+-- run python -- -m sample_px_app.cli -n PxAlt`.
 
 ## 4. Run the tests (pytest or fallback)
 
@@ -83,8 +99,9 @@ run the project commands from there:
 
 ```bash
 $ mkdir -p /tmp/px-demo && cd /tmp/px-demo
-$ cargo run -q -- project init --package demo_pkg
-px project init: Initialized project demo_pkg
+$ cargo run -q -- project init
+px project init: initialized project px_demo
+Hint: Pass --package <name> to override the inferred module name.
 
 $ cargo run -q -- project add requests==2.32.3
 px project add: updated dependencies (added 1, updated 0)
@@ -92,11 +109,12 @@ px project add: updated dependencies (added 1, updated 0)
 $ cargo run -q -- project remove requests
 px project remove: removed dependencies
 
-$ cargo run -q -- run demo_pkg.cli
+$ cargo run -q -- run
 Hello, World!
 ```
 
-- `--package` is required and must be ASCII letters/numbers/underscores.
+- `--package` is optional. By default px sanitizes the directory name (e.g.,
+  `/tmp/px-demo` → `px_demo`).
 - `--py 3.11` (or similar) overrides the default `>=3.12` requirement.
 - Dependency specs are inserted into `[project].dependencies`, sorted, and kept
   unique by name. Removing a name ignores version pins/markers.
@@ -124,8 +142,8 @@ $ cargo run -q -- --json install --frozen
 $ cargo run -q -- --json tidy
 {
   "status": "ok",
-  "message": "px quality tidy: workspace tidy",
-  "details": { "lockfile": "/tmp/px-demo/px.lock" }
+  "message": "px quality tidy: px.lock matches pyproject",
+  "details": { "lockfile": "/tmp/px-demo/px.lock", "status": "clean" }
 }
 ```
 
@@ -198,14 +216,129 @@ upgraded px.lock to version 2
   across branches. `px lock diff`, `px install --frozen`, and `px tidy` accept
   both formats and compare the normalized dependency graph.
 
-## 9. Migration checklist
+## 9. Migrate an existing project
+
+`px migrate` lets you trial px on an existing repo without touching files. It
+reads `pyproject.toml`, `requirements.txt`, and `requirements-dev.txt`, then
+prints the detected dependencies so you can decide whether to commit.
+
+Flags: `--dry-run` (default preview), `--write` (apply + backup), `--yes`,
+`--no-input`, `--source <path>`, `--dev-source <path>`, `--allow-dirty`,
+`--lock-only`, `--no-autopin`, and `--json` for envelopes.
+
+Status lines and the single hint use a muted palette when stdout is a TTY.
+Pass `--no-color` (or set `NO_COLOR=1`) to disable styling; JSON output is
+never colorized.
+
+```bash
+$ cargo run -q -- migrate --source requirements.txt
+px migrate: plan ready (prod: 2, dev: 0, sources: 1, project: requirements)
+Hint: Preview confirmed; rerun with --write to apply
+
+Package  Source            Requested        Scope
+-------  ----------------  ---------------  -----
+rich     requirements.txt  rich==13.7.1     prod
+uvloop  requirements.txt  uvloop==0.20.0  prod
+```
+
+```json
+{
+  "status": "ok",
+  "command": "px migrate",
+  "details": {
+    "project_type": "requirements",
+    "packages": [
+      { "name": "rich", "requested": "rich==13.7.1", "scope": "prod" }
+    ],
+    "write_requested": false,
+    "dry_run": true
+  }
+}
+```
+
+Add `--write` once you are satisfied with the preview. px refuses to run when
+`git status` is dirty (pass `--allow-dirty` to override), backs up touched files
+under `.px/onboard-backups/<timestamp>/`, merges requirements into
+`pyproject.toml` unless `--lock-only`, and writes `px.lock` via the normal
+install flow.
+
+```bash
+$ cargo run -q -- migrate --write --source requirements.txt
+px migrate: plan applied (prod: 2, dev: 0)
+Hint: Backups stored under .px/onboard-backups/20251114T120001
+```
+
+```json
+{
+  "status": "ok",
+  "details": {
+    "actions": {
+      "pyproject_updated": true,
+      "lock_written": true,
+      "backups": [
+        ".px/onboard-backups/20251114T120001/pyproject.toml"
+      ]
+    },
+    "write_requested": true,
+    "dry_run": false
+  }
+}
+```
+
+`px migrate --write` also auto-pins any loose requirements (`>=`, `<`, etc.).
+Pinned entries show up in `details.autopinned`, and the hint callout includes a
+summary so you know what changed. Pass `--no-autopin` if you prefer to edit the
+specs manually before re-running.
+
+Marker-aware filtering keeps this safe: only specs whose PEP 508 markers match
+the active interpreter are pinned. Marker-mismatched entries (say,
+`tomli>=1.1.0; python_version<'3.11'` when running on Python 3.13) stay in the
+file as-is and are not reported as missing pins.
+
+```json
+{
+  "status": "ok",
+  "details": {
+    "autopinned": [
+      {
+        "name": "packaging",
+        "from": "packaging>=23.0",
+        "to": "packaging==23.2",
+        "scope": "prod"
+      }
+    ]
+  }
+}
+```
+
+## 10. Build & publish
+
+`px build` creates tarballs and wheels under `build/`. Use `PX_SKIP_TESTS=1`
+to skip project tests before packaging. Dry runs show what would be written;
+a real run reports the first artifact’s size and truncated sha256.
+
+```bash
+$ PX_SKIP_TESTS=1 px build
+px build: wrote 2 artifacts (755 B, sha256=bc77…)
+```
+
+`px publish --dry-run` lists the artifacts and registry target. Real uploads
+require `PX_ONLINE=1` and credentials (default token env `PX_PUBLISH_TOKEN`).
+Missing gates return actionable `user-error`s.
+
+```bash
+$ px publish --dry-run
+px publish: dry-run to pypi (2 artifacts)
+```
+
+## 11. Migration checklist
 
 1. Start from a clean `px.lock` (`cargo run -q -- lock diff`).
 2. Upgrade the schema (`cargo run -q -- lock upgrade`).
 3. Re-verify artifacts (`cargo run -q -- install --frozen`).
 4. Update CI/docs references if they mention the lock version.
 
-## 9. Explore workspaces
+## 12. Explore workspaces
 
 The repo ships with `fixtures/workspace_dual`, a workspace that references two
 members (`member_alpha`, `member_beta`). Copy it to a scratch directory and run
@@ -223,7 +356,8 @@ $ cargo run -q -- --json workspace verify
 # break a member by removing its lock
 $ rm member_beta/px.lock
 $ cargo run -q -- workspace verify
-px workspace verify: workspace drift detected (run `px install` inside each member)
+px workspace verify: drift in member-beta (px.lock missing)
+Hint: run `px workspace install` or `px install` inside drifted members
 
 # repair the drifted member
 $ cargo run -q -- workspace install

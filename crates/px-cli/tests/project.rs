@@ -1,8 +1,13 @@
 use std::{fs, path::Path};
 
 use assert_cmd::cargo::cargo_bin_cmd;
+use serde_json::Value;
 use tempfile::TempDir;
 use toml_edit::DocumentMut;
+
+mod common;
+
+use common::parse_json;
 
 #[test]
 fn project_init_creates_scaffold_and_runs() {
@@ -22,6 +27,73 @@ fn project_init_creates_scaffold_and_runs() {
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("Hello, World!"));
+}
+
+#[test]
+fn project_init_infers_package_name_from_directory() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("Fancy-App");
+    fs::create_dir_all(&project_dir).expect("create project dir");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project_dir)
+        .args(["project", "init"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("px project init: initialized project fancy_app"),
+        "expected concise init message, got {stdout:?}"
+    );
+
+    let name = read_project_name(project_dir.join("pyproject.toml"));
+    assert_eq!(name, "fancy_app");
+}
+
+#[test]
+fn project_init_refuses_when_pyproject_exists() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    scaffold_demo(&temp, "demo_pkg");
+    let project_dir = temp.path();
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(project_dir)
+        .args(["project", "init"])
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("px project init: project already initialized"),
+        "expected polite refusal, got {stdout:?}"
+    );
+    assert!(stdout.contains("Hint:"), "expected a single hint line");
+}
+
+#[test]
+fn project_init_json_reports_details() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("json-demo");
+    fs::create_dir_all(&project_dir).expect("create project dir");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project_dir)
+        .args(["--json", "project", "init"])
+        .assert()
+        .success();
+
+    let payload: Value = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["details"]["package"], "json_demo");
+    assert!(
+        payload["details"]["files_created"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 3,
+        "expected files_created list"
+    );
 }
 
 #[test]
@@ -82,4 +154,10 @@ fn read_dependencies(path: impl AsRef<Path>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn read_project_name(path: impl AsRef<Path>) -> String {
+    let contents = fs::read_to_string(path).expect("pyproject readable");
+    let doc: DocumentMut = contents.parse().expect("valid toml");
+    doc["project"]["name"].as_str().unwrap().to_string()
 }

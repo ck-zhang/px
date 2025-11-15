@@ -39,12 +39,20 @@ fn install_writes_lockfile_for_fixture() {
         Some("p0-pinned"),
         "cache mode should record pinned installs"
     );
-    let empty = doc
+    let deps = doc
         .get("dependencies")
         .and_then(Item::as_array_of_tables)
-        .map(|tables| tables.is_empty())
-        .unwrap_or(true);
-    assert!(empty, "dependencies should be empty for the fixture");
+        .expect("lock should record dependencies");
+    assert!(
+        deps.iter().any(|table| {
+            table
+                .get("specifier")
+                .and_then(Item::as_value)
+                .and_then(TomlValue::as_str)
+                == Some("rich==13.7.1")
+        }),
+        "rich pin should be captured in px.lock"
+    );
 }
 
 #[test]
@@ -130,6 +138,21 @@ fn lock_diff_is_clean_after_install() {
     let payload = parse_json(&assert);
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["details"]["status"], "clean");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["lock", "diff"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("px lock diff: clean"),
+        "clean diff output missing summary: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("Hint:"),
+        "clean diff should not emit Hint line: {stdout:?}"
+    );
 }
 
 #[test]
@@ -153,6 +176,11 @@ fn lock_diff_detects_python_mismatch() {
 fn lock_diff_reports_missing_lock() {
     let (_tmp, project) = prepare_fixture("lock-diff-missing");
 
+    let lock_path = project.join("px.lock");
+    if lock_path.exists() {
+        fs::remove_file(&lock_path).expect("remove px.lock");
+    }
+
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .args(["--json", "lock", "diff"])
@@ -161,6 +189,20 @@ fn lock_diff_reports_missing_lock() {
     let payload = parse_json(&assert);
     assert_eq!(payload["status"], "user-error");
     assert_eq!(payload["details"]["status"], "missing_lock");
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["lock", "diff"])
+        .assert()
+        .failure();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("px lock diff: missing px.lock"),
+        "human output should mention missing lock: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("Hint: run `px install`"),
+        "missing-lock output should include remediation hint: {stdout:?}"
+    );
 }
 
 #[test]
@@ -172,11 +214,20 @@ fn lock_upgrade_writes_v2_graph() {
     add_dependency(&project, "packaging==24.1");
     run_install(&project);
 
-    cargo_bin_cmd!("px")
+    let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .args(["lock", "upgrade"])
         .assert()
         .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("px lock upgrade: upgraded lock to version 2"),
+        "upgrade output should mention version bump: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("Hint:"),
+        "successful upgrade should not emit Hint: {stdout:?}"
+    );
 
     let lock_path = project.join("px.lock");
     let contents = fs::read_to_string(&lock_path).expect("read lockfile");

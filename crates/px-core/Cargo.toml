@@ -22,6 +22,11 @@ px-store = { path = "../px-store" }
 reqwest.workspace = true
 sha2.workspace = true
 pep508_rs = "0.5"
+flate2 = "1.0"
+tar = "0.4"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
 
+[dev-dependencies]
+tempfile.workspace = true
 [features]
 default = []

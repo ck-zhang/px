@@ -5,6 +5,11 @@ from __future__ import annotations
 import argparse
 import sys
 
+from rich.console import Console
+
+
+_CONSOLE = Console(color_system=None, highlight=False, markup=False)
+
 
 def greet(name: str = "World") -> str:
     """Return a deterministic greeting for the provided name."""
@@ -17,7 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-n", "--name", default="World", help="Name to greet")
     args = parser.parse_args(argv)
 
-    print(greet(args.name))
+    _CONSOLE.print(greet(args.name))
     return 0
 
 

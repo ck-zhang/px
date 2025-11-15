@@ -1,4 +1,7 @@
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use toml_edit::DocumentMut;
@@ -11,6 +14,22 @@ fn require_online() -> bool {
             false
         }
     }
+}
+
+fn write_pyproject(dir: &Path, deps: &[&str]) {
+    let mut deps_block = String::new();
+    for dep in deps {
+        deps_block.push_str("  \"");
+        deps_block.push_str(dep);
+        deps_block.push_str("\",\n");
+    }
+    let contents = format!(
+        "[project]\nname = \"install-fixture\"\nversion = \"0.1.0\"\n\
+requires-python = \">=3.9\"\ndependencies = [\n{deps_block}]\n\
+\n[build-system]\nrequires = [\"setuptools>=70\", \"wheel\"]\n\
+build-backend = \"setuptools.build_meta\"\n"
+    );
+    fs::write(dir.join("pyproject.toml"), contents).expect("write pyproject");
 }
 
 #[test]
@@ -112,5 +131,105 @@ fn install_rejects_unpinned_specs() {
     assert!(
         message.contains("requires `name==version`"),
         "output should mention pinning requirement: {message}"
+    );
+}
+
+#[test]
+fn install_skips_nonmatching_marker_specs() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_pyproject(temp.path(), &["tomli>=1.1.0; python_version < '3.11'"]);
+    let cache_dir = temp.path().join(".px-cache");
+
+    cargo_bin_cmd!("px")
+        .current_dir(temp.path())
+        .env("PX_ONLINE", "1")
+        .env("PX_CACHE_PATH", &cache_dir)
+        .args(["install"])
+        .assert()
+        .success();
+
+    let lock_path = temp.path().join("px.lock");
+    assert!(lock_path.exists(), "px.lock should be created");
+    let lock_doc: DocumentMut = fs::read_to_string(&lock_path)
+        .expect("lock readable")
+        .parse()
+        .expect("valid lock toml");
+    let deps_empty = lock_doc
+        .get("dependencies")
+        .and_then(|item| item.as_array_of_tables())
+        .map(|deps| deps.is_empty())
+        .unwrap_or(true);
+    assert!(deps_empty, "non-matching marker should be skipped");
+}
+
+#[test]
+fn install_accepts_pinned_marker_spec() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_pyproject(
+        temp.path(),
+        &["typing_extensions==4.12.0; python_version >= '3.11'"],
+    );
+    let cache_dir = temp.path().join(".px-cache");
+
+    cargo_bin_cmd!("px")
+        .current_dir(temp.path())
+        .env("PX_ONLINE", "1")
+        .env("PX_CACHE_PATH", &cache_dir)
+        .args(["install"])
+        .assert()
+        .success();
+
+    let lock_path = temp.path().join("px.lock");
+    assert!(lock_path.exists(), "px.lock should exist");
+    let lock_doc: DocumentMut = fs::read_to_string(&lock_path)
+        .expect("lock readable")
+        .parse()
+        .expect("valid lock toml");
+    let deps = lock_doc["dependencies"]
+        .as_array_of_tables()
+        .expect("dependencies array");
+    assert_eq!(deps.len(), 1, "expected single dependency entry");
+    let dep = deps.iter().next().unwrap();
+    assert_eq!(dep["name"].as_str(), Some("typing_extensions"));
+    assert_eq!(dep["marker"].as_str(), Some("python_version >= '3.11'"));
+}
+
+#[test]
+fn install_errors_on_applicable_loose_marker() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_pyproject(
+        temp.path(),
+        &["rich==13.7.1", "tomli>=1.1.0; python_version >= '3.11'"],
+    );
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(temp.path())
+        .env("PX_ONLINE", "1")
+        .args(["install"])
+        .assert()
+        .failure();
+    let output = assert.get_output();
+    let message = if output.stderr.is_empty() {
+        String::from_utf8_lossy(&output.stdout)
+    } else {
+        String::from_utf8_lossy(&output.stderr)
+    };
+    assert!(
+        message.contains("tomli>=1.1.0"),
+        "error should reference the loose spec: {message}"
+    );
+    let lock_path = temp.path().join("px.lock");
+    assert!(
+        !lock_path.exists(),
+        "lockfile should not be written when install fails"
     );
 }

@@ -2,11 +2,14 @@ use std::path::PathBuf;
 
 use atty::Stream;
 use clap::{value_parser, ArgAction, Args, Parser, Subcommand, ValueEnum};
-use color_eyre::owo_colors::OwoColorize;
 use color_eyre::{eyre::eyre, Result};
 use px_core::{self, CommandGroup, CommandStatus, GlobalOptions, PxCommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+mod style;
+
+use style::Style;
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -65,6 +68,8 @@ fn emit_output(
         CommandStatus::Failure => 2,
     };
 
+    let style = Style::new(cli.no_color, atty::is(Stream::Stdout));
+
     if cli.json {
         let payload = px_core::to_json_response(command, outcome, code);
         println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -72,14 +77,15 @@ fn emit_output(
         if is_passthrough(&outcome.details) {
             println!("{}", outcome.message);
         } else {
-            let mut message = px_core::format_status_message(command, &outcome.message);
+            let message = px_core::format_status_message(command, &outcome.message);
+            println!("{}", style.status(&outcome.status, &message));
             if let Some(hint) = hint_from_details(&outcome.details) {
-                message.push_str("\nHint: ");
-                message.push_str(hint);
+                let hint_line = format!("Hint: {}", hint);
+                println!("{}", style.info(&hint_line));
             }
-            let use_color = atty::is(Stream::Stdout);
-            let styled = colorize_message(outcome.status.clone(), &message, use_color);
-            println!("{}", styled);
+            if let Some(table) = render_migrate_table(&style, command, &outcome.details) {
+                println!("{}", table);
+            }
         }
     }
 
@@ -93,17 +99,6 @@ fn hint_from_details(details: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
-fn colorize_message(status: CommandStatus, message: &str, enabled: bool) -> String {
-    if !enabled {
-        return message.to_string();
-    }
-    match status {
-        CommandStatus::Ok => message.green().to_string(),
-        CommandStatus::UserError => message.yellow().to_string(),
-        CommandStatus::Failure => message.red().to_string(),
-    }
-}
-
 fn is_passthrough(details: &Value) -> bool {
     details
         .as_object()
@@ -112,12 +107,103 @@ fn is_passthrough(details: &Value) -> bool {
         .unwrap_or(false)
 }
 
+fn render_migrate_table(style: &Style, command: &PxCommand, details: &Value) -> Option<String> {
+    if command.group != CommandGroup::Migrate {
+        return None;
+    }
+    let packages = details.get("packages")?.as_array()?;
+    if packages.is_empty() {
+        return None;
+    }
+
+    let mut rows = Vec::new();
+    for pkg in packages {
+        let obj = pkg.as_object()?;
+        rows.push(PackageRow {
+            name: obj.get("name")?.as_str()?.to_string(),
+            source: obj.get("source")?.as_str()?.to_string(),
+            requested: obj.get("requested")?.as_str()?.to_string(),
+            scope: obj.get("scope")?.as_str()?.to_string(),
+        });
+    }
+
+    Some(format_package_table(style, &rows))
+}
+
+struct PackageRow {
+    name: String,
+    source: String,
+    requested: String,
+    scope: String,
+}
+
+fn format_package_table(style: &Style, rows: &[PackageRow]) -> String {
+    let headers = ["Package", "Source", "Requested", "Scope"];
+    let mut widths = [
+        headers[0].len(),
+        headers[1].len(),
+        headers[2].len(),
+        headers[3].len(),
+    ];
+
+    for row in rows {
+        widths[0] = widths[0].max(row.name.len());
+        widths[1] = widths[1].max(row.source.len());
+        widths[2] = widths[2].max(row.requested.len());
+        widths[3] = widths[3].max(row.scope.len());
+    }
+
+    let header_line = format!(
+        "{:<width0$}  {:<width1$}  {:<width2$}  {:<width3$}",
+        headers[0],
+        headers[1],
+        headers[2],
+        headers[3],
+        width0 = widths[0],
+        width1 = widths[1],
+        width2 = widths[2],
+        width3 = widths[3],
+    );
+
+    let mut lines = Vec::new();
+    lines.push(style.table_header(&header_line));
+    lines.push(format!(
+        "{:-<width0$}  {:-<width1$}  {:-<width2$}  {:-<width3$}",
+        "",
+        "",
+        "",
+        "",
+        width0 = widths[0],
+        width1 = widths[1],
+        width2 = widths[2],
+        width3 = widths[3],
+    ));
+
+    for row in rows {
+        lines.push(format!(
+            "{:<width0$}  {:<width1$}  {:<width2$}  {:<width3$}",
+            row.name,
+            row.source,
+            row.requested,
+            row.scope,
+            width0 = widths[0],
+            width1 = widths[1],
+            width2 = widths[2],
+            width3 = widths[3],
+        ));
+    }
+
+    lines.join("\n")
+}
+
 fn build_command(group: &CommandGroupCli) -> PxCommand {
     match group {
         CommandGroupCli::Project(cmd) => build_project(cmd),
         CommandGroupCli::Workflow(cmd) => build_workflow(cmd),
         CommandGroupCli::Quality(cmd) => build_quality(cmd),
         CommandGroupCli::Output(cmd) => build_output(cmd),
+        CommandGroupCli::Build(args) => build_output_build_command(args),
+        CommandGroupCli::Publish(args) => build_output_publish_command(args),
         CommandGroupCli::Infra(cmd) => build_infra(cmd),
         CommandGroupCli::Run(args) => build_run_command(args),
         CommandGroupCli::Test(args) => build_test_command(args),
@@ -128,6 +214,8 @@ fn build_command(group: &CommandGroupCli) -> PxCommand {
         CommandGroupCli::Lock(cmd) => build_lock_command(cmd),
         CommandGroupCli::Workspace(cmd) => build_workspace_command(cmd),
         CommandGroupCli::Store(cmd) => build_store_command(cmd),
+        CommandGroupCli::Migrate(args) => build_migrate_command(args),
+        CommandGroupCli::Onboard(args) => build_onboard_alias_command(args),
     }
 }
 
@@ -168,26 +256,34 @@ fn build_quality(cmd: &QualityCommand) -> PxCommand {
 
 fn build_output(cmd: &OutputCommand) -> PxCommand {
     match cmd {
-        OutputCommand::Build(args) => PxCommand::new(
-            CommandGroup::Output,
-            "build",
-            Vec::new(),
-            json!({ "format": args.format, "out": args.out.clone() }),
-            args.common.dry_run,
-            args.common.force,
-        ),
-        OutputCommand::Publish(args) => PxCommand::new(
-            CommandGroup::Output,
-            "publish",
-            Vec::new(),
-            json!({
-                "registry": args.registry.clone(),
-                "token_env": args.token_env.clone(),
-            }),
-            args.common.dry_run,
-            args.common.force,
-        ),
+        OutputCommand::Build(args) => build_output_build_command(args),
+        OutputCommand::Publish(args) => build_output_publish_command(args),
     }
+}
+
+fn build_output_build_command(args: &BuildArgs) -> PxCommand {
+    PxCommand::new(
+        CommandGroup::Output,
+        "build",
+        Vec::new(),
+        json!({ "format": args.format, "out": args.out.clone() }),
+        args.common.dry_run,
+        args.common.force,
+    )
+}
+
+fn build_output_publish_command(args: &PublishArgs) -> PxCommand {
+    PxCommand::new(
+        CommandGroup::Output,
+        "publish",
+        Vec::new(),
+        json!({
+            "registry": args.registry.clone(),
+            "token_env": args.token_env.clone(),
+        }),
+        args.common.dry_run,
+        args.common.force,
+    )
 }
 
 fn build_infra(cmd: &InfraCommand) -> PxCommand {
@@ -252,6 +348,38 @@ fn build_store_command(cmd: &StoreCommand) -> PxCommand {
             args.common.force,
         ),
     }
+}
+
+fn build_migrate_command(args: &MigrateArgs) -> PxCommand {
+    let dry_run = if args.write { false } else { true };
+    let non_interactive = args.yes || args.no_input;
+    PxCommand::new(
+        CommandGroup::Migrate,
+        "migrate",
+        Vec::new(),
+        json!({
+            "source": args.source.as_ref().map(|p| p.to_string_lossy().to_string()),
+            "dev_source": args
+                .dev_source
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            "write": args.write,
+            "dry_run_flag": args.dry_run,
+            "yes": args.yes,
+            "no_input": args.no_input,
+            "non_interactive": non_interactive,
+            "allow_dirty": args.allow_dirty,
+            "lock_only": args.lock_only,
+            "no_autopin": args.no_autopin,
+        }),
+        dry_run,
+        false,
+    )
+}
+
+fn build_onboard_alias_command(args: &MigrateArgs) -> PxCommand {
+    eprintln!("`px onboard` is deprecated; use `px migrate`.");
+    build_migrate_command(args)
 }
 
 fn build_install_command(args: &InstallArgs) -> PxCommand {
@@ -335,18 +463,30 @@ fn build_workspace_command(cmd: &WorkspaceCommand) -> PxCommand {
 }
 
 fn build_run_command(args: &RunArgs) -> PxCommand {
+    let (entry, forwarded_args) = normalize_run_invocation(args);
     PxCommand::new(
         CommandGroup::Workflow,
         "run",
         Vec::new(),
         json!({
-            "entry": args.entry.clone(),
+            "entry": entry,
             "target": args.target.clone(),
-            "args": args.args.clone(),
+            "args": forwarded_args,
         }),
         args.common.dry_run,
         args.common.force,
     )
+}
+
+fn normalize_run_invocation(args: &RunArgs) -> (Option<String>, Vec<String>) {
+    let mut forwarded = args.args.clone();
+    match &args.entry {
+        Some(value) if value.starts_with('-') => {
+            forwarded.insert(0, value.clone());
+            (None, forwarded)
+        }
+        _ => (args.entry.clone(), forwarded),
+    }
 }
 
 fn build_test_command(args: &TestArgs) -> PxCommand {
@@ -403,6 +543,8 @@ struct PxCli {
     trace: bool,
     #[arg(long, help = "Emit {status,message,details} JSON envelopes")]
     json: bool,
+    #[arg(long, help = "Disable colored human output")]
+    no_color: bool,
     #[arg(long, value_parser = value_parser!(PathBuf), help = "Optional px config file path")]
     config: Option<PathBuf>,
     #[command(subcommand)]
@@ -419,15 +561,44 @@ enum CommandGroupCli {
     Quality(QualityCommand),
     #[command(subcommand)]
     Output(OutputCommand),
+    #[command(
+        name = "build",
+        about = "Build sdists and wheels into the project build/ folder.",
+        override_usage = "px build [sdist|wheel|both] [--out DIR]",
+        after_help = "Examples:\n  PX_SKIP_TESTS=1 px build\n  px build wheel --out dist\n"
+    )]
+    Build(BuildArgs),
+    #[command(
+        name = "publish",
+        about = "Publish build artifacts (dry-run by default).",
+        override_usage = "px publish [--dry-run] [--registry NAME] [--token-env VAR]",
+        after_help = "Examples:\n  px publish --dry-run\n  PX_ONLINE=1 PX_PUBLISH_TOKEN=<token> px publish\n"
+    )]
+    Publish(PublishArgs),
     #[command(subcommand)]
     Infra(InfraCommand),
-    #[command(about = "Run a module or entry point inside px")]
+    #[command(
+        about = "Run the inferred entry or a named module inside px.",
+        override_usage = "px run [ENTRY] [-- <ARG>...]",
+        after_help = "Examples:\n  px run\n  px run sample_px_app.cli -- -n Demo\n"
+    )]
     Run(RunArgs),
-    #[command(about = "Run pytest with px-managed tooling")]
+    #[command(
+        about = "Run pytest (or px's fallback) with cached dependencies.",
+        override_usage = "px test [-- <PYTEST_ARG>...]",
+        after_help = "Examples:\n  px test\n  PX_TEST_FALLBACK_STD=1 px test -- -k smoke\n"
+    )]
     Test(TestArgs),
-    #[command(about = "Show interpreter paths and env metadata")]
+    #[command(
+        about = "Show interpreter info, pythonpath entries, or the shim itself.",
+        override_usage = "px env [python|info|paths]",
+        after_help = "Examples:\n  px env python\n  px env info\n  px env paths\n"
+    )]
     Env(EnvArgs),
-    #[command(about = "Inspect or prune the shared px cache")]
+    #[command(
+        about = "Inspect the px cache path, stats, or prune contents.",
+        after_help = "Examples:\n  px cache path\n  px cache stats\n  px cache prune --all --dry-run\n"
+    )]
     Cache(CacheArgs),
     #[command(about = "Install pinned dependencies for the current project")]
     Install(InstallArgs),
@@ -439,22 +610,54 @@ enum CommandGroupCli {
     Workspace(WorkspaceCommand),
     #[command(subcommand)]
     Store(StoreCommand),
+    #[command(about = "Migrate existing projects into px")]
+    Migrate(MigrateArgs),
+    #[command(name = "onboard", hide = true)]
+    Onboard(MigrateArgs),
 }
 
 #[derive(Subcommand, Debug)]
 enum ProjectCommand {
+    #[command(
+        about = "Scaffold pyproject, src/, and tests using the current folder.",
+        override_usage = "px project init [--package NAME] [--py VERSION]",
+        after_help = "Examples:\n  px project init\n  px project init --package demo_pkg --py 3.11\n"
+    )]
     Init(InitArgs),
+    #[command(
+        about = "Add or update pinned dependencies in pyproject.toml.",
+        override_usage = "px project add <SPEC> [SPEC ...]",
+        after_help = "Examples:\n  px project add requests==2.32.3\n  px project add pandas==2.2.3\n"
+    )]
     Add(SpecArgs),
+    #[command(
+        about = "Remove dependencies by name across prod and dev scopes.",
+        override_usage = "px project remove <NAME> [NAME ...]",
+        after_help = "Example:\n  px project remove requests\n"
+    )]
     Remove(SpecArgs),
     Install(InstallArgs),
+    #[command(
+        about = "Update named dependencies to the newest allowed versions.",
+        override_usage = "px project update <SPEC> [SPEC ...]",
+        after_help = "Example:\n  px project update requests\n"
+    )]
     Update(SpecArgs),
 }
 
 #[derive(Subcommand, Debug)]
 enum WorkflowCommand {
-    #[command(about = "Run a module or entry point inside px")]
+    #[command(
+        about = "Run the inferred entry or a named module inside px.",
+        override_usage = "px workflow run [ENTRY] [-- <ARG>...]",
+        after_help = "Examples:\n  px workflow run\n  px workflow run sample_px_app.cli -- -n Demo\n"
+    )]
     Run(RunArgs),
-    #[command(about = "Run pytest with px-managed tooling")]
+    #[command(
+        about = "Run pytest (or px's fallback) with cached dependencies.",
+        override_usage = "px workflow test [-- <PYTEST_ARG>...]",
+        after_help = "Examples:\n  px workflow test\n  PX_TEST_FALLBACK_STD=1 px workflow test -- -k smoke\n"
+    )]
     Test(TestArgs),
 }
 
@@ -467,7 +670,17 @@ enum QualityCommand {
 
 #[derive(Subcommand, Debug)]
 enum OutputCommand {
+    #[command(
+        about = "Build sdists and wheels into the project build/ folder.",
+        override_usage = "px output build [sdist|wheel|both] [--out DIR]",
+        after_help = "Examples:\n  PX_SKIP_TESTS=1 px output build\n  px output build wheel --out dist\n"
+    )]
     Build(BuildArgs),
+    #[command(
+        about = "Publish build artifacts (dry-run by default).",
+        override_usage = "px output publish [--dry-run] [--registry NAME] [--token-env VAR]",
+        after_help = "Examples:\n  px output publish --dry-run\n  PX_ONLINE=1 PX_PUBLISH_TOKEN=<token> px output publish\n"
+    )]
     Publish(PublishArgs),
 }
 
@@ -479,7 +692,67 @@ enum InfraCommand {
 
 #[derive(Subcommand, Debug)]
 enum StoreCommand {
+    #[command(
+        about = "Hydrate lock artifacts into the cache (workspace optional).",
+        after_help = "Examples:\n  px store prefetch --dry-run\n  PX_ONLINE=1 px store prefetch --workspace\n"
+    )]
     Prefetch(StorePrefetchArgs),
+}
+
+#[derive(Args, Debug)]
+struct MigrateArgs {
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Preview the onboarding plan without touching files (default)",
+        conflicts_with = "write"
+    )]
+    dry_run: bool,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Request write mode once it becomes available",
+        conflicts_with = "dry_run"
+    )]
+    write: bool,
+    #[arg(long, action = ArgAction::SetTrue, help = "Answer yes to upcoming prompts")]
+    yes: bool,
+    #[arg(
+        long = "no-input",
+        action = ArgAction::SetTrue,
+        help = "Non-interactive mode; implied --yes"
+    )]
+    no_input: bool,
+    #[arg(
+        long,
+        value_parser = value_parser!(PathBuf),
+        help = "Explicit requirements source (defaults to requirements.txt)"
+    )]
+    source: Option<PathBuf>,
+    #[arg(
+        long,
+        value_parser = value_parser!(PathBuf),
+        help = "Explicit dev requirements source (defaults to requirements-dev.txt)"
+    )]
+    dev_source: Option<PathBuf>,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Allow writes even when git status shows local changes"
+    )]
+    allow_dirty: bool,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Only write px.lock; skip pyproject edits"
+    )]
+    lock_only: bool,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Disable automatic pinning (will error if loose specs remain)"
+    )]
+    no_autopin: bool,
 }
 
 #[derive(Args, Debug)]
@@ -492,15 +765,39 @@ struct StorePrefetchArgs {
 
 #[derive(Subcommand, Debug)]
 enum LockCommand {
+    #[command(
+        about = "Compare px.lock to pyproject dependencies without mutating files.",
+        after_help = "Examples:\n  px lock diff\n  px --json lock diff\n"
+    )]
     Diff,
+    #[command(
+        about = "Upgrade px.lock to the latest schema or dependency pins.",
+        after_help = "Example:\n  px lock upgrade\n"
+    )]
     Upgrade,
 }
 
 #[derive(Subcommand, Debug)]
 enum WorkspaceCommand {
+    #[command(
+        about = "List workspace members from pyproject.toml.",
+        after_help = "Example:\n  px workspace list\n"
+    )]
     List,
+    #[command(
+        about = "Verify each workspace member for lock drift or missing files.",
+        after_help = "Examples:\n  px workspace verify\n  px workspace verify --json\n"
+    )]
     Verify,
+    #[command(
+        about = "Install dependencies for every workspace member.",
+        after_help = "Examples:\n  px workspace install\n  px workspace install --frozen\n"
+    )]
     Install(WorkspaceInstallArgs),
+    #[command(
+        about = "Clean drift and metadata across workspace members.",
+        after_help = "Example:\n  px workspace tidy\n"
+    )]
     Tidy,
 }
 
@@ -522,7 +819,11 @@ struct CommonFlags {
 struct InitArgs {
     #[command(flatten)]
     common: CommonFlags,
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Package module name (defaults to sanitized directory name)"
+    )]
     package: Option<String>,
     #[arg(long = "py")]
     py: Option<String>,
@@ -548,11 +849,19 @@ struct InstallArgs {
 struct RunArgs {
     #[command(flatten)]
     common: CommonFlags,
-    #[arg(value_name = "ENTRY")]
+    #[arg(
+        value_name = "ENTRY",
+        help = "Module or script name (omit to use the inferred default)"
+    )]
     entry: Option<String>,
     #[arg(long)]
     target: Option<String>,
-    #[arg(last = true, value_name = "ARG")]
+    #[arg(
+        value_name = "ARG",
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        help = "Arguments forwarded to the entry or executable"
+    )]
     args: Vec<String>,
 }
 
@@ -613,8 +922,20 @@ struct CacheArgs {
 
 #[derive(Subcommand, Debug)]
 enum CacheSubcommand {
+    #[command(
+        about = "Print the resolved px cache directory.",
+        after_help = "Example:\n  px cache path\n"
+    )]
     Path,
+    #[command(
+        about = "Report cache entry counts and total bytes.",
+        after_help = "Example:\n  px cache stats\n"
+    )]
     Stats,
+    #[command(
+        about = "Prune cache files (pair with --dry-run to preview).",
+        after_help = "Examples:\n  px cache prune --all --dry-run\n  px cache prune --all\n"
+    )]
     Prune(PruneArgs),
 }
 
@@ -628,7 +949,11 @@ struct PruneArgs {
 
 #[derive(Args, Debug)]
 struct EnvArgs {
-    #[arg(value_enum, default_value_t = EnvMode::Info)]
+    #[arg(
+        value_enum,
+        default_value_t = EnvMode::Info,
+        help = "Output mode: info, paths, or python (defaults to info)"
+    )]
     mode: EnvMode,
 }
 

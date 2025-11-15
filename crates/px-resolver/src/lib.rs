@@ -176,7 +176,7 @@ fn normalize_dist_name(name: &str) -> String {
 }
 
 impl ResolverEnv {
-    fn to_marker_environment(&self) -> Result<MarkerEnvironment> {
+    pub fn to_marker_environment(&self) -> Result<MarkerEnvironment> {
         Ok(MarkerEnvironment {
             implementation_name: self.implementation_name.clone(),
             implementation_version: string_version(
