@@ -10,6 +10,7 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
+use dirs_next::home_dir;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -69,6 +70,196 @@ pub struct PrefetchSummary {
     pub failed: usize,
     pub bytes_fetched: u64,
     pub errors: Vec<String>,
+}
+
+pub fn resolve_cache_store_path() -> Result<CacheLocation> {
+    if let Some(override_path) = env::var_os("PX_CACHE_PATH") {
+        let path = absolutize(PathBuf::from(override_path))?;
+        return Ok(CacheLocation {
+            path,
+            source: "PX_CACHE_PATH",
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    let (base, source) = resolve_windows_cache_base()?;
+    #[cfg(not(target_os = "windows"))]
+    let (base, source) = resolve_unix_cache_base()?;
+
+    Ok(CacheLocation {
+        path: base.join("px").join("store"),
+        source,
+    })
+}
+
+pub fn compute_cache_usage(path: &Path) -> Result<CacheUsage> {
+    if !path.exists() {
+        return Ok(CacheUsage {
+            exists: false,
+            total_entries: 0,
+            total_size_bytes: 0,
+        });
+    }
+
+    let mut total_entries = 0u64;
+    let mut total_size_bytes = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let entry_path = entry.path();
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                stack.push(entry_path);
+            } else if metadata.is_file() {
+                total_entries += 1;
+                total_size_bytes += metadata.len();
+            }
+        }
+    }
+
+    Ok(CacheUsage {
+        exists: true,
+        total_entries,
+        total_size_bytes,
+    })
+}
+
+pub fn collect_cache_walk(path: &Path) -> Result<CacheWalk> {
+    if !path.exists() {
+        return Ok(CacheWalk::default());
+    }
+
+    let mut walk = CacheWalk {
+        exists: true,
+        ..CacheWalk::default()
+    };
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let entry_path = entry.path();
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                stack.push(entry_path.clone());
+                if entry_path != path {
+                    walk.dirs.push(entry_path);
+                }
+            } else if metadata.is_file() {
+                let size = metadata.len();
+                walk.total_bytes += size;
+                walk.files.push(CacheEntry {
+                    path: entry_path,
+                    size,
+                });
+            }
+        }
+    }
+
+    walk.files.sort_by(|a, b| a.path.cmp(&b.path));
+    walk.dirs.sort();
+    Ok(walk)
+}
+
+pub fn prune_cache_entries(walk: &CacheWalk) -> CachePruneResult {
+    let mut result = CachePruneResult {
+        candidate_entries: walk.files.len() as u64,
+        candidate_size_bytes: walk.total_bytes,
+        ..CachePruneResult::default()
+    };
+
+    for entry in &walk.files {
+        match fs::remove_file(&entry.path) {
+            Ok(_) => {
+                result.deleted_entries += 1;
+                result.deleted_size_bytes += entry.size;
+            }
+            Err(err) => result.errors.push(CachePruneError {
+                path: entry.path.clone(),
+                error: err.to_string(),
+            }),
+        }
+    }
+
+    for dir in walk.dirs.iter().rev() {
+        let _ = fs::remove_dir(dir);
+    }
+
+    result
+}
+
+#[cfg(not(target_os = "windows"))]
+fn resolve_unix_cache_base() -> Result<(PathBuf, &'static str)> {
+    if let Some(xdg) = env::var_os("XDG_CACHE_HOME") {
+        return Ok((PathBuf::from(xdg), "XDG_CACHE_HOME"));
+    }
+    let home = home_dir().ok_or_else(|| anyhow!("unable to determine home directory"))?;
+    Ok((home.join(".cache"), "~/.cache"))
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_cache_base() -> Result<(PathBuf, &'static str)> {
+    if let Some(local) = env::var_os("LOCALAPPDATA") {
+        return Ok((PathBuf::from(local), "LOCALAPPDATA"));
+    }
+    if let Some(user_profile) = env::var_os("USERPROFILE") {
+        return Ok((
+            PathBuf::from(user_profile).join("AppData").join("Local"),
+            "USERPROFILE",
+        ));
+    }
+    let home = home_dir().ok_or_else(|| anyhow!("unable to determine home directory"))?;
+    Ok((home.join("AppData").join("Local"), "home/AppData/Local"))
+}
+
+fn absolutize(path: PathBuf) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(env::current_dir()?.join(path))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CacheLocation {
+    pub path: PathBuf,
+    pub source: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct CacheUsage {
+    pub exists: bool,
+    pub total_entries: u64,
+    pub total_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CacheWalk {
+    pub exists: bool,
+    pub files: Vec<CacheEntry>,
+    pub dirs: Vec<PathBuf>,
+    pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CacheEntry {
+    pub path: PathBuf,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CachePruneError {
+    pub path: PathBuf,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CachePruneResult {
+    pub candidate_entries: u64,
+    pub candidate_size_bytes: u64,
+    pub deleted_entries: u64,
+    pub deleted_size_bytes: u64,
+    pub errors: Vec<CachePruneError>,
 }
 
 /// Build an sdist into a cached wheel and return its metadata.
@@ -593,7 +784,8 @@ fn http_client() -> Result<Client> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
+    use sha2::{Digest, Sha256};
+    use std::{env, ffi::OsString};
 
     #[test]
     fn download_packaging_smoke() -> Result<()> {
@@ -614,6 +806,53 @@ mod tests {
         let artifact = cache_wheel(temp.path(), &request)?;
         assert!(artifact.path.exists());
         assert_eq!(artifact.size, fs::metadata(&artifact.path)?.len());
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_cache_path_override() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let override_path = temp.path().join("cache-root");
+        fs::create_dir_all(&override_path)?;
+        let previous: Option<OsString> = env::var_os("PX_CACHE_PATH");
+        env::set_var("PX_CACHE_PATH", &override_path);
+        let location = resolve_cache_store_path()?;
+        match previous {
+            Some(value) => env::set_var("PX_CACHE_PATH", value),
+            None => env::remove_var("PX_CACHE_PATH"),
+        }
+
+        assert_eq!(location.source, "PX_CACHE_PATH");
+        assert_eq!(location.path.canonicalize()?, override_path.canonicalize()?);
+        Ok(())
+    }
+
+    #[test]
+    fn prefetch_hits_cached_artifacts() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let cache_root = temp.path();
+        let wheel_path = cache_root.join("wheels/demo/1.0.0/demo-1.0.0.whl");
+        fs::create_dir_all(wheel_path.parent().unwrap())?;
+        fs::write(&wheel_path, b"demo")?;
+
+        let sha = hex::encode(Sha256::digest(b"demo"));
+        let name = "demo".to_string();
+        let version = "1.0.0".to_string();
+        let filename = "demo-1.0.0.whl".to_string();
+        let url = "https://example.invalid/demo.whl".to_string();
+        let specs = vec![PrefetchSpec {
+            name: name.as_str(),
+            version: version.as_str(),
+            filename: filename.as_str(),
+            url: url.as_str(),
+            sha256: sha.as_str(),
+        }];
+
+        let summary = prefetch_artifacts(cache_root, &specs, PrefetchOptions::default())?;
+        assert_eq!(summary.requested, 1);
+        assert_eq!(summary.hit, 1);
+        assert_eq!(summary.fetched, 0);
+        assert_eq!(summary.failed, 0);
         Ok(())
     }
 }

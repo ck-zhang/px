@@ -8,3 +8,13 @@ publish = false
 anyhow.workspace = true
 camino.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+toml_edit = "0.22"
+pep508_rs = "0.5"
+pep440_rs.workspace = true
+px-python = { path = "../px-python" }
+px-resolver = { path = "../px-resolver" }
+dirs-next.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

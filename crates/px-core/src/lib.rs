@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     env,
     ffi::OsString,
     fmt,
@@ -9,39 +9,47 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     str::FromStr,
+    sync::OnceLock,
     time::Duration,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use dirs_next::home_dir;
 use flate2::{write::GzEncoder, Compression};
 use pep440_rs::Version;
 use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement};
+use px_lockfile::{
+    analyze_lock_diff, detect_lock_drift, load_lockfile_optional, lock_prefetch_specs,
+    render_lockfile, render_lockfile_v2, verify_locked_artifacts, LockPrefetchSpec, LockSnapshot,
+    LockedArtifact, ResolvedDependency,
+};
+use px_project::{
+    collect_pyproject_packages, collect_requirement_packages, plan_autopin, AutopinEntry,
+    AutopinState, InstallOverride, ManifestEditor, OnboardPackagePlan, PinSpec, ProjectInitializer,
+};
 use px_python;
 use px_resolver::{ResolveRequest as ResolverRequest, ResolverEnv, ResolverTags};
 use px_runtime::{self, RunOutput};
 use px_store::{
-    cache_wheel, ensure_sdist_build, prefetch_artifacts, ArtifactRequest,
-    PrefetchOptions as StorePrefetchOptions, PrefetchSpec as StorePrefetchSpec,
-    PrefetchSummary as StorePrefetchSummary, SdistRequest,
+    cache_wheel, collect_cache_walk, compute_cache_usage, ensure_sdist_build, prefetch_artifacts,
+    prune_cache_entries, resolve_cache_store_path, ArtifactRequest, CacheLocation,
+    PrefetchOptions as StorePrefetchOptions, PrefetchSpec as StorePrefetchSpec, SdistRequest,
 };
 use reqwest::{blocking::Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tar::Builder;
-use time::{
-    format_description::{self, well_known::Rfc3339},
-    OffsetDateTime,
-};
-use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value as TomlValue};
+use time::{format_description, OffsetDateTime};
+use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 use tracing::warn;
 use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 
-const LOCK_VERSION: i64 = 1;
-const LOCK_MODE_PINNED: &str = "p0-pinned";
+mod workspace;
+
 const PYPI_BASE_URL: &str = "https://pypi.org/pypi";
 const PX_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+type ManifestSnapshot = px_project::ProjectSnapshot;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GlobalOptions {
@@ -117,6 +125,500 @@ impl PxCommand {
     }
 }
 
+#[derive(Debug, Clone)]
+struct EnvSnapshot {
+    vars: HashMap<String, String>,
+}
+
+impl EnvSnapshot {
+    fn capture() -> Self {
+        Self {
+            vars: env::vars().collect(),
+        }
+    }
+
+    fn flag_is_enabled(&self, key: &str) -> bool {
+        matches!(self.vars.get(key).map(String::as_str), Some("1"))
+    }
+
+    fn var(&self, key: &str) -> Option<&str> {
+        self.vars.get(key).map(String::as_str)
+    }
+
+    fn contains(&self, key: &str) -> bool {
+        self.vars.contains_key(key)
+    }
+
+    #[cfg(test)]
+    fn testing(pairs: &[(&str, &str)]) -> Self {
+        let vars = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Self { vars }
+    }
+}
+
+#[derive(Debug)]
+pub struct Config {
+    cache: CacheConfig,
+    network: NetworkConfig,
+    resolver: ResolverConfig,
+    test: TestConfig,
+    publish: PublishConfig,
+}
+
+impl Config {
+    pub fn from_env() -> Result<Self> {
+        let snapshot = EnvSnapshot::capture();
+        Self::from_snapshot(&snapshot)
+    }
+
+    fn from_snapshot(snapshot: &EnvSnapshot) -> Result<Self> {
+        Ok(Self {
+            cache: CacheConfig {
+                store: resolve_cache_store_path()?,
+            },
+            network: NetworkConfig {
+                online: snapshot.flag_is_enabled("PX_ONLINE"),
+            },
+            resolver: ResolverConfig {
+                enabled: snapshot.flag_is_enabled("PX_RESOLVER"),
+                force_sdist: snapshot.flag_is_enabled("PX_FORCE_SDIST"),
+            },
+            test: TestConfig {
+                fallback_builtin: snapshot.flag_is_enabled("PX_TEST_FALLBACK_STD"),
+                skip_tests_flag: snapshot.var("PX_SKIP_TESTS").map(ToOwned::to_owned),
+            },
+            publish: PublishConfig {
+                default_token_env: "PX_PUBLISH_TOKEN",
+            },
+        })
+    }
+
+    pub fn cache(&self) -> &CacheConfig {
+        &self.cache
+    }
+
+    pub fn network(&self) -> &NetworkConfig {
+        &self.network
+    }
+
+    pub fn resolver(&self) -> &ResolverConfig {
+        &self.resolver
+    }
+
+    pub fn test(&self) -> &TestConfig {
+        &self.test
+    }
+
+    pub fn publish(&self) -> &PublishConfig {
+        &self.publish
+    }
+}
+
+#[derive(Debug)]
+pub struct CacheConfig {
+    pub store: CacheLocation,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NetworkConfig {
+    pub online: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ResolverConfig {
+    pub enabled: bool,
+    pub force_sdist: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TestConfig {
+    pub fallback_builtin: bool,
+    pub skip_tests_flag: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PublishConfig {
+    pub default_token_env: &'static str,
+}
+
+pub struct CommandContext<'a> {
+    pub global: &'a GlobalOptions,
+    env: EnvSnapshot,
+    config: Config,
+    project_root: OnceLock<PathBuf>,
+}
+
+impl<'a> CommandContext<'a> {
+    pub fn new(global: &'a GlobalOptions) -> Result<Self> {
+        let env = EnvSnapshot::capture();
+        let config = Config::from_snapshot(&env)?;
+        Ok(Self {
+            global,
+            env,
+            config,
+            project_root: OnceLock::new(),
+        })
+    }
+
+    pub fn cache(&self) -> &CacheLocation {
+        &self.config.cache.store
+    }
+
+    pub fn is_online(&self) -> bool {
+        self.config.network.online
+    }
+
+    pub fn project_root(&self) -> Result<PathBuf> {
+        if let Some(path) = self.project_root.get() {
+            Ok(path.clone())
+        } else {
+            let path = current_project_root()?;
+            let _ = self.project_root.set(path.clone());
+            Ok(path)
+        }
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    pub fn env_contains(&self, key: &str) -> bool {
+        self.env.contains(key)
+    }
+}
+
+pub trait CommandHandler<R> {
+    fn handle(&self, ctx: &CommandContext, request: R) -> Result<ExecutionOutcome>;
+}
+
+#[derive(Clone, Debug)]
+pub struct ProjectInitRequest {
+    pub package: Option<String>,
+    pub python: Option<String>,
+    pub dry_run: bool,
+    pub force: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CacheStatsRequest;
+
+#[derive(Clone, Debug, Default)]
+pub struct CachePathRequest;
+
+#[derive(Clone, Debug, Default)]
+pub struct WorkspaceListRequest;
+
+#[derive(Clone, Debug, Default)]
+pub struct LockDiffRequest;
+
+#[derive(Clone, Debug)]
+pub struct CachePruneRequest {
+    pub all: bool,
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WorkspaceVerifyRequest;
+
+#[derive(Clone, Debug)]
+pub struct WorkflowTestRequest {
+    pub pytest_args: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OutputBuildRequest {
+    pub include_sdist: bool,
+    pub include_wheel: bool,
+    pub out: Option<PathBuf>,
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct OutputPublishRequest {
+    pub registry: Option<String>,
+    pub token_env: Option<String>,
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProjectInstallRequest {
+    pub frozen: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkspaceInstallRequest {
+    pub frozen: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum EnvMode {
+    Info,
+    Paths,
+    Python,
+    Unknown(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct EnvRequest {
+    pub mode: EnvMode,
+}
+
+#[derive(Clone, Debug)]
+pub struct StorePrefetchRequest {
+    pub workspace: bool,
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct QualityTidyRequest;
+
+impl EnvMode {
+    fn from_str(value: &str) -> Self {
+        match value.to_lowercase().as_str() {
+            "info" => EnvMode::Info,
+            "paths" => EnvMode::Paths,
+            "python" => EnvMode::Python,
+            _ => EnvMode::Unknown(value.to_string()),
+        }
+    }
+}
+
+pub fn project_init(
+    global: &GlobalOptions,
+    request: ProjectInitRequest,
+) -> Result<ExecutionOutcome> {
+    let ctx = CommandContext::new(global)?;
+    ProjectInitHandler.handle(&ctx, request)
+}
+
+pub fn cache_stats(global: &GlobalOptions, request: CacheStatsRequest) -> Result<ExecutionOutcome> {
+    let ctx = CommandContext::new(global)?;
+    CacheStatsHandler.handle(&ctx, request)
+}
+
+pub fn cache_path(global: &GlobalOptions, request: CachePathRequest) -> Result<ExecutionOutcome> {
+    let ctx = CommandContext::new(global)?;
+    CachePathHandler.handle(&ctx, request)
+}
+
+pub fn workspace_list(
+    global: &GlobalOptions,
+    request: WorkspaceListRequest,
+) -> Result<ExecutionOutcome> {
+    let ctx = CommandContext::new(global)?;
+    WorkspaceListHandler.handle(&ctx, request)
+}
+
+pub fn lock_diff(global: &GlobalOptions, request: LockDiffRequest) -> Result<ExecutionOutcome> {
+    let ctx = CommandContext::new(global)?;
+    LockDiffHandler.handle(&ctx, request)
+}
+
+pub fn cache_prune(global: &GlobalOptions, request: CachePruneRequest) -> Result<ExecutionOutcome> {
+    let ctx = CommandContext::new(global)?;
+    CachePruneHandler.handle(&ctx, request)
+}
+
+pub fn workspace_verify(
+    global: &GlobalOptions,
+    request: WorkspaceVerifyRequest,
+) -> Result<ExecutionOutcome> {
+    let ctx = CommandContext::new(global)?;
+    WorkspaceVerifyHandler.handle(&ctx, request)
+}
+
+pub fn workflow_test(
+    global: &GlobalOptions,
+    request: WorkflowTestRequest,
+) -> Result<ExecutionOutcome> {
+    let ctx = CommandContext::new(global)?;
+    WorkflowTestHandler.handle(&ctx, request)
+}
+
+pub fn output_build(
+    global: &GlobalOptions,
+    request: OutputBuildRequest,
+) -> Result<ExecutionOutcome> {
+    let ctx = CommandContext::new(global)?;
+    OutputBuildHandler.handle(&ctx, request)
+}
+
+pub fn output_publish(
+    global: &GlobalOptions,
+    request: OutputPublishRequest,
+) -> Result<ExecutionOutcome> {
+    let ctx = CommandContext::new(global)?;
+    OutputPublishHandler.handle(&ctx, request)
+}
+
+pub fn project_install(
+    global: &GlobalOptions,
+    request: ProjectInstallRequest,
+) -> Result<ExecutionOutcome> {
+    let ctx = CommandContext::new(global)?;
+    ProjectInstallHandler.handle(&ctx, request)
+}
+
+pub fn workspace_install(
+    global: &GlobalOptions,
+    request: WorkspaceInstallRequest,
+) -> Result<ExecutionOutcome> {
+    let ctx = CommandContext::new(global)?;
+    WorkspaceInstallHandler.handle(&ctx, request)
+}
+
+pub fn env(global: &GlobalOptions, request: EnvRequest) -> Result<ExecutionOutcome> {
+    let ctx = CommandContext::new(global)?;
+    EnvHandler.handle(&ctx, request)
+}
+
+pub fn store_prefetch(
+    global: &GlobalOptions,
+    request: StorePrefetchRequest,
+) -> Result<ExecutionOutcome> {
+    let ctx = CommandContext::new(global)?;
+    StorePrefetchHandler.handle(&ctx, request)
+}
+
+pub fn quality_tidy(
+    global: &GlobalOptions,
+    request: QualityTidyRequest,
+) -> Result<ExecutionOutcome> {
+    let ctx = CommandContext::new(global)?;
+    QualityTidyHandler.handle(&ctx, request)
+}
+
+fn project_init_request_from_command(command: &PxCommand) -> ProjectInitRequest {
+    ProjectInitRequest {
+        package: command
+            .args
+            .get("package")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string()),
+        python: command
+            .args
+            .get("python")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string()),
+        dry_run: command.dry_run,
+        force: command.force,
+    }
+}
+
+fn cache_prune_request_from_command(command: &PxCommand) -> CachePruneRequest {
+    CachePruneRequest {
+        all: command
+            .args
+            .get("all")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        dry_run: command
+            .args
+            .get("dry_run")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
+}
+
+fn workspace_verify_request_from_command(_command: &PxCommand) -> WorkspaceVerifyRequest {
+    WorkspaceVerifyRequest
+}
+
+fn workflow_test_request_from_command(command: &PxCommand) -> WorkflowTestRequest {
+    WorkflowTestRequest {
+        pytest_args: array_arg(command, "pytest_args"),
+    }
+}
+
+fn output_build_request_from_command(command: &PxCommand) -> OutputBuildRequest {
+    let format = command
+        .args
+        .get("format")
+        .and_then(Value::as_str)
+        .unwrap_or("Both");
+    let (include_sdist, include_wheel) = match format {
+        "Sdist" => (true, false),
+        "Wheel" => (false, true),
+        _ => (true, true),
+    };
+    let out = command
+        .args
+        .get("out")
+        .and_then(Value::as_str)
+        .map(PathBuf::from);
+    OutputBuildRequest {
+        include_sdist,
+        include_wheel,
+        out,
+        dry_run: command.dry_run,
+    }
+}
+
+fn output_publish_request_from_command(command: &PxCommand) -> OutputPublishRequest {
+    OutputPublishRequest {
+        registry: command
+            .args
+            .get("registry")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string()),
+        token_env: command
+            .args
+            .get("token_env")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string()),
+        dry_run: command.dry_run,
+    }
+}
+
+fn project_install_request_from_command(command: &PxCommand) -> ProjectInstallRequest {
+    ProjectInstallRequest {
+        frozen: command
+            .args
+            .get("frozen")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
+}
+
+fn workspace_install_request_from_command(command: &PxCommand) -> WorkspaceInstallRequest {
+    WorkspaceInstallRequest {
+        frozen: command
+            .args
+            .get("frozen")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
+}
+
+fn env_request_from_command(command: &PxCommand) -> EnvRequest {
+    let mode = command
+        .args
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("info");
+    EnvRequest {
+        mode: EnvMode::from_str(mode),
+    }
+}
+
+fn store_prefetch_request_from_command(command: &PxCommand) -> StorePrefetchRequest {
+    StorePrefetchRequest {
+        workspace: command
+            .args
+            .get("workspace")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        dry_run: command.dry_run,
+    }
+}
+
+fn quality_tidy_request_from_command(_command: &PxCommand) -> QualityTidyRequest {
+    QualityTidyRequest
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionOutcome {
     pub status: CommandStatus,
@@ -174,40 +676,79 @@ pub enum CommandStatus {
     Failure,
 }
 
-pub fn execute(_global: &GlobalOptions, command: &PxCommand) -> Result<ExecutionOutcome> {
+pub fn execute(global: &GlobalOptions, command: &PxCommand) -> Result<ExecutionOutcome> {
+    if command.group == CommandGroup::Project && command.name == "init" {
+        return project_init(global, project_init_request_from_command(command));
+    }
+    if command.group == CommandGroup::Infra
+        && command.name == "cache"
+        && cache_mode_eq(command, "stats")
+    {
+        return cache_stats(global, CacheStatsRequest);
+    }
+    if command.group == CommandGroup::Infra
+        && command.name == "cache"
+        && cache_mode_eq(command, "path")
+    {
+        return cache_path(global, CachePathRequest);
+    }
+    if command.group == CommandGroup::Infra
+        && command.name == "cache"
+        && cache_mode_eq(command, "prune")
+    {
+        return cache_prune(global, cache_prune_request_from_command(command));
+    }
+    if command.group == CommandGroup::Workspace && command.name == "list" {
+        return workspace_list(global, WorkspaceListRequest);
+    }
+    if command.group == CommandGroup::Workspace && command.name == "verify" {
+        return workspace_verify(global, workspace_verify_request_from_command(command));
+    }
+    if command.group == CommandGroup::Lock && command.name == "diff" {
+        return lock_diff(global, LockDiffRequest);
+    }
+    if command.group == CommandGroup::Workflow && command.name == "test" {
+        return workflow_test(global, workflow_test_request_from_command(command));
+    }
+    if command.group == CommandGroup::Output && command.name == "build" {
+        return output_build(global, output_build_request_from_command(command));
+    }
+    if command.group == CommandGroup::Output && command.name == "publish" {
+        return output_publish(global, output_publish_request_from_command(command));
+    }
+    if command.group == CommandGroup::Project && command.name == "install" {
+        return project_install(global, project_install_request_from_command(command));
+    }
+    if command.group == CommandGroup::Workspace && command.name == "install" {
+        return workspace_install(global, workspace_install_request_from_command(command));
+    }
+    if command.group == CommandGroup::Infra && command.name == "env" {
+        return env(global, env_request_from_command(command));
+    }
+    if command.group == CommandGroup::Store && command.name == "prefetch" {
+        return store_prefetch(global, store_prefetch_request_from_command(command));
+    }
+    if command.group == CommandGroup::Quality && command.name == "tidy" {
+        return quality_tidy(global, quality_tidy_request_from_command(command));
+    }
+
+    let ctx = CommandContext::new(global)?;
     match (command.group, command.name.as_str()) {
-        (CommandGroup::Infra, "env") => handle_env(command),
-        (CommandGroup::Infra, "cache") => handle_cache(command),
-        (CommandGroup::Workflow, "run") => handle_run(command),
-        (CommandGroup::Workflow, "test") => handle_test(command),
-        (CommandGroup::Project, "init") => handle_project_init(command),
-        (CommandGroup::Project, "add") => handle_project_add(command),
-        (CommandGroup::Project, "remove") => handle_project_remove(command),
-        (CommandGroup::Project, "install") => handle_project_install(command),
-        (CommandGroup::Quality, "tidy") => handle_tidy(command),
-        (CommandGroup::Output, "build") => handle_output_build(command),
-        (CommandGroup::Output, "publish") => handle_output_publish(command),
-        (CommandGroup::Lock, "diff") => handle_lock_diff(command),
-        (CommandGroup::Lock, "upgrade") => handle_lock_upgrade(command),
-        (CommandGroup::Workspace, "list") => handle_workspace_list(command),
-        (CommandGroup::Workspace, "verify") => handle_workspace_verify(command),
-        (CommandGroup::Workspace, "install") => handle_workspace_install(command),
-        (CommandGroup::Workspace, "tidy") => handle_workspace_tidy(command),
-        (CommandGroup::Store, "prefetch") => handle_store_prefetch(command),
-        (CommandGroup::Migrate, "migrate") => handle_migrate(command),
+        (CommandGroup::Infra, "cache") => handle_cache(&ctx, command),
+        (CommandGroup::Workflow, "run") => handle_run(&ctx, command),
+        (CommandGroup::Project, "add") => handle_project_add(&ctx, command),
+        (CommandGroup::Project, "remove") => handle_project_remove(&ctx, command),
+        (CommandGroup::Lock, "upgrade") => handle_lock_upgrade(&ctx, command),
+        (CommandGroup::Workspace, "verify") => handle_workspace_verify(&ctx, command),
+        (CommandGroup::Workspace, "tidy") => handle_workspace_tidy(&ctx, command),
+        (CommandGroup::Migrate, "migrate") => handle_migrate(&ctx, command),
         _ => Ok(default_outcome(command)),
     }
 }
 
-fn handle_env(command: &PxCommand) -> Result<ExecutionOutcome> {
-    let mode = command
-        .args
-        .get("mode")
-        .and_then(Value::as_str)
-        .unwrap_or("info")
-        .to_lowercase();
-    match mode.as_str() {
-        "python" => {
+fn env_outcome(mode: EnvMode) -> Result<ExecutionOutcome> {
+    match mode {
+        EnvMode::Python => {
             let interpreter = px_python::detect_interpreter()?;
             Ok(ExecutionOutcome::success(
                 interpreter.clone(),
@@ -217,7 +758,7 @@ fn handle_env(command: &PxCommand) -> Result<ExecutionOutcome> {
                 }),
             ))
         }
-        "info" => {
+        EnvMode::Info => {
             let ctx = PythonContext::new()?;
             let mut details = env_details(&ctx);
             if let Value::Object(ref mut map) = details {
@@ -232,7 +773,7 @@ fn handle_env(command: &PxCommand) -> Result<ExecutionOutcome> {
                 details,
             ))
         }
-        "paths" => {
+        EnvMode::Paths => {
             let ctx = PythonContext::new()?;
             let mut details = env_details(&ctx);
             let pythonpath_os = OsString::from(&ctx.pythonpath);
@@ -251,11 +792,11 @@ fn handle_env(command: &PxCommand) -> Result<ExecutionOutcome> {
                 details,
             ))
         }
-        other => bail!("px env mode `{other}` not implemented"),
+        EnvMode::Unknown(other) => bail!("px env mode `{other}` not implemented"),
     }
 }
 
-fn handle_run(command: &PxCommand) -> Result<ExecutionOutcome> {
+fn handle_run(_ctx: &CommandContext, command: &PxCommand) -> Result<ExecutionOutcome> {
     let ctx = PythonContext::new()?;
     let extra_args = array_arg(command, "args");
     let entry_arg = command
@@ -390,7 +931,7 @@ fn run_module_entry(
     let mut python_args = vec!["-m".to_string(), entry.clone()];
     python_args.extend(extra_args.iter().cloned());
 
-    let mut envs = ctx.base_env(command)?;
+    let mut envs = ctx.base_env(&command.args)?;
     envs.push(("PX_RUN_ENTRY".into(), entry.clone()));
 
     let output = px_runtime::run_command(&ctx.python, &python_args, &envs, &ctx.project_root)?;
@@ -431,7 +972,7 @@ fn run_passthrough(
         reason,
         resolved,
     } = target;
-    let envs = ctx.base_env(command)?;
+    let envs = ctx.base_env(&command.args)?;
     let program_args = match &reason {
         PassthroughReason::PythonScript { script_arg, .. } => {
             let mut args = Vec::with_capacity(extra_args.len() + 1);
@@ -616,22 +1157,26 @@ fn resolve_executable_path(entry: &str, root: &Path) -> (String, Option<String>)
     }
 }
 
-fn handle_test(command: &PxCommand) -> Result<ExecutionOutcome> {
-    let ctx = PythonContext::new()?;
-    let mut envs = ctx.base_env(command)?;
+fn workflow_test_outcome(
+    ctx: &CommandContext,
+    pytest_args: &[String],
+) -> Result<ExecutionOutcome> {
+    let py_ctx = PythonContext::new()?;
+    let command_args = json!({ "pytest_args": pytest_args });
+    let mut envs = py_ctx.base_env(&command_args)?;
     envs.push(("PX_TEST_RUNNER".into(), "pytest".into()));
 
-    if env::var("PX_TEST_FALLBACK_STD").is_ok() {
-        return run_builtin_tests(command, ctx, envs);
+    if ctx.config().test.fallback_builtin {
+        return run_builtin_tests("test", py_ctx, envs);
     }
 
-    let mut pytest_args = vec!["-m".to_string(), "pytest".to_string(), "tests".to_string()];
-    pytest_args.extend(array_arg(command, "pytest_args"));
+    let mut pytest_cmd = vec!["-m".to_string(), "pytest".to_string(), "tests".to_string()];
+    pytest_cmd.extend(pytest_args.iter().cloned());
 
-    let output = px_runtime::run_command(&ctx.python, &pytest_args, &envs, &ctx.project_root)?;
+    let output = px_runtime::run_command(&py_ctx.python, &pytest_cmd, &envs, &py_ctx.project_root)?;
     if output.code == 0 {
         return Ok(outcome_from_output(
-            &command.name,
+            "test",
             "pytest",
             output,
             "px test",
@@ -640,7 +1185,7 @@ fn handle_test(command: &PxCommand) -> Result<ExecutionOutcome> {
     }
 
     if missing_pytest(&output.stderr) {
-        return run_builtin_tests(command, ctx, envs);
+        return run_builtin_tests("test", py_ctx, envs);
     }
 
     Ok(ExecutionOutcome::failure(
@@ -653,43 +1198,46 @@ fn handle_test(command: &PxCommand) -> Result<ExecutionOutcome> {
     ))
 }
 
-fn handle_output_build(command: &PxCommand) -> Result<ExecutionOutcome> {
-    let ctx = PythonContext::new()?;
-    let targets = parse_build_targets(command.args.get("format"));
-    let out_dir = resolve_output_dir(&ctx, command.args.get("out"))?;
+fn output_build_outcome(
+    ctx: &CommandContext,
+    request: &OutputBuildRequest,
+) -> Result<ExecutionOutcome> {
+    let py_ctx = PythonContext::new()?;
+    let targets = build_targets_from_request(request);
+    let out_dir = resolve_output_dir_from_request(&py_ctx, request.out.as_ref())?;
 
-    if command.dry_run {
-        let artifacts = collect_artifact_summaries(&out_dir, None, &ctx)?;
+    if request.dry_run {
+        let artifacts = collect_artifact_summaries(&out_dir, None, &py_ctx)?;
         let details = json!({
             "artifacts": artifacts,
-            "out_dir": relative_path_str(&out_dir, &ctx.project_root),
+            "out_dir": relative_path_str(&out_dir, &py_ctx.project_root),
             "format": targets.label(),
             "dry_run": true,
         });
         let message = format!(
             "px build: dry-run (format={}, out={})",
             targets.label(),
-            relative_path_str(&out_dir, &ctx.project_root)
+            relative_path_str(&out_dir, &py_ctx.project_root)
         );
         return Ok(ExecutionOutcome::success(message, details));
     }
 
     fs::create_dir_all(&out_dir)?;
-    let (name, version) = project_name_version(&ctx.project_root)?;
+    let (name, version) = project_name_version(&py_ctx.project_root)?;
     let mut produced = Vec::new();
     if targets.sdist {
-        produced.push(write_sdist(&ctx, &out_dir, &name, &version)?);
+        produced.push(write_sdist(&py_ctx, &out_dir, &name, &version)?);
     }
     if targets.wheel {
-        produced.push(write_wheel(&ctx, &out_dir, &name, &version)?);
+        produced.push(write_wheel(&py_ctx, &out_dir, &name, &version)?);
     }
 
-    let artifacts = summarize_selected_artifacts(&produced, &ctx)?;
+    let artifacts = summarize_selected_artifacts(&produced, &py_ctx)?;
     if artifacts.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "px build: build completed but produced no artifacts",
             json!({
-                "out_dir": relative_path_str(&out_dir, &ctx.project_root),
+                "out_dir": relative_path_str(&out_dir, &py_ctx.project_root),
                 "format": targets.label(),
             }),
         ));
@@ -714,38 +1262,39 @@ fn handle_output_build(command: &PxCommand) -> Result<ExecutionOutcome> {
     };
     let details = json!({
         "artifacts": artifacts,
-        "out_dir": relative_path_str(&out_dir, &ctx.project_root),
+        "out_dir": relative_path_str(&out_dir, &py_ctx.project_root),
         "format": targets.label(),
         "dry_run": false,
-        "skip_tests": env::var("PX_SKIP_TESTS").ok(),
+        "skip_tests": ctx.config().test.skip_tests_flag.clone(),
     });
     Ok(ExecutionOutcome::success(message, details))
 }
 
-fn handle_output_publish(command: &PxCommand) -> Result<ExecutionOutcome> {
-    let ctx = PythonContext::new()?;
-    let registry = command
-        .args
-        .get("registry")
-        .and_then(Value::as_str)
+fn output_publish_outcome(
+    ctx: &CommandContext,
+    request: &OutputPublishRequest,
+) -> Result<ExecutionOutcome> {
+    let py_ctx = PythonContext::new()?;
+    let registry = request
+        .registry
+        .as_deref()
         .filter(|s| !s.is_empty())
         .unwrap_or("pypi");
-    let token_env = command
-        .args
-        .get("token_env")
-        .and_then(Value::as_str)
+    let token_env = request
+        .token_env
+        .clone()
         .filter(|s| !s.is_empty())
-        .unwrap_or("PX_PUBLISH_TOKEN");
-    let build_dir = ctx.project_root.join("build");
-    let artifacts = collect_artifact_summaries(&build_dir, None, &ctx)?;
+        .unwrap_or_else(|| ctx.config().publish.default_token_env.to_string());
+    let build_dir = py_ctx.project_root.join("build");
+    let artifacts = collect_artifact_summaries(&build_dir, None, &py_ctx)?;
     if artifacts.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "px publish: no artifacts found (run `px build` first)",
-            json!({ "build_dir": relative_path_str(&build_dir, &ctx.project_root) }),
+            json!({ "build_dir": relative_path_str(&build_dir, &py_ctx.project_root) }),
         ));
     }
 
-    if command.dry_run {
+    if request.dry_run {
         let details = json!({
             "registry": registry,
             "token_env": token_env,
@@ -759,7 +1308,7 @@ fn handle_output_publish(command: &PxCommand) -> Result<ExecutionOutcome> {
         return Ok(ExecutionOutcome::success(message, details));
     }
 
-    if env::var("PX_ONLINE").ok().as_deref() != Some("1") {
+    if !ctx.is_online() {
         return Ok(ExecutionOutcome::user_error(
             "px publish: PX_ONLINE=1 required for uploads",
             json!({
@@ -772,7 +1321,7 @@ fn handle_output_publish(command: &PxCommand) -> Result<ExecutionOutcome> {
         ));
     }
 
-    if env::var(token_env).is_err() {
+    if !ctx.env_contains(&token_env) {
         return Ok(ExecutionOutcome::user_error(
             format!("px publish: {token_env} must be set"),
             json!({
@@ -820,30 +1369,29 @@ impl BuildTargets {
     }
 }
 
-fn parse_build_targets(raw: Option<&Value>) -> BuildTargets {
-    match raw.and_then(Value::as_str) {
-        Some("Sdist") => BuildTargets {
-            sdist: true,
-            wheel: false,
-        },
-        Some("Wheel") => BuildTargets {
-            sdist: false,
-            wheel: true,
-        },
-        _ => BuildTargets {
+fn build_targets_from_request(request: &OutputBuildRequest) -> BuildTargets {
+    let mut targets = BuildTargets {
+        sdist: request.include_sdist,
+        wheel: request.include_wheel,
+    };
+    if !targets.sdist && !targets.wheel {
+        targets = BuildTargets {
             sdist: true,
             wheel: true,
-        },
+        };
     }
+    targets
 }
 
-fn resolve_output_dir(ctx: &PythonContext, raw: Option<&Value>) -> Result<PathBuf> {
-    if let Some(path_str) = raw.and_then(Value::as_str).filter(|s| !s.is_empty()) {
-        let candidate = PathBuf::from(path_str);
-        if candidate.is_absolute() {
-            Ok(candidate)
+fn resolve_output_dir_from_request(
+    ctx: &PythonContext,
+    out: Option<&PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(path) = out {
+        if path.is_absolute() {
+            Ok(path.clone())
         } else {
-            Ok(ctx.project_root.join(candidate))
+            Ok(ctx.project_root.join(path))
         }
     } else {
         Ok(ctx.project_root.join("build"))
@@ -1025,7 +1573,7 @@ fn append_dir_to_zip(zip: &mut ZipWriter<File>, src: &Path, prefix: &str) -> Res
 }
 
 fn run_builtin_tests(
-    command: &PxCommand,
+    command_name: &str,
     ctx: PythonContext,
     mut envs: Vec<(String, String)>,
 ) -> Result<ExecutionOutcome> {
@@ -1034,7 +1582,7 @@ fn run_builtin_tests(
     let args = vec!["-c".to_string(), script.to_string()];
     let output = px_runtime::run_command(&ctx.python, &args, &envs, &ctx.project_root)?;
     Ok(outcome_from_output(
-        &command.name,
+        command_name,
         "builtin",
         output,
         "px test",
@@ -1067,7 +1615,7 @@ fn env_details(ctx: &PythonContext) -> Value {
     })
 }
 
-fn handle_cache(command: &PxCommand) -> Result<ExecutionOutcome> {
+fn handle_cache(ctx: &CommandContext, command: &PxCommand) -> Result<ExecutionOutcome> {
     let mode = command
         .args
         .get("mode")
@@ -1075,8 +1623,8 @@ fn handle_cache(command: &PxCommand) -> Result<ExecutionOutcome> {
         .unwrap_or("path")
         .to_lowercase();
     match mode.as_str() {
-        "path" => cache_path_outcome(),
-        "stats" => cache_stats_outcome(),
+        "path" => cache_path_outcome_with(ctx.cache()),
+        "stats" => cache_stats_outcome_with(ctx.cache()),
         "prune" => {
             let all = command
                 .args
@@ -1088,39 +1636,35 @@ fn handle_cache(command: &PxCommand) -> Result<ExecutionOutcome> {
                 .get("dry_run")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            cache_prune_outcome(all, dry_run)
+            cache_prune_outcome_with(ctx.cache(), all, dry_run)
         }
         other => bail!("px cache mode `{other}` not implemented"),
     }
 }
 
-fn handle_store_prefetch(command: &PxCommand) -> Result<ExecutionOutcome> {
-    let dry_run = command.dry_run;
-    if !dry_run && env::var("PX_ONLINE").ok().as_deref() != Some("1") {
+fn store_prefetch_outcome(
+    ctx: &CommandContext,
+    request: &StorePrefetchRequest,
+) -> Result<ExecutionOutcome> {
+    if !request.dry_run && !ctx.is_online() {
         return Ok(ExecutionOutcome::user_error(
             "PX_ONLINE=1 required for downloads",
             json!({
                 "status": "gated-offline",
-                "dry_run": dry_run,
+                "dry_run": request.dry_run,
                 "hint": "export PX_ONLINE=1 or add --dry-run to inspect work without downloading",
             }),
         ));
     }
 
-    let workspace_mode = command
-        .args
-        .get("workspace")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-
-    if workspace_mode {
-        handle_workspace_prefetch(dry_run)
+    if request.workspace {
+        workspace::prefetch(ctx, request.dry_run)
     } else {
-        handle_project_prefetch(dry_run)
+        handle_project_prefetch(ctx, request.dry_run)
     }
 }
 
-fn handle_migrate(command: &PxCommand) -> Result<ExecutionOutcome> {
+fn handle_migrate(ctx: &CommandContext, command: &PxCommand) -> Result<ExecutionOutcome> {
     let root = current_project_root()?;
     let pyproject_path = root.join("pyproject.toml");
     let pyproject_exists = pyproject_path.exists();
@@ -1319,7 +1863,22 @@ fn handle_migrate(command: &PxCommand) -> Result<ExecutionOutcome> {
     let mut autopin_hint = None;
 
     if pyproject_path.exists() {
-        match plan_autopin(&root, &pyproject_path, lock_only, no_autopin)? {
+        let marker_env = current_marker_environment()?;
+        let autopin_snapshot = px_project::ProjectSnapshot::read_from(&root)?;
+        let resolver = |snap: &ManifestSnapshot, specs: &[String]| -> Result<Vec<PinSpec>> {
+            let mut override_snapshot = snap.clone();
+            override_snapshot.dependencies = specs.to_vec();
+            let resolved = resolve_dependencies(&override_snapshot)?;
+            Ok(resolved.pins)
+        };
+        match plan_autopin(
+            &autopin_snapshot,
+            &pyproject_path,
+            lock_only,
+            no_autopin,
+            &resolver,
+            &marker_env,
+        )? {
             AutopinState::NotNeeded => {}
             AutopinState::Disabled { pending } => {
                 if !pending.is_empty() {
@@ -1369,7 +1928,7 @@ fn handle_migrate(command: &PxCommand) -> Result<ExecutionOutcome> {
     if lock_needs_backup {
         backups.backup(&snapshot.lock_path)?;
     }
-    let install_outcome = match install_snapshot(&snapshot, false, install_override.as_ref()) {
+    let install_outcome = match install_snapshot(ctx, &snapshot, false, install_override.as_ref()) {
         Ok(ok) => ok,
         Err(err) => match err.downcast::<InstallUserError>() {
             Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
@@ -1427,9 +1986,9 @@ fn handle_migrate(command: &PxCommand) -> Result<ExecutionOutcome> {
     }
 }
 
-fn handle_project_prefetch(dry_run: bool) -> Result<ExecutionOutcome> {
+fn handle_project_prefetch(ctx: &CommandContext, dry_run: bool) -> Result<ExecutionOutcome> {
     let snapshot = manifest_snapshot()?;
-    let lock = match maybe_load_lock_snapshot(&snapshot.lock_path)? {
+    let lock = match load_lockfile_optional(&snapshot.lock_path)? {
         Some(lock) => lock,
         None => {
             return Ok(ExecutionOutcome::user_error(
@@ -1442,7 +2001,7 @@ fn handle_project_prefetch(dry_run: bool) -> Result<ExecutionOutcome> {
         }
     };
 
-    let specs = match prefetch_specs_from_lock(&lock) {
+    let lock_specs = match lock_prefetch_specs(&lock) {
         Ok(specs) => specs,
         Err(err) => {
             return Ok(ExecutionOutcome::user_error(
@@ -1452,15 +2011,15 @@ fn handle_project_prefetch(dry_run: bool) -> Result<ExecutionOutcome> {
         }
     };
 
-    if specs.is_empty() {
+    if lock_specs.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "px.lock does not contain artifact metadata",
             json!({ "lockfile": snapshot.lock_path.display().to_string() }),
         ));
     }
 
-    let cache = resolve_cache_store_path()?;
-    let store_specs: Vec<_> = specs.iter().map(|spec| spec.as_px_spec()).collect();
+    let cache = ctx.cache();
+    let store_specs = store_prefetch_specs(&lock_specs);
     let summary = prefetch_artifacts(
         &cache.path,
         &store_specs,
@@ -1503,140 +2062,8 @@ fn handle_project_prefetch(dry_run: bool) -> Result<ExecutionOutcome> {
     Ok(ExecutionOutcome::success(message, details))
 }
 
-fn handle_workspace_prefetch(dry_run: bool) -> Result<ExecutionOutcome> {
-    let workspace = read_workspace_definition()?;
-    if workspace.members.is_empty() {
-        return Ok(workspace_missing_members_outcome(&workspace));
-    }
 
-    let cache = resolve_cache_store_path()?;
-    let mut totals = StorePrefetchSummary::default();
-    let mut members = Vec::new();
-    let mut had_error = false;
-
-    for member in &workspace.members {
-        let lockfile = member.abs_path.join("px.lock").display().to_string();
-        let mut status = "ok".to_string();
-        let mut error = None;
-        let mut summary = StorePrefetchSummary::default();
-
-        if !member.exists {
-            status = "missing-manifest".to_string();
-            error = Some(format!(
-                "manifest not found at {}",
-                member.manifest_path.display()
-            ));
-            had_error = true;
-        } else {
-            match manifest_snapshot_at(&member.abs_path) {
-                Ok(snapshot) => match maybe_load_lock_snapshot(&snapshot.lock_path)? {
-                    Some(lock) => match prefetch_specs_from_lock(&lock) {
-                        Ok(specs) => {
-                            if specs.is_empty() {
-                                status = "missing-artifacts".to_string();
-                                error =
-                                    Some("px.lock does not contain artifact metadata".to_string());
-                                had_error = true;
-                            } else {
-                                let store_specs: Vec<_> =
-                                    specs.iter().map(|spec| spec.as_px_spec()).collect();
-                                match prefetch_artifacts(
-                                    &cache.path,
-                                    &store_specs,
-                                    StorePrefetchOptions {
-                                        dry_run,
-                                        parallel: 4,
-                                    },
-                                ) {
-                                    Ok(result) => {
-                                        summary = result;
-                                        if summary.failed > 0 {
-                                            status = "prefetch-error".to_string();
-                                            error = summary.errors.first().cloned();
-                                            had_error = true;
-                                        }
-                                    }
-                                    Err(err) => {
-                                        status = "prefetch-error".to_string();
-                                        summary.requested = store_specs.len();
-                                        summary.failed = store_specs.len();
-                                        summary.errors.push(err.to_string());
-                                        error = Some(err.to_string());
-                                        had_error = true;
-                                    }
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            status = "lock-error".to_string();
-                            error = Some(err.to_string());
-                            had_error = true;
-                        }
-                    },
-                    None => {
-                        status = "missing-lock".to_string();
-                        error = Some("px.lock not found (run `px install`)".to_string());
-                        had_error = true;
-                    }
-                },
-                Err(err) => {
-                    status = "manifest-error".to_string();
-                    error = Some(err.to_string());
-                    had_error = true;
-                }
-            }
-        }
-
-        accumulate_prefetch_summary(&mut totals, &summary);
-        members.push(PrefetchWorkspaceMember {
-            name: member.name.clone(),
-            path: member.rel_path.clone(),
-            lockfile: Some(lockfile),
-            status,
-            summary: summary.clone(),
-            error,
-        });
-    }
-
-    let message = if dry_run {
-        format!(
-            "workspace dry-run {} artifacts ({} cached)",
-            totals.requested, totals.hit
-        )
-    } else {
-        format!(
-            "workspace hydrated {} artifacts ({} cached, {} fetched)",
-            totals.requested, totals.hit, totals.fetched
-        )
-    };
-
-    let mut details = json!({
-        "cache": {
-            "path": cache.path.display().to_string(),
-            "source": cache.source,
-        },
-        "dry_run": dry_run,
-        "workspace": {
-            "root": workspace.root.display().to_string(),
-            "members": members,
-            "totals": totals,
-        }
-    });
-
-    details["status"] = Value::String(if dry_run { "dry-run" } else { "prefetched" }.to_string());
-
-    if had_error {
-        Ok(ExecutionOutcome::user_error(
-            "workspace prefetch encountered errors",
-            details,
-        ))
-    } else {
-        Ok(ExecutionOutcome::success(message, details))
-    }
-}
-
-fn cache_path_outcome() -> Result<ExecutionOutcome> {
-    let cache = resolve_cache_store_path()?;
+fn cache_path_outcome_with(cache: &CacheLocation) -> Result<ExecutionOutcome> {
     fs::create_dir_all(&cache.path).context("unable to create cache directory")?;
     let canonical = fs::canonicalize(&cache.path).unwrap_or(cache.path.clone());
     let path_str = canonical.display().to_string();
@@ -1650,8 +2077,7 @@ fn cache_path_outcome() -> Result<ExecutionOutcome> {
     ))
 }
 
-fn cache_stats_outcome() -> Result<ExecutionOutcome> {
-    let cache = resolve_cache_store_path()?;
+fn cache_stats_outcome_with(cache: &CacheLocation) -> Result<ExecutionOutcome> {
     let usage = compute_cache_usage(&cache.path)?;
     let message = if usage.exists {
         format!(
@@ -1673,8 +2099,171 @@ fn cache_stats_outcome() -> Result<ExecutionOutcome> {
     ))
 }
 
-fn cache_prune_outcome(all: bool, dry_run: bool) -> Result<ExecutionOutcome> {
-    let cache = resolve_cache_store_path()?;
+struct CacheStatsHandler;
+
+impl CommandHandler<CacheStatsRequest> for CacheStatsHandler {
+    fn handle(
+        &self,
+        _ctx: &CommandContext,
+        _request: CacheStatsRequest,
+    ) -> Result<ExecutionOutcome> {
+        cache_stats_outcome_with(_ctx.cache())
+    }
+}
+
+struct CachePathHandler;
+
+impl CommandHandler<CachePathRequest> for CachePathHandler {
+    fn handle(&self, _ctx: &CommandContext, _request: CachePathRequest) -> Result<ExecutionOutcome> {
+        cache_path_outcome_with(_ctx.cache())
+    }
+}
+
+struct CachePruneHandler;
+
+impl CommandHandler<CachePruneRequest> for CachePruneHandler {
+    fn handle(
+        &self,
+        ctx: &CommandContext,
+        request: CachePruneRequest,
+    ) -> Result<ExecutionOutcome> {
+        cache_prune_outcome_with(ctx.cache(), request.all, request.dry_run)
+    }
+}
+
+struct WorkspaceListHandler;
+
+impl CommandHandler<WorkspaceListRequest> for WorkspaceListHandler {
+    fn handle(
+        &self,
+        ctx: &CommandContext,
+        _request: WorkspaceListRequest,
+    ) -> Result<ExecutionOutcome> {
+        workspace::list(ctx)
+    }
+}
+
+struct LockDiffHandler;
+
+impl CommandHandler<LockDiffRequest> for LockDiffHandler {
+    fn handle(
+        &self,
+        _ctx: &CommandContext,
+        _request: LockDiffRequest,
+    ) -> Result<ExecutionOutcome> {
+        lock_diff_outcome()
+    }
+}
+
+struct WorkspaceVerifyHandler;
+
+impl CommandHandler<WorkspaceVerifyRequest> for WorkspaceVerifyHandler {
+    fn handle(
+        &self,
+        ctx: &CommandContext,
+        _request: WorkspaceVerifyRequest,
+    ) -> Result<ExecutionOutcome> {
+        workspace::verify(ctx)
+    }
+}
+
+struct WorkflowTestHandler;
+
+impl CommandHandler<WorkflowTestRequest> for WorkflowTestHandler {
+    fn handle(
+        &self,
+        ctx: &CommandContext,
+        request: WorkflowTestRequest,
+    ) -> Result<ExecutionOutcome> {
+        workflow_test_outcome(ctx, &request.pytest_args)
+    }
+}
+
+struct OutputBuildHandler;
+
+impl CommandHandler<OutputBuildRequest> for OutputBuildHandler {
+    fn handle(
+        &self,
+        ctx: &CommandContext,
+        request: OutputBuildRequest,
+    ) -> Result<ExecutionOutcome> {
+        output_build_outcome(ctx, &request)
+    }
+}
+
+struct OutputPublishHandler;
+
+impl CommandHandler<OutputPublishRequest> for OutputPublishHandler {
+    fn handle(
+        &self,
+        ctx: &CommandContext,
+        request: OutputPublishRequest,
+    ) -> Result<ExecutionOutcome> {
+        output_publish_outcome(ctx, &request)
+    }
+}
+
+struct ProjectInstallHandler;
+
+impl CommandHandler<ProjectInstallRequest> for ProjectInstallHandler {
+    fn handle(
+        &self,
+        ctx: &CommandContext,
+        request: ProjectInstallRequest,
+    ) -> Result<ExecutionOutcome> {
+        project_install_outcome(ctx, request.frozen)
+    }
+}
+
+struct WorkspaceInstallHandler;
+
+impl CommandHandler<WorkspaceInstallRequest> for WorkspaceInstallHandler {
+    fn handle(
+        &self,
+        ctx: &CommandContext,
+        request: WorkspaceInstallRequest,
+    ) -> Result<ExecutionOutcome> {
+        workspace::install(ctx, request.frozen)
+    }
+}
+
+struct EnvHandler;
+
+impl CommandHandler<EnvRequest> for EnvHandler {
+    fn handle(&self, _ctx: &CommandContext, request: EnvRequest) -> Result<ExecutionOutcome> {
+        env_outcome(request.mode)
+    }
+}
+
+struct StorePrefetchHandler;
+
+impl CommandHandler<StorePrefetchRequest> for StorePrefetchHandler {
+    fn handle(
+        &self,
+        ctx: &CommandContext,
+        request: StorePrefetchRequest,
+    ) -> Result<ExecutionOutcome> {
+        store_prefetch_outcome(ctx, &request)
+    }
+}
+
+struct QualityTidyHandler;
+
+impl CommandHandler<QualityTidyRequest> for QualityTidyHandler {
+    fn handle(
+        &self,
+        _ctx: &CommandContext,
+        _request: QualityTidyRequest,
+    ) -> Result<ExecutionOutcome> {
+        quality_tidy_outcome()
+    }
+}
+
+fn cache_prune_outcome_with(
+    cache: &CacheLocation,
+    all: bool,
+    dry_run: bool,
+) -> Result<ExecutionOutcome> {
     if !all {
         return Ok(ExecutionOutcome::user_error(
             "px cache prune currently requires --all",
@@ -1744,44 +2333,35 @@ fn cache_prune_outcome(all: bool, dry_run: bool) -> Result<ExecutionOutcome> {
         ));
     }
 
-    let mut deleted_entries = 0u64;
-    let mut deleted_size_bytes = 0u64;
-    let mut errors = Vec::new();
-    for entry in &walk.files {
-        match fs::remove_file(&entry.path) {
-            Ok(_) => {
-                deleted_entries += 1;
-                deleted_size_bytes += entry.size;
-            }
-            Err(err) => errors.push(json!({
-                "path": entry.path.display().to_string(),
-                "error": err.to_string(),
-            })),
-        }
-    }
-
-    for dir in walk.dirs.iter().rev() {
-        let _ = fs::remove_dir(dir);
-    }
-
-    let error_count = errors.len();
+    let prune = prune_cache_entries(&walk);
+    let error_count = prune.errors.len();
+    let errors_json: Vec<_> = prune
+        .errors
+        .iter()
+        .map(|err| {
+            json!({
+                "path": err.path.display().to_string(),
+                "error": err.error,
+            })
+        })
+        .collect();
     let details = json!({
         "cache_path": cache.path.display().to_string(),
         "cache_exists": true,
         "dry_run": false,
-        "candidate_entries": candidate_entries,
-        "candidate_size_bytes": candidate_size_bytes,
-        "deleted_entries": deleted_entries,
-        "deleted_size_bytes": deleted_size_bytes,
-        "errors": errors,
+        "candidate_entries": prune.candidate_entries,
+        "candidate_size_bytes": prune.candidate_size_bytes,
+        "deleted_entries": prune.deleted_entries,
+        "deleted_size_bytes": prune.deleted_size_bytes,
+        "errors": errors_json,
         "status": if error_count == 0 { "success" } else { "partial" },
     });
 
     if error_count == 0 {
         Ok(ExecutionOutcome::success(
             format!(
-                "removed {} files ({deleted_size_bytes} bytes)",
-                deleted_entries
+                "removed {} files ({} bytes)",
+                prune.deleted_entries, prune.deleted_size_bytes
             ),
             details,
         ))
@@ -1789,760 +2369,92 @@ fn cache_prune_outcome(all: bool, dry_run: bool) -> Result<ExecutionOutcome> {
         Ok(ExecutionOutcome::failure(
             format!(
                 "removed {} files but {} errors occurred",
-                deleted_entries, error_count
+                prune.deleted_entries, error_count
             ),
             details,
         ))
     }
 }
 
-struct CacheUsage {
-    exists: bool,
-    total_entries: u64,
-    total_size_bytes: u64,
+fn cache_mode_eq(command: &PxCommand, expected: &str) -> bool {
+    command
+        .args
+        .get("mode")
+        .and_then(Value::as_str)
+        .map(|mode| mode.eq_ignore_ascii_case(expected))
+        .unwrap_or(false)
 }
 
-fn compute_cache_usage(path: &Path) -> Result<CacheUsage> {
-    if !path.exists() {
-        return Ok(CacheUsage {
-            exists: false,
-            total_entries: 0,
-            total_size_bytes: 0,
-        });
-    }
 
-    let mut total_entries = 0u64;
-    let mut total_size_bytes = 0u64;
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
-            let entry_path = entry.path();
-            let metadata = entry.metadata()?;
-            if metadata.is_dir() {
-                stack.push(entry_path);
-            } else if metadata.is_file() {
-                total_entries += 1;
-                total_size_bytes += metadata.len();
-            }
-        }
-    }
-
-    Ok(CacheUsage {
-        exists: true,
-        total_entries,
-        total_size_bytes,
-    })
-}
-
-#[derive(Default)]
-struct CacheWalk {
-    files: Vec<CacheEntry>,
-    dirs: Vec<PathBuf>,
-    total_bytes: u64,
-}
-
-#[derive(Clone)]
-struct CacheEntry {
-    path: PathBuf,
-    size: u64,
-}
-
-fn collect_cache_walk(path: &Path) -> Result<CacheWalk> {
-    let mut walk = CacheWalk::default();
-    if !path.exists() {
-        return Ok(walk);
-    }
-
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
-            let entry_path = entry.path();
-            let metadata = entry.metadata()?;
-            if metadata.is_dir() {
-                stack.push(entry_path.clone());
-                if entry_path != path {
-                    walk.dirs.push(entry_path);
-                }
-            } else if metadata.is_file() {
-                let size = metadata.len();
-                walk.total_bytes += size;
-                walk.files.push(CacheEntry {
-                    path: entry_path,
-                    size,
-                });
-            }
-        }
-    }
-
-    walk.files.sort_by(|a, b| a.path.cmp(&b.path));
-    walk.dirs.sort();
-    Ok(walk)
-}
-
-fn workspace_missing_members_outcome(workspace: &WorkspaceDefinition) -> ExecutionOutcome {
-    ExecutionOutcome::user_error(
-        "no [tool.px.workspace] members declared",
-        json!({
-            "workspace": {
-                "root": workspace.root.display().to_string(),
-                "members": Vec::<Value>::new(),
-            },
-            "hint": "add [tool.px.workspace].members entries in pyproject.toml",
-        }),
-    )
-}
-
-fn finalize_workspace_outcome(
-    label: &str,
-    workspace: WorkspaceDefinition,
-    reports: Vec<WorkspaceMemberReport>,
-    stats: WorkspaceStats,
-) -> Result<ExecutionOutcome> {
-    let total = reports.len();
-    let details = workspace_details(&workspace, &reports, &stats);
-    let summary = workspace_summary(label, &stats, total);
-    if stats.has_error() {
-        Ok(ExecutionOutcome::user_error(summary, details))
-    } else {
-        Ok(ExecutionOutcome::success(summary, details))
-    }
-}
-
-fn workspace_details(
-    workspace: &WorkspaceDefinition,
-    reports: &[WorkspaceMemberReport],
-    stats: &WorkspaceStats,
-) -> Value {
-    json!({
-        "workspace": {
-            "root": workspace.root.display().to_string(),
-            "counts": stats.counts_value(reports.len()),
-            "members": reports.iter().map(|r| r.to_json()).collect::<Vec<_>>(),
-        }
-    })
-}
-
-fn workspace_summary(_label: &str, stats: &WorkspaceStats, total: usize) -> String {
-    if stats.has_error() {
-        format!(
-            "{}/{} clean, {} drifted, {} failed",
-            stats.ok, total, stats.drifted, stats.failed
-        )
-    } else {
-        format!("all {total} members clean")
-    }
-}
-
-fn read_workspace_definition() -> Result<WorkspaceDefinition> {
-    let root = current_project_root()?;
-    let manifest_path = root.join("pyproject.toml");
-    ensure_pyproject_exists(&manifest_path)?;
-    let contents = fs::read_to_string(&manifest_path)?;
-    let doc: DocumentMut = contents.parse()?;
-
-    let members_item = doc
-        .get("tool")
-        .and_then(Item::as_table)
-        .and_then(|tool| tool.get("px"))
-        .and_then(Item::as_table)
-        .and_then(|px| px.get("workspace"))
-        .and_then(Item::as_table)
-        .and_then(|workspace| workspace.get("members"));
-
-    let mut members = Vec::new();
-    if let Some(item) = members_item {
-        if let Some(array) = item.as_array() {
-            for value in array.iter() {
-                if let Some(rel) = value.as_str() {
-                    let rel_path = rel.to_string();
-                    let abs_path = root.join(rel);
-                    let member_manifest = abs_path.join("pyproject.toml");
-                    let exists = member_manifest.exists();
-                    let name = if exists {
-                        discover_project_name(&member_manifest).unwrap_or_else(|| rel_path.clone())
-                    } else {
-                        rel_path.clone()
-                    };
-                    let lock_exists = abs_path.join("px.lock").exists();
-                    members.push(WorkspaceMember {
-                        name,
-                        rel_path,
-                        abs_path,
-                        manifest_path: member_manifest,
-                        exists,
-                        lock_exists,
-                    });
-                }
-            }
-        }
-    }
-
-    Ok(WorkspaceDefinition { root, members })
-}
-
-fn discover_project_name(manifest_path: &Path) -> Option<String> {
-    let contents = fs::read_to_string(manifest_path).ok()?;
-    let doc: DocumentMut = contents.parse().ok()?;
-    doc.get("project")
-        .and_then(Item::as_table)
-        .and_then(|table| table.get("name"))
-        .and_then(Item::as_str)
-        .map(|s| s.to_string())
-}
-
-fn analyze_lock_diff(snapshot: &ManifestSnapshot, lock: &LockSnapshot) -> LockDiffReport {
-    let marker_env = current_marker_environment().ok();
-    let mut report = LockDiffReport::default();
-    let manifest_map = spec_map(&snapshot.dependencies, marker_env.as_ref());
-    let lock_map = spec_map(&lock.dependencies, None);
-
-    for (name, spec) in &manifest_map {
-        match lock_map.get(name) {
-            Some(lock_spec) => {
-                if *lock_spec != *spec {
-                    report.changed.push(ChangedEntry {
-                        name: name.clone(),
-                        from: (*lock_spec).clone(),
-                        to: (*spec).clone(),
-                    });
-                }
-            }
-            None => {
-                let applicable = marker_env
-                    .as_ref()
-                    .map(|env| marker_applies(spec, env))
-                    .unwrap_or(true);
-                if applicable {
-                    report.added.push(DiffEntry {
-                        name: name.clone(),
-                        specifier: (*spec).clone(),
-                        source: "pyproject",
-                    });
-                }
-            }
-        }
-    }
-
-    for (name, spec) in &lock_map {
-        if !manifest_map.contains_key(name) {
-            report.removed.push(DiffEntry {
-                name: name.clone(),
-                specifier: (*spec).clone(),
-                source: "px.lock",
-            });
-        }
-    }
-
-    match lock.project_name.as_deref() {
-        Some(name) if name == snapshot.name => {}
-        Some(name) => {
-            report.project_mismatch = Some(ProjectMismatch {
-                manifest: snapshot.name.clone(),
-                lock: Some(name.to_string()),
-            })
-        }
-        None => {
-            report.project_mismatch = Some(ProjectMismatch {
-                manifest: snapshot.name.clone(),
-                lock: None,
-            })
-        }
-    }
-
-    match lock.python_requirement.as_ref() {
-        Some(req) if req == &snapshot.python_requirement => {}
-        Some(req) => {
-            report.python_mismatch = Some(PythonMismatch {
-                manifest: snapshot.python_requirement.clone(),
-                lock: Some(req.clone()),
-            })
-        }
-        None => {
-            report.python_mismatch = Some(PythonMismatch {
-                manifest: snapshot.python_requirement.clone(),
-                lock: None,
-            })
-        }
-    }
-
-    if lock.version != LOCK_VERSION && lock.version != 2 {
-        report.version_mismatch = Some(VersionMismatch {
-            expected: LOCK_VERSION,
-            found: lock.version,
-        });
-    }
-
-    if lock.mode.as_deref() != Some(LOCK_MODE_PINNED) {
-        report.mode_mismatch = Some(ModeMismatch {
-            expected: LOCK_MODE_PINNED,
-            found: lock.mode.clone(),
-        });
-    }
-
-    report
-}
-
-fn spec_map<'a>(
-    specs: &'a [String],
-    marker_env: Option<&MarkerEnvironment>,
-) -> HashMap<String, &'a String> {
-    let mut map = HashMap::new();
-    for spec in specs {
-        if let Some(env) = marker_env {
-            if !marker_applies(spec, env) {
-                continue;
-            }
-        }
-        map.insert(dependency_name(spec), spec);
-    }
-    map
-}
-
-#[derive(Default)]
-struct LockDiffReport {
-    added: Vec<DiffEntry>,
-    removed: Vec<DiffEntry>,
-    changed: Vec<ChangedEntry>,
-    python_mismatch: Option<PythonMismatch>,
-    version_mismatch: Option<VersionMismatch>,
-    mode_mismatch: Option<ModeMismatch>,
-    project_mismatch: Option<ProjectMismatch>,
-}
-
-#[derive(Clone)]
-struct DiffEntry {
-    name: String,
-    specifier: String,
-    source: &'static str,
-}
-
-#[derive(Clone)]
-struct ChangedEntry {
-    name: String,
-    from: String,
-    to: String,
-}
-
-struct PythonMismatch {
-    manifest: String,
-    lock: Option<String>,
-}
-
-struct VersionMismatch {
-    expected: i64,
-    found: i64,
-}
-
-struct ModeMismatch {
-    expected: &'static str,
-    found: Option<String>,
-}
-
-struct ProjectMismatch {
-    manifest: String,
-    lock: Option<String>,
-}
-
-struct WorkspaceDefinition {
-    root: PathBuf,
-    members: Vec<WorkspaceMember>,
-}
-
-struct WorkspaceMember {
-    name: String,
-    rel_path: String,
-    abs_path: PathBuf,
-    manifest_path: PathBuf,
-    exists: bool,
-    lock_exists: bool,
-}
-
-enum WorkspaceMemberStatus {
-    Installed,
-    UpToDate,
-    Verified,
-    Tidied,
-    Drift,
-    MissingLock,
-    MissingManifest,
-    ManifestError,
-    InstallError,
-}
-
-impl WorkspaceMemberStatus {
-    fn as_str(&self) -> &'static str {
-        match self {
-            WorkspaceMemberStatus::Installed => "installed",
-            WorkspaceMemberStatus::UpToDate => "up-to-date",
-            WorkspaceMemberStatus::Verified => "verified",
-            WorkspaceMemberStatus::Tidied => "tidied",
-            WorkspaceMemberStatus::Drift => "drift",
-            WorkspaceMemberStatus::MissingLock => "missing-lock",
-            WorkspaceMemberStatus::MissingManifest => "missing-manifest",
-            WorkspaceMemberStatus::ManifestError => "manifest-error",
-            WorkspaceMemberStatus::InstallError => "install-error",
-        }
-    }
-
-    fn is_ok(&self) -> bool {
-        matches!(
-            self,
-            WorkspaceMemberStatus::Installed
-                | WorkspaceMemberStatus::UpToDate
-                | WorkspaceMemberStatus::Verified
-                | WorkspaceMemberStatus::Tidied
-        )
-    }
-
-    fn is_drift(&self) -> bool {
-        matches!(
-            self,
-            WorkspaceMemberStatus::Drift | WorkspaceMemberStatus::MissingLock
-        )
-    }
-}
-
-struct WorkspaceMemberReport {
-    name: String,
-    path: String,
-    status: WorkspaceMemberStatus,
-    lockfile: Option<String>,
-    drift: Vec<String>,
-    error: Option<String>,
-}
-
-impl WorkspaceMemberReport {
-    fn new(member: &WorkspaceMember) -> Self {
-        Self {
-            name: member.name.clone(),
-            path: member.rel_path.clone(),
-            status: WorkspaceMemberStatus::UpToDate,
-            lockfile: None,
-            drift: Vec::new(),
-            error: None,
-        }
-    }
-
-    fn with_status(mut self, status: WorkspaceMemberStatus) -> Self {
-        self.status = status;
-        self
-    }
-
-    fn lockfile(mut self, path: impl Into<String>) -> Self {
-        self.lockfile = Some(path.into());
-        self
-    }
-
-    fn drift(mut self, drift: Vec<String>) -> Self {
-        self.drift = drift;
-        self
-    }
-
-    fn error(mut self, err: impl Into<String>) -> Self {
-        self.error = Some(err.into());
-        self
-    }
-
-    fn to_json(&self) -> Value {
-        json!({
-            "name": self.name,
-            "path": self.path,
-            "status": self.status.as_str(),
-            "lockfile": self.lockfile,
-            "drift": self.drift,
-            "error": self.error,
-        })
-    }
-}
-
-#[derive(Serialize)]
-struct PrefetchWorkspaceMember {
-    name: String,
-    path: String,
-    lockfile: Option<String>,
-    status: String,
-    summary: StorePrefetchSummary,
-    error: Option<String>,
-}
-
-fn accumulate_prefetch_summary(target: &mut StorePrefetchSummary, addition: &StorePrefetchSummary) {
-    target.requested += addition.requested;
-    target.hit += addition.hit;
-    target.fetched += addition.fetched;
-    target.failed += addition.failed;
-    target.bytes_fetched += addition.bytes_fetched;
-    if !addition.errors.is_empty() {
-        target.errors.extend(addition.errors.iter().cloned());
-    }
-}
-
-#[derive(Default)]
-struct WorkspaceStats {
-    ok: usize,
-    drifted: usize,
-    failed: usize,
-}
-
-impl WorkspaceStats {
-    fn update(&mut self, status: &WorkspaceMemberStatus) {
-        if status.is_ok() {
-            self.ok += 1;
-        } else if status.is_drift() {
-            self.drifted += 1;
-        } else {
-            self.failed += 1;
-        }
-    }
-
-    fn has_error(&self) -> bool {
-        self.drifted > 0 || self.failed > 0
-    }
-
-    fn counts_value(&self, total: usize) -> Value {
-        json!({
-            "total": total,
-            "ok": self.ok,
-            "drifted": self.drifted,
-            "failed": self.failed,
-        })
-    }
-}
-
-struct InstallOutcome {
+pub(crate) struct InstallOutcome {
     state: InstallState,
     lockfile: String,
     drift: Vec<String>,
     verified: bool,
 }
 
-enum InstallState {
+pub(crate) enum InstallState {
     Installed,
     UpToDate,
     Drift,
     MissingLock,
 }
 
-struct TidyOutcome {
-    state: TidyState,
-    lockfile: String,
-    drift: Vec<String>,
-}
+struct ProjectInitHandler;
 
-enum TidyState {
-    Clean,
-    Drift,
-    MissingLock,
-}
+impl CommandHandler<ProjectInitRequest> for ProjectInitHandler {
+    fn handle(
+        &self,
+        _ctx: &CommandContext,
+        request: ProjectInitRequest,
+    ) -> Result<ExecutionOutcome> {
+        let root = current_project_root()?;
+        let pyproject_path = root.join("pyproject.toml");
 
-impl LockDiffReport {
-    fn is_clean(&self) -> bool {
-        self.added.is_empty()
-            && self.removed.is_empty()
-            && self.changed.is_empty()
-            && self.python_mismatch.is_none()
-            && self.version_mismatch.is_none()
-            && self.mode_mismatch.is_none()
-    }
-
-    fn to_json(&self, snapshot: &ManifestSnapshot) -> Value {
-        json!({
-            "status": if self.is_clean() { "clean" } else { "drift" },
-            "pyproject": snapshot.manifest_path.display().to_string(),
-            "lockfile": snapshot.lock_path.display().to_string(),
-            "added": self
-                .added
-                .iter()
-                .map(|entry| json!({
-                    "name": entry.name,
-                    "specifier": entry.specifier,
-                    "source": entry.source,
-                }))
-                .collect::<Vec<_>>(),
-            "removed": self
-                .removed
-                .iter()
-                .map(|entry| json!({
-                    "name": entry.name,
-                    "specifier": entry.specifier,
-                    "source": entry.source,
-                }))
-                .collect::<Vec<_>>(),
-            "changed": self
-                .changed
-                .iter()
-                .map(|entry| json!({
-                    "name": entry.name,
-                    "from": entry.from,
-                    "to": entry.to,
-                }))
-                .collect::<Vec<_>>(),
-            "python_mismatch": self.python_mismatch.as_ref().map(|m| json!({
-                "manifest": m.manifest,
-                "lock": m.lock,
-            })),
-            "version_mismatch": self.version_mismatch.as_ref().map(|m| json!({
-                "expected": m.expected,
-                "found": m.found,
-            })),
-            "mode_mismatch": self.mode_mismatch.as_ref().map(|m| json!({
-                "expected": m.expected,
-                "found": m.found,
-            })),
-            "project_mismatch": self.project_mismatch.as_ref().map(|m| json!({
-                "manifest": m.manifest,
-                "lock": m.lock,
-            })),
-        })
-    }
-
-    fn summary(&self) -> String {
-        if self.is_clean() {
-            return "clean".to_string();
+        if pyproject_path.exists() {
+            return existing_pyproject_response(&pyproject_path);
         }
 
-        let mut chunks = Vec::new();
-        if !self.added.is_empty() {
-            chunks.push(format!("{} added", self.added.len()));
-        }
-        if !self.removed.is_empty() {
-            chunks.push(format!("{} removed", self.removed.len()));
-        }
-        if !self.changed.is_empty() {
-            chunks.push(format!("{} changed", self.changed.len()));
-        }
-        if self.python_mismatch.is_some() {
-            chunks.push("python mismatch".to_string());
-        }
-        if self.version_mismatch.is_some() {
-            chunks.push("lock version mismatch".to_string());
-        }
-        if self.mode_mismatch.is_some() {
-            chunks.push("mode mismatch".to_string());
-        }
-        if self.project_mismatch.is_some() {
-            chunks.push("project mismatch".to_string());
-        }
-        if chunks.is_empty() {
-            "drift".to_string()
-        } else {
-            format!("drift ({})", chunks.join(", "))
-        }
-    }
-
-    fn to_messages(&self) -> Vec<String> {
-        let mut msgs = Vec::new();
-        for entry in &self.added {
-            msgs.push(format!(
-                "dependency `{}` present in pyproject but missing from px.lock",
-                entry.name
-            ));
-        }
-        for entry in &self.removed {
-            msgs.push(format!(
-                "dependency `{}` present in px.lock but missing from pyproject",
-                entry.name
-            ));
-        }
-        for entry in &self.changed {
-            msgs.push(format!(
-                "dependency `{}` differs (lock={}, manifest={})",
-                entry.name, entry.from, entry.to
-            ));
-        }
-        if let Some(mismatch) = &self.python_mismatch {
-            match &mismatch.lock {
-                Some(lock_req) => msgs.push(format!(
-                    "python requirement differs (lock={}, manifest={})",
-                    lock_req, mismatch.manifest
-                )),
-                None => msgs.push(format!(
-                    "python requirement missing in lock (manifest={})",
-                    mismatch.manifest
-                )),
+        if !request.force {
+            if let Some(changes) = git_worktree_changes(&root)? {
+                if !changes.is_empty() {
+                    return Ok(dirty_worktree_response(changes));
+                }
             }
         }
-        if let Some(mismatch) = &self.version_mismatch {
-            msgs.push(format!(
-                "lock version {} does not match expected {}",
-                mismatch.found, mismatch.expected
-            ));
+
+        let package_arg = request
+            .package
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let (package, inferred) = px_project::infer_package_name(package_arg, &root)?;
+        let package_name = package.clone();
+        let python_req = resolve_python_requirement_arg(request.python.as_deref());
+
+        let files = ProjectInitializer::scaffold(&root, &package, &python_req)?;
+        let mut details = json!({
+            "package": package,
+            "python": python_req,
+            "files_created": files,
+            "project_root": root.display().to_string(),
+        });
+        if inferred {
+            details["inferred_package"] = Value::Bool(true);
+            details["hint"] = Value::String(
+                "Pass --package <name> to override the inferred module name.".to_string(),
+            );
         }
-        if let Some(mismatch) = &self.mode_mismatch {
-            match &mismatch.found {
-                Some(found) => msgs.push(format!(
-                    "lock metadata mode `{}` does not match expected `{}`",
-                    found, mismatch.expected
-                )),
-                None => msgs.push(format!(
-                    "lock metadata mode missing (expected `{}`)",
-                    mismatch.expected
-                )),
-            }
-        }
-        if let Some(mismatch) = &self.project_mismatch {
-            match &mismatch.lock {
-                Some(lock_name) => msgs.push(format!(
-                    "project name differs (lock={}, manifest={})",
-                    lock_name, mismatch.manifest
-                )),
-                None => msgs.push(format!(
-                    "project name missing in lock (manifest={})",
-                    mismatch.manifest
-                )),
-            }
-        }
-        msgs
+
+        Ok(ExecutionOutcome::success(
+            format!("initialized project {package_name}"),
+            details,
+        ))
     }
 }
 
-fn handle_project_init(command: &PxCommand) -> Result<ExecutionOutcome> {
-    let root = current_project_root()?;
-    let pyproject_path = root.join("pyproject.toml");
-
-    if pyproject_path.exists() {
-        return existing_pyproject_response(&pyproject_path);
-    }
-
-    if !command.force {
-        if let Some(changes) = git_worktree_changes(&root)? {
-            if !changes.is_empty() {
-                return Ok(dirty_worktree_response(changes));
-            }
-        }
-    }
-
-    let (package, inferred) = infer_package_name(command, &root)?;
-    let package_name = package.clone();
-    let python_req = resolve_python_requirement(command);
-
-    let files = scaffold_project(&root, &package, &python_req)?;
-    let mut details = json!({
-        "package": package,
-        "python": python_req,
-        "files_created": files,
-        "project_root": root.display().to_string(),
-    });
-    if inferred {
-        details["inferred_package"] = Value::Bool(true);
-        details["hint"] = Value::String(
-            "Pass --package <name> to override the inferred module name.".to_string(),
-        );
-    }
-
-    Ok(ExecutionOutcome::success(
-        format!("initialized project {package_name}"),
-        details,
-    ))
-}
-
-fn resolve_python_requirement(command: &PxCommand) -> String {
-    command
-        .args
-        .get("python")
-        .and_then(Value::as_str)
-        .map(str::trim)
+fn resolve_python_requirement_arg(raw: Option<&str>) -> String {
+    raw.map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| {
             if s.starts_with('>') {
@@ -2552,59 +2464,6 @@ fn resolve_python_requirement(command: &PxCommand) -> String {
             }
         })
         .unwrap_or_else(|| ">=3.12".to_string())
-}
-
-fn infer_package_name(command: &PxCommand, root: &Path) -> Result<(String, bool)> {
-    if let Some(explicit) = command
-        .args
-        .get("package")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        validate_package_name(explicit)?;
-        return Ok((explicit.to_string(), false));
-    }
-
-    let inferred = sanitize_package_candidate(root);
-    validate_package_name(&inferred)?;
-    Ok((inferred, true))
-}
-
-fn sanitize_package_candidate(root: &Path) -> String {
-    let raw = root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("px_app");
-    let mut result = String::new();
-    let mut last_was_sep = false;
-    for ch in raw.chars() {
-        if ch.is_ascii_alphanumeric() {
-            result.push(ch.to_ascii_lowercase());
-            last_was_sep = false;
-        } else if matches!(ch, '-' | '_' | ' ' | '.') {
-            if !last_was_sep {
-                result.push('_');
-                last_was_sep = true;
-            }
-        } else {
-            last_was_sep = false;
-        }
-    }
-    while result.starts_with('_') {
-        result.remove(0);
-    }
-    while result.ends_with('_') {
-        result.pop();
-    }
-    if result.is_empty() {
-        return "px_app".to_string();
-    }
-    let first = result.chars().next().unwrap();
-    if !first.is_ascii_alphabetic() && first != '_' {
-        result = format!("px_{result}");
-    }
-    result
 }
 
 fn existing_pyproject_response(pyproject_path: &Path) -> Result<ExecutionOutcome> {
@@ -2625,18 +2484,7 @@ fn existing_pyproject_response(pyproject_path: &Path) -> Result<ExecutionOutcome
 }
 
 fn project_name_from_pyproject(pyproject_path: &Path) -> Result<Option<String>> {
-    if !pyproject_path.exists() {
-        return Ok(None);
-    }
-    let contents = fs::read_to_string(pyproject_path)?;
-    let doc: DocumentMut = contents.parse()?;
-    let name = doc
-        .get("project")
-        .and_then(Item::as_table)
-        .and_then(|table| table.get("name"))
-        .and_then(Item::as_str)
-        .map(|s| s.to_string());
-    Ok(name)
+    px_project::project_name_from_pyproject(pyproject_path)
 }
 
 fn dirty_worktree_response(changes: Vec<String>) -> ExecutionOutcome {
@@ -2649,7 +2497,7 @@ fn dirty_worktree_response(changes: Vec<String>) -> ExecutionOutcome {
     )
 }
 
-fn handle_project_add(command: &PxCommand) -> Result<ExecutionOutcome> {
+fn handle_project_add(_ctx: &CommandContext, command: &PxCommand) -> Result<ExecutionOutcome> {
     if command.specs.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "provide at least one dependency",
@@ -2659,52 +2507,45 @@ fn handle_project_add(command: &PxCommand) -> Result<ExecutionOutcome> {
 
     let root = current_project_root()?;
     let pyproject_path = root.join("pyproject.toml");
-    ensure_pyproject_exists(&pyproject_path)?;
-
-    let mut doc: DocumentMut = fs::read_to_string(&pyproject_path)?.parse()?;
-    let mut deps = read_dependencies(&doc)?;
-    let mut added = Vec::new();
-    let mut updated = Vec::new();
-
-    for spec in &command.specs {
-        let spec = spec.trim();
-        if spec.is_empty() {
-            continue;
-        }
-        match upsert_dependency(&mut deps, spec) {
-            InsertOutcome::Added(name) => added.push(name),
-            InsertOutcome::Updated(name) => updated.push(name),
-            InsertOutcome::Unchanged => {}
-        }
+    let cleaned_specs: Vec<String> = command
+        .specs
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if cleaned_specs.is_empty() {
+        return Ok(ExecutionOutcome::user_error(
+            "provide at least one dependency",
+            json!({ "hint": "run `px project add name==version`" }),
+        ));
     }
 
-    sort_and_dedupe(&mut deps);
-    if added.is_empty() && updated.is_empty() {
+    let mut editor = ManifestEditor::open(&pyproject_path)?;
+    let report = editor.add_specs(&cleaned_specs)?;
+
+    if report.added.is_empty() && report.updated.is_empty() {
         return Ok(ExecutionOutcome::success(
             "dependencies already satisfied",
             json!({ "pyproject": pyproject_path.display().to_string() }),
         ));
     }
 
-    write_dependencies(&mut doc, &deps)?;
-    fs::write(&pyproject_path, doc.to_string())?;
-
     let message = format!(
         "updated dependencies (added {}, updated {})",
-        added.len(),
-        updated.len()
+        report.added.len(),
+        report.updated.len()
     );
     Ok(ExecutionOutcome::success(
         message,
         json!({
             "pyproject": pyproject_path.display().to_string(),
-            "added": added,
-            "updated": updated,
+            "added": report.added,
+            "updated": report.updated,
         }),
     ))
 }
 
-fn handle_project_remove(command: &PxCommand) -> Result<ExecutionOutcome> {
+fn handle_project_remove(_ctx: &CommandContext, command: &PxCommand) -> Result<ExecutionOutcome> {
     if command.specs.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "provide at least one dependency to remove",
@@ -2714,53 +2555,40 @@ fn handle_project_remove(command: &PxCommand) -> Result<ExecutionOutcome> {
 
     let root = current_project_root()?;
     let pyproject_path = root.join("pyproject.toml");
-    ensure_pyproject_exists(&pyproject_path)?;
-
-    let mut doc: DocumentMut = fs::read_to_string(&pyproject_path)?.parse()?;
-    let mut deps = read_dependencies(&doc)?;
-    let targets: HashSet<String> = command
+    let cleaned_specs: Vec<String> = command
         .specs
         .iter()
-        .map(|s| dependency_name(s))
+        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    if targets.is_empty() {
+    if cleaned_specs.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "dependencies must contain at least one name",
             json!({ "hint": "use bare names like requests==2.32.3" }),
         ));
     }
 
-    let before = deps.len();
-    deps.retain(|spec| !targets.contains(&dependency_name(spec)));
-    if deps.len() == before {
+    let mut editor = ManifestEditor::open(&pyproject_path)?;
+    let report = editor.remove_specs(&cleaned_specs)?;
+    if report.removed.is_empty() {
         return Ok(ExecutionOutcome::success(
             "no matching dependencies found",
             json!({ "removed": [] }),
         ));
     }
 
-    sort_and_dedupe(&mut deps);
-    write_dependencies(&mut doc, &deps)?;
-    fs::write(&pyproject_path, doc.to_string())?;
-
     Ok(ExecutionOutcome::success(
         "removed dependencies",
         json!({
             "pyproject": pyproject_path.display().to_string(),
-            "removed": targets,
+            "removed": report.removed,
         }),
     ))
 }
 
-fn handle_project_install(command: &PxCommand) -> Result<ExecutionOutcome> {
-    let frozen = command
-        .args
-        .get("frozen")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+fn project_install_outcome(ctx: &CommandContext, frozen: bool) -> Result<ExecutionOutcome> {
     let snapshot = manifest_snapshot()?;
-    let outcome = match install_snapshot(&snapshot, frozen, None) {
+    let outcome = match install_snapshot(ctx, &snapshot, frozen, None) {
         Ok(ok) => ok,
         Err(err) => match err.downcast::<InstallUserError>() {
             Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
@@ -2810,10 +2638,10 @@ fn handle_project_install(command: &PxCommand) -> Result<ExecutionOutcome> {
     }
 }
 
-fn handle_tidy(_command: &PxCommand) -> Result<ExecutionOutcome> {
+fn quality_tidy_outcome() -> Result<ExecutionOutcome> {
     let snapshot = manifest_snapshot()?;
 
-    let lock = match maybe_load_lock_snapshot(&snapshot.lock_path)? {
+    let lock = match load_lockfile_optional(&snapshot.lock_path)? {
         Some(lock) => lock,
         None => {
             return Ok(ExecutionOutcome::user_error(
@@ -2826,7 +2654,7 @@ fn handle_tidy(_command: &PxCommand) -> Result<ExecutionOutcome> {
         }
     };
 
-    let drift = detect_lock_drift(&snapshot, &lock);
+    let drift = detect_lock_drift(&snapshot, &lock, None);
     if drift.is_empty() {
         Ok(ExecutionOutcome::success(
             "px.lock matches pyproject",
@@ -2848,11 +2676,11 @@ fn handle_tidy(_command: &PxCommand) -> Result<ExecutionOutcome> {
     }
 }
 
-fn handle_lock_diff(_command: &PxCommand) -> Result<ExecutionOutcome> {
+fn lock_diff_outcome() -> Result<ExecutionOutcome> {
     let snapshot = manifest_snapshot()?;
-    match maybe_load_lock_snapshot(&snapshot.lock_path)? {
+    match load_lockfile_optional(&snapshot.lock_path)? {
         Some(lock) => {
-            let report = analyze_lock_diff(&snapshot, &lock);
+            let report = analyze_lock_diff(&snapshot, &lock, None);
             let mut details = report.to_json(&snapshot);
             if report.is_clean() {
                 Ok(ExecutionOutcome::success(report.summary(), details))
@@ -2887,10 +2715,10 @@ fn handle_lock_diff(_command: &PxCommand) -> Result<ExecutionOutcome> {
     }
 }
 
-fn handle_lock_upgrade(_command: &PxCommand) -> Result<ExecutionOutcome> {
+fn handle_lock_upgrade(_ctx: &CommandContext, _command: &PxCommand) -> Result<ExecutionOutcome> {
     let snapshot = manifest_snapshot()?;
     let lock_path = snapshot.lock_path.clone();
-    let lock = match maybe_load_lock_snapshot(&lock_path)? {
+    let lock = match load_lockfile_optional(&lock_path)? {
         Some(lock) => lock,
         None => {
             return Ok(ExecutionOutcome::user_error(
@@ -2915,7 +2743,7 @@ fn handle_lock_upgrade(_command: &PxCommand) -> Result<ExecutionOutcome> {
         ));
     }
 
-    let upgraded = render_lockfile_v2(&snapshot, &lock)?;
+    let upgraded = render_lockfile_v2(&snapshot, &lock, PX_VERSION)?;
     fs::write(&lock_path, upgraded)?;
 
     Ok(ExecutionOutcome::success(
@@ -2928,364 +2756,35 @@ fn handle_lock_upgrade(_command: &PxCommand) -> Result<ExecutionOutcome> {
     ))
 }
 
-fn handle_workspace_list(_command: &PxCommand) -> Result<ExecutionOutcome> {
-    let workspace = read_workspace_definition()?;
-    if workspace.members.is_empty() {
-        return Ok(ExecutionOutcome::user_error(
-            "no [tool.px.workspace] members declared",
-            json!({
-                "workspace": {
-                    "root": workspace.root.display().to_string(),
-                    "members": Vec::<Value>::new(),
-                },
-                "hint": "add [tool.px.workspace].members to pyproject.toml",
-            }),
-        ));
-    }
 
-    let details = json!({
-        "workspace": {
-            "root": workspace.root.display().to_string(),
-            "members": workspace
-                .members
-                .iter()
-                .map(|member| json!({
-                    "name": member.name,
-                    "path": member.rel_path,
-                    "manifest": member.manifest_path.display().to_string(),
-                    "manifest_exists": member.exists,
-                    "lock_exists": member.lock_exists,
-                }))
-                .collect::<Vec<_>>(),
-        },
-    });
-
-    let names = workspace
-        .members
-        .iter()
-        .map(|m| m.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    Ok(ExecutionOutcome::success(
-        format!("workspace members: {names}"),
-        details,
-    ))
+fn handle_workspace_verify(ctx: &CommandContext, _command: &PxCommand) -> Result<ExecutionOutcome> {
+    workspace::verify(ctx)
 }
 
-fn handle_workspace_verify(_command: &PxCommand) -> Result<ExecutionOutcome> {
-    let workspace = read_workspace_definition()?;
-    if workspace.members.is_empty() {
-        return Ok(ExecutionOutcome::user_error(
-            "no [tool.px.workspace] members declared",
-            json!({
-                "workspace": {
-                    "root": workspace.root.display().to_string(),
-                    "members": Vec::<Value>::new(),
-                }
-            }),
-        ));
-    }
 
-    let mut member_reports = Vec::new();
-    let mut has_drift = false;
-    let mut first_issue: Option<(String, String)> = None;
 
-    for member in &workspace.members {
-        if !member.exists {
-            has_drift = true;
-            member_reports.push(json!({
-                "name": member.name,
-                "path": member.rel_path,
-                "status": "missing-manifest",
-                "message": format!("manifest not found at {}", member.manifest_path.display()),
-            }));
-            if first_issue.is_none() {
-                first_issue = Some((member.name.clone(), "missing-manifest".to_string()));
-            }
-            continue;
-        }
 
-        let snapshot = match manifest_snapshot_at(&member.abs_path) {
-            Ok(snapshot) => snapshot,
-            Err(err) => {
-                has_drift = true;
-                member_reports.push(json!({
-                    "name": member.name,
-                    "path": member.rel_path,
-                    "status": "manifest-error",
-                    "message": err.to_string(),
-                }));
-                if first_issue.is_none() {
-                    first_issue = Some((member.name.clone(), "manifest-error".to_string()));
-                }
-                continue;
-            }
-        };
-
-        match maybe_load_lock_snapshot(&snapshot.lock_path)? {
-            Some(lock) => {
-                let report = analyze_lock_diff(&snapshot, &lock);
-                if report.is_clean() {
-                    member_reports.push(json!({
-                        "name": member.name,
-                        "path": member.rel_path,
-                        "status": "ok",
-                        "lockfile": snapshot.lock_path.display().to_string(),
-                    }));
-                } else {
-                    has_drift = true;
-                    member_reports.push(json!({
-                        "name": member.name,
-                        "path": member.rel_path,
-                        "status": "drift",
-                        "lockfile": snapshot.lock_path.display().to_string(),
-                        "drift": report.to_messages(),
-                    }));
-                    if first_issue.is_none() {
-                        first_issue = Some((member.name.clone(), "drift".to_string()));
-                    }
-                }
-            }
-            None => {
-                has_drift = true;
-                member_reports.push(json!({
-                    "name": member.name,
-                    "path": member.rel_path,
-                    "status": "missing-lock",
-                    "lockfile": snapshot.lock_path.display().to_string(),
-                }));
-                if first_issue.is_none() {
-                    first_issue = Some((member.name.clone(), "missing-lock".to_string()));
-                }
-            }
-        }
-    }
-
-    let mut details = json!({
-        "status": if has_drift { "drift" } else { "clean" },
-        "workspace": {
-            "root": workspace.root.display().to_string(),
-            "members": member_reports,
-        }
-    });
-
-    if has_drift {
-        details["hint"] = Value::String(
-            "run `px workspace install` or `px install` inside drifted members".to_string(),
-        );
-        let summary = summarize_workspace_issue(first_issue);
-        Ok(ExecutionOutcome::user_error(summary, details))
-    } else {
-        Ok(ExecutionOutcome::success("all members clean", details))
-    }
-}
-
-fn summarize_workspace_issue(issue: Option<(String, String)>) -> String {
-    if let Some((name, status)) = issue {
-        match status.as_str() {
-            "missing-manifest" => format!("member {name} missing manifest"),
-            "manifest-error" => format!("member {name} manifest error"),
-            "missing-lock" => format!("drift in {name} (px.lock missing)"),
-            "drift" => format!("drift in {name} (lock mismatch)"),
-            other => format!("drift in {name} ({other})"),
-        }
-    } else {
-        "workspace drift detected".to_string()
-    }
-}
-
-fn handle_workspace_install(command: &PxCommand) -> Result<ExecutionOutcome> {
-    let frozen = command
-        .args
-        .get("frozen")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let workspace = read_workspace_definition()?;
-    if workspace.members.is_empty() {
-        return Ok(workspace_missing_members_outcome(&workspace));
-    }
-
-    let mut reports = Vec::new();
-    let mut stats = WorkspaceStats::default();
-
-    for member in &workspace.members {
-        let mut report = WorkspaceMemberReport::new(member);
-        if !member.exists {
-            report = report
-                .with_status(WorkspaceMemberStatus::MissingManifest)
-                .error(format!(
-                    "manifest not found at {}",
-                    member.manifest_path.display()
-                ));
-            stats.update(&report.status);
-            reports.push(report);
-            continue;
-        }
-
-        let snapshot = match manifest_snapshot_at(&member.abs_path) {
-            Ok(snapshot) => snapshot,
-            Err(err) => {
-                report = report
-                    .with_status(WorkspaceMemberStatus::ManifestError)
-                    .error(err.to_string());
-                stats.update(&report.status);
-                reports.push(report);
-                continue;
-            }
-        };
-
-        match install_snapshot(&snapshot, frozen, None) {
-            Ok(result) => {
-                report = report.lockfile(result.lockfile.clone());
-                report = match result.state {
-                    InstallState::Installed => report.with_status(WorkspaceMemberStatus::Installed),
-                    InstallState::UpToDate => {
-                        if frozen && result.verified {
-                            report.with_status(WorkspaceMemberStatus::Verified)
-                        } else {
-                            report.with_status(WorkspaceMemberStatus::UpToDate)
-                        }
-                    }
-                    InstallState::Drift => report
-                        .with_status(WorkspaceMemberStatus::Drift)
-                        .drift(result.drift),
-                    InstallState::MissingLock => {
-                        report.with_status(WorkspaceMemberStatus::MissingLock)
-                    }
-                };
-            }
-            Err(err) => match err.downcast::<InstallUserError>() {
-                Ok(user) => {
-                    report = report
-                        .with_status(WorkspaceMemberStatus::InstallError)
-                        .error(user.message);
-                }
-                Err(err) => {
-                    report = report
-                        .with_status(WorkspaceMemberStatus::InstallError)
-                        .error(err.to_string());
-                }
-            },
-        }
-
-        stats.update(&report.status);
-        reports.push(report);
-    }
-
-    finalize_workspace_outcome(
-        if frozen {
-            "workspace install --frozen"
-        } else {
-            "workspace install"
-        },
-        workspace,
-        reports,
-        stats,
-    )
-}
-
-fn handle_workspace_tidy(_command: &PxCommand) -> Result<ExecutionOutcome> {
-    let workspace = read_workspace_definition()?;
-    if workspace.members.is_empty() {
-        return Ok(workspace_missing_members_outcome(&workspace));
-    }
-
-    let mut reports = Vec::new();
-    let mut stats = WorkspaceStats::default();
-
-    for member in &workspace.members {
-        let mut report = WorkspaceMemberReport::new(member);
-        if !member.exists {
-            report = report
-                .with_status(WorkspaceMemberStatus::MissingManifest)
-                .error(format!(
-                    "manifest not found at {}",
-                    member.manifest_path.display()
-                ));
-            stats.update(&report.status);
-            reports.push(report);
-            continue;
-        }
-
-        let snapshot = match manifest_snapshot_at(&member.abs_path) {
-            Ok(snapshot) => snapshot,
-            Err(err) => {
-                report = report
-                    .with_status(WorkspaceMemberStatus::ManifestError)
-                    .error(err.to_string());
-                stats.update(&report.status);
-                reports.push(report);
-                continue;
-            }
-        };
-
-        match tidy_snapshot(&snapshot) {
-            Ok(result) => {
-                report = report.lockfile(result.lockfile.clone());
-                report = match result.state {
-                    TidyState::Clean => report.with_status(WorkspaceMemberStatus::Tidied),
-                    TidyState::Drift => report
-                        .with_status(WorkspaceMemberStatus::Drift)
-                        .drift(result.drift),
-                    TidyState::MissingLock => {
-                        report.with_status(WorkspaceMemberStatus::MissingLock)
-                    }
-                };
-            }
-            Err(err) => {
-                report = report
-                    .with_status(WorkspaceMemberStatus::InstallError)
-                    .error(err.to_string());
-            }
-        }
-
-        stats.update(&report.status);
-        reports.push(report);
-    }
-
-    finalize_workspace_outcome("workspace tidy", workspace, reports, stats)
+fn handle_workspace_tidy(ctx: &CommandContext, _command: &PxCommand) -> Result<ExecutionOutcome> {
+    workspace::tidy(ctx)
 }
 
 fn lock_is_fresh(snapshot: &ManifestSnapshot) -> Result<bool> {
-    match maybe_load_lock_snapshot(&snapshot.lock_path)? {
-        Some(lock) => Ok(detect_lock_drift(snapshot, &lock).is_empty()),
+    match load_lockfile_optional(&snapshot.lock_path)? {
+        Some(lock) => Ok(detect_lock_drift(snapshot, &lock, None).is_empty()),
         None => Ok(false),
     }
 }
 
-fn manifest_snapshot() -> Result<ManifestSnapshot> {
-    let root = current_project_root()?;
-    manifest_snapshot_at(&root)
+pub(crate) fn manifest_snapshot() -> Result<ManifestSnapshot> {
+    Ok(px_project::ProjectSnapshot::read_current()?)
 }
 
-fn manifest_snapshot_at(root: &Path) -> Result<ManifestSnapshot> {
-    let manifest_path = root.join("pyproject.toml");
-    ensure_pyproject_exists(&manifest_path)?;
-    let contents = fs::read_to_string(&manifest_path)?;
-    let doc: DocumentMut = contents.parse()?;
-    let project = project_table(&doc)?;
-    let name = project
-        .get("name")
-        .and_then(Item::as_str)
-        .ok_or_else(|| anyhow!("pyproject missing [project].name"))?
-        .to_string();
-    let python_requirement = project
-        .get("requires-python")
-        .and_then(Item::as_str)
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| ">=3.12".to_string());
-    let dependencies = read_dependencies(&doc)?;
-    Ok(ManifestSnapshot {
-        root: root.to_path_buf(),
-        manifest_path,
-        lock_path: root.join("px.lock"),
-        name,
-        python_requirement,
-        dependencies,
-    })
+pub(crate) fn manifest_snapshot_at(root: &Path) -> Result<ManifestSnapshot> {
+    Ok(px_project::ProjectSnapshot::read_from(root)?)
 }
 
-fn install_snapshot(
+pub(crate) fn install_snapshot(
+    ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
     frozen: bool,
     override_pins: Option<&InstallOverride>,
@@ -3315,7 +2814,7 @@ fn install_snapshot(
         let mut resolved_override = None;
         if override_pins.is_none()
             && dependencies_require_resolution(&dependencies)
-            && resolver_enabled()
+            && ctx.config().resolver.enabled
         {
             let resolved = resolve_dependencies(snapshot)?;
             let marker_env = current_marker_environment()?;
@@ -3331,8 +2830,8 @@ fn install_snapshot(
                 None => ensure_exact_pins(&dependencies)?,
             }
         };
-        let resolved = resolve_pins(&pins)?;
-        let contents = render_lockfile(snapshot, &resolved)?;
+        let resolved = resolve_pins(&pins, ctx.cache(), ctx.config().resolver.force_sdist)?;
+        let contents = render_lockfile(snapshot, &resolved, PX_VERSION)?;
         fs::write(&snapshot.lock_path, contents)?;
         Ok(InstallOutcome {
             state: InstallState::Installed,
@@ -3344,7 +2843,7 @@ fn install_snapshot(
 }
 
 fn refresh_project_site(snapshot: &ManifestSnapshot) -> Result<()> {
-    let lock = maybe_load_lock_snapshot(&snapshot.lock_path)?.ok_or_else(|| {
+    let lock = load_lockfile_optional(&snapshot.lock_path)?.ok_or_else(|| {
         anyhow!(
             "px install: lockfile missing at {}",
             snapshot.lock_path.display()
@@ -3406,7 +2905,7 @@ fn ensure_project_site_bootstrap(project_root: &Path) {
         python_requirement: String::new(),
         dependencies: Vec::new(),
     };
-    match maybe_load_lock_snapshot(&snapshot.lock_path) {
+    match load_lockfile_optional(&snapshot.lock_path) {
         Ok(Some(lock)) => {
             if let Err(err) = materialize_project_site(&snapshot, &lock) {
                 warn!("failed to refresh .px/site from px.lock: {err:?}");
@@ -3424,9 +2923,9 @@ fn ensure_project_site_bootstrap(project_root: &Path) {
 
 fn verify_lock(snapshot: &ManifestSnapshot) -> Result<InstallOutcome> {
     let lockfile = snapshot.lock_path.display().to_string();
-    match maybe_load_lock_snapshot(&snapshot.lock_path)? {
+    match load_lockfile_optional(&snapshot.lock_path)? {
         Some(lock) => {
-            let report = analyze_lock_diff(snapshot, &lock);
+            let report = analyze_lock_diff(snapshot, &lock, None);
             let mut drift = report.to_messages();
             if drift.is_empty() {
                 drift = verify_locked_artifacts(&lock);
@@ -3456,62 +2955,6 @@ fn verify_lock(snapshot: &ManifestSnapshot) -> Result<InstallOutcome> {
     }
 }
 
-fn verify_locked_artifacts(lock: &LockSnapshot) -> Vec<String> {
-    let mut issues = Vec::new();
-    for dep in &lock.resolved {
-        let Some(artifact) = &dep.artifact else {
-            continue;
-        };
-        if artifact.cached_path.is_empty() {
-            issues.push(format!(
-                "dependency `{}` missing cached_path in lock",
-                dep.name
-            ));
-            continue;
-        }
-        let path = PathBuf::from(&artifact.cached_path);
-        if !path.exists() {
-            issues.push(format!(
-                "artifact for `{}` missing at {}",
-                dep.name,
-                path.display()
-            ));
-            continue;
-        }
-        match compute_file_sha256(&path) {
-            Ok(actual) if actual == artifact.sha256 => {}
-            Ok(actual) => {
-                issues.push(format!(
-                    "artifact for `{}` has sha256 {} but lock expects {}",
-                    dep.name, actual, artifact.sha256
-                ));
-                continue;
-            }
-            Err(err) => {
-                issues.push(format!(
-                    "unable to hash `{}` at {}: {}",
-                    dep.name,
-                    path.display(),
-                    err
-                ));
-                continue;
-            }
-        }
-
-        if let Ok(meta) = fs::metadata(&path) {
-            if meta.len() != artifact.size {
-                issues.push(format!(
-                    "artifact for `{}` size mismatch (have {}, lock {})",
-                    dep.name,
-                    meta.len(),
-                    artifact.size
-                ));
-            }
-        }
-    }
-    issues
-}
-
 fn compute_file_sha256(path: &Path) -> Result<String> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
@@ -3528,14 +2971,6 @@ fn compute_file_sha256(path: &Path) -> Result<String> {
 
 fn dependencies_require_resolution(specs: &[String]) -> bool {
     specs.iter().any(|spec| !spec.trim().contains("=="))
-}
-
-fn resolver_enabled() -> bool {
-    matches!(env::var("PX_RESOLVER").ok().as_deref(), Some("1"))
-}
-
-fn force_sdist_build() -> bool {
-    matches!(env::var("PX_FORCE_SDIST").ok().as_deref(), Some("1"))
 }
 
 struct ResolvedSpecOutput {
@@ -3593,41 +3028,17 @@ fn persist_resolved_dependencies(snapshot: &ManifestSnapshot, specs: &[String]) 
     Ok(())
 }
 
-fn prefetch_specs_from_lock(lock: &LockSnapshot) -> Result<Vec<PrefetchArtifactSpec>> {
-    let mut spec_map = HashMap::new();
-    for spec in &lock.dependencies {
-        spec_map.insert(dependency_name(spec), spec.clone());
-    }
-
-    let mut specs = Vec::new();
-    for dep in &lock.resolved {
-        let Some(artifact) = &dep.artifact else {
-            continue;
-        };
-        let Some(specifier) = spec_map.get(&dep.name) else {
-            bail!("lock entry `{}` missing from dependencies list", dep.name);
-        };
-        let Some(version) = version_from_specifier(specifier) else {
-            bail!("lock entry `{}` is missing a pinned version", dep.name);
-        };
-        if artifact.filename.is_empty() || artifact.url.is_empty() || artifact.sha256.is_empty() {
-            bail!("lock entry `{}` is missing artifact metadata", dep.name);
-        }
-        specs.push(PrefetchArtifactSpec {
-            name: dep.name.clone(),
-            version: version.to_string(),
-            filename: artifact.filename.clone(),
-            url: artifact.url.clone(),
-            sha256: artifact.sha256.clone(),
-        });
-    }
-    Ok(specs)
-}
-
-fn version_from_specifier(spec: &str) -> Option<&str> {
-    spec.trim()
-        .split_once("==")
-        .map(|(_, version)| version.trim())
+pub(crate) fn store_prefetch_specs<'a>(entries: &'a [LockPrefetchSpec]) -> Vec<StorePrefetchSpec<'a>> {
+    entries
+        .iter()
+        .map(|entry| StorePrefetchSpec {
+            name: entry.name.as_str(),
+            version: entry.version.as_str(),
+            filename: entry.filename.as_str(),
+            url: entry.url.as_str(),
+            sha256: entry.sha256.as_str(),
+        })
+        .collect()
 }
 
 fn ensure_exact_pins(specs: &[String]) -> Result<Vec<PinSpec>> {
@@ -3708,57 +3119,23 @@ fn parse_exact_pin(spec: &str) -> Result<PinSpec> {
     })
 }
 
-#[derive(Clone)]
-struct PinSpec {
-    name: String,
-    specifier: String,
-    version: String,
-    normalized: String,
-    extras: Vec<String>,
-    marker: Option<String>,
-}
-
-#[derive(Clone)]
-struct InstallOverride {
-    dependencies: Vec<String>,
-    pins: Vec<PinSpec>,
-}
-
-struct PrefetchArtifactSpec {
-    name: String,
-    version: String,
-    filename: String,
-    url: String,
-    sha256: String,
-}
-
-impl PrefetchArtifactSpec {
-    fn as_px_spec(&self) -> StorePrefetchSpec<'_> {
-        StorePrefetchSpec {
-            name: &self.name,
-            version: &self.version,
-            filename: &self.filename,
-            url: &self.url,
-            sha256: &self.sha256,
-        }
-    }
-}
-
-fn resolve_pins(pins: &[PinSpec]) -> Result<Vec<ResolvedDependency>> {
+fn resolve_pins(
+    pins: &[PinSpec],
+    cache: &CacheLocation,
+    force_sdist: bool,
+) -> Result<Vec<ResolvedDependency>> {
     if pins.is_empty() {
         return Ok(Vec::new());
     }
 
-    let cache = resolve_cache_store_path()?;
     let client = build_http_client()?;
     let python = px_python::detect_interpreter()?;
     let tags = detect_interpreter_tags_with(&python)?;
     let mut resolved = Vec::new();
-    let force_sdist = force_sdist_build();
     for pin in pins {
         let release = fetch_release(&client, &pin.normalized, &pin.version, &pin.specifier)?;
         let artifact = if force_sdist {
-            build_wheel_via_sdist(&cache, &release, pin, &python)?
+            build_wheel_via_sdist(cache, &release, pin, &python)?
         } else {
             match select_wheel(&release.urls, &tags, &pin.specifier) {
                 Ok(wheel) => {
@@ -3781,7 +3158,7 @@ fn resolve_pins(pins: &[PinSpec]) -> Result<Vec<ResolvedDependency>> {
                         platform_tag: wheel.platform_tag.clone(),
                     }
                 }
-                Err(err) => match build_wheel_via_sdist(&cache, &release, pin, &python) {
+                Err(err) => match build_wheel_via_sdist(cache, &release, pin, &python) {
                     Ok(artifact) => artifact,
                     Err(build_err) => {
                         return Err(err.context(format!("sdist fallback failed: {build_err}")))
@@ -4124,22 +3501,6 @@ fn canonical_extras(extras: &[String]) -> Vec<String> {
     values
 }
 
-fn parse_spec_metadata(spec: &str) -> (Vec<String>, Option<String>) {
-    match PepRequirement::from_str(spec.trim()) {
-        Ok(req) => {
-            let extras = canonical_extras(
-                &req.extras
-                    .iter()
-                    .map(|extra| extra.to_string())
-                    .collect::<Vec<_>>(),
-            );
-            let marker = req.marker.as_ref().map(|m| m.to_string());
-            (extras, marker)
-        }
-        Err(_) => (Vec::new(), None),
-    }
-}
-
 #[derive(Deserialize)]
 struct PypiReleaseResponse {
     urls: Vec<PypiFile>,
@@ -4182,722 +3543,11 @@ struct InterpreterTagsPayload {
     platform: Vec<String>,
 }
 
-fn tidy_snapshot(snapshot: &ManifestSnapshot) -> Result<TidyOutcome> {
-    let lockfile = snapshot.lock_path.display().to_string();
-    match maybe_load_lock_snapshot(&snapshot.lock_path)? {
-        Some(lock) => {
-            let report = analyze_lock_diff(snapshot, &lock);
-            if report.is_clean() {
-                Ok(TidyOutcome {
-                    state: TidyState::Clean,
-                    lockfile,
-                    drift: Vec::new(),
-                })
-            } else {
-                Ok(TidyOutcome {
-                    state: TidyState::Drift,
-                    lockfile,
-                    drift: report.to_messages(),
-                })
-            }
-        }
-        None => Ok(TidyOutcome {
-            state: TidyState::MissingLock,
-            lockfile,
-            drift: Vec::new(),
-        }),
-    }
-}
-
-fn render_lockfile(snapshot: &ManifestSnapshot, resolved: &[ResolvedDependency]) -> Result<String> {
-    let mut doc = DocumentMut::new();
-    doc.insert("version", Item::Value(TomlValue::from(LOCK_VERSION)));
-
-    let mut metadata = Table::new();
-    metadata.insert("px_version", Item::Value(TomlValue::from(PX_VERSION)));
-    metadata.insert(
-        "created_at",
-        Item::Value(TomlValue::from(current_timestamp()?)),
-    );
-    metadata.insert("mode", Item::Value(TomlValue::from(LOCK_MODE_PINNED)));
-    doc.insert("metadata", Item::Table(metadata));
-
-    let mut project = Table::new();
-    project.insert("name", Item::Value(TomlValue::from(snapshot.name.clone())));
-    doc.insert("project", Item::Table(project));
-
-    let mut python = Table::new();
-    python.insert(
-        "requirement",
-        Item::Value(TomlValue::from(snapshot.python_requirement.clone())),
-    );
-    doc.insert("python", Item::Table(python));
-
-    let mut ordered = resolved.to_vec();
-    ordered.sort_by(|a, b| a.name.cmp(&b.name).then(a.specifier.cmp(&b.specifier)));
-    let mut deps = ArrayOfTables::new();
-    for dep in ordered {
-        let mut table = Table::new();
-        table.insert("name", Item::Value(TomlValue::from(dep.name.clone())));
-        table.insert(
-            "specifier",
-            Item::Value(TomlValue::from(dep.specifier.clone())),
-        );
-        if !dep.extras.is_empty() {
-            let mut extras = Array::new();
-            for extra in &dep.extras {
-                extras.push(TomlValue::from(extra.as_str()));
-            }
-            table.insert("extras", Item::Value(TomlValue::Array(extras)));
-        }
-        if let Some(marker) = &dep.marker {
-            table.insert("marker", Item::Value(TomlValue::from(marker.clone())));
-        }
-
-        let mut artifact = Table::new();
-        artifact.insert(
-            "filename",
-            Item::Value(TomlValue::from(dep.artifact.filename.clone())),
-        );
-        artifact.insert(
-            "url",
-            Item::Value(TomlValue::from(dep.artifact.url.clone())),
-        );
-        artifact.insert(
-            "sha256",
-            Item::Value(TomlValue::from(dep.artifact.sha256.clone())),
-        );
-        artifact.insert(
-            "size",
-            Item::Value(TomlValue::from(dep.artifact.size as i64)),
-        );
-        artifact.insert(
-            "cached_path",
-            Item::Value(TomlValue::from(dep.artifact.cached_path.clone())),
-        );
-        artifact.insert(
-            "python_tag",
-            Item::Value(TomlValue::from(dep.artifact.python_tag.clone())),
-        );
-        artifact.insert(
-            "abi_tag",
-            Item::Value(TomlValue::from(dep.artifact.abi_tag.clone())),
-        );
-        artifact.insert(
-            "platform_tag",
-            Item::Value(TomlValue::from(dep.artifact.platform_tag.clone())),
-        );
-        table.insert("artifact", Item::Table(artifact));
-        deps.push(table);
-    }
-    doc.insert("dependencies", Item::ArrayOfTables(deps));
-
-    Ok(doc.to_string())
-}
-
-fn render_lockfile_v2(snapshot: &ManifestSnapshot, lock: &LockSnapshot) -> Result<String> {
-    let mut doc = DocumentMut::new();
-    doc.insert("version", Item::Value(TomlValue::from(2)));
-
-    let mut metadata = Table::new();
-    metadata.insert("px_version", Item::Value(TomlValue::from(PX_VERSION)));
-    metadata.insert(
-        "created_at",
-        Item::Value(TomlValue::from(current_timestamp()?)),
-    );
-    metadata.insert("mode", Item::Value(TomlValue::from(LOCK_MODE_PINNED)));
-    doc.insert("metadata", Item::Table(metadata));
-
-    let mut project = Table::new();
-    project.insert("name", Item::Value(TomlValue::from(snapshot.name.clone())));
-    doc.insert("project", Item::Table(project));
-
-    let mut python = Table::new();
-    python.insert(
-        "requirement",
-        Item::Value(TomlValue::from(snapshot.python_requirement.clone())),
-    );
-    doc.insert("python", Item::Table(python));
-
-    let resolved = collect_resolved_dependencies(lock);
-
-    let mut deps = ArrayOfTables::new();
-    for dep in &resolved {
-        let mut table = Table::new();
-        table.insert("name", Item::Value(TomlValue::from(dep.name.clone())));
-        table.insert(
-            "specifier",
-            Item::Value(TomlValue::from(dep.specifier.clone())),
-        );
-        if !dep.artifact.filename.is_empty() {
-            let mut artifact = Table::new();
-            artifact.insert(
-                "filename",
-                Item::Value(TomlValue::from(dep.artifact.filename.clone())),
-            );
-            artifact.insert(
-                "url",
-                Item::Value(TomlValue::from(dep.artifact.url.clone())),
-            );
-            artifact.insert(
-                "sha256",
-                Item::Value(TomlValue::from(dep.artifact.sha256.clone())),
-            );
-            artifact.insert(
-                "size",
-                Item::Value(TomlValue::from(dep.artifact.size as i64)),
-            );
-            artifact.insert(
-                "cached_path",
-                Item::Value(TomlValue::from(dep.artifact.cached_path.clone())),
-            );
-            artifact.insert(
-                "python_tag",
-                Item::Value(TomlValue::from(dep.artifact.python_tag.clone())),
-            );
-            artifact.insert(
-                "abi_tag",
-                Item::Value(TomlValue::from(dep.artifact.abi_tag.clone())),
-            );
-            artifact.insert(
-                "platform_tag",
-                Item::Value(TomlValue::from(dep.artifact.platform_tag.clone())),
-            );
-            table.insert("artifact", Item::Table(artifact));
-        }
-        deps.push(table);
-    }
-    doc.insert("dependencies", Item::ArrayOfTables(deps));
-
-    let mut graph_table = Table::new();
-
-    let mut node_entries = ArrayOfTables::new();
-    for dep in &resolved {
-        if let Some(version) = specifier_version(&dep.specifier) {
-            let mut node = Table::new();
-            node.insert("name", Item::Value(TomlValue::from(dep.name.clone())));
-            node.insert("version", Item::Value(TomlValue::from(version)));
-            node.insert(
-                "marker",
-                Item::Value(TomlValue::from(dep.marker.clone().unwrap_or_default())),
-            );
-            if !dep.extras.is_empty() {
-                let mut extras = Array::new();
-                for extra in &dep.extras {
-                    extras.push(TomlValue::from(extra.as_str()));
-                }
-                node.insert("extras", Item::Value(TomlValue::Array(extras)));
-            }
-            let mut parents = Array::new();
-            parents.push(TomlValue::from("root"));
-            node.insert("parents", Item::Value(TomlValue::Array(parents)));
-            node_entries.push(node);
-        }
-    }
-    if !node_entries.is_empty() {
-        graph_table.insert("nodes", Item::ArrayOfTables(node_entries));
-    }
-
-    let mut target_map: HashMap<(String, String, String), String> = HashMap::new();
-    let mut target_tables = ArrayOfTables::new();
-    for dep in &resolved {
-        let artifact = &dep.artifact;
-        if artifact.filename.is_empty() {
-            continue;
-        }
-        let key = (
-            artifact.python_tag.clone(),
-            artifact.abi_tag.clone(),
-            artifact.platform_tag.clone(),
-        );
-        if target_map.contains_key(&key) {
-            continue;
-        }
-        let id = format!(
-            "{}-{}-{}",
-            if key.0.is_empty() {
-                "py"
-            } else {
-                key.0.as_str()
-            },
-            if key.1.is_empty() {
-                "abi"
-            } else {
-                key.1.as_str()
-            },
-            if key.2.is_empty() {
-                "plat"
-            } else {
-                key.2.as_str()
-            }
-        );
-        target_map.insert(key.clone(), id.clone());
-        let mut table = Table::new();
-        table.insert("id", Item::Value(TomlValue::from(id)));
-        table.insert("python_tag", Item::Value(TomlValue::from(key.0)));
-        table.insert("abi_tag", Item::Value(TomlValue::from(key.1)));
-        table.insert("platform_tag", Item::Value(TomlValue::from(key.2)));
-        target_tables.push(table);
-    }
-    if !target_tables.is_empty() {
-        graph_table.insert("targets", Item::ArrayOfTables(target_tables));
-    }
-
-    let mut artifact_tables = ArrayOfTables::new();
-    for dep in &resolved {
-        let artifact = &dep.artifact;
-        if artifact.filename.is_empty() {
-            continue;
-        }
-        let key = (
-            artifact.python_tag.clone(),
-            artifact.abi_tag.clone(),
-            artifact.platform_tag.clone(),
-        );
-        let target_id = target_map
-            .get(&key)
-            .cloned()
-            .unwrap_or_else(|| "py-abi-plat".to_string());
-        let mut table = Table::new();
-        table.insert("node", Item::Value(TomlValue::from(dep.name.clone())));
-        table.insert("target", Item::Value(TomlValue::from(target_id)));
-        table.insert(
-            "filename",
-            Item::Value(TomlValue::from(artifact.filename.clone())),
-        );
-        table.insert("url", Item::Value(TomlValue::from(artifact.url.clone())));
-        table.insert(
-            "sha256",
-            Item::Value(TomlValue::from(artifact.sha256.clone())),
-        );
-        table.insert("size", Item::Value(TomlValue::from(artifact.size as i64)));
-        table.insert(
-            "cached_path",
-            Item::Value(TomlValue::from(artifact.cached_path.clone())),
-        );
-        table.insert(
-            "python_tag",
-            Item::Value(TomlValue::from(artifact.python_tag.clone())),
-        );
-        table.insert(
-            "abi_tag",
-            Item::Value(TomlValue::from(artifact.abi_tag.clone())),
-        );
-        table.insert(
-            "platform_tag",
-            Item::Value(TomlValue::from(artifact.platform_tag.clone())),
-        );
-        artifact_tables.push(table);
-    }
-    if !artifact_tables.is_empty() {
-        graph_table.insert("artifacts", Item::ArrayOfTables(artifact_tables));
-    }
-
-    doc.insert("graph", Item::Table(graph_table));
-
-    Ok(doc.to_string())
-}
-
-fn collect_resolved_dependencies(lock: &LockSnapshot) -> Vec<ResolvedDependency> {
-    let mut deps = Vec::new();
-    let mut spec_lookup = HashMap::new();
-    for spec in &lock.dependencies {
-        spec_lookup.insert(dependency_name(spec), spec.clone());
-    }
-    for entry in &lock.resolved {
-        let specifier = spec_lookup
-            .get(&entry.name)
-            .cloned()
-            .unwrap_or_else(|| entry.name.clone());
-        let artifact = entry
-            .artifact
-            .clone()
-            .unwrap_or_else(LockedArtifact::default);
-        let (extras, marker) = parse_spec_metadata(&specifier);
-        deps.push(ResolvedDependency {
-            name: entry.name.clone(),
-            specifier,
-            extras,
-            marker,
-            artifact,
-        });
-    }
-    deps.sort_by(|a, b| a.name.cmp(&b.name).then(a.specifier.cmp(&b.specifier)));
-    deps
-}
-
-fn specifier_version(spec: &str) -> Option<String> {
-    let parts: Vec<&str> = spec.split("==").collect();
-    if parts.len() == 2 {
-        Some(parts[1].to_string())
-    } else {
-        None
-    }
-}
-
-fn current_timestamp() -> Result<String> {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .map_err(|err| anyhow!("failed to format timestamp: {err}"))
-}
-
-struct ManifestSnapshot {
-    #[allow(dead_code)]
-    root: PathBuf,
-    #[allow(dead_code)]
-    manifest_path: PathBuf,
-    lock_path: PathBuf,
-    name: String,
-    python_requirement: String,
-    dependencies: Vec<String>,
-}
-
-struct LockSnapshot {
-    version: i64,
-    project_name: Option<String>,
-    python_requirement: Option<String>,
-    dependencies: Vec<String>,
-    mode: Option<String>,
-    resolved: Vec<LockedDependency>,
-    #[allow(dead_code)]
-    graph: Option<LockGraphSnapshot>,
-}
-
-#[derive(Clone)]
-struct ResolvedDependency {
-    name: String,
-    specifier: String,
-    extras: Vec<String>,
-    marker: Option<String>,
-    artifact: LockedArtifact,
-}
-
-#[derive(Clone, Default)]
-struct LockedDependency {
-    name: String,
-    artifact: Option<LockedArtifact>,
-}
-
-#[derive(Clone, Default)]
-struct LockedArtifact {
-    filename: String,
-    url: String,
-    sha256: String,
-    size: u64,
-    cached_path: String,
-    python_tag: String,
-    abi_tag: String,
-    platform_tag: String,
-}
-
-#[derive(Clone, Default)]
-struct GraphNode {
-    name: String,
-    version: String,
-    #[allow(dead_code)]
-    marker: Option<String>,
-    #[allow(dead_code)]
-    parents: Vec<String>,
-    extras: Vec<String>,
-}
-
-#[derive(Clone, Default)]
-struct GraphTarget {
-    #[allow(dead_code)]
-    id: String,
-    #[allow(dead_code)]
-    python_tag: String,
-    #[allow(dead_code)]
-    abi_tag: String,
-    #[allow(dead_code)]
-    platform_tag: String,
-}
-
-#[derive(Clone, Default)]
-struct GraphArtifactEntry {
-    node: String,
-    #[allow(dead_code)]
-    target: String,
-    artifact: LockedArtifact,
-}
-
-#[derive(Clone, Default)]
-struct LockGraphSnapshot {
-    nodes: Vec<GraphNode>,
-    #[allow(dead_code)]
-    targets: Vec<GraphTarget>,
-    artifacts: Vec<GraphArtifactEntry>,
-}
-
-fn maybe_load_lock_snapshot(path: &Path) -> Result<Option<LockSnapshot>> {
-    if path.exists() {
-        Ok(Some(load_lock_snapshot(path)?))
-    } else {
-        Ok(None)
-    }
-}
-
-fn load_lock_snapshot(path: &Path) -> Result<LockSnapshot> {
-    let contents = fs::read_to_string(path)?;
-    let doc: DocumentMut = contents.parse()?;
-    Ok(parse_lock_snapshot(&doc))
-}
-
-fn parse_lock_snapshot(doc: &DocumentMut) -> LockSnapshot {
-    let version = doc.get("version").and_then(Item::as_integer).unwrap_or(0);
-    let project_name = doc
-        .get("project")
-        .and_then(Item::as_table)
-        .and_then(|table| table.get("name"))
-        .and_then(Item::as_str)
-        .map(|s| s.to_string());
-    let python_requirement = doc
-        .get("python")
-        .and_then(Item::as_table)
-        .and_then(|table| table.get("requirement"))
-        .and_then(Item::as_str)
-        .map(|s| s.to_string());
-    let mode = doc
-        .get("metadata")
-        .and_then(Item::as_table)
-        .and_then(|table| table.get("mode"))
-        .and_then(Item::as_str)
-        .map(|s| s.to_string());
-
-    if version >= 2 {
-        if let Some(graph) = parse_graph_snapshot(doc) {
-            let (dependencies, resolved) = normalized_from_graph(&graph);
-            return LockSnapshot {
-                version,
-                project_name,
-                python_requirement,
-                dependencies,
-                mode,
-                resolved,
-                graph: Some(graph),
-            };
-        }
-    }
-
-    let mut dependencies = Vec::new();
-    let mut resolved = Vec::new();
-    if let Some(tables) = doc.get("dependencies").and_then(Item::as_array_of_tables) {
-        for table in tables.iter() {
-            let specifier = table
-                .get("specifier")
-                .and_then(Item::as_str)
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-            if !specifier.is_empty() {
-                dependencies.push(specifier.clone());
-            }
-            let name = table
-                .get("name")
-                .and_then(Item::as_str)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| dependency_name(&specifier));
-            let artifact = table
-                .get("artifact")
-                .and_then(Item::as_table)
-                .and_then(parse_artifact_table);
-            resolved.push(LockedDependency { name, artifact });
-        }
-    } else if let Some(array) = doc.get("dependencies").and_then(Item::as_array) {
-        dependencies = array
-            .iter()
-            .filter_map(|val| val.as_str().map(|s| s.to_string()))
-            .collect();
-    }
-
-    LockSnapshot {
-        version,
-        project_name,
-        python_requirement,
-        dependencies,
-        mode,
-        resolved,
-        graph: None,
-    }
-}
-
-fn parse_artifact_table(table: &Table) -> Option<LockedArtifact> {
-    let filename = table.get("filename").and_then(Item::as_str)?.to_string();
-    let url = table.get("url").and_then(Item::as_str)?.to_string();
-    let sha256 = table.get("sha256").and_then(Item::as_str)?.to_string();
-    let size = table
-        .get("size")
-        .and_then(Item::as_integer)
-        .map(|v| v as u64)
-        .unwrap_or(0);
-    let cached_path = table
-        .get("cached_path")
-        .and_then(Item::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let python_tag = table
-        .get("python_tag")
-        .and_then(Item::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let abi_tag = table
-        .get("abi_tag")
-        .and_then(Item::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let platform_tag = table
-        .get("platform_tag")
-        .and_then(Item::as_str)
-        .unwrap_or_default()
-        .to_string();
-
-    Some(LockedArtifact {
-        filename,
-        url,
-        sha256,
-        size,
-        cached_path,
-        python_tag,
-        abi_tag,
-        platform_tag,
-    })
-}
-
-fn parse_graph_snapshot(doc: &DocumentMut) -> Option<LockGraphSnapshot> {
-    let graph = doc.get("graph")?.as_table()?;
-    let node_tables = graph.get("nodes")?.as_array_of_tables()?;
-    let mut nodes = Vec::new();
-    for table in node_tables.iter() {
-        let name = table.get("name").and_then(Item::as_str)?.to_string();
-        let version = table
-            .get("version")
-            .and_then(Item::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let marker = table
-            .get("marker")
-            .and_then(Item::as_str)
-            .map(|s| s.to_string());
-        let extras = table
-            .get("extras")
-            .and_then(Item::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|val| val.as_str().map(|s| s.to_string()))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(Vec::new);
-        let parents = table
-            .get("parents")
-            .and_then(Item::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|val| val.as_str().map(|s| s.to_string()))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(Vec::new);
-        nodes.push(GraphNode {
-            name,
-            version,
-            marker,
-            parents,
-            extras,
-        });
-    }
-    if nodes.is_empty() {
-        return None;
-    }
-
-    let mut targets = Vec::new();
-    if let Some(target_tables) = graph.get("targets").and_then(Item::as_array_of_tables) {
-        for table in target_tables.iter() {
-            let target = GraphTarget {
-                id: table
-                    .get("id")
-                    .and_then(Item::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                python_tag: table
-                    .get("python_tag")
-                    .and_then(Item::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                abi_tag: table
-                    .get("abi_tag")
-                    .and_then(Item::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                platform_tag: table
-                    .get("platform_tag")
-                    .and_then(Item::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-            };
-            targets.push(target);
-        }
-    }
-
-    let mut artifacts = Vec::new();
-    if let Some(artifact_tables) = graph.get("artifacts").and_then(Item::as_array_of_tables) {
-        for table in artifact_tables.iter() {
-            let node = table
-                .get("node")
-                .and_then(Item::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let target = table
-                .get("target")
-                .and_then(Item::as_str)
-                .unwrap_or_default()
-                .to_string();
-            if let Some(artifact) = parse_artifact_table(table) {
-                artifacts.push(GraphArtifactEntry {
-                    node,
-                    target,
-                    artifact,
-                });
-            }
-        }
-    }
-
-    Some(LockGraphSnapshot {
-        nodes,
-        targets,
-        artifacts,
-    })
-}
-
-fn normalized_from_graph(graph: &LockGraphSnapshot) -> (Vec<String>, Vec<LockedDependency>) {
-    let mut nodes = graph.nodes.clone();
-    nodes.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
-
-    let mut dependencies = Vec::new();
-    let mut resolved = Vec::new();
-    for node in nodes {
-        let marker = node.marker.as_deref().filter(|m| !m.is_empty());
-        let spec = format_specifier(&node.name, &node.extras, &node.version, marker);
-        dependencies.push(spec.clone());
-        let artifact = graph
-            .artifacts
-            .iter()
-            .find(|entry| entry.node == node.name)
-            .map(|entry| entry.artifact.clone());
-        resolved.push(LockedDependency {
-            name: node.name,
-            artifact,
-        });
-    }
-
-    (dependencies, resolved)
-}
-
-fn detect_lock_drift(snapshot: &ManifestSnapshot, lock: &LockSnapshot) -> Vec<String> {
-    analyze_lock_diff(snapshot, lock).to_messages()
-}
-
 fn current_project_root() -> Result<PathBuf> {
-    env::current_dir().context("unable to determine project root")
+    Ok(px_project::current_project_root()?)
 }
 
+#[allow(dead_code)]
 fn scaffold_project(root: &Path, package: &str, python_req: &str) -> Result<Vec<String>> {
     let mut files = Vec::new();
     let pyproject_path = root.join("pyproject.toml");
@@ -4965,6 +3615,7 @@ def test_greet_name() -> None:
     Ok(files)
 }
 
+#[allow(dead_code)]
 fn ensure_gitignore(root: &Path, files: &mut Vec<String>) -> Result<()> {
     let path = root.join(".gitignore");
     let entries = ["__pycache__/", "dist/", "build/", "*.egg-info/"];
@@ -4998,6 +3649,7 @@ fn ensure_gitignore(root: &Path, files: &mut Vec<String>) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn validate_package_name(name: &str) -> Result<()> {
     let mut chars = name.chars();
     match chars.next() {
@@ -5017,7 +3669,7 @@ fn relative_path(root: &Path, path: &Path) -> String {
         .to_string()
 }
 
-fn ensure_pyproject_exists(path: &Path) -> Result<()> {
+pub(crate) fn ensure_pyproject_exists(path: &Path) -> Result<()> {
     if path.exists() {
         Ok(())
     } else {
@@ -5026,20 +3678,6 @@ fn ensure_pyproject_exists(path: &Path) -> Result<()> {
             path.parent().unwrap_or(path).display()
         )
     }
-}
-
-fn read_dependencies(doc: &DocumentMut) -> Result<Vec<String>> {
-    if let Some(project) = doc.get("project").and_then(Item::as_table) {
-        if let Some(item) = project.get("dependencies") {
-            if let Some(array) = item.as_array() {
-                return Ok(array
-                    .iter()
-                    .filter_map(|val| val.as_str().map(|s| s.to_string()))
-                    .collect());
-            }
-        }
-    }
-    Ok(Vec::new())
 }
 
 fn resolve_onboard_path(
@@ -5060,230 +3698,6 @@ fn resolve_onboard_path(
     } else {
         Ok(None)
     }
-}
-
-fn collect_pyproject_packages(
-    root: &Path,
-    path: &Path,
-) -> Result<(Value, Vec<OnboardPackagePlan>)> {
-    let contents = fs::read_to_string(path)?;
-    let doc: DocumentMut = contents.parse()?;
-    let deps = read_dependencies(&doc)?;
-    let rel = relative_path(root, path);
-    let mut rows = Vec::new();
-    for dep in deps {
-        rows.push(OnboardPackagePlan::new(dep, "prod", rel.clone()));
-    }
-    Ok((
-        json!({ "kind": "pyproject", "path": rel, "count": rows.len() }),
-        rows,
-    ))
-}
-
-fn collect_requirement_packages(
-    root: &Path,
-    path: &Path,
-    kind: &str,
-    scope: &str,
-) -> Result<(Value, Vec<OnboardPackagePlan>)> {
-    let specs = read_requirements_file(path)?;
-    let rel = relative_path(root, path);
-    let mut rows = Vec::new();
-    for spec in specs {
-        rows.push(OnboardPackagePlan::new(spec, scope, rel.clone()));
-    }
-    Ok((
-        json!({ "kind": kind, "path": rel, "count": rows.len() }),
-        rows,
-    ))
-}
-
-fn read_requirements_file(path: &Path) -> Result<Vec<String>> {
-    let contents = fs::read_to_string(path)?;
-    let mut specs = Vec::new();
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let spec = if let Some(idx) = trimmed.find('#') {
-            trimmed[..idx].trim()
-        } else {
-            trimmed
-        };
-        if !spec.is_empty() {
-            specs.push(spec.to_string());
-        }
-    }
-    Ok(specs)
-}
-
-fn plan_autopin(
-    root: &Path,
-    pyproject_path: &Path,
-    lock_only: bool,
-    no_autopin: bool,
-) -> Result<AutopinState> {
-    if !pyproject_path.exists() {
-        return Ok(AutopinState::NotNeeded);
-    }
-    let contents = fs::read_to_string(pyproject_path)?;
-    let mut doc: DocumentMut = contents.parse()?;
-    let prod_specs = read_dependencies(&doc)?;
-    let dev_specs = read_optional_dependency_group(&doc, "px-dev");
-    let marker_env = current_marker_environment()?;
-    let mut autopin_map = collect_autopin_locations(&prod_specs, &dev_specs, &marker_env);
-    if autopin_map.is_empty() {
-        return Ok(AutopinState::NotNeeded);
-    }
-    if no_autopin {
-        let pending = autopin_map
-            .values()
-            .flat_map(|locs| locs.iter().map(AutopinPending::from))
-            .collect();
-        return Ok(AutopinState::Disabled { pending });
-    }
-
-    let resolver_specs = autopin_map
-        .values()
-        .filter_map(|locs| locs.first())
-        .map(|loc| loc.original.clone())
-        .collect::<Vec<_>>();
-    let (project_name, python_requirement) = project_identity(&doc)?;
-    let snapshot = ManifestSnapshot {
-        root: root.to_path_buf(),
-        manifest_path: pyproject_path.to_path_buf(),
-        lock_path: root.join("px.lock"),
-        name: project_name,
-        python_requirement,
-        dependencies: resolver_specs,
-    };
-    let resolved = resolve_dependencies(&snapshot)?;
-    let mut resolved_lookup = HashMap::new();
-    for pin in resolved.pins {
-        resolved_lookup.insert(autopin_pin_key(&pin), pin);
-    }
-
-    let mut prod_specs_final = prod_specs.clone();
-    let mut dev_specs_final = dev_specs.clone();
-    let mut autopinned = Vec::new();
-    let mut prod_override_pins = Vec::new();
-    let touches_prod = autopin_map
-        .values()
-        .any(|locs| locs.iter().any(|loc| loc.scope == AutopinScope::Prod));
-    let touches_dev = autopin_map
-        .values()
-        .any(|locs| locs.iter().any(|loc| loc.scope == AutopinScope::Dev));
-
-    for (key, locations) in autopin_map.drain() {
-        let Some(pin) = resolved_lookup.get(&key) else {
-            let applies = locations
-                .iter()
-                .any(|loc| marker_applies(&loc.original, &marker_env));
-            if !applies {
-                continue;
-            }
-            return Err(anyhow!("resolver missing pin for {key}"));
-        };
-        for loc in locations {
-            let entry = AutopinEntry::new(&loc.name, loc.scope, &loc.original, &pin.specifier);
-            match loc.scope {
-                AutopinScope::Prod => {
-                    if let Some(slot) = prod_specs_final.get_mut(loc.index) {
-                        *slot = pin.specifier.clone();
-                    }
-                    prod_override_pins.push(pin.clone());
-                }
-                AutopinScope::Dev => {
-                    if let Some(slot) = dev_specs_final.get_mut(loc.index) {
-                        *slot = pin.specifier.clone();
-                    }
-                }
-            }
-            autopinned.push(entry);
-        }
-    }
-
-    let mut doc_contents = None;
-    if !lock_only {
-        let mut changed = false;
-        if touches_prod {
-            write_dependencies(&mut doc, &prod_specs_final)?;
-            changed = true;
-        }
-        if touches_dev {
-            write_optional_dependency_group(&mut doc, "px-dev", &dev_specs_final)?;
-            changed = true;
-        }
-        if changed {
-            doc_contents = Some(doc.to_string());
-        }
-    }
-
-    let install_override = if lock_only && touches_prod {
-        Some(InstallOverride {
-            dependencies: prod_specs_final.clone(),
-            pins: prod_override_pins,
-        })
-    } else {
-        None
-    };
-
-    Ok(AutopinState::Planned(AutopinPlan {
-        doc_contents,
-        autopinned,
-        install_override,
-    }))
-}
-
-fn read_optional_dependency_group(doc: &DocumentMut, group: &str) -> Vec<String> {
-    doc.get("project")
-        .and_then(Item::as_table)
-        .and_then(|project| project.get("optional-dependencies"))
-        .and_then(Item::as_table)
-        .and_then(|table| table.get(group))
-        .and_then(Item::as_array)
-        .map(|array| {
-            array
-                .iter()
-                .filter_map(|val| val.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn write_optional_dependency_group(
-    doc: &mut DocumentMut,
-    group: &str,
-    specs: &[String],
-) -> Result<()> {
-    let project = project_table_mut(doc)?;
-    let optional_table = project
-        .entry("optional-dependencies")
-        .or_insert(Item::Table(Table::new()))
-        .as_table_mut()
-        .ok_or_else(|| anyhow!("optional-dependencies must be a table"))?;
-    let mut array = Array::new();
-    for spec in specs {
-        array.push_formatted(TomlValue::from(spec.clone()));
-    }
-    optional_table.insert(group, Item::Value(TomlValue::Array(array)));
-    Ok(())
-}
-
-fn project_identity(doc: &DocumentMut) -> Result<(String, String)> {
-    let project = project_table(doc)?;
-    let name = project
-        .get("name")
-        .and_then(Item::as_str)
-        .ok_or_else(|| anyhow!("pyproject missing [project].name"))?
-        .to_string();
-    let python_requirement = project
-        .get("requires-python")
-        .and_then(Item::as_str)
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| ">=3.12".to_string());
-    Ok((name, python_requirement))
 }
 
 fn summarize_autopins(entries: &[AutopinEntry]) -> Option<String> {
@@ -5308,41 +3722,6 @@ fn summarize_autopins(entries: &[AutopinEntry]) -> Option<String> {
         summary.push(')');
     }
     Some(summary)
-}
-
-fn collect_autopin_locations(
-    prod_specs: &[String],
-    dev_specs: &[String],
-    marker_env: &MarkerEnvironment,
-) -> HashMap<String, Vec<AutopinLocation>> {
-    let mut map = HashMap::new();
-    for (idx, spec) in prod_specs.iter().enumerate() {
-        push_autopin_location(&mut map, spec, idx, AutopinScope::Prod, marker_env);
-    }
-    for (idx, spec) in dev_specs.iter().enumerate() {
-        push_autopin_location(&mut map, spec, idx, AutopinScope::Dev, marker_env);
-    }
-    map.retain(|_, locs| !locs.is_empty());
-    map
-}
-
-fn push_autopin_location(
-    map: &mut HashMap<String, Vec<AutopinLocation>>,
-    spec: &str,
-    index: usize,
-    scope: AutopinScope,
-    marker_env: &MarkerEnvironment,
-) {
-    if !spec_requires_pin(spec) {
-        return;
-    }
-    if !marker_applies(spec, marker_env) {
-        return;
-    }
-    let key = autopin_spec_key(spec);
-    map.entry(key)
-        .or_default()
-        .push(AutopinLocation::new(spec, index, scope));
 }
 
 fn marker_applies(spec: &str, marker_env: &MarkerEnvironment) -> bool {
@@ -5427,15 +3806,6 @@ fn canonicalize_marker(raw: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn extract_version_label(spec: &str) -> String {
-    if let Some((_, version)) = spec.split_once("==") {
-        let head = version.split(';').next().unwrap_or(version).trim();
-        head.to_string()
-    } else {
-        spec.to_string()
-    }
-}
-
 fn pins_with_override(
     dependencies: &[String],
     override_pins: &InstallOverride,
@@ -5465,115 +3835,6 @@ fn pins_with_override(
     Ok(pins)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AutopinScope {
-    Prod,
-    Dev,
-}
-
-impl AutopinScope {
-    fn as_str(&self) -> &'static str {
-        match self {
-            AutopinScope::Prod => "prod",
-            AutopinScope::Dev => "dev",
-        }
-    }
-}
-
-struct AutopinLocation {
-    scope: AutopinScope,
-    index: usize,
-    original: String,
-    name: String,
-}
-
-impl AutopinLocation {
-    fn new(spec: &str, index: usize, scope: AutopinScope) -> Self {
-        Self {
-            scope,
-            index,
-            original: spec.to_string(),
-            name: requirement_display_name(spec),
-        }
-    }
-}
-
-struct AutopinPlan {
-    doc_contents: Option<String>,
-    autopinned: Vec<AutopinEntry>,
-    install_override: Option<InstallOverride>,
-}
-
-enum AutopinState {
-    NotNeeded,
-    Disabled { pending: Vec<AutopinPending> },
-    Planned(AutopinPlan),
-}
-
-#[derive(Clone)]
-struct AutopinEntry {
-    name: String,
-    scope: AutopinScope,
-    from: String,
-    to: String,
-}
-
-impl AutopinEntry {
-    fn new(name: &str, scope: AutopinScope, from: &str, to: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            scope,
-            from: from.to_string(),
-            to: to.to_string(),
-        }
-    }
-
-    fn to_json(&self) -> Value {
-        json!({
-            "name": self.name,
-            "scope": self.scope.as_str(),
-            "from": self.from,
-            "to": self.to,
-        })
-    }
-
-    fn short_label(&self) -> String {
-        let version = extract_version_label(&self.to);
-        let mut label = format!("{}=={}", self.name, version);
-        if self.scope == AutopinScope::Dev {
-            label.push_str(" (dev)");
-        }
-        label
-    }
-}
-
-#[derive(Clone)]
-struct AutopinPending {
-    name: String,
-    scope: AutopinScope,
-    requested: String,
-}
-
-impl AutopinPending {
-    fn to_json(&self) -> Value {
-        json!({
-            "name": self.name,
-            "scope": self.scope.as_str(),
-            "requested": self.requested,
-        })
-    }
-}
-
-impl From<&AutopinLocation> for AutopinPending {
-    fn from(value: &AutopinLocation) -> Self {
-        Self {
-            name: value.name.clone(),
-            scope: value.scope,
-            requested: value.original.clone(),
-        }
-    }
-}
-
 fn normalize_onboard_path(root: &Path, path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         path
@@ -5583,31 +3844,6 @@ fn normalize_onboard_path(root: &Path, path: PathBuf) -> PathBuf {
 }
 
 #[derive(Clone)]
-struct OnboardPackagePlan {
-    name: String,
-    requested: String,
-    scope: String,
-    source: String,
-}
-
-impl OnboardPackagePlan {
-    fn new(requested: String, scope: &str, source: String) -> Self {
-        let name = requirement_display_name(&requested);
-        Self {
-            name,
-            requested,
-            scope: scope.to_string(),
-            source,
-        }
-    }
-}
-
-fn requirement_display_name(spec: &str) -> String {
-    PepRequirement::from_str(spec.trim())
-        .map(|req| req.name.to_string())
-        .unwrap_or_else(|_| spec.trim().to_string())
-}
-
 struct PyprojectPlan {
     path: PathBuf,
     contents: Option<String>,
@@ -5877,27 +4113,6 @@ fn project_table_mut(doc: &mut DocumentMut) -> Result<&mut Table> {
         .ok_or_else(|| anyhow!("[project] must be a table"))
 }
 
-fn upsert_dependency(deps: &mut Vec<String>, spec: &str) -> InsertOutcome {
-    let name = dependency_name(spec);
-    for existing in deps.iter_mut() {
-        if dependency_name(existing) == name {
-            if existing.trim() != spec.trim() {
-                *existing = spec.to_string();
-                return InsertOutcome::Updated(name);
-            }
-            return InsertOutcome::Unchanged;
-        }
-    }
-    deps.push(spec.to_string());
-    InsertOutcome::Added(name)
-}
-
-fn sort_and_dedupe(specs: &mut Vec<String>) {
-    specs.sort_by(|a, b| dependency_name(a).cmp(&dependency_name(b)).then(a.cmp(b)));
-    let mut seen = HashSet::new();
-    specs.retain(|spec| seen.insert(dependency_name(spec)));
-}
-
 fn dependency_name(spec: &str) -> String {
     let trimmed = strip_wrapping_quotes(spec.trim());
     let mut end = trimmed.len();
@@ -5922,12 +4137,6 @@ fn strip_wrapping_quotes(input: &str) -> &str {
         }
     }
     input
-}
-
-enum InsertOutcome {
-    Added(String),
-    Updated(String),
-    Unchanged,
 }
 
 fn outcome_from_output(
@@ -6020,7 +4229,7 @@ impl PythonContext {
         })
     }
 
-    fn base_env(&self, command: &PxCommand) -> Result<Vec<(String, String)>> {
+    fn base_env(&self, command_args: &Value) -> Result<Vec<(String, String)>> {
         let mut envs = Vec::new();
         envs.push(("PYTHONPATH".into(), self.pythonpath.clone()));
         envs.push(("PYTHONUNBUFFERED".into(), "1".into()));
@@ -6028,7 +4237,7 @@ impl PythonContext {
             "PX_PROJECT_ROOT".into(),
             self.project_root.display().to_string(),
         ));
-        envs.push(("PX_COMMAND_JSON".into(), command.args.to_string()));
+        envs.push(("PX_COMMAND_JSON".into(), command_args.to_string()));
         Ok(envs)
     }
 }
@@ -6075,71 +4284,6 @@ fn build_pythonpath(project_root: &Path) -> Result<String> {
         .map_err(|_| anyhow!("pythonpath contains non-UTF paths"))
 }
 
-struct CacheLocation {
-    path: PathBuf,
-    source: &'static str,
-}
-
-fn resolve_cache_store_path() -> Result<CacheLocation> {
-    if let Some(override_path) = env::var_os("PX_CACHE_PATH") {
-        let path = absolutize(PathBuf::from(override_path))?;
-        return Ok(CacheLocation {
-            path,
-            source: "PX_CACHE_PATH",
-        });
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let (base, source) = resolve_windows_cache_base()?;
-        return Ok(CacheLocation {
-            path: base.join("px").join("store"),
-            source,
-        });
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let (base, source) = resolve_unix_cache_base()?;
-        return Ok(CacheLocation {
-            path: base.join("px").join("store"),
-            source,
-        });
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn resolve_unix_cache_base() -> Result<(PathBuf, &'static str)> {
-    if let Some(xdg) = env::var_os("XDG_CACHE_HOME") {
-        return Ok((PathBuf::from(xdg), "XDG_CACHE_HOME"));
-    }
-    let home = home_dir().ok_or_else(|| anyhow!("unable to determine home directory"))?;
-    Ok((home.join(".cache"), "~/.cache"))
-}
-
-#[cfg(target_os = "windows")]
-fn resolve_windows_cache_base() -> Result<(PathBuf, &'static str)> {
-    if let Some(local) = env::var_os("LOCALAPPDATA") {
-        return Ok((PathBuf::from(local), "LOCALAPPDATA"));
-    }
-    if let Some(user_profile) = env::var_os("USERPROFILE") {
-        return Ok((
-            PathBuf::from(user_profile).join("AppData").join("Local"),
-            "USERPROFILE",
-        ));
-    }
-    let home = home_dir().ok_or_else(|| anyhow!("unable to determine home directory"))?;
-    Ok((home.join("AppData").join("Local"), "home/AppData/Local"))
-}
-
-fn absolutize(path: PathBuf) -> Result<PathBuf> {
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        Ok(env::current_dir()?.join(path))
-    }
-}
-
 pub fn to_json_response(command: &PxCommand, outcome: &ExecutionOutcome, _code: i32) -> Value {
     let status = match outcome.status {
         CommandStatus::Ok => "ok",
@@ -6181,8 +4325,26 @@ pub fn format_status_message(command: &PxCommand, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use px_lockfile::LockedDependency;
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    #[test]
+    fn config_respects_env_flags() {
+        let snapshot = EnvSnapshot::testing(&[
+            ("PX_ONLINE", "1"),
+            ("PX_RESOLVER", "1"),
+            ("PX_FORCE_SDIST", "1"),
+            ("PX_TEST_FALLBACK_STD", "1"),
+            ("PX_SKIP_TESTS", "1"),
+        ]);
+        let config = Config::from_snapshot(&snapshot).expect("config");
+        assert!(config.network.online);
+        assert!(config.resolver.enabled);
+        assert!(config.resolver.force_sdist);
+        assert!(config.test.fallback_builtin);
+        assert_eq!(config.test.skip_tests_flag.as_deref(), Some("1"));
+    }
 
     #[test]
     fn marker_applies_respects_python_version() {

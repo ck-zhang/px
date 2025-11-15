@@ -1163,6 +1163,8 @@ dependencies = [
  "flate2",
  "pep440_rs 0.5.0",
  "pep508_rs",
+ "px-lockfile",
+ "px-project",
  "px-python",
  "px-resolver",
  "px-runtime",
@@ -1185,8 +1187,15 @@ name = "px-lockfile"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "pep440_rs 0.5.0",
+ "pep508_rs",
+ "px-project",
  "serde",
+ "serde_json",
  "sha2",
+ "tempfile",
+ "time",
+ "toml_edit",
 ]
 
 [[package]]
@@ -1195,7 +1204,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
+ "dirs-next",
+ "pep440_rs 0.5.0",
+ "pep508_rs",
+ "px-python",
+ "px-resolver",
  "serde",
+ "serde_json",
+ "tempfile",
+ "toml_edit",
 ]
 
 [[package]]
@@ -1231,6 +1248,7 @@ name = "px-store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs-next",
  "hex",
  "reqwest",
  "serde",

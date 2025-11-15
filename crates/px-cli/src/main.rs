@@ -3,7 +3,13 @@ use std::path::PathBuf;
 use atty::Stream;
 use clap::{value_parser, ArgAction, Args, Parser, Subcommand, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
-use px_core::{self, CommandGroup, CommandStatus, GlobalOptions, PxCommand};
+use px_core::{
+    self, CachePathRequest, CachePruneRequest, CacheStatsRequest, CommandGroup, CommandStatus,
+    EnvMode as CoreEnvMode, EnvRequest, GlobalOptions, LockDiffRequest, OutputBuildRequest,
+    OutputPublishRequest, ProjectInitRequest, ProjectInstallRequest, PxCommand, QualityTidyRequest,
+    StorePrefetchRequest, WorkflowTestRequest, WorkspaceInstallRequest, WorkspaceListRequest,
+    WorkspaceVerifyRequest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -25,8 +31,56 @@ fn main() -> Result<()> {
         config: cli.config.as_ref().map(|p| p.to_string_lossy().to_string()),
     };
 
+    let typed = typed_invocation(&cli.command);
     let command = build_command(&cli.command);
-    let outcome = px_core::execute(&global, &command).map_err(|err| eyre!("{err:?}"))?;
+    let outcome = match typed {
+        Some(TypedInvocation::ProjectInit(request)) => {
+            px_core::project_init(&global, request).map_err(|err| eyre!("{err:?}"))?
+        }
+        Some(TypedInvocation::CacheStats(request)) => {
+            px_core::cache_stats(&global, request).map_err(|err| eyre!("{err:?}"))?
+        }
+        Some(TypedInvocation::CachePath(request)) => {
+            px_core::cache_path(&global, request).map_err(|err| eyre!("{err:?}"))?
+        }
+        Some(TypedInvocation::CachePrune(request)) => {
+            px_core::cache_prune(&global, request).map_err(|err| eyre!("{err:?}"))?
+        }
+        Some(TypedInvocation::WorkspaceList(request)) => {
+            px_core::workspace_list(&global, request).map_err(|err| eyre!("{err:?}"))?
+        }
+        Some(TypedInvocation::WorkspaceVerify(request)) => {
+            px_core::workspace_verify(&global, request).map_err(|err| eyre!("{err:?}"))?
+        }
+        Some(TypedInvocation::LockDiff(request)) => {
+            px_core::lock_diff(&global, request).map_err(|err| eyre!("{err:?}"))?
+        }
+        Some(TypedInvocation::WorkflowTest(request)) => {
+            px_core::workflow_test(&global, request).map_err(|err| eyre!("{err:?}"))?
+        }
+        Some(TypedInvocation::OutputBuild(request)) => {
+            px_core::output_build(&global, request).map_err(|err| eyre!("{err:?}"))?
+        }
+        Some(TypedInvocation::OutputPublish(request)) => {
+            px_core::output_publish(&global, request).map_err(|err| eyre!("{err:?}"))?
+        }
+        Some(TypedInvocation::ProjectInstall(request)) => {
+            px_core::project_install(&global, request).map_err(|err| eyre!("{err:?}"))?
+        }
+        Some(TypedInvocation::WorkspaceInstall(request)) => {
+            px_core::workspace_install(&global, request).map_err(|err| eyre!("{err:?}"))?
+        }
+        Some(TypedInvocation::Env(request)) => {
+            px_core::env(&global, request).map_err(|err| eyre!("{err:?}"))?
+        }
+        Some(TypedInvocation::StorePrefetch(request)) => {
+            px_core::store_prefetch(&global, request).map_err(|err| eyre!("{err:?}"))?
+        }
+        Some(TypedInvocation::QualityTidy(request)) => {
+            px_core::quality_tidy(&global, request).map_err(|err| eyre!("{err:?}"))?
+        }
+        None => px_core::execute(&global, &command).map_err(|err| eyre!("{err:?}"))?,
+    };
     let code = emit_output(&cli, &command, &outcome)?;
 
     if code == 0 {
@@ -217,6 +271,148 @@ fn build_command(group: &CommandGroupCli) -> PxCommand {
         CommandGroupCli::Migrate(args) => build_migrate_command(args),
         CommandGroupCli::Onboard(args) => build_onboard_alias_command(args),
     }
+}
+
+enum TypedInvocation {
+    ProjectInit(ProjectInitRequest),
+    CacheStats(CacheStatsRequest),
+    CachePath(CachePathRequest),
+    CachePrune(CachePruneRequest),
+    WorkspaceList(WorkspaceListRequest),
+    WorkspaceVerify(WorkspaceVerifyRequest),
+    LockDiff(LockDiffRequest),
+    WorkflowTest(WorkflowTestRequest),
+    OutputBuild(OutputBuildRequest),
+    OutputPublish(OutputPublishRequest),
+    ProjectInstall(ProjectInstallRequest),
+    WorkspaceInstall(WorkspaceInstallRequest),
+    Env(EnvRequest),
+    StorePrefetch(StorePrefetchRequest),
+    QualityTidy(QualityTidyRequest),
+}
+
+fn typed_invocation(group: &CommandGroupCli) -> Option<TypedInvocation> {
+    match group {
+        CommandGroupCli::Project(ProjectCommand::Init(args)) => {
+            Some(TypedInvocation::ProjectInit(ProjectInitRequest {
+                package: args.package.clone(),
+                python: args.py.clone(),
+                dry_run: args.common.dry_run,
+                force: args.common.force,
+            }))
+        }
+        CommandGroupCli::Project(ProjectCommand::Install(args))
+        | CommandGroupCli::Install(args) => Some(TypedInvocation::ProjectInstall(
+            project_install_request_from_args(args),
+        )),
+        CommandGroupCli::Cache(cache_args) => match &cache_args.command {
+            CacheSubcommand::Stats => Some(TypedInvocation::CacheStats(CacheStatsRequest)),
+            CacheSubcommand::Path => Some(TypedInvocation::CachePath(CachePathRequest)),
+            CacheSubcommand::Prune(args) => Some(TypedInvocation::CachePrune(CachePruneRequest {
+                all: args.all,
+                dry_run: args.dry_run,
+            })),
+        },
+        CommandGroupCli::Infra(InfraCommand::Cache(cache_args)) => match &cache_args.command {
+            CacheSubcommand::Stats => Some(TypedInvocation::CacheStats(CacheStatsRequest)),
+            CacheSubcommand::Path => Some(TypedInvocation::CachePath(CachePathRequest)),
+            CacheSubcommand::Prune(args) => Some(TypedInvocation::CachePrune(CachePruneRequest {
+                all: args.all,
+                dry_run: args.dry_run,
+            })),
+        },
+        CommandGroupCli::Workspace(WorkspaceCommand::List) => {
+            Some(TypedInvocation::WorkspaceList(WorkspaceListRequest))
+        }
+        CommandGroupCli::Workspace(WorkspaceCommand::Verify) => {
+            Some(TypedInvocation::WorkspaceVerify(WorkspaceVerifyRequest))
+        }
+        CommandGroupCli::Workspace(WorkspaceCommand::Install(args)) => {
+            Some(TypedInvocation::WorkspaceInstall(workspace_install_request_from_args(args)))
+        }
+        CommandGroupCli::Quality(QualityCommand::Tidy(args))
+        | CommandGroupCli::Tidy(args) => Some(TypedInvocation::QualityTidy(
+            quality_tidy_request_from_args(args),
+        )),
+        CommandGroupCli::Lock(LockCommand::Diff) => Some(TypedInvocation::LockDiff(LockDiffRequest)),
+        CommandGroupCli::Workflow(WorkflowCommand::Test(args))
+        | CommandGroupCli::Test(args) => Some(TypedInvocation::WorkflowTest(
+            workflow_test_request_from_args(args),
+        )),
+        CommandGroupCli::Output(OutputCommand::Build(args))
+        | CommandGroupCli::Build(args) => Some(TypedInvocation::OutputBuild(
+            output_build_request_from_args(args),
+        )),
+        CommandGroupCli::Output(OutputCommand::Publish(args))
+        | CommandGroupCli::Publish(args) => Some(TypedInvocation::OutputPublish(
+            output_publish_request_from_args(args),
+        )),
+        CommandGroupCli::Env(args) | CommandGroupCli::Infra(InfraCommand::Env(args)) => {
+            Some(TypedInvocation::Env(env_request_from_args(args)))
+        }
+        CommandGroupCli::Store(StoreCommand::Prefetch(args)) => Some(
+            TypedInvocation::StorePrefetch(store_prefetch_request_from_args(args)),
+        ),
+        _ => None,
+    }
+}
+
+fn workflow_test_request_from_args(args: &TestArgs) -> WorkflowTestRequest {
+    WorkflowTestRequest {
+        pytest_args: args.args.clone(),
+    }
+}
+
+fn output_build_request_from_args(args: &BuildArgs) -> OutputBuildRequest {
+    let (include_sdist, include_wheel) = match args.format {
+        BuildFormat::Sdist => (true, false),
+        BuildFormat::Wheel => (false, true),
+        BuildFormat::Both => (true, true),
+    };
+    OutputBuildRequest {
+        include_sdist,
+        include_wheel,
+        out: args.out.clone(),
+        dry_run: args.common.dry_run,
+    }
+}
+
+fn output_publish_request_from_args(args: &PublishArgs) -> OutputPublishRequest {
+    OutputPublishRequest {
+        registry: args.registry.clone(),
+        token_env: args.token_env.clone(),
+        dry_run: args.common.dry_run,
+    }
+}
+
+fn project_install_request_from_args(args: &InstallArgs) -> ProjectInstallRequest {
+    ProjectInstallRequest {
+        frozen: args.frozen,
+    }
+}
+
+fn workspace_install_request_from_args(args: &WorkspaceInstallArgs) -> WorkspaceInstallRequest {
+    WorkspaceInstallRequest { frozen: args.frozen }
+}
+
+fn env_request_from_args(args: &EnvArgs) -> EnvRequest {
+    let mode = match args.mode {
+        EnvMode::Info => CoreEnvMode::Info,
+        EnvMode::Paths => CoreEnvMode::Paths,
+        EnvMode::Python => CoreEnvMode::Python,
+    };
+    EnvRequest { mode }
+}
+
+fn store_prefetch_request_from_args(args: &StorePrefetchArgs) -> StorePrefetchRequest {
+    StorePrefetchRequest {
+        workspace: args.workspace,
+        dry_run: args.common.dry_run,
+    }
+}
+
+fn quality_tidy_request_from_args(_args: &TidyArgs) -> QualityTidyRequest {
+    QualityTidyRequest
 }
 
 fn build_project(cmd: &ProjectCommand) -> PxCommand {

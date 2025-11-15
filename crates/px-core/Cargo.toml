@@ -14,6 +14,8 @@ tracing.workspace = true
 px-python = { path = "../px-python" }
 px-runtime = { path = "../px-runtime" }
 px-resolver = { path = "../px-resolver" }
+px-project = { path = "../px-project" }
+px-lockfile = { path = "../px-lockfile" }
 dirs-next.workspace = true
 toml_edit = "0.22"
 time = { version = "0.3", features = ["formatting"] }
