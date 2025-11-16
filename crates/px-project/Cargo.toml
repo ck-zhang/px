@@ -15,6 +15,7 @@ pep440_rs.workspace = true
 px-python = { path = "../px-python" }
 px-resolver = { path = "../px-resolver" }
 dirs-next.workspace = true
+time = { version = "0.3", features = ["formatting"] }
 
 [dev-dependencies]
 tempfile.workspace = true

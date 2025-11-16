@@ -1,15 +1,17 @@
-use std::{collections::HashMap, fs, path::Path, str::FromStr};
+use std::{collections::HashMap, fs, path::Path};
 
 use anyhow::{anyhow, Result};
-use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement};
+use pep508_rs::MarkerEnvironment;
 use serde_json::{json, Value};
 use toml_edit::DocumentMut;
 
 use crate::manifest::{
-    merge_dependency_specs, merge_dev_dependency_specs, read_dependencies_from_doc,
+    overwrite_dependency_specs, overwrite_dev_dependency_specs, read_dependencies_from_doc,
     read_optional_dependency_group, requirement_display_name,
 };
-use crate::resolver::{InstallOverride, PinSpec};
+use crate::resolver::{
+    autopin_pin_key, autopin_spec_key, marker_applies, spec_requires_pin, InstallOverride, PinSpec,
+};
 use crate::snapshot::ProjectSnapshot;
 
 pub type ResolvePinsFn = dyn Fn(&ProjectSnapshot, &[String]) -> Result<Vec<PinSpec>>;
@@ -99,10 +101,10 @@ pub fn plan_autopin(
     if !lock_only {
         let mut changed = false;
         if touches_prod {
-            changed |= merge_dependency_specs(&mut doc, &prod_specs_final);
+            changed |= overwrite_dependency_specs(&mut doc, &prod_specs_final);
         }
         if touches_dev {
-            changed |= merge_dev_dependency_specs(&mut doc, &dev_specs_final);
+            changed |= overwrite_dev_dependency_specs(&mut doc, &dev_specs_final);
         }
         if changed {
             doc_contents = Some(doc.to_string());
@@ -158,60 +160,6 @@ fn push_autopin_location(
     map.entry(key)
         .or_default()
         .push(AutopinLocation::new(spec, index, scope));
-}
-
-fn marker_applies(spec: &str, marker_env: &MarkerEnvironment) -> bool {
-    let cleaned = crate::manifest::strip_wrapping_quotes(spec.trim());
-    match PepRequirement::from_str(cleaned) {
-        Ok(req) => req.evaluate_markers(marker_env, &[]),
-        Err(_) => true,
-    }
-}
-
-fn spec_requires_pin(spec: &str) -> bool {
-    let head = spec.split(';').next().unwrap_or(spec).trim();
-    !head.contains("==")
-}
-
-fn autopin_spec_key(spec: &str) -> String {
-    match PepRequirement::from_str(spec.trim()) {
-        Ok(req) => {
-            let name = req.name.to_string().to_ascii_lowercase();
-            let mut extras = req
-                .extras
-                .iter()
-                .map(|extra| extra.to_string().to_ascii_lowercase())
-                .collect::<Vec<_>>();
-            extras.sort();
-            let extras_part = extras.join(",");
-            let marker_part = req
-                .marker
-                .as_ref()
-                .map(|m| crate::manifest::canonicalize_marker(&m.to_string()))
-                .unwrap_or_default();
-            format!("{name}|{extras_part}|{marker_part}")
-        }
-        Err(_) => {
-            let name = crate::manifest::dependency_name(spec);
-            format!("{name}||")
-        }
-    }
-}
-
-fn autopin_pin_key(pin: &PinSpec) -> String {
-    let mut extras = pin
-        .extras
-        .iter()
-        .map(|extra| extra.to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    extras.sort();
-    let extras_part = extras.join(",");
-    let marker_part = pin
-        .marker
-        .as_deref()
-        .map(crate::manifest::canonicalize_marker)
-        .unwrap_or_default();
-    format!("{}|{extras_part}|{marker_part}", pin.normalized)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -397,6 +345,54 @@ dependencies = ["demo"]
                 assert_eq!(plan.autopinned.len(), 1);
                 assert!(plan.doc_contents.is_some());
                 assert!(plan.install_override.is_none());
+            }
+            _ => panic!("unexpected autopin state"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rewrites_specs_without_duplication() -> Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path();
+        let pyproject_path = root.join("pyproject.toml");
+        fs::write(
+            &pyproject_path,
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["demo>=1.0", "helper==0.5"]
+"#,
+        )?;
+
+        let snapshot = ProjectSnapshot::read_from(root)?;
+        let marker_env = marker_env();
+        let resolver = |_: &ProjectSnapshot, specs: &[String]| -> Result<Vec<PinSpec>> {
+            assert_eq!(specs, &["demo>=1.0".to_string()]);
+            Ok(vec![PinSpec {
+                name: "demo".into(),
+                specifier: "demo==1.2.3".into(),
+                version: "1.2.3".into(),
+                normalized: "demo".into(),
+                extras: Vec::new(),
+                marker: None,
+            }])
+        };
+
+        match plan_autopin(
+            &snapshot,
+            &pyproject_path,
+            false,
+            false,
+            &resolver,
+            &marker_env,
+        )? {
+            AutopinState::Planned(plan) => {
+                let contents = plan.doc_contents.expect("pyproject contents");
+                let doc: DocumentMut = contents.parse()?;
+                let deps = read_dependencies_from_doc(&doc);
+                assert_eq!(deps, vec!["demo==1.2.3".to_string(), "helper==0.5".to_string()]);
             }
             _ => panic!("unexpected autopin state"),
         }

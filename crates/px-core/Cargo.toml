@@ -18,7 +18,6 @@ px-project = { path = "../px-project" }
 px-lockfile = { path = "../px-lockfile" }
 dirs-next.workspace = true
 toml_edit = "0.22"
-time = { version = "0.3", features = ["formatting"] }
 pep440_rs.workspace = true
 px-store = { path = "../px-store" }
 reqwest.workspace = true

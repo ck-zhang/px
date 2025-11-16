@@ -1,17 +1,19 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use atty::Stream;
 use clap::{value_parser, ArgAction, Args, Parser, Subcommand, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
 use px_core::{
-    self, CachePathRequest, CachePruneRequest, CacheStatsRequest, CommandGroup, CommandStatus,
-    EnvMode as CoreEnvMode, EnvRequest, GlobalOptions, LockDiffRequest, OutputBuildRequest,
-    OutputPublishRequest, ProjectInitRequest, ProjectInstallRequest, PxCommand, QualityTidyRequest,
-    StorePrefetchRequest, WorkflowTestRequest, WorkspaceInstallRequest, WorkspaceListRequest,
-    WorkspaceVerifyRequest,
+    self, CachePathRequest, CachePruneRequest, CacheStatsRequest, CommandContext, CommandGroup,
+    CommandInfo, CommandStatus, EnvMode as CoreEnvMode, EnvRequest, GlobalOptions, LockDiffRequest,
+    LockUpgradeRequest, MigrateRequest, OutputBuildRequest, OutputPublishRequest,
+    ProjectAddRequest, ProjectInitRequest, ProjectInstallRequest, ProjectRemoveRequest,
+    ProjectUpdateRequest, QualityTidyRequest, StorePrefetchRequest, SystemEffects,
+    ToolCommandRequest, WorkflowRunRequest, WorkflowTestRequest, WorkspaceInstallRequest,
+    WorkspaceListRequest, WorkspaceTidyRequest, WorkspaceVerifyRequest,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 mod style;
 
@@ -31,57 +33,10 @@ fn main() -> Result<()> {
         config: cli.config.as_ref().map(|p| p.to_string_lossy().to_string()),
     };
 
-    let typed = typed_invocation(&cli.command);
-    let command = build_command(&cli.command);
-    let outcome = match typed {
-        Some(TypedInvocation::ProjectInit(request)) => {
-            px_core::project_init(&global, request).map_err(|err| eyre!("{err:?}"))?
-        }
-        Some(TypedInvocation::CacheStats(request)) => {
-            px_core::cache_stats(&global, request).map_err(|err| eyre!("{err:?}"))?
-        }
-        Some(TypedInvocation::CachePath(request)) => {
-            px_core::cache_path(&global, request).map_err(|err| eyre!("{err:?}"))?
-        }
-        Some(TypedInvocation::CachePrune(request)) => {
-            px_core::cache_prune(&global, request).map_err(|err| eyre!("{err:?}"))?
-        }
-        Some(TypedInvocation::WorkspaceList(request)) => {
-            px_core::workspace_list(&global, request).map_err(|err| eyre!("{err:?}"))?
-        }
-        Some(TypedInvocation::WorkspaceVerify(request)) => {
-            px_core::workspace_verify(&global, request).map_err(|err| eyre!("{err:?}"))?
-        }
-        Some(TypedInvocation::LockDiff(request)) => {
-            px_core::lock_diff(&global, request).map_err(|err| eyre!("{err:?}"))?
-        }
-        Some(TypedInvocation::WorkflowTest(request)) => {
-            px_core::workflow_test(&global, request).map_err(|err| eyre!("{err:?}"))?
-        }
-        Some(TypedInvocation::OutputBuild(request)) => {
-            px_core::output_build(&global, request).map_err(|err| eyre!("{err:?}"))?
-        }
-        Some(TypedInvocation::OutputPublish(request)) => {
-            px_core::output_publish(&global, request).map_err(|err| eyre!("{err:?}"))?
-        }
-        Some(TypedInvocation::ProjectInstall(request)) => {
-            px_core::project_install(&global, request).map_err(|err| eyre!("{err:?}"))?
-        }
-        Some(TypedInvocation::WorkspaceInstall(request)) => {
-            px_core::workspace_install(&global, request).map_err(|err| eyre!("{err:?}"))?
-        }
-        Some(TypedInvocation::Env(request)) => {
-            px_core::env(&global, request).map_err(|err| eyre!("{err:?}"))?
-        }
-        Some(TypedInvocation::StorePrefetch(request)) => {
-            px_core::store_prefetch(&global, request).map_err(|err| eyre!("{err:?}"))?
-        }
-        Some(TypedInvocation::QualityTidy(request)) => {
-            px_core::quality_tidy(&global, request).map_err(|err| eyre!("{err:?}"))?
-        }
-        None => px_core::execute(&global, &command).map_err(|err| eyre!("{err:?}"))?,
-    };
-    let code = emit_output(&cli, &command, &outcome)?;
+    let ctx = CommandContext::new(&global, Arc::new(SystemEffects::new()))
+        .map_err(|err| eyre!("{err:?}"))?;
+    let (info, outcome) = dispatch_command(&ctx, &cli.command)?;
+    let code = emit_output(&cli, info, &outcome)?;
 
     if code == 0 {
         Ok(())
@@ -111,11 +66,7 @@ fn init_tracing(trace: bool, verbose: u8) {
     let _ = tracing::subscriber::set_global_default(subscriber);
 }
 
-fn emit_output(
-    cli: &PxCli,
-    command: &PxCommand,
-    outcome: &px_core::ExecutionOutcome,
-) -> Result<i32> {
+fn emit_output(cli: &PxCli, info: CommandInfo, outcome: &px_core::ExecutionOutcome) -> Result<i32> {
     let code = match outcome.status {
         CommandStatus::Ok => 0,
         CommandStatus::UserError => 1,
@@ -125,19 +76,19 @@ fn emit_output(
     let style = Style::new(cli.no_color, atty::is(Stream::Stdout));
 
     if cli.json {
-        let payload = px_core::to_json_response(command, outcome, code);
+        let payload = px_core::to_json_response(info, outcome, code);
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else if !cli.quiet {
         if is_passthrough(&outcome.details) {
             println!("{}", outcome.message);
         } else {
-            let message = px_core::format_status_message(command, &outcome.message);
+            let message = px_core::format_status_message(info, &outcome.message);
             println!("{}", style.status(&outcome.status, &message));
             if let Some(hint) = hint_from_details(&outcome.details) {
                 let hint_line = format!("Hint: {}", hint);
                 println!("{}", style.info(&hint_line));
             }
-            if let Some(table) = render_migrate_table(&style, command, &outcome.details) {
+            if let Some(table) = render_migrate_table(&style, info, &outcome.details) {
                 println!("{}", table);
             }
         }
@@ -161,8 +112,8 @@ fn is_passthrough(details: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn render_migrate_table(style: &Style, command: &PxCommand, details: &Value) -> Option<String> {
-    if command.group != CommandGroup::Migrate {
+fn render_migrate_table(style: &Style, info: CommandInfo, details: &Value) -> Option<String> {
+    if info.group != CommandGroup::Migrate {
         return None;
     }
     let packages = details.get("packages")?.as_array()?;
@@ -250,116 +201,238 @@ fn format_package_table(style: &Style, rows: &[PackageRow]) -> String {
     lines.join("\n")
 }
 
-fn build_command(group: &CommandGroupCli) -> PxCommand {
-    match group {
-        CommandGroupCli::Project(cmd) => build_project(cmd),
-        CommandGroupCli::Workflow(cmd) => build_workflow(cmd),
-        CommandGroupCli::Quality(cmd) => build_quality(cmd),
-        CommandGroupCli::Output(cmd) => build_output(cmd),
-        CommandGroupCli::Build(args) => build_output_build_command(args),
-        CommandGroupCli::Publish(args) => build_output_publish_command(args),
-        CommandGroupCli::Infra(cmd) => build_infra(cmd),
-        CommandGroupCli::Run(args) => build_run_command(args),
-        CommandGroupCli::Test(args) => build_test_command(args),
-        CommandGroupCli::Env(args) => build_env_command(args),
-        CommandGroupCli::Cache(args) => build_cache_command(args),
-        CommandGroupCli::Install(args) => build_install_command(args),
-        CommandGroupCli::Tidy(args) => build_tidy_command(args),
-        CommandGroupCli::Lock(cmd) => build_lock_command(cmd),
-        CommandGroupCli::Workspace(cmd) => build_workspace_command(cmd),
-        CommandGroupCli::Store(cmd) => build_store_command(cmd),
-        CommandGroupCli::Migrate(args) => build_migrate_command(args),
-        CommandGroupCli::Onboard(args) => build_onboard_alias_command(args),
-    }
+fn core_call(
+    info: CommandInfo,
+    outcome: anyhow::Result<px_core::ExecutionOutcome>,
+) -> Result<(CommandInfo, px_core::ExecutionOutcome)> {
+    let result = outcome.map_err(|err| eyre!("{err:?}"))?;
+    Ok((info, result))
 }
 
-enum TypedInvocation {
-    ProjectInit(ProjectInitRequest),
-    CacheStats(CacheStatsRequest),
-    CachePath(CachePathRequest),
-    CachePrune(CachePruneRequest),
-    WorkspaceList(WorkspaceListRequest),
-    WorkspaceVerify(WorkspaceVerifyRequest),
-    LockDiff(LockDiffRequest),
-    WorkflowTest(WorkflowTestRequest),
-    OutputBuild(OutputBuildRequest),
-    OutputPublish(OutputPublishRequest),
-    ProjectInstall(ProjectInstallRequest),
-    WorkspaceInstall(WorkspaceInstallRequest),
-    Env(EnvRequest),
-    StorePrefetch(StorePrefetchRequest),
-    QualityTidy(QualityTidyRequest),
-}
-
-fn typed_invocation(group: &CommandGroupCli) -> Option<TypedInvocation> {
+fn dispatch_command(
+    ctx: &CommandContext,
+    group: &CommandGroupCli,
+) -> Result<(CommandInfo, px_core::ExecutionOutcome)> {
     match group {
-        CommandGroupCli::Project(ProjectCommand::Init(args)) => {
-            Some(TypedInvocation::ProjectInit(ProjectInitRequest {
-                package: args.package.clone(),
-                python: args.py.clone(),
-                dry_run: args.common.dry_run,
-                force: args.common.force,
-            }))
-        }
-        CommandGroupCli::Project(ProjectCommand::Install(args))
-        | CommandGroupCli::Install(args) => Some(TypedInvocation::ProjectInstall(
-            project_install_request_from_args(args),
-        )),
-        CommandGroupCli::Cache(cache_args) => match &cache_args.command {
-            CacheSubcommand::Stats => Some(TypedInvocation::CacheStats(CacheStatsRequest)),
-            CacheSubcommand::Path => Some(TypedInvocation::CachePath(CachePathRequest)),
-            CacheSubcommand::Prune(args) => Some(TypedInvocation::CachePrune(CachePruneRequest {
-                all: args.all,
-                dry_run: args.dry_run,
-            })),
+        CommandGroupCli::Project(cmd) => match cmd {
+            ProjectCommand::Init(args) => {
+                let info = CommandInfo::new(CommandGroup::Project, "init");
+                let request = project_init_request_from_args(args);
+                core_call(info, px_core::project_init(ctx, request))
+            }
+            ProjectCommand::Add(args) => {
+                let info = CommandInfo::new(CommandGroup::Project, "add");
+                let request = ProjectAddRequest {
+                    specs: args.specs.clone(),
+                };
+                core_call(info, px_core::project_add(ctx, request))
+            }
+            ProjectCommand::Remove(args) => {
+                let info = CommandInfo::new(CommandGroup::Project, "remove");
+                let request = ProjectRemoveRequest {
+                    specs: args.specs.clone(),
+                };
+                core_call(info, px_core::project_remove(ctx, request))
+            }
+            ProjectCommand::Install(args) => {
+                let info = CommandInfo::new(CommandGroup::Project, "install");
+                let request = project_install_request_from_args(args);
+                core_call(info, px_core::project_install(ctx, request))
+            }
+            ProjectCommand::Update(args) => {
+                let info = CommandInfo::new(CommandGroup::Project, "update");
+                let request = ProjectUpdateRequest {
+                    specs: args.specs.clone(),
+                };
+                core_call(info, px_core::project_update(ctx, request))
+            }
         },
-        CommandGroupCli::Infra(InfraCommand::Cache(cache_args)) => match &cache_args.command {
-            CacheSubcommand::Stats => Some(TypedInvocation::CacheStats(CacheStatsRequest)),
-            CacheSubcommand::Path => Some(TypedInvocation::CachePath(CachePathRequest)),
-            CacheSubcommand::Prune(args) => Some(TypedInvocation::CachePrune(CachePruneRequest {
-                all: args.all,
-                dry_run: args.dry_run,
-            })),
+        CommandGroupCli::Workflow(cmd) => match cmd {
+            WorkflowCommand::Run(args) => {
+                let info = CommandInfo::new(CommandGroup::Workflow, "run");
+                let request = workflow_run_request_from_args(args);
+                core_call(info, px_core::workflow_run(ctx, request))
+            }
+            WorkflowCommand::Test(args) => {
+                let info = CommandInfo::new(CommandGroup::Workflow, "test");
+                let request = workflow_test_request_from_args(args);
+                core_call(info, px_core::workflow_test(ctx, request))
+            }
         },
-        CommandGroupCli::Workspace(WorkspaceCommand::List) => {
-            Some(TypedInvocation::WorkspaceList(WorkspaceListRequest))
+        CommandGroupCli::Quality(cmd) => match cmd {
+            QualityCommand::Fmt(args) => {
+                let info = CommandInfo::new(CommandGroup::Quality, "fmt");
+                let request = tool_command_request_from_args(args);
+                core_call(info, px_core::quality_fmt(ctx, request))
+            }
+            QualityCommand::Lint(args) => {
+                let info = CommandInfo::new(CommandGroup::Quality, "lint");
+                let request = tool_command_request_from_args(args);
+                core_call(info, px_core::quality_lint(ctx, request))
+            }
+            QualityCommand::Tidy(args) => {
+                let info = CommandInfo::new(CommandGroup::Quality, "tidy");
+                let request = quality_tidy_request_from_args(args);
+                core_call(info, px_core::quality_tidy(ctx, request))
+            }
+        },
+        CommandGroupCli::Output(cmd) => match cmd {
+            OutputCommand::Build(args) => {
+                let info = CommandInfo::new(CommandGroup::Output, "build");
+                let request = output_build_request_from_args(args);
+                core_call(info, px_core::output_build(ctx, request))
+            }
+            OutputCommand::Publish(args) => {
+                let info = CommandInfo::new(CommandGroup::Output, "publish");
+                let request = output_publish_request_from_args(args);
+                core_call(info, px_core::output_publish(ctx, request))
+            }
+        },
+        CommandGroupCli::Build(args) => {
+            let info = CommandInfo::new(CommandGroup::Output, "build");
+            let request = output_build_request_from_args(args);
+            core_call(info, px_core::output_build(ctx, request))
         }
-        CommandGroupCli::Workspace(WorkspaceCommand::Verify) => {
-            Some(TypedInvocation::WorkspaceVerify(WorkspaceVerifyRequest))
+        CommandGroupCli::Publish(args) => {
+            let info = CommandInfo::new(CommandGroup::Output, "publish");
+            let request = output_publish_request_from_args(args);
+            core_call(info, px_core::output_publish(ctx, request))
         }
-        CommandGroupCli::Workspace(WorkspaceCommand::Install(args)) => {
-            Some(TypedInvocation::WorkspaceInstall(workspace_install_request_from_args(args)))
+        CommandGroupCli::Infra(InfraCommand::Cache(args)) | CommandGroupCli::Cache(args) => {
+            match &args.command {
+                CacheSubcommand::Path => {
+                    let info = CommandInfo::new(CommandGroup::Infra, "cache");
+                    core_call(info, px_core::cache_path(ctx, CachePathRequest))
+                }
+                CacheSubcommand::Stats => {
+                    let info = CommandInfo::new(CommandGroup::Infra, "cache");
+                    core_call(info, px_core::cache_stats(ctx, CacheStatsRequest))
+                }
+                CacheSubcommand::Prune(prune_args) => {
+                    let info = CommandInfo::new(CommandGroup::Infra, "cache");
+                    let request = CachePruneRequest {
+                        all: prune_args.all,
+                        dry_run: prune_args.dry_run,
+                    };
+                    core_call(info, px_core::cache_prune(ctx, request))
+                }
+            }
         }
-        CommandGroupCli::Quality(QualityCommand::Tidy(args))
-        | CommandGroupCli::Tidy(args) => Some(TypedInvocation::QualityTidy(
-            quality_tidy_request_from_args(args),
-        )),
-        CommandGroupCli::Lock(LockCommand::Diff) => Some(TypedInvocation::LockDiff(LockDiffRequest)),
-        CommandGroupCli::Workflow(WorkflowCommand::Test(args))
-        | CommandGroupCli::Test(args) => Some(TypedInvocation::WorkflowTest(
-            workflow_test_request_from_args(args),
-        )),
-        CommandGroupCli::Output(OutputCommand::Build(args))
-        | CommandGroupCli::Build(args) => Some(TypedInvocation::OutputBuild(
-            output_build_request_from_args(args),
-        )),
-        CommandGroupCli::Output(OutputCommand::Publish(args))
-        | CommandGroupCli::Publish(args) => Some(TypedInvocation::OutputPublish(
-            output_publish_request_from_args(args),
-        )),
-        CommandGroupCli::Env(args) | CommandGroupCli::Infra(InfraCommand::Env(args)) => {
-            Some(TypedInvocation::Env(env_request_from_args(args)))
+        CommandGroupCli::Infra(InfraCommand::Env(args)) | CommandGroupCli::Env(args) => {
+            let info = CommandInfo::new(CommandGroup::Infra, "env");
+            let request = env_request_from_args(args);
+            core_call(info, px_core::env(ctx, request))
         }
-        CommandGroupCli::Store(StoreCommand::Prefetch(args)) => Some(
-            TypedInvocation::StorePrefetch(store_prefetch_request_from_args(args)),
-        ),
-        _ => None,
+        CommandGroupCli::Run(args) => {
+            let info = CommandInfo::new(CommandGroup::Workflow, "run");
+            let request = workflow_run_request_from_args(args);
+            core_call(info, px_core::workflow_run(ctx, request))
+        }
+        CommandGroupCli::Test(args) => {
+            let info = CommandInfo::new(CommandGroup::Workflow, "test");
+            let request = workflow_test_request_from_args(args);
+            core_call(info, px_core::workflow_test(ctx, request))
+        }
+        CommandGroupCli::Install(args) => {
+            let info = CommandInfo::new(CommandGroup::Project, "install");
+            let request = project_install_request_from_args(args);
+            core_call(info, px_core::project_install(ctx, request))
+        }
+        CommandGroupCli::Tidy(args) => {
+            let info = CommandInfo::new(CommandGroup::Quality, "tidy");
+            let request = quality_tidy_request_from_args(args);
+            core_call(info, px_core::quality_tidy(ctx, request))
+        }
+        CommandGroupCli::Lock(LockCommand::Diff) => {
+            let info = CommandInfo::new(CommandGroup::Lock, "diff");
+            core_call(info, px_core::lock_diff(ctx, LockDiffRequest))
+        }
+        CommandGroupCli::Lock(LockCommand::Upgrade) => {
+            let info = CommandInfo::new(CommandGroup::Lock, "upgrade");
+            core_call(info, px_core::lock_upgrade(ctx, LockUpgradeRequest))
+        }
+        CommandGroupCli::Workspace(cmd) => match cmd {
+            WorkspaceCommand::List => {
+                let info = CommandInfo::new(CommandGroup::Workspace, "list");
+                core_call(info, px_core::workspace_list(ctx, WorkspaceListRequest))
+            }
+            WorkspaceCommand::Verify => {
+                let info = CommandInfo::new(CommandGroup::Workspace, "verify");
+                core_call(info, px_core::workspace_verify(ctx, WorkspaceVerifyRequest))
+            }
+            WorkspaceCommand::Install(args) => {
+                let info = CommandInfo::new(CommandGroup::Workspace, "install");
+                let request = workspace_install_request_from_args(args);
+                core_call(info, px_core::workspace_install(ctx, request))
+            }
+            WorkspaceCommand::Tidy => {
+                let info = CommandInfo::new(CommandGroup::Workspace, "tidy");
+                core_call(info, px_core::workspace_tidy(ctx, WorkspaceTidyRequest))
+            }
+        },
+        CommandGroupCli::Store(StoreCommand::Prefetch(args)) => {
+            let info = CommandInfo::new(CommandGroup::Store, "prefetch");
+            let request = store_prefetch_request_from_args(args);
+            core_call(info, px_core::store_prefetch(ctx, request))
+        }
+        CommandGroupCli::Migrate(args) => {
+            let info = CommandInfo::new(CommandGroup::Migrate, "migrate");
+            let request = migrate_request_from_args(args);
+            core_call(info, px_core::migrate(ctx, request))
+        }
+        CommandGroupCli::Onboard(args) => {
+            eprintln!("`px onboard` is deprecated; use `px migrate`.");
+            let info = CommandInfo::new(CommandGroup::Migrate, "migrate");
+            let request = migrate_request_from_args(args);
+            core_call(info, px_core::migrate(ctx, request))
+        }
     }
 }
 
 fn workflow_test_request_from_args(args: &TestArgs) -> WorkflowTestRequest {
     WorkflowTestRequest {
         pytest_args: args.args.clone(),
+    }
+}
+
+fn workflow_run_request_from_args(args: &RunArgs) -> WorkflowRunRequest {
+    let (entry, forwarded_args) = normalize_run_invocation(args);
+    WorkflowRunRequest {
+        entry,
+        target: args.target.clone(),
+        args: forwarded_args,
+    }
+}
+
+fn project_init_request_from_args(args: &InitArgs) -> ProjectInitRequest {
+    ProjectInitRequest {
+        package: args.package.clone(),
+        python: args.py.clone(),
+        dry_run: args.common.dry_run,
+        force: args.common.force,
+    }
+}
+
+fn tool_command_request_from_args(args: &ToolArgs) -> ToolCommandRequest {
+    ToolCommandRequest {
+        args: args.args.clone(),
+    }
+}
+
+fn migrate_request_from_args(args: &MigrateArgs) -> MigrateRequest {
+    MigrateRequest {
+        source: args
+            .source
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
+        dev_source: args
+            .dev_source
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
+        write: args.write,
+        allow_dirty: args.allow_dirty,
+        lock_only: args.lock_only,
+        no_autopin: args.no_autopin,
     }
 }
 
@@ -392,7 +465,9 @@ fn project_install_request_from_args(args: &InstallArgs) -> ProjectInstallReques
 }
 
 fn workspace_install_request_from_args(args: &WorkspaceInstallArgs) -> WorkspaceInstallRequest {
-    WorkspaceInstallRequest { frozen: args.frozen }
+    WorkspaceInstallRequest {
+        frozen: args.frozen,
+    }
 }
 
 fn env_request_from_args(args: &EnvArgs) -> EnvRequest {
@@ -415,265 +490,6 @@ fn quality_tidy_request_from_args(_args: &TidyArgs) -> QualityTidyRequest {
     QualityTidyRequest
 }
 
-fn build_project(cmd: &ProjectCommand) -> PxCommand {
-    match cmd {
-        ProjectCommand::Init(args) => PxCommand::new(
-            CommandGroup::Project,
-            "init",
-            Vec::new(),
-            json!({
-                "package": args.package,
-                "python": args.py,
-            }),
-            args.common.dry_run,
-            args.common.force,
-        ),
-        ProjectCommand::Add(args) => to_spec_command(CommandGroup::Project, "add", args),
-        ProjectCommand::Remove(args) => to_spec_command(CommandGroup::Project, "remove", args),
-        ProjectCommand::Install(args) => build_install_command(args),
-        ProjectCommand::Update(args) => to_spec_command(CommandGroup::Project, "update", args),
-    }
-}
-
-fn build_workflow(cmd: &WorkflowCommand) -> PxCommand {
-    match cmd {
-        WorkflowCommand::Run(args) => build_run_command(args),
-        WorkflowCommand::Test(args) => build_test_command(args),
-    }
-}
-
-fn build_quality(cmd: &QualityCommand) -> PxCommand {
-    match cmd {
-        QualityCommand::Fmt(args) => to_tool_command(CommandGroup::Quality, "fmt", args),
-        QualityCommand::Lint(args) => to_tool_command(CommandGroup::Quality, "lint", args),
-        QualityCommand::Tidy(args) => build_tidy_command(args),
-    }
-}
-
-fn build_output(cmd: &OutputCommand) -> PxCommand {
-    match cmd {
-        OutputCommand::Build(args) => build_output_build_command(args),
-        OutputCommand::Publish(args) => build_output_publish_command(args),
-    }
-}
-
-fn build_output_build_command(args: &BuildArgs) -> PxCommand {
-    PxCommand::new(
-        CommandGroup::Output,
-        "build",
-        Vec::new(),
-        json!({ "format": args.format, "out": args.out.clone() }),
-        args.common.dry_run,
-        args.common.force,
-    )
-}
-
-fn build_output_publish_command(args: &PublishArgs) -> PxCommand {
-    PxCommand::new(
-        CommandGroup::Output,
-        "publish",
-        Vec::new(),
-        json!({
-            "registry": args.registry.clone(),
-            "token_env": args.token_env.clone(),
-        }),
-        args.common.dry_run,
-        args.common.force,
-    )
-}
-
-fn build_infra(cmd: &InfraCommand) -> PxCommand {
-    match cmd {
-        InfraCommand::Cache(args) => build_cache_command(args),
-        InfraCommand::Env(args) => build_env_command(args),
-    }
-}
-
-fn build_env_command(args: &EnvArgs) -> PxCommand {
-    PxCommand::new(
-        CommandGroup::Infra,
-        "env",
-        Vec::new(),
-        json!({ "mode": args.mode.as_str() }),
-        false,
-        false,
-    )
-}
-
-fn build_cache_command(args: &CacheArgs) -> PxCommand {
-    match &args.command {
-        CacheSubcommand::Path => PxCommand::new(
-            CommandGroup::Infra,
-            "cache",
-            Vec::new(),
-            json!({ "mode": "path" }),
-            false,
-            false,
-        ),
-        CacheSubcommand::Stats => PxCommand::new(
-            CommandGroup::Infra,
-            "cache",
-            Vec::new(),
-            json!({ "mode": "stats" }),
-            false,
-            false,
-        ),
-        CacheSubcommand::Prune(args) => PxCommand::new(
-            CommandGroup::Infra,
-            "cache",
-            Vec::new(),
-            json!({
-                "mode": "prune",
-                "all": args.all,
-                "dry_run": args.dry_run,
-            }),
-            false,
-            false,
-        ),
-    }
-}
-
-fn build_store_command(cmd: &StoreCommand) -> PxCommand {
-    match cmd {
-        StoreCommand::Prefetch(args) => PxCommand::new(
-            CommandGroup::Store,
-            "prefetch",
-            Vec::new(),
-            json!({ "workspace": args.workspace }),
-            args.common.dry_run,
-            args.common.force,
-        ),
-    }
-}
-
-fn build_migrate_command(args: &MigrateArgs) -> PxCommand {
-    let dry_run = if args.write { false } else { true };
-    let non_interactive = args.yes || args.no_input;
-    PxCommand::new(
-        CommandGroup::Migrate,
-        "migrate",
-        Vec::new(),
-        json!({
-            "source": args.source.as_ref().map(|p| p.to_string_lossy().to_string()),
-            "dev_source": args
-                .dev_source
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            "write": args.write,
-            "dry_run_flag": args.dry_run,
-            "yes": args.yes,
-            "no_input": args.no_input,
-            "non_interactive": non_interactive,
-            "allow_dirty": args.allow_dirty,
-            "lock_only": args.lock_only,
-            "no_autopin": args.no_autopin,
-        }),
-        dry_run,
-        false,
-    )
-}
-
-fn build_onboard_alias_command(args: &MigrateArgs) -> PxCommand {
-    eprintln!("`px onboard` is deprecated; use `px migrate`.");
-    build_migrate_command(args)
-}
-
-fn build_install_command(args: &InstallArgs) -> PxCommand {
-    PxCommand::new(
-        CommandGroup::Project,
-        "install",
-        Vec::new(),
-        json!({ "frozen": args.frozen }),
-        args.common.dry_run,
-        args.common.force,
-    )
-}
-
-fn build_tidy_command(args: &TidyArgs) -> PxCommand {
-    PxCommand::new(
-        CommandGroup::Quality,
-        "tidy",
-        Vec::new(),
-        json!({}),
-        args.common.dry_run,
-        args.common.force,
-    )
-}
-
-fn build_lock_command(cmd: &LockCommand) -> PxCommand {
-    match cmd {
-        LockCommand::Diff => PxCommand::new(
-            CommandGroup::Lock,
-            "diff",
-            Vec::new(),
-            json!({}),
-            false,
-            false,
-        ),
-        LockCommand::Upgrade => PxCommand::new(
-            CommandGroup::Lock,
-            "upgrade",
-            Vec::new(),
-            json!({}),
-            false,
-            false,
-        ),
-    }
-}
-
-fn build_workspace_command(cmd: &WorkspaceCommand) -> PxCommand {
-    match cmd {
-        WorkspaceCommand::List => PxCommand::new(
-            CommandGroup::Workspace,
-            "list",
-            Vec::new(),
-            json!({}),
-            false,
-            false,
-        ),
-        WorkspaceCommand::Verify => PxCommand::new(
-            CommandGroup::Workspace,
-            "verify",
-            Vec::new(),
-            json!({}),
-            false,
-            false,
-        ),
-        WorkspaceCommand::Install(args) => PxCommand::new(
-            CommandGroup::Workspace,
-            "install",
-            Vec::new(),
-            json!({ "frozen": args.frozen }),
-            false,
-            false,
-        ),
-        WorkspaceCommand::Tidy => PxCommand::new(
-            CommandGroup::Workspace,
-            "tidy",
-            Vec::new(),
-            json!({}),
-            false,
-            false,
-        ),
-    }
-}
-
-fn build_run_command(args: &RunArgs) -> PxCommand {
-    let (entry, forwarded_args) = normalize_run_invocation(args);
-    PxCommand::new(
-        CommandGroup::Workflow,
-        "run",
-        Vec::new(),
-        json!({
-            "entry": entry,
-            "target": args.target.clone(),
-            "args": forwarded_args,
-        }),
-        args.common.dry_run,
-        args.common.force,
-    )
-}
-
 fn normalize_run_invocation(args: &RunArgs) -> (Option<String>, Vec<String>) {
     let mut forwarded = args.args.clone();
     match &args.entry {
@@ -683,39 +499,6 @@ fn normalize_run_invocation(args: &RunArgs) -> (Option<String>, Vec<String>) {
         }
         _ => (args.entry.clone(), forwarded),
     }
-}
-
-fn build_test_command(args: &TestArgs) -> PxCommand {
-    PxCommand::new(
-        CommandGroup::Workflow,
-        "test",
-        Vec::new(),
-        json!({ "pytest_args": args.args.clone() }),
-        args.common.dry_run,
-        args.common.force,
-    )
-}
-
-fn to_spec_command(group: CommandGroup, name: &str, args: &SpecArgs) -> PxCommand {
-    PxCommand::new(
-        group,
-        name,
-        args.specs.clone(),
-        json!({}),
-        args.common.dry_run,
-        args.common.force,
-    )
-}
-
-fn to_tool_command(group: CommandGroup, name: &str, args: &ToolArgs) -> PxCommand {
-    PxCommand::new(
-        group,
-        name,
-        Vec::new(),
-        json!({ "args": args.args.clone() }),
-        args.common.dry_run,
-        args.common.force,
-    )
 }
 
 #[derive(Parser, Debug)]
@@ -1158,14 +941,4 @@ enum EnvMode {
     Info,
     Paths,
     Python,
-}
-
-impl EnvMode {
-    fn as_str(&self) -> &'static str {
-        match self {
-            EnvMode::Info => "info",
-            EnvMode::Paths => "paths",
-            EnvMode::Python => "python",
-        }
-    }
 }

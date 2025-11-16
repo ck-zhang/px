@@ -13,38 +13,47 @@ use std::{
     time::Duration,
 };
 
+use self::effects::{Effects, SharedEffects};
 use anyhow::{anyhow, bail, Context, Result};
 use flate2::{write::GzEncoder, Compression};
 use pep440_rs::Version;
-use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement};
+use pep508_rs::MarkerEnvironment;
 use px_lockfile::{
     analyze_lock_diff, detect_lock_drift, load_lockfile_optional, lock_prefetch_specs,
     render_lockfile, render_lockfile_v2, verify_locked_artifacts, LockPrefetchSpec, LockSnapshot,
     LockedArtifact, ResolvedDependency,
 };
+use px_project::resolver::{
+    autopin_pin_key, autopin_spec_key, marker_applies, merge_resolved_dependencies,
+};
 use px_project::{
-    collect_pyproject_packages, collect_requirement_packages, plan_autopin, AutopinEntry,
-    AutopinState, InstallOverride, ManifestEditor, OnboardPackagePlan, PinSpec, ProjectInitializer,
+    collect_pyproject_packages, collect_requirement_packages, plan_autopin, prepare_pyproject_plan,
+    resolve_onboard_path, AutopinEntry, AutopinState, BackupManager, InstallOverride,
+    ManifestEditor, PinSpec, ProjectInitializer,
 };
 use px_python;
 use px_resolver::{ResolveRequest as ResolverRequest, ResolverEnv, ResolverTags};
 use px_runtime::{self, RunOutput};
 use px_store::{
-    cache_wheel, collect_cache_walk, compute_cache_usage, ensure_sdist_build, prefetch_artifacts,
-    prune_cache_entries, resolve_cache_store_path, ArtifactRequest, CacheLocation,
-    PrefetchOptions as StorePrefetchOptions, PrefetchSpec as StorePrefetchSpec, SdistRequest,
+    ArtifactRequest, CacheLocation, PrefetchOptions as StorePrefetchOptions,
+    PrefetchSpec as StorePrefetchSpec, SdistRequest,
 };
 use reqwest::{blocking::Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tar::Builder;
-use time::{format_description, OffsetDateTime};
 use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 use tracing::warn;
 use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 
+use crate::pypi::{PypiFile, PypiReleaseResponse};
+
+mod effects;
+mod pypi;
 mod workspace;
+
+pub use effects::SystemEffects;
 
 const PYPI_BASE_URL: &str = "https://pypi.org/pypi";
 const PX_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -91,37 +100,15 @@ impl fmt::Display for CommandGroup {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PxCommand {
+#[derive(Clone, Copy, Debug)]
+pub struct CommandInfo {
     pub group: CommandGroup,
-    pub name: String,
-    #[serde(default)]
-    pub specs: Vec<String>,
-    #[serde(default)]
-    pub args: Value,
-    #[serde(default)]
-    pub dry_run: bool,
-    #[serde(default)]
-    pub force: bool,
+    pub name: &'static str,
 }
 
-impl PxCommand {
-    pub fn new(
-        group: CommandGroup,
-        name: impl Into<String>,
-        specs: Vec<String>,
-        args: Value,
-        dry_run: bool,
-        force: bool,
-    ) -> Self {
-        Self {
-            group,
-            name: name.into(),
-            specs,
-            args,
-            dry_run,
-            force,
-        }
+impl CommandInfo {
+    pub const fn new(group: CommandGroup, name: &'static str) -> Self {
+        Self { group, name }
     }
 }
 
@@ -169,15 +156,18 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn from_env() -> Result<Self> {
+    pub fn from_env(effects: &dyn Effects) -> Result<Self> {
         let snapshot = EnvSnapshot::capture();
-        Self::from_snapshot(&snapshot)
+        Self::from_snapshot(&snapshot, effects.cache())
     }
 
-    fn from_snapshot(snapshot: &EnvSnapshot) -> Result<Self> {
+    fn from_snapshot(
+        snapshot: &EnvSnapshot,
+        cache_store: &dyn effects::CacheStore,
+    ) -> Result<Self> {
         Ok(Self {
             cache: CacheConfig {
-                store: resolve_cache_store_path()?,
+                store: cache_store.resolve_store_path()?,
             },
             network: NetworkConfig {
                 online: snapshot.flag_is_enabled("PX_ONLINE"),
@@ -249,18 +239,28 @@ pub struct CommandContext<'a> {
     env: EnvSnapshot,
     config: Config,
     project_root: OnceLock<PathBuf>,
+    effects: SharedEffects,
 }
 
 impl<'a> CommandContext<'a> {
-    pub fn new(global: &'a GlobalOptions) -> Result<Self> {
+    pub fn new(global: &'a GlobalOptions, effects: SharedEffects) -> Result<Self> {
         let env = EnvSnapshot::capture();
-        let config = Config::from_snapshot(&env)?;
+        let config = Config::from_snapshot(&env, effects.cache())?;
         Ok(Self {
             global,
             env,
             config,
             project_root: OnceLock::new(),
+            effects,
         })
+    }
+
+    pub fn effects(&self) -> &dyn Effects {
+        self.effects.as_ref()
+    }
+
+    pub fn shared_effects(&self) -> SharedEffects {
+        self.effects.clone()
     }
 
     pub fn cache(&self) -> &CacheLocation {
@@ -269,6 +269,32 @@ impl<'a> CommandContext<'a> {
 
     pub fn is_online(&self) -> bool {
         self.config.network.online
+    }
+
+    pub fn fs(&self) -> &dyn effects::FileSystem {
+        self.effects.fs()
+    }
+
+    pub fn python_runtime(&self) -> &dyn effects::PythonRuntime {
+        self.effects.python()
+    }
+
+    pub fn git(&self) -> &dyn effects::GitClient {
+        self.effects.git()
+    }
+
+    pub fn cache_store(&self) -> &dyn effects::CacheStore {
+        self.effects.cache()
+    }
+
+    pub fn pypi(&self) -> &dyn effects::PypiClient {
+        self.effects.pypi()
+    }
+
+    pub fn marker_environment(&self) -> Result<MarkerEnvironment> {
+        let python = self.python_runtime().detect_interpreter()?;
+        let resolver_env = detect_marker_environment_with(&python)?;
+        resolver_env.to_marker_environment()
     }
 
     pub fn project_root(&self) -> Result<PathBuf> {
@@ -375,248 +401,145 @@ pub struct StorePrefetchRequest {
 #[derive(Clone, Debug, Default)]
 pub struct QualityTidyRequest;
 
-impl EnvMode {
-    fn from_str(value: &str) -> Self {
-        match value.to_lowercase().as_str() {
-            "info" => EnvMode::Info,
-            "paths" => EnvMode::Paths,
-            "python" => EnvMode::Python,
-            _ => EnvMode::Unknown(value.to_string()),
-        }
-    }
+#[derive(Clone, Debug)]
+pub struct WorkflowRunRequest {
+    pub entry: Option<String>,
+    pub target: Option<String>,
+    pub args: Vec<String>,
 }
 
-pub fn project_init(
-    global: &GlobalOptions,
-    request: ProjectInitRequest,
-) -> Result<ExecutionOutcome> {
-    let ctx = CommandContext::new(global)?;
-    ProjectInitHandler.handle(&ctx, request)
+#[derive(Clone, Debug)]
+pub struct ProjectAddRequest {
+    pub specs: Vec<String>,
 }
 
-pub fn cache_stats(global: &GlobalOptions, request: CacheStatsRequest) -> Result<ExecutionOutcome> {
-    let ctx = CommandContext::new(global)?;
-    CacheStatsHandler.handle(&ctx, request)
+#[derive(Clone, Debug)]
+pub struct ProjectRemoveRequest {
+    pub specs: Vec<String>,
 }
 
-pub fn cache_path(global: &GlobalOptions, request: CachePathRequest) -> Result<ExecutionOutcome> {
-    let ctx = CommandContext::new(global)?;
-    CachePathHandler.handle(&ctx, request)
+#[derive(Clone, Debug)]
+pub struct ProjectUpdateRequest {
+    pub specs: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MigrateRequest {
+    pub source: Option<String>,
+    pub dev_source: Option<String>,
+    pub write: bool,
+    pub allow_dirty: bool,
+    pub lock_only: bool,
+    pub no_autopin: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LockUpgradeRequest;
+
+#[derive(Clone, Debug, Default)]
+pub struct WorkspaceTidyRequest;
+
+#[derive(Clone, Debug)]
+pub struct ToolCommandRequest {
+    pub args: Vec<String>,
+}
+
+pub fn project_init(ctx: &CommandContext, request: ProjectInitRequest) -> Result<ExecutionOutcome> {
+    ProjectInitHandler.handle(ctx, request)
+}
+
+pub fn cache_stats(ctx: &CommandContext, request: CacheStatsRequest) -> Result<ExecutionOutcome> {
+    CacheStatsHandler.handle(ctx, request)
+}
+
+pub fn cache_path(ctx: &CommandContext, request: CachePathRequest) -> Result<ExecutionOutcome> {
+    CachePathHandler.handle(ctx, request)
 }
 
 pub fn workspace_list(
-    global: &GlobalOptions,
+    ctx: &CommandContext,
     request: WorkspaceListRequest,
 ) -> Result<ExecutionOutcome> {
-    let ctx = CommandContext::new(global)?;
-    WorkspaceListHandler.handle(&ctx, request)
+    WorkspaceListHandler.handle(ctx, request)
 }
 
-pub fn lock_diff(global: &GlobalOptions, request: LockDiffRequest) -> Result<ExecutionOutcome> {
-    let ctx = CommandContext::new(global)?;
-    LockDiffHandler.handle(&ctx, request)
+pub fn lock_diff(ctx: &CommandContext, request: LockDiffRequest) -> Result<ExecutionOutcome> {
+    LockDiffHandler.handle(ctx, request)
 }
 
-pub fn cache_prune(global: &GlobalOptions, request: CachePruneRequest) -> Result<ExecutionOutcome> {
-    let ctx = CommandContext::new(global)?;
-    CachePruneHandler.handle(&ctx, request)
+pub fn cache_prune(ctx: &CommandContext, request: CachePruneRequest) -> Result<ExecutionOutcome> {
+    CachePruneHandler.handle(ctx, request)
 }
 
 pub fn workspace_verify(
-    global: &GlobalOptions,
+    ctx: &CommandContext,
     request: WorkspaceVerifyRequest,
 ) -> Result<ExecutionOutcome> {
-    let ctx = CommandContext::new(global)?;
-    WorkspaceVerifyHandler.handle(&ctx, request)
+    WorkspaceVerifyHandler.handle(ctx, request)
 }
 
 pub fn workflow_test(
-    global: &GlobalOptions,
+    ctx: &CommandContext,
     request: WorkflowTestRequest,
 ) -> Result<ExecutionOutcome> {
-    let ctx = CommandContext::new(global)?;
-    WorkflowTestHandler.handle(&ctx, request)
+    WorkflowTestHandler.handle(ctx, request)
 }
 
-pub fn output_build(
-    global: &GlobalOptions,
-    request: OutputBuildRequest,
-) -> Result<ExecutionOutcome> {
-    let ctx = CommandContext::new(global)?;
-    OutputBuildHandler.handle(&ctx, request)
+pub fn output_build(ctx: &CommandContext, request: OutputBuildRequest) -> Result<ExecutionOutcome> {
+    OutputBuildHandler.handle(ctx, request)
 }
 
 pub fn output_publish(
-    global: &GlobalOptions,
+    ctx: &CommandContext,
     request: OutputPublishRequest,
 ) -> Result<ExecutionOutcome> {
-    let ctx = CommandContext::new(global)?;
-    OutputPublishHandler.handle(&ctx, request)
+    OutputPublishHandler.handle(ctx, request)
 }
 
 pub fn project_install(
-    global: &GlobalOptions,
+    ctx: &CommandContext,
     request: ProjectInstallRequest,
 ) -> Result<ExecutionOutcome> {
-    let ctx = CommandContext::new(global)?;
-    ProjectInstallHandler.handle(&ctx, request)
+    ProjectInstallHandler.handle(ctx, request)
 }
 
 pub fn workspace_install(
-    global: &GlobalOptions,
+    ctx: &CommandContext,
     request: WorkspaceInstallRequest,
 ) -> Result<ExecutionOutcome> {
-    let ctx = CommandContext::new(global)?;
-    WorkspaceInstallHandler.handle(&ctx, request)
+    WorkspaceInstallHandler.handle(ctx, request)
 }
 
-pub fn env(global: &GlobalOptions, request: EnvRequest) -> Result<ExecutionOutcome> {
-    let ctx = CommandContext::new(global)?;
-    EnvHandler.handle(&ctx, request)
+pub fn env(ctx: &CommandContext, request: EnvRequest) -> Result<ExecutionOutcome> {
+    EnvHandler.handle(ctx, request)
 }
 
 pub fn store_prefetch(
-    global: &GlobalOptions,
+    ctx: &CommandContext,
     request: StorePrefetchRequest,
 ) -> Result<ExecutionOutcome> {
-    let ctx = CommandContext::new(global)?;
-    StorePrefetchHandler.handle(&ctx, request)
+    StorePrefetchHandler.handle(ctx, request)
 }
 
-pub fn quality_tidy(
-    global: &GlobalOptions,
-    request: QualityTidyRequest,
+pub fn quality_tidy(ctx: &CommandContext, request: QualityTidyRequest) -> Result<ExecutionOutcome> {
+    QualityTidyHandler.handle(ctx, request)
+}
+
+pub fn quality_fmt(_ctx: &CommandContext, request: ToolCommandRequest) -> Result<ExecutionOutcome> {
+    Ok(ExecutionOutcome::success(
+        "stubbed quality fmt",
+        json!({ "args": request.args }),
+    ))
+}
+
+pub fn quality_lint(
+    _ctx: &CommandContext,
+    request: ToolCommandRequest,
 ) -> Result<ExecutionOutcome> {
-    let ctx = CommandContext::new(global)?;
-    QualityTidyHandler.handle(&ctx, request)
-}
-
-fn project_init_request_from_command(command: &PxCommand) -> ProjectInitRequest {
-    ProjectInitRequest {
-        package: command
-            .args
-            .get("package")
-            .and_then(Value::as_str)
-            .map(|s| s.to_string()),
-        python: command
-            .args
-            .get("python")
-            .and_then(Value::as_str)
-            .map(|s| s.to_string()),
-        dry_run: command.dry_run,
-        force: command.force,
-    }
-}
-
-fn cache_prune_request_from_command(command: &PxCommand) -> CachePruneRequest {
-    CachePruneRequest {
-        all: command
-            .args
-            .get("all")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        dry_run: command
-            .args
-            .get("dry_run")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    }
-}
-
-fn workspace_verify_request_from_command(_command: &PxCommand) -> WorkspaceVerifyRequest {
-    WorkspaceVerifyRequest
-}
-
-fn workflow_test_request_from_command(command: &PxCommand) -> WorkflowTestRequest {
-    WorkflowTestRequest {
-        pytest_args: array_arg(command, "pytest_args"),
-    }
-}
-
-fn output_build_request_from_command(command: &PxCommand) -> OutputBuildRequest {
-    let format = command
-        .args
-        .get("format")
-        .and_then(Value::as_str)
-        .unwrap_or("Both");
-    let (include_sdist, include_wheel) = match format {
-        "Sdist" => (true, false),
-        "Wheel" => (false, true),
-        _ => (true, true),
-    };
-    let out = command
-        .args
-        .get("out")
-        .and_then(Value::as_str)
-        .map(PathBuf::from);
-    OutputBuildRequest {
-        include_sdist,
-        include_wheel,
-        out,
-        dry_run: command.dry_run,
-    }
-}
-
-fn output_publish_request_from_command(command: &PxCommand) -> OutputPublishRequest {
-    OutputPublishRequest {
-        registry: command
-            .args
-            .get("registry")
-            .and_then(Value::as_str)
-            .map(|s| s.to_string()),
-        token_env: command
-            .args
-            .get("token_env")
-            .and_then(Value::as_str)
-            .map(|s| s.to_string()),
-        dry_run: command.dry_run,
-    }
-}
-
-fn project_install_request_from_command(command: &PxCommand) -> ProjectInstallRequest {
-    ProjectInstallRequest {
-        frozen: command
-            .args
-            .get("frozen")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    }
-}
-
-fn workspace_install_request_from_command(command: &PxCommand) -> WorkspaceInstallRequest {
-    WorkspaceInstallRequest {
-        frozen: command
-            .args
-            .get("frozen")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    }
-}
-
-fn env_request_from_command(command: &PxCommand) -> EnvRequest {
-    let mode = command
-        .args
-        .get("mode")
-        .and_then(Value::as_str)
-        .unwrap_or("info");
-    EnvRequest {
-        mode: EnvMode::from_str(mode),
-    }
-}
-
-fn store_prefetch_request_from_command(command: &PxCommand) -> StorePrefetchRequest {
-    StorePrefetchRequest {
-        workspace: command
-            .args
-            .get("workspace")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        dry_run: command.dry_run,
-    }
-}
-
-fn quality_tidy_request_from_command(_command: &PxCommand) -> QualityTidyRequest {
-    QualityTidyRequest
+    Ok(ExecutionOutcome::success(
+        "stubbed quality lint",
+        json!({ "args": request.args }),
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -676,80 +599,10 @@ pub enum CommandStatus {
     Failure,
 }
 
-pub fn execute(global: &GlobalOptions, command: &PxCommand) -> Result<ExecutionOutcome> {
-    if command.group == CommandGroup::Project && command.name == "init" {
-        return project_init(global, project_init_request_from_command(command));
-    }
-    if command.group == CommandGroup::Infra
-        && command.name == "cache"
-        && cache_mode_eq(command, "stats")
-    {
-        return cache_stats(global, CacheStatsRequest);
-    }
-    if command.group == CommandGroup::Infra
-        && command.name == "cache"
-        && cache_mode_eq(command, "path")
-    {
-        return cache_path(global, CachePathRequest);
-    }
-    if command.group == CommandGroup::Infra
-        && command.name == "cache"
-        && cache_mode_eq(command, "prune")
-    {
-        return cache_prune(global, cache_prune_request_from_command(command));
-    }
-    if command.group == CommandGroup::Workspace && command.name == "list" {
-        return workspace_list(global, WorkspaceListRequest);
-    }
-    if command.group == CommandGroup::Workspace && command.name == "verify" {
-        return workspace_verify(global, workspace_verify_request_from_command(command));
-    }
-    if command.group == CommandGroup::Lock && command.name == "diff" {
-        return lock_diff(global, LockDiffRequest);
-    }
-    if command.group == CommandGroup::Workflow && command.name == "test" {
-        return workflow_test(global, workflow_test_request_from_command(command));
-    }
-    if command.group == CommandGroup::Output && command.name == "build" {
-        return output_build(global, output_build_request_from_command(command));
-    }
-    if command.group == CommandGroup::Output && command.name == "publish" {
-        return output_publish(global, output_publish_request_from_command(command));
-    }
-    if command.group == CommandGroup::Project && command.name == "install" {
-        return project_install(global, project_install_request_from_command(command));
-    }
-    if command.group == CommandGroup::Workspace && command.name == "install" {
-        return workspace_install(global, workspace_install_request_from_command(command));
-    }
-    if command.group == CommandGroup::Infra && command.name == "env" {
-        return env(global, env_request_from_command(command));
-    }
-    if command.group == CommandGroup::Store && command.name == "prefetch" {
-        return store_prefetch(global, store_prefetch_request_from_command(command));
-    }
-    if command.group == CommandGroup::Quality && command.name == "tidy" {
-        return quality_tidy(global, quality_tidy_request_from_command(command));
-    }
-
-    let ctx = CommandContext::new(global)?;
-    match (command.group, command.name.as_str()) {
-        (CommandGroup::Infra, "cache") => handle_cache(&ctx, command),
-        (CommandGroup::Workflow, "run") => handle_run(&ctx, command),
-        (CommandGroup::Project, "add") => handle_project_add(&ctx, command),
-        (CommandGroup::Project, "remove") => handle_project_remove(&ctx, command),
-        (CommandGroup::Lock, "upgrade") => handle_lock_upgrade(&ctx, command),
-        (CommandGroup::Workspace, "verify") => handle_workspace_verify(&ctx, command),
-        (CommandGroup::Workspace, "tidy") => handle_workspace_tidy(&ctx, command),
-        (CommandGroup::Migrate, "migrate") => handle_migrate(&ctx, command),
-        _ => Ok(default_outcome(command)),
-    }
-}
-
-fn env_outcome(mode: EnvMode) -> Result<ExecutionOutcome> {
+fn env_outcome(ctx: &CommandContext, mode: EnvMode) -> Result<ExecutionOutcome> {
     match mode {
         EnvMode::Python => {
-            let interpreter = px_python::detect_interpreter()?;
+            let interpreter = ctx.python_runtime().detect_interpreter()?;
             Ok(ExecutionOutcome::success(
                 interpreter.clone(),
                 json!({
@@ -759,24 +612,24 @@ fn env_outcome(mode: EnvMode) -> Result<ExecutionOutcome> {
             ))
         }
         EnvMode::Info => {
-            let ctx = PythonContext::new()?;
-            let mut details = env_details(&ctx);
+            let py = PythonContext::new(ctx)?;
+            let mut details = env_details(&py);
             if let Value::Object(ref mut map) = details {
                 map.insert("mode".to_string(), Value::String("info".to_string()));
             }
             Ok(ExecutionOutcome::success(
                 format!(
                     "interpreter {} • project {}",
-                    ctx.python,
-                    ctx.project_root.display()
+                    py.python,
+                    py.project_root.display()
                 ),
                 details,
             ))
         }
         EnvMode::Paths => {
-            let ctx = PythonContext::new()?;
-            let mut details = env_details(&ctx);
-            let pythonpath_os = OsString::from(&ctx.pythonpath);
+            let py = PythonContext::new(ctx)?;
+            let mut details = env_details(&py);
+            let pythonpath_os = OsString::from(&py.pythonpath);
             let os_paths = env::split_paths(&pythonpath_os)
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>();
@@ -796,40 +649,37 @@ fn env_outcome(mode: EnvMode) -> Result<ExecutionOutcome> {
     }
 }
 
-fn handle_run(_ctx: &CommandContext, command: &PxCommand) -> Result<ExecutionOutcome> {
-    let ctx = PythonContext::new()?;
-    let extra_args = array_arg(command, "args");
-    let entry_arg = command
-        .args
-        .get("entry")
-        .and_then(Value::as_str)
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-
-    if let Some(entry) = entry_arg.as_deref() {
-        if let Some(target) = detect_passthrough_target(entry, &ctx) {
-            return run_passthrough(command, &ctx, target, extra_args);
+pub fn workflow_run(ctx: &CommandContext, request: WorkflowRunRequest) -> Result<ExecutionOutcome> {
+    let py_ctx = PythonContext::new(ctx)?;
+    let extra_args = request.args.clone();
+    let command_args = json!({
+        "entry": request.entry,
+        "target": request.target,
+        "args": extra_args,
+    });
+    if let Some(entry) = request.entry.as_deref() {
+        if let Some(target) = detect_passthrough_target(entry, &py_ctx) {
+            return run_passthrough(ctx, &py_ctx, target, extra_args, &command_args);
         }
     }
 
-    let resolved = match entry_arg {
+    let resolved = match request.entry.clone() {
         Some(entry) => ResolvedEntry::explicit(entry),
         None => {
-            let manifest = ctx.project_root.join("pyproject.toml");
+            let manifest = py_ctx.project_root.join("pyproject.toml");
             if !manifest.exists() {
-                return Ok(DefaultEntryIssue::MissingManifest(manifest).into_outcome(&ctx));
+                return Ok(DefaultEntryIssue::MissingManifest(manifest).into_outcome(&py_ctx));
             }
             match infer_default_entry(&manifest)? {
                 Some(entry) => entry,
                 None => {
-                    return Ok(DefaultEntryIssue::NoScripts(manifest).into_outcome(&ctx));
+                    return Ok(DefaultEntryIssue::NoScripts(manifest).into_outcome(&py_ctx));
                 }
             }
         }
     };
 
-    run_module_entry(command, &ctx, resolved, extra_args)
+    run_module_entry(ctx, &py_ctx, resolved, extra_args, &command_args)
 }
 
 #[derive(Debug, Clone)]
@@ -922,19 +772,25 @@ enum PassthroughReason {
 }
 
 fn run_module_entry(
-    command: &PxCommand,
-    ctx: &PythonContext,
+    core_ctx: &CommandContext,
+    py_ctx: &PythonContext,
     resolved: ResolvedEntry,
     extra_args: Vec<String>,
+    command_args: &Value,
 ) -> Result<ExecutionOutcome> {
     let ResolvedEntry { entry, source } = resolved;
     let mut python_args = vec!["-m".to_string(), entry.clone()];
     python_args.extend(extra_args.iter().cloned());
 
-    let mut envs = ctx.base_env(&command.args)?;
+    let mut envs = py_ctx.base_env(command_args)?;
     envs.push(("PX_RUN_ENTRY".into(), entry.clone()));
 
-    let output = px_runtime::run_command(&ctx.python, &python_args, &envs, &ctx.project_root)?;
+    let output = core_ctx.python_runtime().run_command(
+        &py_ctx.python,
+        &python_args,
+        &envs,
+        &py_ctx.project_root,
+    )?;
     let mut details = json!({
         "mode": "module",
         "entry": entry.clone(),
@@ -952,7 +808,7 @@ fn run_module_entry(
     }
 
     Ok(outcome_from_output(
-        &command.name,
+        "run",
         &entry,
         output,
         "px run",
@@ -961,10 +817,11 @@ fn run_module_entry(
 }
 
 fn run_passthrough(
-    command: &PxCommand,
-    ctx: &PythonContext,
+    core_ctx: &CommandContext,
+    py_ctx: &PythonContext,
     target: PassthroughTarget,
     extra_args: Vec<String>,
+    command_args: &Value,
 ) -> Result<ExecutionOutcome> {
     let PassthroughTarget {
         program,
@@ -972,7 +829,7 @@ fn run_passthrough(
         reason,
         resolved,
     } = target;
-    let envs = ctx.base_env(&command.args)?;
+    let envs = py_ctx.base_env(command_args)?;
     let program_args = match &reason {
         PassthroughReason::PythonScript { script_arg, .. } => {
             let mut args = Vec::with_capacity(extra_args.len() + 1);
@@ -982,7 +839,12 @@ fn run_passthrough(
         }
         _ => extra_args.clone(),
     };
-    let output = px_runtime::run_command(&program, &program_args, &envs, &ctx.project_root)?;
+    let output = core_ctx.python_runtime().run_command(
+        &program,
+        &program_args,
+        &envs,
+        &py_ctx.project_root,
+    )?;
     let mut details = json!({
         "mode": "passthrough",
         "program": display.clone(),
@@ -1003,7 +865,7 @@ fn run_passthrough(
     }
 
     Ok(outcome_from_output(
-        &command.name,
+        "run",
         &display,
         output,
         "px run",
@@ -1157,35 +1019,33 @@ fn resolve_executable_path(entry: &str, root: &Path) -> (String, Option<String>)
     }
 }
 
-fn workflow_test_outcome(
-    ctx: &CommandContext,
-    pytest_args: &[String],
-) -> Result<ExecutionOutcome> {
-    let py_ctx = PythonContext::new()?;
+fn workflow_test_outcome(ctx: &CommandContext, pytest_args: &[String]) -> Result<ExecutionOutcome> {
+    let py_ctx = PythonContext::new(ctx)?;
     let command_args = json!({ "pytest_args": pytest_args });
     let mut envs = py_ctx.base_env(&command_args)?;
     envs.push(("PX_TEST_RUNNER".into(), "pytest".into()));
 
     if ctx.config().test.fallback_builtin {
-        return run_builtin_tests("test", py_ctx, envs);
+        return run_builtin_tests("test", ctx, py_ctx, envs);
     }
 
     let mut pytest_cmd = vec!["-m".to_string(), "pytest".to_string(), "tests".to_string()];
     pytest_cmd.extend(pytest_args.iter().cloned());
 
-    let output = px_runtime::run_command(&py_ctx.python, &pytest_cmd, &envs, &py_ctx.project_root)?;
+    let output = ctx.python_runtime().run_command(
+        &py_ctx.python,
+        &pytest_cmd,
+        &envs,
+        &py_ctx.project_root,
+    )?;
     if output.code == 0 {
         return Ok(outcome_from_output(
-            "test",
-            "pytest",
-            output,
-            "px test",
-            None,
+            "test", "pytest", output, "px test", None,
         ));
     }
 
     if missing_pytest(&output.stderr) {
-        return run_builtin_tests("test", py_ctx, envs);
+        return run_builtin_tests("test", ctx, py_ctx, envs);
     }
 
     Ok(ExecutionOutcome::failure(
@@ -1202,7 +1062,7 @@ fn output_build_outcome(
     ctx: &CommandContext,
     request: &OutputBuildRequest,
 ) -> Result<ExecutionOutcome> {
-    let py_ctx = PythonContext::new()?;
+    let py_ctx = PythonContext::new(ctx)?;
     let targets = build_targets_from_request(request);
     let out_dir = resolve_output_dir_from_request(&py_ctx, request.out.as_ref())?;
 
@@ -1222,7 +1082,9 @@ fn output_build_outcome(
         return Ok(ExecutionOutcome::success(message, details));
     }
 
-    fs::create_dir_all(&out_dir)?;
+    ctx.fs()
+        .create_dir_all(&out_dir)
+        .context("creating build directory")?;
     let (name, version) = project_name_version(&py_ctx.project_root)?;
     let mut produced = Vec::new();
     if targets.sdist {
@@ -1274,7 +1136,7 @@ fn output_publish_outcome(
     ctx: &CommandContext,
     request: &OutputPublishRequest,
 ) -> Result<ExecutionOutcome> {
-    let py_ctx = PythonContext::new()?;
+    let py_ctx = PythonContext::new(ctx)?;
     let registry = request
         .registry
         .as_deref()
@@ -1383,10 +1245,7 @@ fn build_targets_from_request(request: &OutputBuildRequest) -> BuildTargets {
     targets
 }
 
-fn resolve_output_dir_from_request(
-    ctx: &PythonContext,
-    out: Option<&PathBuf>,
-) -> Result<PathBuf> {
+fn resolve_output_dir_from_request(ctx: &PythonContext, out: Option<&PathBuf>) -> Result<PathBuf> {
     if let Some(path) = out {
         if path.is_absolute() {
             Ok(path.clone())
@@ -1574,13 +1433,17 @@ fn append_dir_to_zip(zip: &mut ZipWriter<File>, src: &Path, prefix: &str) -> Res
 
 fn run_builtin_tests(
     command_name: &str,
+    core_ctx: &CommandContext,
     ctx: PythonContext,
     mut envs: Vec<(String, String)>,
 ) -> Result<ExecutionOutcome> {
     envs.push(("PX_TEST_RUNNER".into(), "builtin".into()));
     let script = "from sample_px_app import cli\nassert cli.greet() == 'Hello, World!'\nprint('px fallback test passed')";
     let args = vec!["-c".to_string(), script.to_string()];
-    let output = px_runtime::run_command(&ctx.python, &args, &envs, &ctx.project_root)?;
+    let output =
+        core_ctx
+            .python_runtime()
+            .run_command(&ctx.python, &args, &envs, &ctx.project_root)?;
     Ok(outcome_from_output(
         command_name,
         "builtin",
@@ -1588,19 +1451,6 @@ fn run_builtin_tests(
         "px test",
         None,
     ))
-}
-
-fn default_outcome(command: &PxCommand) -> ExecutionOutcome {
-    let details = json!({
-        "specs": command.specs.clone(),
-        "args": command.args.clone(),
-        "dry_run": command.dry_run,
-        "force": command.force,
-    });
-    ExecutionOutcome::success(
-        format!("stubbed {} {}", command.group, command.name),
-        details,
-    )
 }
 
 fn env_details(ctx: &PythonContext) -> Value {
@@ -1613,33 +1463,6 @@ fn env_details(ctx: &PythonContext) -> Value {
             "PYTHONPATH": ctx.pythonpath.clone(),
         }
     })
-}
-
-fn handle_cache(ctx: &CommandContext, command: &PxCommand) -> Result<ExecutionOutcome> {
-    let mode = command
-        .args
-        .get("mode")
-        .and_then(Value::as_str)
-        .unwrap_or("path")
-        .to_lowercase();
-    match mode.as_str() {
-        "path" => cache_path_outcome_with(ctx.cache()),
-        "stats" => cache_stats_outcome_with(ctx.cache()),
-        "prune" => {
-            let all = command
-                .args
-                .get("all")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let dry_run = command
-                .args
-                .get("dry_run")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            cache_prune_outcome_with(ctx.cache(), all, dry_run)
-        }
-        other => bail!("px cache mode `{other}` not implemented"),
-    }
 }
 
 fn store_prefetch_outcome(
@@ -1664,21 +1487,13 @@ fn store_prefetch_outcome(
     }
 }
 
-fn handle_migrate(ctx: &CommandContext, command: &PxCommand) -> Result<ExecutionOutcome> {
-    let root = current_project_root()?;
+pub fn migrate(ctx: &CommandContext, request: MigrateRequest) -> Result<ExecutionOutcome> {
+    let root = ctx.project_root()?;
     let pyproject_path = root.join("pyproject.toml");
     let pyproject_exists = pyproject_path.exists();
 
-    let source_override = command
-        .args
-        .get("source")
-        .and_then(Value::as_str)
-        .map(|s| s.to_string());
-    let dev_override = command
-        .args
-        .get("dev_source")
-        .and_then(Value::as_str)
-        .map(|s| s.to_string());
+    let source_override = request.source.clone();
+    let dev_override = request.dev_source.clone();
 
     let requirements_path = match resolve_onboard_path(
         &root,
@@ -1766,26 +1581,10 @@ fn handle_migrate(ctx: &CommandContext, command: &PxCommand) -> Result<Execution
     let mut message = format!(
         "px migrate: plan ready (prod: {prod_count}, dev: {dev_count}, sources: {source_count}, project: {project_type})"
     );
-    let write_requested = command
-        .args
-        .get("write")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let allow_dirty = command
-        .args
-        .get("allow_dirty")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let lock_only = command
-        .args
-        .get("lock_only")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let no_autopin = command
-        .args
-        .get("no_autopin")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let write_requested = request.write;
+    let allow_dirty = request.allow_dirty;
+    let lock_only = request.lock_only;
+    let no_autopin = request.no_autopin;
 
     if lock_only && !pyproject_exists {
         return Ok(ExecutionOutcome::user_error(
@@ -1828,7 +1627,7 @@ fn handle_migrate(ctx: &CommandContext, command: &PxCommand) -> Result<Execution
     }
 
     if !allow_dirty {
-        if let Some(changes) = git_worktree_changes(&root)? {
+        if let Some(changes) = ctx.git().worktree_changes(&root)? {
             if !changes.is_empty() {
                 details["changes"] =
                     Value::Array(changes.iter().map(|c| Value::String(c.clone())).collect());
@@ -1863,12 +1662,13 @@ fn handle_migrate(ctx: &CommandContext, command: &PxCommand) -> Result<Execution
     let mut autopin_hint = None;
 
     if pyproject_path.exists() {
-        let marker_env = current_marker_environment()?;
+        let marker_env = ctx.marker_environment()?;
         let autopin_snapshot = px_project::ProjectSnapshot::read_from(&root)?;
-        let resolver = |snap: &ManifestSnapshot, specs: &[String]| -> Result<Vec<PinSpec>> {
+        let effects = ctx.shared_effects();
+        let resolver = move |snap: &ManifestSnapshot, specs: &[String]| -> Result<Vec<PinSpec>> {
             let mut override_snapshot = snap.clone();
             override_snapshot.dependencies = specs.to_vec();
-            let resolved = resolve_dependencies(&override_snapshot)?;
+            let resolved = resolve_dependencies_with_effects(effects.as_ref(), &override_snapshot)?;
             Ok(resolved.pins)
         };
         match plan_autopin(
@@ -2020,7 +1820,7 @@ fn handle_project_prefetch(ctx: &CommandContext, dry_run: bool) -> Result<Execut
 
     let cache = ctx.cache();
     let store_specs = store_prefetch_specs(&lock_specs);
-    let summary = prefetch_artifacts(
+    let summary = ctx.cache_store().prefetch(
         &cache.path,
         &store_specs,
         StorePrefetchOptions {
@@ -2062,10 +1862,15 @@ fn handle_project_prefetch(ctx: &CommandContext, dry_run: bool) -> Result<Execut
     Ok(ExecutionOutcome::success(message, details))
 }
 
-
-fn cache_path_outcome_with(cache: &CacheLocation) -> Result<ExecutionOutcome> {
-    fs::create_dir_all(&cache.path).context("unable to create cache directory")?;
-    let canonical = fs::canonicalize(&cache.path).unwrap_or(cache.path.clone());
+fn cache_path_outcome(ctx: &CommandContext) -> Result<ExecutionOutcome> {
+    let cache = ctx.cache();
+    ctx.fs()
+        .create_dir_all(&cache.path)
+        .context("unable to create cache directory")?;
+    let canonical = ctx
+        .fs()
+        .canonicalize(&cache.path)
+        .unwrap_or(cache.path.clone());
     let path_str = canonical.display().to_string();
     Ok(ExecutionOutcome::success(
         format!("path {path_str}"),
@@ -2077,8 +1882,9 @@ fn cache_path_outcome_with(cache: &CacheLocation) -> Result<ExecutionOutcome> {
     ))
 }
 
-fn cache_stats_outcome_with(cache: &CacheLocation) -> Result<ExecutionOutcome> {
-    let usage = compute_cache_usage(&cache.path)?;
+fn cache_stats_outcome(ctx: &CommandContext) -> Result<ExecutionOutcome> {
+    let cache = ctx.cache();
+    let usage = ctx.cache_store().compute_usage(&cache.path)?;
     let message = if usage.exists {
         format!(
             "stats: {} files, {} bytes",
@@ -2104,30 +1910,26 @@ struct CacheStatsHandler;
 impl CommandHandler<CacheStatsRequest> for CacheStatsHandler {
     fn handle(
         &self,
-        _ctx: &CommandContext,
+        ctx: &CommandContext,
         _request: CacheStatsRequest,
     ) -> Result<ExecutionOutcome> {
-        cache_stats_outcome_with(_ctx.cache())
+        cache_stats_outcome(ctx)
     }
 }
 
 struct CachePathHandler;
 
 impl CommandHandler<CachePathRequest> for CachePathHandler {
-    fn handle(&self, _ctx: &CommandContext, _request: CachePathRequest) -> Result<ExecutionOutcome> {
-        cache_path_outcome_with(_ctx.cache())
+    fn handle(&self, ctx: &CommandContext, _request: CachePathRequest) -> Result<ExecutionOutcome> {
+        cache_path_outcome(ctx)
     }
 }
 
 struct CachePruneHandler;
 
 impl CommandHandler<CachePruneRequest> for CachePruneHandler {
-    fn handle(
-        &self,
-        ctx: &CommandContext,
-        request: CachePruneRequest,
-    ) -> Result<ExecutionOutcome> {
-        cache_prune_outcome_with(ctx.cache(), request.all, request.dry_run)
+    fn handle(&self, ctx: &CommandContext, request: CachePruneRequest) -> Result<ExecutionOutcome> {
+        cache_prune_outcome(ctx, request.all, request.dry_run)
     }
 }
 
@@ -2146,11 +1948,7 @@ impl CommandHandler<WorkspaceListRequest> for WorkspaceListHandler {
 struct LockDiffHandler;
 
 impl CommandHandler<LockDiffRequest> for LockDiffHandler {
-    fn handle(
-        &self,
-        _ctx: &CommandContext,
-        _request: LockDiffRequest,
-    ) -> Result<ExecutionOutcome> {
+    fn handle(&self, _ctx: &CommandContext, _request: LockDiffRequest) -> Result<ExecutionOutcome> {
         lock_diff_outcome()
     }
 }
@@ -2230,8 +2028,8 @@ impl CommandHandler<WorkspaceInstallRequest> for WorkspaceInstallHandler {
 struct EnvHandler;
 
 impl CommandHandler<EnvRequest> for EnvHandler {
-    fn handle(&self, _ctx: &CommandContext, request: EnvRequest) -> Result<ExecutionOutcome> {
-        env_outcome(request.mode)
+    fn handle(&self, ctx: &CommandContext, request: EnvRequest) -> Result<ExecutionOutcome> {
+        env_outcome(ctx, request.mode)
     }
 }
 
@@ -2259,11 +2057,8 @@ impl CommandHandler<QualityTidyRequest> for QualityTidyHandler {
     }
 }
 
-fn cache_prune_outcome_with(
-    cache: &CacheLocation,
-    all: bool,
-    dry_run: bool,
-) -> Result<ExecutionOutcome> {
+fn cache_prune_outcome(ctx: &CommandContext, all: bool, dry_run: bool) -> Result<ExecutionOutcome> {
+    let cache = ctx.cache();
     if !all {
         return Ok(ExecutionOutcome::user_error(
             "px cache prune currently requires --all",
@@ -2292,7 +2087,7 @@ fn cache_prune_outcome_with(
         ));
     }
 
-    let walk = collect_cache_walk(&cache.path)?;
+    let walk = ctx.cache_store().collect_walk(&cache.path)?;
     let candidate_entries = walk.files.len() as u64;
     let candidate_size_bytes = walk.total_bytes;
 
@@ -2333,7 +2128,7 @@ fn cache_prune_outcome_with(
         ));
     }
 
-    let prune = prune_cache_entries(&walk);
+    let prune = ctx.cache_store().prune(&walk);
     let error_count = prune.errors.len();
     let errors_json: Vec<_> = prune
         .errors
@@ -2376,16 +2171,6 @@ fn cache_prune_outcome_with(
     }
 }
 
-fn cache_mode_eq(command: &PxCommand, expected: &str) -> bool {
-    command
-        .args
-        .get("mode")
-        .and_then(Value::as_str)
-        .map(|mode| mode.eq_ignore_ascii_case(expected))
-        .unwrap_or(false)
-}
-
-
 pub(crate) struct InstallOutcome {
     state: InstallState,
     lockfile: String,
@@ -2405,10 +2190,10 @@ struct ProjectInitHandler;
 impl CommandHandler<ProjectInitRequest> for ProjectInitHandler {
     fn handle(
         &self,
-        _ctx: &CommandContext,
+        ctx: &CommandContext,
         request: ProjectInitRequest,
     ) -> Result<ExecutionOutcome> {
-        let root = current_project_root()?;
+        let root = ctx.project_root()?;
         let pyproject_path = root.join("pyproject.toml");
 
         if pyproject_path.exists() {
@@ -2416,7 +2201,7 @@ impl CommandHandler<ProjectInitRequest> for ProjectInitHandler {
         }
 
         if !request.force {
-            if let Some(changes) = git_worktree_changes(&root)? {
+            if let Some(changes) = ctx.git().worktree_changes(&root)? {
                 if !changes.is_empty() {
                     return Ok(dirty_worktree_response(changes));
                 }
@@ -2497,17 +2282,17 @@ fn dirty_worktree_response(changes: Vec<String>) -> ExecutionOutcome {
     )
 }
 
-fn handle_project_add(_ctx: &CommandContext, command: &PxCommand) -> Result<ExecutionOutcome> {
-    if command.specs.is_empty() {
+pub fn project_add(ctx: &CommandContext, request: ProjectAddRequest) -> Result<ExecutionOutcome> {
+    if request.specs.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "provide at least one dependency",
             json!({ "hint": "run `px project add name==version`" }),
         ));
     }
 
-    let root = current_project_root()?;
+    let root = ctx.project_root()?;
     let pyproject_path = root.join("pyproject.toml");
-    let cleaned_specs: Vec<String> = command
+    let cleaned_specs: Vec<String> = request
         .specs
         .iter()
         .map(|s| s.trim().to_string())
@@ -2545,17 +2330,20 @@ fn handle_project_add(_ctx: &CommandContext, command: &PxCommand) -> Result<Exec
     ))
 }
 
-fn handle_project_remove(_ctx: &CommandContext, command: &PxCommand) -> Result<ExecutionOutcome> {
-    if command.specs.is_empty() {
+pub fn project_remove(
+    ctx: &CommandContext,
+    request: ProjectRemoveRequest,
+) -> Result<ExecutionOutcome> {
+    if request.specs.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "provide at least one dependency to remove",
             json!({ "hint": "run `px project remove name`" }),
         ));
     }
 
-    let root = current_project_root()?;
+    let root = ctx.project_root()?;
     let pyproject_path = root.join("pyproject.toml");
-    let cleaned_specs: Vec<String> = command
+    let cleaned_specs: Vec<String> = request
         .specs
         .iter()
         .map(|s| s.trim().to_string())
@@ -2586,6 +2374,16 @@ fn handle_project_remove(_ctx: &CommandContext, command: &PxCommand) -> Result<E
     ))
 }
 
+pub fn project_update(
+    _ctx: &CommandContext,
+    request: ProjectUpdateRequest,
+) -> Result<ExecutionOutcome> {
+    Ok(ExecutionOutcome::success(
+        "stubbed project update",
+        json!({ "specs": request.specs }),
+    ))
+}
+
 fn project_install_outcome(ctx: &CommandContext, frozen: bool) -> Result<ExecutionOutcome> {
     let snapshot = manifest_snapshot()?;
     let outcome = match install_snapshot(ctx, &snapshot, frozen, None) {
@@ -2603,14 +2401,14 @@ fn project_install_outcome(ctx: &CommandContext, frozen: bool) -> Result<Executi
 
     match outcome.state {
         InstallState::Installed => {
-            refresh_project_site(&snapshot)?;
+            refresh_project_site(&snapshot, ctx.fs())?;
             Ok(ExecutionOutcome::success(
                 format!("wrote {}", outcome.lockfile),
                 details,
             ))
         }
         InstallState::UpToDate => {
-            refresh_project_site(&snapshot)?;
+            refresh_project_site(&snapshot, ctx.fs())?;
             let message = if frozen && outcome.verified {
                 "lockfile verified".to_string()
             } else {
@@ -2715,7 +2513,10 @@ fn lock_diff_outcome() -> Result<ExecutionOutcome> {
     }
 }
 
-fn handle_lock_upgrade(_ctx: &CommandContext, _command: &PxCommand) -> Result<ExecutionOutcome> {
+pub fn lock_upgrade(
+    _ctx: &CommandContext,
+    _request: LockUpgradeRequest,
+) -> Result<ExecutionOutcome> {
     let snapshot = manifest_snapshot()?;
     let lock_path = snapshot.lock_path.clone();
     let lock = match load_lockfile_optional(&lock_path)? {
@@ -2756,15 +2557,10 @@ fn handle_lock_upgrade(_ctx: &CommandContext, _command: &PxCommand) -> Result<Ex
     ))
 }
 
-
-fn handle_workspace_verify(ctx: &CommandContext, _command: &PxCommand) -> Result<ExecutionOutcome> {
-    workspace::verify(ctx)
-}
-
-
-
-
-fn handle_workspace_tidy(ctx: &CommandContext, _command: &PxCommand) -> Result<ExecutionOutcome> {
+pub fn workspace_tidy(
+    ctx: &CommandContext,
+    _request: WorkspaceTidyRequest,
+) -> Result<ExecutionOutcome> {
     workspace::tidy(ctx)
 }
 
@@ -2811,26 +2607,27 @@ pub(crate) fn install_snapshot(
         } else {
             snapshot.dependencies.clone()
         };
+        let marker_env = ctx.marker_environment()?;
         let mut resolved_override = None;
         if override_pins.is_none()
             && dependencies_require_resolution(&dependencies)
             && ctx.config().resolver.enabled
         {
-            let resolved = resolve_dependencies(snapshot)?;
-            let marker_env = current_marker_environment()?;
-            dependencies = merge_resolved_dependencies(&dependencies, &resolved.specs, &marker_env);
+            let resolved = resolve_dependencies(ctx, snapshot)?;
+            dependencies =
+                merge_resolved_dependencies(&dependencies, &resolved.specs, &marker_env);
             resolved_override = Some(resolved.pins);
             persist_resolved_dependencies(snapshot, &dependencies)?;
         }
         let pins = if let Some(override_data) = override_pins {
-            pins_with_override(&dependencies, override_data)?
+            pins_with_override(&marker_env, &dependencies, override_data)?
         } else {
             match resolved_override {
                 Some(pins) => pins,
-                None => ensure_exact_pins(&dependencies)?,
+                None => ensure_exact_pins(&marker_env, &dependencies)?,
             }
         };
-        let resolved = resolve_pins(&pins, ctx.cache(), ctx.config().resolver.force_sdist)?;
+        let resolved = resolve_pins(ctx, &pins, ctx.config().resolver.force_sdist)?;
         let contents = render_lockfile(snapshot, &resolved, PX_VERSION)?;
         fs::write(&snapshot.lock_path, contents)?;
         Ok(InstallOutcome {
@@ -2842,19 +2639,23 @@ pub(crate) fn install_snapshot(
     }
 }
 
-fn refresh_project_site(snapshot: &ManifestSnapshot) -> Result<()> {
+fn refresh_project_site(snapshot: &ManifestSnapshot, fs: &dyn effects::FileSystem) -> Result<()> {
     let lock = load_lockfile_optional(&snapshot.lock_path)?.ok_or_else(|| {
         anyhow!(
             "px install: lockfile missing at {}",
             snapshot.lock_path.display()
         )
     })?;
-    materialize_project_site(snapshot, &lock)
+    materialize_project_site(snapshot, &lock, fs)
 }
 
-fn materialize_project_site(snapshot: &ManifestSnapshot, lock: &LockSnapshot) -> Result<()> {
+fn materialize_project_site(
+    snapshot: &ManifestSnapshot,
+    lock: &LockSnapshot,
+    fs: &dyn effects::FileSystem,
+) -> Result<()> {
     let site_dir = snapshot.root.join(".px").join("site");
-    fs::create_dir_all(&site_dir)?;
+    fs.create_dir_all(&site_dir)?;
     let pth_path = site_dir.join("px.pth");
 
     let mut entries = Vec::new();
@@ -2884,11 +2685,11 @@ fn materialize_project_site(snapshot: &ManifestSnapshot, lock: &LockSnapshot) ->
     if !contents.is_empty() {
         contents.push('\n');
     }
-    fs::write(&pth_path, contents)?;
+    fs.write(&pth_path, contents.as_bytes())?;
     Ok(())
 }
 
-fn ensure_project_site_bootstrap(project_root: &Path) {
+fn ensure_project_site_bootstrap(project_root: &Path, fs: &dyn effects::FileSystem) {
     let pth_path = project_root.join(".px").join("site").join("px.pth");
     if pth_path.exists() {
         return;
@@ -2907,7 +2708,7 @@ fn ensure_project_site_bootstrap(project_root: &Path) {
     };
     match load_lockfile_optional(&snapshot.lock_path) {
         Ok(Some(lock)) => {
-            if let Err(err) = materialize_project_site(&snapshot, &lock) {
+            if let Err(err) = materialize_project_site(&snapshot, &lock, fs) {
                 warn!("failed to refresh .px/site from px.lock: {err:?}");
             }
         }
@@ -2978,8 +2779,18 @@ struct ResolvedSpecOutput {
     pins: Vec<PinSpec>,
 }
 
-fn resolve_dependencies(snapshot: &ManifestSnapshot) -> Result<ResolvedSpecOutput> {
-    let python = px_python::detect_interpreter()?;
+fn resolve_dependencies(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+) -> Result<ResolvedSpecOutput> {
+    resolve_dependencies_with_effects(ctx.effects(), snapshot)
+}
+
+fn resolve_dependencies_with_effects(
+    effects: &dyn Effects,
+    snapshot: &ManifestSnapshot,
+) -> Result<ResolvedSpecOutput> {
+    let python = effects.python().detect_interpreter()?;
     let tags = detect_interpreter_tags_with(&python)?;
     let marker_env = detect_marker_environment_with(&python)?;
     let request = ResolverRequest {
@@ -3028,7 +2839,9 @@ fn persist_resolved_dependencies(snapshot: &ManifestSnapshot, specs: &[String]) 
     Ok(())
 }
 
-pub(crate) fn store_prefetch_specs<'a>(entries: &'a [LockPrefetchSpec]) -> Vec<StorePrefetchSpec<'a>> {
+pub(crate) fn store_prefetch_specs<'a>(
+    entries: &'a [LockPrefetchSpec],
+) -> Vec<StorePrefetchSpec<'a>> {
     entries
         .iter()
         .map(|entry| StorePrefetchSpec {
@@ -3041,8 +2854,7 @@ pub(crate) fn store_prefetch_specs<'a>(entries: &'a [LockPrefetchSpec]) -> Vec<S
         .collect()
 }
 
-fn ensure_exact_pins(specs: &[String]) -> Result<Vec<PinSpec>> {
-    let marker_env = current_marker_environment()?;
+fn ensure_exact_pins(marker_env: &MarkerEnvironment, specs: &[String]) -> Result<Vec<PinSpec>> {
     let mut pins = Vec::new();
     for spec in specs {
         if !marker_applies(spec, &marker_env) {
@@ -3120,22 +2932,23 @@ fn parse_exact_pin(spec: &str) -> Result<PinSpec> {
 }
 
 fn resolve_pins(
+    ctx: &CommandContext,
     pins: &[PinSpec],
-    cache: &CacheLocation,
     force_sdist: bool,
 ) -> Result<Vec<ResolvedDependency>> {
     if pins.is_empty() {
         return Ok(Vec::new());
     }
 
-    let client = build_http_client()?;
     let python = px_python::detect_interpreter()?;
     let tags = detect_interpreter_tags_with(&python)?;
     let mut resolved = Vec::new();
     for pin in pins {
-        let release = fetch_release(&client, &pin.normalized, &pin.version, &pin.specifier)?;
+        let release = ctx
+            .pypi()
+            .fetch_release(&pin.normalized, &pin.version, &pin.specifier)?;
         let artifact = if force_sdist {
-            build_wheel_via_sdist(cache, &release, pin, &python)?
+            build_wheel_via_sdist(ctx, &release, pin, &python)?
         } else {
             match select_wheel(&release.urls, &tags, &pin.specifier) {
                 Ok(wheel) => {
@@ -3146,7 +2959,7 @@ fn resolve_pins(
                         url: &wheel.url,
                         sha256: &wheel.sha256,
                     };
-                    let cached = cache_wheel(&cache.path, &request)?;
+                    let cached = ctx.cache_store().cache_wheel(&ctx.cache().path, &request)?;
                     LockedArtifact {
                         filename: wheel.filename.clone(),
                         url: wheel.url.clone(),
@@ -3158,7 +2971,7 @@ fn resolve_pins(
                         platform_tag: wheel.platform_tag.clone(),
                     }
                 }
-                Err(err) => match build_wheel_via_sdist(cache, &release, pin, &python) {
+                Err(err) => match build_wheel_via_sdist(ctx, &release, pin, &python) {
                     Ok(artifact) => artifact,
                     Err(build_err) => {
                         return Err(err.context(format!("sdist fallback failed: {build_err}")))
@@ -3179,14 +2992,14 @@ fn resolve_pins(
 }
 
 fn build_wheel_via_sdist(
-    cache: &CacheLocation,
+    ctx: &CommandContext,
     release: &PypiReleaseResponse,
     pin: &PinSpec,
     python: &str,
 ) -> Result<LockedArtifact> {
     let sdist = select_sdist(&release.urls, &pin.specifier)?;
-    let built = ensure_sdist_build(
-        &cache.path,
+    let built = ctx.cache_store().ensure_sdist_build(
+        &ctx.cache().path,
         &SdistRequest {
             normalized_name: &pin.normalized,
             version: &pin.version,
@@ -3221,7 +3034,7 @@ fn select_sdist<'a>(files: &'a [PypiFile], specifier: &str) -> Result<&'a PypiFi
         })
 }
 
-fn build_http_client() -> Result<Client> {
+pub(crate) fn build_http_client() -> Result<Client> {
     Client::builder()
         .user_agent(format!("px/{PX_VERSION}"))
         .timeout(Duration::from_secs(60))
@@ -3230,7 +3043,7 @@ fn build_http_client() -> Result<Client> {
         .context("failed to build HTTP client")
 }
 
-fn fetch_release(
+pub(crate) fn fetch_release(
     client: &Client,
     normalized: &str,
     version: &str,
@@ -3437,12 +3250,6 @@ print(json.dumps(data))
     })
 }
 
-fn current_marker_environment() -> Result<MarkerEnvironment> {
-    let python = px_python::detect_interpreter()?;
-    let resolver_env = detect_marker_environment_with(&python)?;
-    resolver_env.to_marker_environment()
-}
-
 #[derive(Deserialize)]
 struct MarkerEnvPayload {
     implementation_name: String,
@@ -3501,25 +3308,6 @@ fn canonical_extras(extras: &[String]) -> Vec<String> {
     values
 }
 
-#[derive(Deserialize)]
-struct PypiReleaseResponse {
-    urls: Vec<PypiFile>,
-}
-
-#[derive(Clone, Deserialize)]
-struct PypiFile {
-    filename: String,
-    url: String,
-    packagetype: String,
-    yanked: Option<bool>,
-    digests: PypiDigests,
-}
-
-#[derive(Clone, Deserialize)]
-struct PypiDigests {
-    sha256: String,
-}
-
 #[derive(Clone)]
 struct WheelCandidate {
     filename: String,
@@ -3547,159 +3335,6 @@ fn current_project_root() -> Result<PathBuf> {
     Ok(px_project::current_project_root()?)
 }
 
-#[allow(dead_code)]
-fn scaffold_project(root: &Path, package: &str, python_req: &str) -> Result<Vec<String>> {
-    let mut files = Vec::new();
-    let pyproject_path = root.join("pyproject.toml");
-    let package_dir = root.join(package);
-    let tests_dir = root.join("tests");
-
-    fs::create_dir_all(&package_dir)?;
-    fs::create_dir_all(&tests_dir)?;
-
-    let script_name = format!("{package}-cli");
-    let pyproject = format!(
-        "[project]\nname = \"{package}\"\nversion = \"0.1.0\"\ndescription = \"Generated by px project init\"\nrequires-python = \"{python_req}\"\ndependencies = []\n\n[project.scripts]\n{script_name} = \"{package}.cli:main\"\n\n[build-system]\nrequires = [\"setuptools>=70\", \"wheel\"]\nbuild-backend = \"setuptools.build_meta\"\n"
-    );
-    fs::write(&pyproject_path, pyproject)?;
-    files.push(relative_path(root, &pyproject_path));
-
-    let init_path = package_dir.join("__init__.py");
-    fs::write(&init_path, "__all__ = [\"cli\"]\n")?;
-    files.push(relative_path(root, &init_path));
-
-    let cli_path = package_dir.join("cli.py");
-    let cli_body = format!(
-        r#"from __future__ import annotations
-
-
-def greet(name: str | None = None) -> str:
-    target = name or "World"
-    return f"Hello, {{target}}!"
-
-
-def main() -> None:
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Print a greeting.")
-    parser.add_argument("-n", "--name", default=None, help="Name to greet")
-    args = parser.parse_args()
-    print(greet(args.name))
-
-
-if __name__ == "__main__":
-    main()
-"#
-    );
-    fs::write(&cli_path, cli_body)?;
-    files.push(relative_path(root, &cli_path));
-
-    let tests_path = tests_dir.join("test_cli.py");
-    let tests_body = format!(
-        r#"from {package}.cli import greet
-
-
-def test_greet_default() -> None:
-    assert greet() == "Hello, World!"
-
-
-def test_greet_name() -> None:
-    assert greet("Px") == "Hello, Px!"
-"#
-    );
-    fs::write(&tests_path, tests_body)?;
-    files.push(relative_path(root, &tests_path));
-
-    ensure_gitignore(root, &mut files)?;
-
-    Ok(files)
-}
-
-#[allow(dead_code)]
-fn ensure_gitignore(root: &Path, files: &mut Vec<String>) -> Result<()> {
-    let path = root.join(".gitignore");
-    let entries = ["__pycache__/", "dist/", "build/", "*.egg-info/"];
-    if !path.exists() {
-        let mut contents = String::new();
-        for entry in &entries {
-            contents.push_str(entry);
-            contents.push('\n');
-        }
-        fs::write(&path, contents)?;
-        files.push(relative_path(root, &path));
-        return Ok(());
-    }
-
-    let mut contents = fs::read_to_string(&path)?;
-    let mut changed = false;
-    for entry in &entries {
-        if !contents.lines().any(|line| line.trim() == *entry) {
-            if !contents.ends_with('\n') {
-                contents.push('\n');
-            }
-            contents.push_str(entry);
-            contents.push('\n');
-            changed = true;
-        }
-    }
-    if changed {
-        fs::write(&path, contents)?;
-        files.push(relative_path(root, &path));
-    }
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn validate_package_name(name: &str) -> Result<()> {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(ch) if ch.is_ascii_alphabetic() || ch == '_' => {}
-        _ => bail!("package name must start with a letter or underscore"),
-    }
-    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        bail!("package name may only contain letters, numbers, or underscores");
-    }
-    Ok(())
-}
-
-fn relative_path(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .display()
-        .to_string()
-}
-
-pub(crate) fn ensure_pyproject_exists(path: &Path) -> Result<()> {
-    if path.exists() {
-        Ok(())
-    } else {
-        bail!(
-            "pyproject.toml not found in {}",
-            path.parent().unwrap_or(path).display()
-        )
-    }
-}
-
-fn resolve_onboard_path(
-    root: &Path,
-    override_value: Option<&str>,
-    default_name: &str,
-) -> Result<Option<PathBuf>> {
-    if let Some(raw) = override_value {
-        let candidate = normalize_onboard_path(root, PathBuf::from(raw));
-        if !candidate.exists() {
-            bail!("path not found: {}", candidate.display());
-        }
-        return Ok(Some(candidate));
-    }
-    let candidate = root.join(default_name);
-    if candidate.exists() {
-        Ok(Some(candidate))
-    } else {
-        Ok(None)
-    }
-}
-
 fn summarize_autopins(entries: &[AutopinEntry]) -> Option<String> {
     if entries.is_empty() {
         return None;
@@ -3724,93 +3359,11 @@ fn summarize_autopins(entries: &[AutopinEntry]) -> Option<String> {
     Some(summary)
 }
 
-fn marker_applies(spec: &str, marker_env: &MarkerEnvironment) -> bool {
-    let cleaned = strip_wrapping_quotes(spec.trim());
-    match PepRequirement::from_str(cleaned) {
-        Ok(req) => req.evaluate_markers(marker_env, &[]),
-        Err(_) => true,
-    }
-}
-
-fn spec_requires_pin(spec: &str) -> bool {
-    let head = spec.split(';').next().unwrap_or(spec).trim();
-    !head.contains("==")
-}
-
-fn merge_resolved_dependencies(
-    original: &[String],
-    resolved: &[String],
-    marker_env: &MarkerEnvironment,
-) -> Vec<String> {
-    let mut merged = Vec::with_capacity(original.len());
-    let mut resolved_iter = resolved.iter();
-    for spec in original {
-        if spec_requires_pin(spec) && marker_applies(spec, marker_env) {
-            if let Some(pinned) = resolved_iter.next() {
-                merged.push(pinned.clone());
-            } else {
-                merged.push(spec.clone());
-            }
-        } else {
-            merged.push(spec.clone());
-        }
-    }
-    debug_assert!(resolved_iter.next().is_none(), "resolver/pin mismatch");
-    merged
-}
-
-fn autopin_spec_key(spec: &str) -> String {
-    match PepRequirement::from_str(spec.trim()) {
-        Ok(req) => {
-            let name = req.name.to_string().to_ascii_lowercase();
-            let mut extras = req
-                .extras
-                .iter()
-                .map(|extra| extra.to_string().to_ascii_lowercase())
-                .collect::<Vec<_>>();
-            extras.sort();
-            let extras_part = extras.join(",");
-            let marker_part = req
-                .marker
-                .as_ref()
-                .map(|m| canonicalize_marker(&m.to_string()))
-                .unwrap_or_default();
-            format!("{name}|{extras_part}|{marker_part}")
-        }
-        Err(_) => {
-            let name = dependency_name(spec);
-            format!("{name}||")
-        }
-    }
-}
-
-fn autopin_pin_key(pin: &PinSpec) -> String {
-    let mut extras = pin
-        .extras
-        .iter()
-        .map(|extra| extra.to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    extras.sort();
-    let extras_part = extras.join(",");
-    let marker_part = pin
-        .marker
-        .as_deref()
-        .map(canonicalize_marker)
-        .unwrap_or_default();
-    format!("{}|{extras_part}|{marker_part}", pin.normalized)
-}
-
-fn canonicalize_marker(raw: &str) -> String {
-    raw.split_whitespace()
-        .collect::<String>()
-        .to_ascii_lowercase()
-}
-
 fn pins_with_override(
+    marker_env: &MarkerEnvironment,
     dependencies: &[String],
     override_pins: &InstallOverride,
 ) -> Result<Vec<PinSpec>> {
-    let marker_env = current_marker_environment()?;
     let mut lookup: HashMap<String, VecDeque<PinSpec>> = HashMap::new();
     for pin in &override_pins.pins {
         lookup
@@ -3833,261 +3386,6 @@ fn pins_with_override(
         pins.push(parse_exact_pin(spec)?);
     }
     Ok(pins)
-}
-
-fn normalize_onboard_path(root: &Path, path: PathBuf) -> PathBuf {
-    if path.is_absolute() {
-        path
-    } else {
-        root.join(path)
-    }
-}
-
-#[derive(Clone)]
-struct PyprojectPlan {
-    path: PathBuf,
-    contents: Option<String>,
-    created: bool,
-}
-
-impl PyprojectPlan {
-    fn needs_backup(&self) -> bool {
-        self.contents.is_some() && !self.created
-    }
-
-    fn updated(&self) -> bool {
-        self.contents.is_some()
-    }
-}
-
-struct BackupSummary {
-    files: Vec<String>,
-    directory: Option<String>,
-}
-
-struct BackupManager {
-    root: PathBuf,
-    dir: Option<PathBuf>,
-    entries: Vec<String>,
-}
-
-impl BackupManager {
-    fn new(root: &Path) -> Self {
-        Self {
-            root: root.to_path_buf(),
-            dir: None,
-            entries: Vec::new(),
-        }
-    }
-
-    fn backup(&mut self, path: &Path) -> Result<()> {
-        if !path.exists() {
-            return Ok(());
-        }
-        let dir = self.ensure_dir()?;
-        let rel = relative_path(&self.root, path);
-        let dest = dir.join(&rel);
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(path, &dest)?;
-        self.entries.push(relative_path(&self.root, &dest));
-        Ok(())
-    }
-
-    fn ensure_dir(&mut self) -> Result<PathBuf> {
-        if self.dir.is_none() {
-            let fmt = format_description::parse("[year][month][day]T[hour][minute][second]")?;
-            let stamp = OffsetDateTime::now_utc().format(&fmt)?;
-            let dir = self.root.join(".px").join("onboard-backups").join(stamp);
-            fs::create_dir_all(&dir)?;
-            self.dir = Some(dir);
-        }
-        Ok(self.dir.clone().unwrap())
-    }
-
-    fn finish(self) -> BackupSummary {
-        let dir_rel = self.dir.map(|dir| relative_path(&self.root, &dir));
-        BackupSummary {
-            files: self.entries,
-            directory: dir_rel,
-        }
-    }
-}
-
-fn prepare_pyproject_plan(
-    root: &Path,
-    pyproject_path: &Path,
-    lock_only: bool,
-    packages: &[OnboardPackagePlan],
-) -> Result<PyprojectPlan> {
-    if lock_only {
-        ensure_pyproject_exists(pyproject_path)?;
-        return Ok(PyprojectPlan {
-            path: pyproject_path.to_path_buf(),
-            contents: None,
-            created: false,
-        });
-    }
-
-    let mut created = false;
-    let mut doc: DocumentMut = if pyproject_path.exists() {
-        fs::read_to_string(pyproject_path)?.parse()?
-    } else {
-        created = true;
-        create_minimal_pyproject_doc(root)?
-    };
-
-    let mut prod_specs = Vec::new();
-    let mut dev_specs = Vec::new();
-    for pkg in packages {
-        if pkg.source.ends_with("pyproject.toml") {
-            continue;
-        }
-        if pkg.scope == "dev" {
-            dev_specs.push(pkg.requested.clone());
-        } else {
-            prod_specs.push(pkg.requested.clone());
-        }
-    }
-
-    let mut changed = false;
-    changed |= merge_dependency_specs(&mut doc, &prod_specs);
-    changed |= merge_dev_dependency_specs(&mut doc, &dev_specs);
-
-    if changed || created {
-        Ok(PyprojectPlan {
-            path: pyproject_path.to_path_buf(),
-            contents: Some(doc.to_string()),
-            created,
-        })
-    } else {
-        Ok(PyprojectPlan {
-            path: pyproject_path.to_path_buf(),
-            contents: None,
-            created: false,
-        })
-    }
-}
-
-fn create_minimal_pyproject_doc(root: &Path) -> Result<DocumentMut> {
-    let name = default_package_name(root);
-    let template = format!("[project]\nname = \"{name}\"\nversion = \"0.1.0\"\n",)
-        + "description = \"Onboarded by px\"\n"
-        + "requires-python = \">=3.12\"\n"
-        + "dependencies = []\n\n[build-system]\n"
-        + "requires = [\"setuptools>=70\", \"wheel\"]\n"
-        + "build-backend = \"setuptools.build_meta\"\n";
-    let doc: DocumentMut = template.parse()?;
-    Ok(doc)
-}
-
-fn default_package_name(root: &Path) -> String {
-    let raw = root
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("px_onboard");
-    sanitize_package_name(raw)
-}
-
-fn sanitize_package_name(raw: &str) -> String {
-    let mut name = raw
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>()
-        .replace('-', "_")
-        .to_lowercase();
-    if name.is_empty() || !name.chars().next().unwrap().is_ascii_alphabetic() {
-        name = format!("px_{name}");
-    }
-    name
-}
-
-fn merge_dependency_specs(doc: &mut DocumentMut, specs: &[String]) -> bool {
-    if specs.is_empty() {
-        return false;
-    }
-    let array = ensure_dependencies_array_mut(doc);
-    let mut changed = false;
-    for spec in specs {
-        if !array.iter().any(|val| val.as_str() == Some(spec.as_str())) {
-            array.push(spec.as_str());
-            changed = true;
-        }
-    }
-    changed
-}
-
-fn merge_dev_dependency_specs(doc: &mut DocumentMut, specs: &[String]) -> bool {
-    if specs.is_empty() {
-        return false;
-    }
-    let array = ensure_optional_dependency_array_mut(doc, "px-dev");
-    let mut changed = false;
-    for spec in specs {
-        if !array.iter().any(|val| val.as_str() == Some(spec.as_str())) {
-            array.push(spec.as_str());
-            changed = true;
-        }
-    }
-    changed
-}
-
-fn ensure_dependencies_array_mut(doc: &mut DocumentMut) -> &mut Array {
-    if !doc["project"].is_table() {
-        doc["project"] = Item::Table(Table::default());
-    }
-    if !doc["project"]["dependencies"].is_array() {
-        doc["project"]["dependencies"] = Item::Value(TomlValue::Array(Array::new()));
-    }
-    doc["project"]["dependencies"].as_array_mut().unwrap()
-}
-
-fn ensure_optional_dependency_array_mut<'a>(
-    doc: &'a mut DocumentMut,
-    group: &str,
-) -> &'a mut Array {
-    if !doc["project"].is_table() {
-        doc["project"] = Item::Table(Table::default());
-    }
-    let project_table = doc["project"].as_table_mut().unwrap();
-    if !project_table.contains_key("optional-dependencies")
-        || !project_table["optional-dependencies"].is_table()
-    {
-        project_table["optional-dependencies"] = Item::Table(Table::default());
-    }
-    let table = project_table["optional-dependencies"]
-        .as_table_mut()
-        .unwrap();
-    if !table.contains_key(group) || !table[group].is_array() {
-        table[group] = Item::Value(TomlValue::Array(Array::new()));
-    }
-    table[group].as_array_mut().unwrap()
-}
-
-fn git_worktree_changes(root: &Path) -> Result<Option<Vec<String>>> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(root)
-        .output();
-    match output {
-        Ok(out) if out.status.success() => {
-            let lines = String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .map(|line| line.to_string())
-                .collect::<Vec<_>>();
-            Ok(Some(lines))
-        }
-        Ok(_) => Ok(None),
-        Err(_) => Ok(None),
-    }
 }
 
 fn write_dependencies(doc: &mut DocumentMut, specs: &[String]) -> Result<()> {
@@ -4192,20 +3490,6 @@ fn outcome_from_output(
     }
 }
 
-fn array_arg(command: &PxCommand, key: &str) -> Vec<String> {
-    command
-        .args
-        .get(key)
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-}
-
 fn missing_pytest(stderr: &str) -> bool {
     stderr.contains("No module named") && stderr.contains("pytest")
 }
@@ -4217,11 +3501,11 @@ struct PythonContext {
 }
 
 impl PythonContext {
-    fn new() -> Result<Self> {
-        let project_root = env::current_dir().context("px must run inside a project")?;
-        ensure_project_site_bootstrap(&project_root);
-        let python = px_python::detect_interpreter()?;
-        let pythonpath = build_pythonpath(&project_root)?;
+    fn new(ctx: &CommandContext) -> Result<Self> {
+        let project_root = ctx.project_root()?;
+        ensure_project_site_bootstrap(&project_root, ctx.fs());
+        let python = ctx.python_runtime().detect_interpreter()?;
+        let pythonpath = build_pythonpath(ctx.fs(), &project_root)?;
         Ok(Self {
             project_root,
             python,
@@ -4242,7 +3526,7 @@ impl PythonContext {
     }
 }
 
-fn build_pythonpath(project_root: &Path) -> Result<String> {
+fn build_pythonpath(fs: &dyn effects::FileSystem, project_root: &Path) -> Result<String> {
     let mut paths = Vec::new();
     let src = project_root.join("src");
     if src.exists() {
@@ -4250,11 +3534,11 @@ fn build_pythonpath(project_root: &Path) -> Result<String> {
     }
     paths.push(project_root.to_path_buf());
 
-    if let Some(site_dir) = project_root.join(".px").join("site").canonicalize().ok() {
+    if let Ok(site_dir) = fs.canonicalize(&project_root.join(".px").join("site")) {
         paths.push(site_dir.clone());
         let pth = site_dir.join("px.pth");
         if pth.exists() {
-            if let Ok(contents) = fs::read_to_string(&pth) {
+            if let Ok(contents) = fs.read_to_string(&pth) {
                 for line in contents.lines() {
                     let trimmed = line.trim();
                     if trimmed.is_empty() {
@@ -4284,7 +3568,7 @@ fn build_pythonpath(project_root: &Path) -> Result<String> {
         .map_err(|_| anyhow!("pythonpath contains non-UTF paths"))
 }
 
-pub fn to_json_response(command: &PxCommand, outcome: &ExecutionOutcome, _code: i32) -> Value {
+pub fn to_json_response(info: CommandInfo, outcome: &ExecutionOutcome, _code: i32) -> Value {
     let status = match outcome.status {
         CommandStatus::Ok => "ok",
         CommandStatus::UserError => "user-error",
@@ -4297,22 +3581,21 @@ pub fn to_json_response(command: &PxCommand, outcome: &ExecutionOutcome, _code: 
     };
     json!({
         "status": status,
-        "message": format_status_message(command, &outcome.message),
+        "message": format_status_message(info, &outcome.message),
         "details": details,
     })
 }
 
-pub fn format_status_message(command: &PxCommand, message: &str) -> String {
-    let group_name = command.group.to_string();
-    let prefix = if matches!(command.group, CommandGroup::Output)
-        && matches!(command.name.as_str(), "build" | "publish")
-    {
-        format!("px {}", command.name)
-    } else if group_name == command.name {
-        format!("px {}", command.name)
-    } else {
-        format!("px {} {}", group_name, command.name)
-    };
+pub fn format_status_message(info: CommandInfo, message: &str) -> String {
+    let group_name = info.group.to_string();
+    let prefix =
+        if matches!(info.group, CommandGroup::Output) && matches!(info.name, "build" | "publish") {
+            format!("px {}", info.name)
+        } else if group_name == info.name {
+            format!("px {}", info.name)
+        } else {
+            format!("px {} {}", group_name, info.name)
+        };
     if message.is_empty() {
         prefix
     } else if message.starts_with(&prefix) {
@@ -4328,6 +3611,8 @@ mod tests {
     use px_lockfile::LockedDependency;
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    use crate::SystemEffects;
 
     #[test]
     fn config_respects_env_flags() {
@@ -4348,7 +3633,7 @@ mod tests {
 
     #[test]
     fn marker_applies_respects_python_version() {
-        let env = current_marker_environment().expect("marker env");
+        let env = px_project::resolver::current_marker_environment().expect("marker env");
         assert!(
             !marker_applies("tomli>=1.1.0; python_version < '3.11'", &env),
             "non-matching marker should be skipped"
@@ -4419,7 +3704,8 @@ mod tests {
             graph: None,
         };
 
-        materialize_project_site(&snapshot, &lock).expect("materialize site");
+        let effects = SystemEffects::new();
+        materialize_project_site(&snapshot, &lock, effects.fs()).expect("materialize site");
 
         let pxpth = snapshot.root.join(".px").join("site").join("px.pth");
         assert!(
@@ -4467,7 +3753,9 @@ mod tests {
             graph: None,
         };
 
-        materialize_project_site(&snapshot, &lock).expect("materialize site with gap");
+        let effects = SystemEffects::new();
+        materialize_project_site(&snapshot, &lock, effects.fs())
+            .expect("materialize site with gap");
         let pxpth = snapshot.root.join(".px").join("site").join("px.pth");
         assert!(pxpth.exists(), "px.pth should still be created");
         let contents = fs::read_to_string(pxpth).expect("read px.pth");

@@ -399,6 +399,16 @@ pub(crate) fn merge_dev_dependency_specs(doc: &mut DocumentMut, specs: &[String]
     changed
 }
 
+pub(crate) fn overwrite_dependency_specs(doc: &mut DocumentMut, specs: &[String]) -> bool {
+    let array = ensure_dependencies_array_mut(doc);
+    overwrite_array_if_needed(array, specs)
+}
+
+pub(crate) fn overwrite_dev_dependency_specs(doc: &mut DocumentMut, specs: &[String]) -> bool {
+    let array = ensure_optional_dependency_array_mut(doc, "px-dev");
+    overwrite_array_if_needed(array, specs)
+}
+
 pub(crate) fn ensure_dependencies_array_mut(doc: &mut DocumentMut) -> &mut Array {
     if !doc["project"].is_table() {
         doc["project"] = Item::Table(Table::default());
@@ -419,6 +429,27 @@ pub(crate) fn canonicalize_marker(raw: &str) -> String {
     raw.split_whitespace()
         .collect::<String>()
         .to_ascii_lowercase()
+}
+
+fn overwrite_array_if_needed(array: &mut Array, specs: &[String]) -> bool {
+    if array_matches(array, specs) {
+        return false;
+    }
+    array.clear();
+    for spec in specs {
+        array.push(spec.as_str());
+    }
+    true
+}
+
+fn array_matches(array: &Array, specs: &[String]) -> bool {
+    if array.len() != specs.len() {
+        return false;
+    }
+    array
+        .iter()
+        .zip(specs.iter())
+        .all(|(value, spec)| value.as_str() == Some(spec.as_str()))
 }
 
 #[cfg(test)]

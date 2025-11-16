@@ -72,7 +72,7 @@ pub fn project_name_from_pyproject(path: &Path) -> Result<Option<String>> {
     Ok(name)
 }
 
-pub(crate) fn ensure_pyproject_exists(path: &Path) -> Result<()> {
+pub fn ensure_pyproject_exists(path: &Path) -> Result<()> {
     if path.exists() {
         Ok(())
     } else {

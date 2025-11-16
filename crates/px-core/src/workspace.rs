@@ -12,9 +12,10 @@ use serde_json::{json, Value};
 use toml_edit::{DocumentMut, Item};
 
 use crate::{
-    ensure_pyproject_exists, install_snapshot, manifest_snapshot_at, store_prefetch_specs,
-    CommandContext, ExecutionOutcome, InstallState, InstallUserError, ManifestSnapshot,
+    install_snapshot, manifest_snapshot_at, store_prefetch_specs, CommandContext, ExecutionOutcome,
+    InstallState, InstallUserError, ManifestSnapshot,
 };
+use px_project::ensure_pyproject_exists;
 
 pub(crate) fn prefetch(ctx: &CommandContext, dry_run: bool) -> Result<ExecutionOutcome> {
     let workspace = read_workspace_definition(ctx)?;
@@ -47,7 +48,8 @@ pub(crate) fn prefetch(ctx: &CommandContext, dry_run: bool) -> Result<ExecutionO
                         Ok(specs) => {
                             if specs.is_empty() {
                                 status = "missing-artifacts".to_string();
-                                error = Some("px.lock does not contain artifact metadata".to_string());
+                                error =
+                                    Some("px.lock does not contain artifact metadata".to_string());
                                 had_error = true;
                             } else {
                                 let store_specs = store_prefetch_specs(&specs);
