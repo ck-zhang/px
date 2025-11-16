@@ -14,8 +14,10 @@ non-interactive CI-friendly flags, dry-run previews, backups, and structured
 
 - `px project init` only scaffolds greenfield projects; existing repos must
   manually edit `pyproject.toml` before px can help (docs/cli.md:143-178).
-- `px install` rejects ranges/extras unless `PX_RESOLVER=1` is set, leaving
-  users to pin versions by hand before trying px (docs/cli.md:194-206).
+- `px install` historically rejected ranges/extras unless `PX_RESOLVER=1` was
+  set; the resolver now runs by default (set `PX_RESOLVER=0` to opt out), so
+  migrate should lean on that behavior to keep users from hand-pinning
+  (docs/cli.md:194-206).
 - The quickstart states px expects to run from a directory that already owns a
   `pyproject.toml`, offering no path for requirements-only repos
   (docs/quickstart.md:257-265).
@@ -35,7 +37,8 @@ non-interactive CI-friendly flags, dry-run previews, backups, and structured
 ## Non-Goals
 
 - Replacing the existing resolver; `px migrate` will call the same resolution
-  pipeline used by `px install` (with optional `PX_RESOLVER`).
+  pipeline used by `px install` (which can still be disabled via
+  `PX_RESOLVER=0`).
 - Full Poetry/uv lock import (future work once the base command ships).
 
 ## UX Patterns to Borrow
@@ -83,9 +86,9 @@ Research across Poetry, pip-tools, and uv suggests the following patterns:
 1. Discover inputs (pyproject, requirements files).
 2. Parse requirements (support comments, hashes, environment markers) and
    classify into default/dev sets.
-3. Resolve versions via the existing resolver pipeline (respecting
-   `PX_RESOLVER`/`PX_ONLINE` gates); when ranges are found, propose pins and
-   require confirmation.
+3. Resolve versions via the existing resolver pipeline (respecting the
+   `PX_ONLINE` gate and any `PX_RESOLVER=0` override); when ranges are found,
+   propose pins and require confirmation.
 4. Produce a plan table summarizing packages, requested spec, resolved pin,
    source file, and whether it is dev-only.
 5. Run safety checks: ensure git worktree clean (unless `--allow-dirty`), and
@@ -163,8 +166,8 @@ JSON (write mode):
   resolution, diffs, and output serialization.
 - Wire `px-cli` subcommand to invoke the planner, handle prompts, manage
   backups, and format tables/JSON.
-- Reuse existing resolver/store for version selection, enabling the optional
-  `PX_RESOLVER` path for loose specs.
+- Reuse existing resolver/store for version selection, with
+  `PX_RESOLVER=0` remaining as the escape hatch for legacy installs.
 
 ## Test Plan
 

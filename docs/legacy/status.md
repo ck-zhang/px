@@ -10,10 +10,10 @@
   install/tidy/list/verify are online; the pinned-only install path now hits
   PyPI, but a full resolver/store, editable installs, and Windows parity from
   `docs/requirements.md` remain open.
-- Resolver extras + markers slice: when `PX_RESOLVER=1` is set we parse
-  `requests[socks]`-style requirements with basic PEP 508 markers, evaluate
-  them against the detected interpreter, and record normalized specifiers in
-  both lock v1 and v2 so diff/--frozen remain deterministic.
+- Resolver now auto-pins bare names plus `requests[socks]`-style requirements
+  (with basic PEP 508 markers) by default, evaluates them against the detected
+  interpreter, and records normalized specifiers in both lock v1 and v2; set
+  `PX_RESOLVER=0` to opt back into the legacy pin-only mode.
 - Human output now uses consistent `px <group> <command>:` prefixes, hint
   blocks, and optional color-on-TTY; JSON envelopes are standardized to
   `{status,message,details}` for every command.

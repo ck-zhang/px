@@ -115,9 +115,7 @@ fn resolve_requirement(
                 requirement_str
             )
         }
-        None => {
-            bail!("no version specifier supplied for `{}`", requirement_str)
-        }
+        None => VersionSpecifiers::from_iter(std::iter::empty()),
     };
 
     let project = fetch_project(client, &normalized)?;

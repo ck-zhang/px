@@ -30,7 +30,6 @@ fn resolver_pins_range_when_enabled() {
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_ONLINE", "1")
-        .env("PX_RESOLVER", "1")
         .env("PX_CACHE_PATH", project.join(".px-cache"))
         .args(["install"])
         .assert()
@@ -59,7 +58,6 @@ fn resolver_pins_range_when_enabled() {
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_ONLINE", "1")
-        .env("PX_RESOLVER", "1")
         .env("PX_CACHE_PATH", project.join(".px-cache"))
         .args(["install", "--frozen"])
         .assert()
@@ -79,6 +77,7 @@ fn resolver_disabled_still_errors_for_ranges() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_ONLINE", "1")
+        .env("PX_RESOLVER", "0")
         .args(["install"])
         .assert()
         .failure();
@@ -111,7 +110,6 @@ fn resolver_handles_extras_and_markers() {
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_ONLINE", "1")
-        .env("PX_RESOLVER", "1")
         .env("PX_CACHE_PATH", &cache)
         .args(["install"])
         .assert()
@@ -142,11 +140,47 @@ fn resolver_handles_extras_and_markers() {
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_ONLINE", "1")
-        .env("PX_RESOLVER", "1")
         .env("PX_CACHE_PATH", &cache)
         .args(["install", "--frozen"])
         .assert()
         .success();
+}
+
+#[test]
+fn resolver_pins_unversioned_spec() {
+    if !require_online() {
+        return;
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = init_project(&temp, "resolver_unversioned");
+    add_dependency(&project, "numpy");
+    let cache = project.join(".px-cache");
+
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_ONLINE", "1")
+        .env("PX_CACHE_PATH", &cache)
+        .args(["install"])
+        .assert()
+        .success();
+
+    let pyproject = project.join("pyproject.toml");
+    let doc: DocumentMut = fs::read_to_string(&pyproject)
+        .expect("read pyproject")
+        .parse()
+        .expect("pyproject toml");
+    let deps = doc["project"]["dependencies"]
+        .as_array()
+        .expect("dependencies array");
+    let pinned = deps
+        .iter()
+        .find_map(|item| item.as_str())
+        .expect("dependency entry");
+    assert!(
+        pinned.starts_with("numpy=="),
+        "expected numpy to be pinned, got {pinned}"
+    );
 }
 
 #[test]
@@ -163,6 +197,7 @@ fn resolver_disabled_rejects_extras() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_ONLINE", "1")
+        .env("PX_RESOLVER", "0")
         .args(["install"])
         .assert()
         .failure();

@@ -68,7 +68,7 @@ These supporting entrypoints will be carved out first so the command handlers ca
 The CLI refactor follows the agent-produced typed dispatch design:
 
 1. **Typed requests** – Each command derives a `clap::Args` struct that converts into a domain request (e.g., `InstallRequest`, `WorkspaceListRequest`). Trait `CommandRequest` is a marker for compile-time validation.
-2. **CommandContext** – Built once at process startup. It contains the merged `Config` (env vars like `PX_RESOLVER`, CLI flags, config files), resolved paths, cache roots, resolver/installer options, and `Arc` handles to infrastructure traits (`ArtifactStore`, `PythonRunner`, `GitClient`, `NetworkClient`).
+2. **CommandContext** – Built once at process startup. It contains the merged `Config` (env vars like `PX_RESOLVER`—set it to `0` to disable the default resolver—CLI flags, config files), resolved paths, cache roots, resolver/installer options, and `Arc` handles to infrastructure traits (`ArtifactStore`, `PythonRunner`, `GitClient`, `NetworkClient`).
 3. **Handler registry** – Define `trait PxCommandHandler<R: CommandRequest> { fn handle(&self, ctx: &CommandContext, req: R) -> Result<ExecutionOutcome>; }`. Register handlers in a map/enum so px-cli no longer matches on `(group, name)`; it instantiates the typed request and hands it off.
 4. **Dependency injection** – Infrastructure traits live in their crates (`px-store` implements `ArtifactStore`, `px-runtime` implements `PythonRunner`, etc.) and are injected via the context, enabling deterministic unit tests.
 
@@ -83,4 +83,3 @@ The CLI refactor follows the agent-produced typed dispatch design:
 - **px-runtime / px-python**: remain infrastructure crates providing `PythonRunner` + interpreter detection. They plug into the context as trait objects.
 
 With this inventory and target API sketch, subsequent steps can move handlers out of `crates/px-core/src/lib.rs` incrementally—one command group at a time—while new typed requests and the `CommandContext` keep cross-crate interaction narrow and testable.
-

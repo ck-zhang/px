@@ -147,17 +147,13 @@ $ cargo run -q -- --json tidy
 }
 ```
 
-- `px install` now requires exact pins (`name==version`) in
-  `[project].dependencies`. Any markers/ranges/extras cause a `user-error`
-  explaining that pins are mandatory in this slice.
-- Experimental: exporting both `PX_RESOLVER=1` and `PX_ONLINE=1` lets `px`
-  resolve simple pure-Python ranges (e.g., `packaging>=24,<25`) by picking the
-  highest universal wheel before continuing with the pinned workflow. Without
-  the flag the command still errors on non-pinned specs.
-- With `PX_RESOLVER=1`, extras and simple PEP 508 markers are now respected.
-  A dependency such as `requests[socks]>=2.32 ; python_version >= "3.10"` pins
-  correctly, and the generated `px.lock` keeps those extras/markers so
-  `px lock diff`/`px install --frozen` compare apples to apples.
+- `px install` now resolves bare names, ranges, extras, and markers
+  automatically (set `PX_RESOLVER=0` to return to the legacy
+  `name==version` enforcement) and then writes the pinned specifiers back to
+  `pyproject.toml`.
+- Extras and basic PEP 508 markers are normalized during pinning so the
+  resulting `px.lock` carries the same metadata that `px lock diff`/`px install
+  --frozen` compare against.
 - The command queries the PyPI JSON API for every pin, selects a compatible
   wheel (preferring `py3-none-any`), downloads it into the px cache, verifies
   the SHA256 digest, and records the artifact metadata inside `px.lock`.

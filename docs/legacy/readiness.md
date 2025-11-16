@@ -26,8 +26,8 @@
 
 - Autofix only touches `[project.dependencies]` and the `px-dev` optional group;
   all other extras must be curated manually.
-- Pinned specs with extras error in `px install`, and `px migrate` rejects URL
-  requirements outright. Range resolution only runs when `PX_RESOLVER=1`.
+- Resolver now runs by default (disable with `PX_RESOLVER=0`), so pins with
+  extras/markers succeed end-to-end, but URL requirements are still rejected.
 - Publish is a stub: after verifying `PX_ONLINE` + token env, the handler only
   prints success.
 - Workspace onboarding lacks `px workspace migrate`, so every member must run
@@ -40,10 +40,10 @@
 | --- | --- | --- |
 | pyproject onboarding & autopin | [x] | `px migrate --write` + backup manager handle single projects with prod/dev scopes |
 | requirements parser (markers/comments) | [x] | `requirements*.txt` parsing strips comments and respects markers during autopin |
-| dependency resolver for ranges | [~] | Resolver exists but is gated behind `PX_RESOLVER=1`; extras/URLs unsupported |
+| dependency resolver for ranges | [~] | Resolver runs by default (set `PX_RESOLVER=0` to disable) and auto-pins bare names/ranges/extras/markers; URLs still unsupported |
 | pinned installs + lockfile authoring | [x] | `px install` enforces `name==version`, renders `px.lock`, refreshes `.px/site` |
-| installer extras / URL support | [ ] | Extras in pins raise errors and URL deps are rejected |
-| marker awareness in installs | [~] | Marker evaluation works for autopin + skipping specs, but pinned markers still fail |
+| installer extras / URL support | [~] | Extras/markers now flow through pinned installs; URL deps remain rejected |
+| marker awareness in installs | [x] | Resolver + install honor markers when pinning/spec normalization |
 | lock verification / drift detection | [x] | `px install --frozen`, `px tidy`, `px lock diff` reuse shared drift analyzers |
 | wheel cache + store | [x] | `px-store` downloads/caches wheels, supports prefetch via lock metadata |
 | workspace support | [~] | Install/tidy/verify implemented; migrate/update automation missing |
@@ -63,21 +63,19 @@ Legend: `[x]` implemented, `[~]` partial, `[ ]` missing.
 # Sample project (fixtures/sample_px_app)
 cd fixtures/sample_px_app
 ../../target/debug/px migrate --write --allow-dirty
-PX_RESOLVER=1 ../../target/debug/px install
+../../target/debug/px install
 ../../target/debug/px run sample_px_app.cli -- -n Demo
 ../../target/debug/px test
 
 # Real repo smoke (/home/toxictoast/test/black)
 cd /home/toxictoast/test/black
-RUST_BACKTRACE=1 PX_RESOLVER=1 px migrate --write --allow-dirty
+RUST_BACKTRACE=1 px migrate --write --allow-dirty
 RUST_BACKTRACE=1 px --json migrate --write --allow-dirty > migrate.json
 cat migrate.json
 ```
 
 ## Next Up
 
-- Turn on the resolver by default and accept extras/URL sources end to end.
-- Teach `px install` to honor pinned extras + markers so migrate/lock/install
-  share behavior.
+- Finish URL/VCS handling in resolver/install so direct references work.
 - Implement `px workspace migrate` (and friends) to batch onboarding.
 - Replace the publish stub with a real upload path (twine API or warehouse API).

@@ -231,19 +231,11 @@ $ cargo run -q -- --json install --frozen
 }
 ```
 
-- Phase C’s pinned-only slice accepts only exact `name==version` specs. Any
-  marker, range (`>=`), or extras trigger a `user-error` explaining that pins
-  are required.
-- Experimental: when both `PX_RESOLVER=1` and `PX_ONLINE=1` are set, `px`
-  resolves simple pure-Python ranges (for example `packaging>=24,<25`) by
-  selecting the highest `py3-none-any` wheel before continuing with the
-  pinned-only pipeline. The flag is opt-in; without it the legacy pin-required
-  error remains.
-- With that same `PX_RESOLVER=1` gate, extras and basic PEP 508 markers are
-  honored. For example, `requests[socks]>=2.32 ; python_version >= "3.10"`
-  resolves to the best wheel for the current interpreter and the resulting
-  `px.lock` specifier retains the extras + marker text so `lock diff`/`--frozen`
-  stay stable.
+- The install/lock slice now resolves bare names, ranges, extras, and
+  markers automatically; set `PX_RESOLVER=0` to revert to the legacy
+  `name==version` enforcement.
+- Extras and basic PEP 508 markers are preserved in the pinned specifiers so
+  `px.lock`, `px lock diff`, and `px install --frozen` stay deterministic.
 - `px install` queries the PyPI JSON API for each pin, picks the best wheel
   (prefer `py3-none-any`, otherwise the interpreter’s tags), downloads it to
   the px cache, and verifies the SHA256 digest before writing `px.lock`.

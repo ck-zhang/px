@@ -3,11 +3,14 @@
 use std::{
     env,
     fs::{self, File},
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use anyhow::{anyhow, bail, Context, Result};
 use dirs_next::home_dir;
@@ -16,10 +19,12 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
+use zip::ZipArchive;
 
 const USER_AGENT: &str = concat!("px-store/", env!("CARGO_PKG_VERSION"));
 const DOWNLOAD_ATTEMPTS: usize = 3;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
+const WHEEL_MARKER_NAME: &str = ".px-wheel.json";
 
 /// Request describing a wheel that should be cached locally.
 pub struct ArtifactRequest<'a> {
@@ -33,8 +38,15 @@ pub struct ArtifactRequest<'a> {
 /// Result of caching a wheel on disk.
 #[derive(Debug, Clone)]
 pub struct CachedArtifact {
-    pub path: PathBuf,
+    pub wheel_path: PathBuf,
+    pub dist_path: PathBuf,
     pub size: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedWheelFile {
+    path: PathBuf,
+    size: u64,
 }
 
 /// Artifact entry captured from `px.lock` for prefetching.
@@ -349,12 +361,14 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
 
     let sha256 = compute_sha256(&dest)?;
     let size = fs::metadata(&dest)?.len();
+    let dist_path = ensure_wheel_dist(&dest, &sha256)?;
     let built = BuiltWheel {
         filename,
         url: request.url.to_string(),
         sha256,
         size,
         cached_path: dest.clone(),
+        dist_path: dist_path.clone(),
         python_tag,
         abi_tag,
         platform_tag,
@@ -522,12 +536,18 @@ fn load_cached_build(meta_path: &Path) -> Result<Option<BuiltWheel>> {
     if !path.exists() {
         return Ok(None);
     }
+    let dist = if let Some(dist) = meta.dist_path {
+        PathBuf::from(dist)
+    } else {
+        path.with_extension("dist")
+    };
     Ok(Some(BuiltWheel {
         filename: meta.filename,
         url: meta.url,
         sha256: meta.sha256,
         size: meta.size,
         cached_path: path,
+        dist_path: dist,
         python_tag: meta.python_tag,
         abi_tag: meta.abi_tag,
         platform_tag: meta.platform_tag,
@@ -544,6 +564,7 @@ fn persist_metadata(meta_path: &Path, built: &BuiltWheel) -> Result<()> {
         sha256: built.sha256.clone(),
         size: built.size,
         cached_path: built.cached_path.display().to_string(),
+        dist_path: Some(built.dist_path.display().to_string()),
         python_tag: built.python_tag.clone(),
         abi_tag: built.abi_tag.clone(),
         platform_tag: built.platform_tag.clone(),
@@ -559,9 +580,16 @@ struct BuiltWheelMetadata {
     sha256: String,
     size: u64,
     cached_path: String,
+    #[serde(default)]
+    dist_path: Option<String>,
     python_tag: String,
     abi_tag: String,
     platform_tag: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WheelUnpackMetadata {
+    sha256: String,
 }
 
 fn parse_wheel_tags(filename: &str) -> Option<(String, String, String)> {
@@ -598,6 +626,7 @@ pub struct BuiltWheel {
     pub sha256: String,
     pub size: u64,
     pub cached_path: PathBuf,
+    pub dist_path: PathBuf,
     pub python_tag: String,
     pub abi_tag: String,
     pub platform_tag: String,
@@ -606,20 +635,16 @@ pub struct BuiltWheel {
 /// Ensure a wheel exists in the cache, downloading and verifying if needed.
 pub fn cache_wheel(cache_root: &Path, request: &ArtifactRequest<'_>) -> Result<CachedArtifact> {
     let dest = wheel_path(cache_root, request.name, request.version, request.filename);
-    if let Some(existing) = validate_existing(&dest, request.sha256)? {
-        return Ok(existing);
-    }
-
-    let mut last_err = None;
-    for _ in 0..DOWNLOAD_ATTEMPTS {
-        match download_once(&dest, request) {
-            Ok(artifact) => return Ok(artifact),
-            Err(err) => last_err = Some(err),
-        }
-    }
-
-    Err(last_err
-        .unwrap_or_else(|| anyhow!("failed to download {}; no attempts left", request.filename)))
+    let wheel = match validate_existing(&dest, request.sha256)? {
+        Some(existing) => existing,
+        None => download_with_retry(&dest, request)?,
+    };
+    let dist = ensure_wheel_dist(&wheel.path, request.sha256)?;
+    Ok(CachedArtifact {
+        wheel_path: wheel.path,
+        dist_path: dist,
+        size: wheel.size,
+    })
 }
 
 fn wheel_path(cache_root: &Path, name: &str, version: &str, filename: &str) -> PathBuf {
@@ -630,7 +655,7 @@ fn wheel_path(cache_root: &Path, name: &str, version: &str, filename: &str) -> P
         .join(filename)
 }
 
-fn validate_existing(path: &Path, expected_sha: &str) -> Result<Option<CachedArtifact>> {
+fn validate_existing(path: &Path, expected_sha: &str) -> Result<Option<CachedWheelFile>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -638,7 +663,7 @@ fn validate_existing(path: &Path, expected_sha: &str) -> Result<Option<CachedArt
     match compute_sha256(path) {
         Ok(actual) if actual == expected_sha => {
             let size = fs::metadata(path)?.len();
-            Ok(Some(CachedArtifact {
+            Ok(Some(CachedWheelFile {
                 path: path.to_path_buf(),
                 size,
             }))
@@ -671,20 +696,30 @@ pub fn prefetch_artifacts(
     for chunk in specs.chunks(batch_size) {
         for spec in chunk {
             let dest = wheel_path(cache_root, spec.name, spec.version, spec.filename);
-            match validate_existing(&dest, spec.sha256) {
-                Ok(Some(_)) => {
-                    summary.hit += 1;
-                    continue;
-                }
-                Ok(None) => {}
+            let existing = match validate_existing(&dest, spec.sha256) {
+                Ok(value) => value,
                 Err(err) => {
                     summary.failed += 1;
                     summary.errors.push(err.to_string());
                     continue;
                 }
-            }
+            };
 
             if options.dry_run {
+                if existing.is_some() {
+                    summary.hit += 1;
+                }
+                continue;
+            }
+
+            if let Some(file) = existing {
+                match ensure_wheel_dist(&file.path, spec.sha256) {
+                    Ok(_) => summary.hit += 1,
+                    Err(err) => {
+                        summary.failed += 1;
+                        summary.errors.push(err.to_string());
+                    }
+                }
                 continue;
             }
 
@@ -712,7 +747,20 @@ pub fn prefetch_artifacts(
     Ok(summary)
 }
 
-fn download_once(dest: &Path, request: &ArtifactRequest<'_>) -> Result<CachedArtifact> {
+fn download_with_retry(dest: &Path, request: &ArtifactRequest<'_>) -> Result<CachedWheelFile> {
+    let mut last_err = None;
+    for _ in 0..DOWNLOAD_ATTEMPTS {
+        match download_once(dest, request) {
+            Ok(file) => return Ok(file),
+            Err(err) => last_err = Some(err),
+        }
+    }
+
+    Err(last_err
+        .unwrap_or_else(|| anyhow!("failed to download {}; no attempts left", request.filename)))
+}
+
+fn download_once(dest: &Path, request: &ArtifactRequest<'_>) -> Result<CachedWheelFile> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -752,10 +800,90 @@ fn download_once(dest: &Path, request: &ArtifactRequest<'_>) -> Result<CachedArt
     }
 
     tmp.persist(dest)?;
-    Ok(CachedArtifact {
+    Ok(CachedWheelFile {
         path: dest.to_path_buf(),
         size: written,
     })
+}
+
+fn ensure_wheel_dist(wheel_path: &Path, expected_sha: &str) -> Result<PathBuf> {
+    let dist_dir = wheel_path.with_extension("dist");
+    let marker_path = dist_dir.join(WHEEL_MARKER_NAME);
+    if dist_dir.exists() && marker_matches(&marker_path, expected_sha)? {
+        return Ok(dist_dir);
+    }
+
+    if dist_dir.exists() {
+        fs::remove_dir_all(&dist_dir)
+            .with_context(|| format!("failed to clear outdated dist at {}", dist_dir.display()))?;
+    }
+
+    let staging = dist_dir.with_extension("tmp");
+    if staging.exists() {
+        fs::remove_dir_all(&staging)
+            .with_context(|| format!("failed to clear staging dir {}", staging.display()))?;
+    }
+    fs::create_dir_all(&staging)?;
+    unpack_wheel(wheel_path, &staging)?;
+    write_marker(&staging.join(WHEEL_MARKER_NAME), expected_sha)?;
+    if dist_dir.exists() {
+        fs::remove_dir_all(&dist_dir)?;
+    }
+    fs::rename(&staging, &dist_dir)?;
+    Ok(dist_dir)
+}
+
+fn marker_matches(marker: &Path, expected_sha: &str) -> Result<bool> {
+    if !marker.exists() {
+        return Ok(false);
+    }
+    let contents = match fs::read_to_string(marker) {
+        Ok(data) => data,
+        Err(_) => return Ok(false),
+    };
+    let meta: WheelUnpackMetadata = match serde_json::from_str(&contents) {
+        Ok(meta) => meta,
+        Err(_) => return Ok(false),
+    };
+    Ok(meta.sha256 == expected_sha)
+}
+
+fn write_marker(marker: &Path, sha: &str) -> Result<()> {
+    let meta = WheelUnpackMetadata {
+        sha256: sha.to_string(),
+    };
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(marker, serde_json::to_string(&meta)?)?;
+    Ok(())
+}
+
+fn unpack_wheel(wheel: &Path, dest: &Path) -> Result<()> {
+    let file = File::open(wheel)?;
+    let mut archive = ZipArchive::new(file)?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let Some(enclosed) = entry.enclosed_name().map(|p| dest.join(p)) else {
+            continue;
+        };
+        if entry.name().ends_with('/') || entry.is_dir() {
+            fs::create_dir_all(&enclosed)?;
+            continue;
+        }
+        if let Some(parent) = enclosed.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut outfile = File::create(&enclosed)?;
+        io::copy(&mut entry, &mut outfile)?;
+        #[cfg(unix)]
+        {
+            if let Some(mode) = entry.unix_mode() {
+                fs::set_permissions(&enclosed, fs::Permissions::from_mode(mode))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn compute_sha256(path: &Path) -> Result<String> {
@@ -784,8 +912,8 @@ fn http_client() -> Result<Client> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
-    use std::{env, ffi::OsString};
+    use std::{env, ffi::OsString, fs::File, io::Write};
+    use zip::write::FileOptions;
 
     #[test]
     fn download_packaging_smoke() -> Result<()> {
@@ -804,8 +932,9 @@ mod tests {
         };
 
         let artifact = cache_wheel(temp.path(), &request)?;
-        assert!(artifact.path.exists());
-        assert_eq!(artifact.size, fs::metadata(&artifact.path)?.len());
+        assert!(artifact.wheel_path.exists());
+        assert!(artifact.dist_path.exists());
+        assert_eq!(artifact.size, fs::metadata(&artifact.wheel_path)?.len());
         Ok(())
     }
 
@@ -833,9 +962,9 @@ mod tests {
         let cache_root = temp.path();
         let wheel_path = cache_root.join("wheels/demo/1.0.0/demo-1.0.0.whl");
         fs::create_dir_all(wheel_path.parent().unwrap())?;
-        fs::write(&wheel_path, b"demo")?;
+        write_dummy_wheel(&wheel_path, b"print('demo')")?;
 
-        let sha = hex::encode(Sha256::digest(b"demo"));
+        let sha = compute_sha256(&wheel_path)?;
         let name = "demo".to_string();
         let version = "1.0.0".to_string();
         let filename = "demo-1.0.0.whl".to_string();
@@ -853,6 +982,17 @@ mod tests {
         assert_eq!(summary.hit, 1);
         assert_eq!(summary.fetched, 0);
         assert_eq!(summary.failed, 0);
+        assert!(wheel_path.with_extension("dist").exists());
+        Ok(())
+    }
+
+    fn write_dummy_wheel(path: &Path, contents: &[u8]) -> Result<()> {
+        let file = File::create(path)?;
+        let mut writer = zip::ZipWriter::new(file);
+        let options = FileOptions::default();
+        writer.start_file("demo/__init__.py", options)?;
+        writer.write_all(contents)?;
+        writer.finish()?;
         Ok(())
     }
 }
