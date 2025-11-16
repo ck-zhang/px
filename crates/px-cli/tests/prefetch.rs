@@ -47,7 +47,7 @@ fn prefetch_hydrates_missing_artifact() {
         .current_dir(&project)
         .env("PX_ONLINE", "1")
         .env("PX_CACHE_PATH", &cache_root)
-        .args(["store", "prefetch"])
+        .args(["cache", "prefetch"])
         .assert()
         .success();
 
@@ -76,7 +76,7 @@ fn prefetch_dry_run_reports_counts() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_CACHE_PATH", &cache_root)
-        .args(["--json", "store", "prefetch", "--dry-run"])
+        .args(["--json", "cache", "prefetch", "--dry-run"])
         .assert()
         .success();
     let payload = parse_json(&assert);
@@ -92,13 +92,13 @@ fn store_prefetch_requires_px_online_for_downloads() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_ONLINE", "0")
-        .args(["store", "prefetch"])
+        .args(["cache", "prefetch"])
         .assert()
         .failure();
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains("px store prefetch: PX_ONLINE=1 required for downloads"),
+        stdout.contains("px cache prefetch: PX_ONLINE=1 required for downloads"),
         "gated run should mention PX_ONLINE requirement: {stdout:?}"
     );
     assert!(
@@ -119,12 +119,12 @@ fn store_prefetch_dry_run_emits_status_and_json_flag() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_ONLINE", "0")
-        .args(["store", "prefetch", "--dry-run"])
+        .args(["cache", "prefetch", "--dry-run"])
         .assert()
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains("px store prefetch: dry-run"),
+        stdout.contains("px cache prefetch: dry-run"),
         "dry-run human output should include dry-run summary: {stdout:?}"
     );
     assert!(
@@ -135,7 +135,7 @@ fn store_prefetch_dry_run_emits_status_and_json_flag() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_ONLINE", "0")
-        .args(["--json", "store", "prefetch", "--dry-run"])
+        .args(["--json", "cache", "prefetch", "--dry-run"])
         .assert()
         .success();
     let payload = parse_json(&assert);
@@ -145,7 +145,7 @@ fn store_prefetch_dry_run_emits_status_and_json_flag() {
 fn init_project(temp: &TempDir, name: &str) -> PathBuf {
     cargo_bin_cmd!("px")
         .current_dir(temp.path())
-        .args(["project", "init", "--package", name])
+        .args(["init", "--package", name])
         .assert()
         .success();
     temp.path().to_path_buf()
@@ -154,7 +154,7 @@ fn init_project(temp: &TempDir, name: &str) -> PathBuf {
 fn add_dependency(project: &Path, spec: &str) {
     cargo_bin_cmd!("px")
         .current_dir(project)
-        .args(["project", "add", spec])
+        .args(["add", spec])
         .assert()
         .success();
 }

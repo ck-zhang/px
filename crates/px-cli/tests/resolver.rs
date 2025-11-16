@@ -184,7 +184,7 @@ fn resolver_disabled_rejects_extras() {
 fn init_project(temp: &TempDir, name: &str) -> PathBuf {
     cargo_bin_cmd!("px")
         .current_dir(temp.path())
-        .args(["project", "init", "--package", name])
+        .args(["init", "--package", name])
         .assert()
         .success();
     temp.path().to_path_buf()
@@ -193,7 +193,7 @@ fn init_project(temp: &TempDir, name: &str) -> PathBuf {
 fn add_dependency(project: &Path, spec: &str) {
     cargo_bin_cmd!("px")
         .current_dir(project)
-        .args(["project", "add", spec])
+        .args(["add", spec])
         .assert()
         .success();
 }

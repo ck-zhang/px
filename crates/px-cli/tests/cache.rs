@@ -65,7 +65,7 @@ fn cache_path_human_output_is_prefixed() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains("px infra cache: path"),
+        stdout.contains("px cache path:") || stdout.starts_with("px cache path"),
         "cache path output should include prefixed summary: {stdout:?}"
     );
 }
@@ -83,7 +83,7 @@ fn cache_prune_dry_run_human_message_is_concise() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains("px infra cache: would remove"),
+        stdout.contains("px cache prune:") || stdout.starts_with("px cache prune"),
         "dry-run output should mention would-remove summary: {stdout:?}"
     );
     assert!(

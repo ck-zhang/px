@@ -9,8 +9,8 @@ fn help_output(args: &[&str]) -> String {
 fn run_help_mentions_usage_and_examples() {
     let output = help_output(&["run", "--help"]);
     assert!(
-        output.contains("Run the inferred entry or a named module inside px."),
-        "run help missing about: {output}"
+        output.contains("Run a named task or script."),
+        "run help missing updated about: {output}"
     );
     assert!(
         output.contains("px run [ENTRY] [-- <ARG>...]")
@@ -23,18 +23,18 @@ fn run_help_mentions_usage_and_examples() {
 }
 
 #[test]
-fn project_init_help_lists_examples() {
-    let output = help_output(&["project", "init", "--help"]);
+fn init_help_lists_examples() {
+    let output = help_output(&["init", "--help"]);
     assert!(
-        output.contains("Scaffold pyproject, src/, and tests using the current folder."),
+        output.contains("Create a new px project and environment."),
         "init about missing: {output}"
     );
     assert!(
-        output.contains("px project init [--package NAME] [--py VERSION]")
-            || output.contains("px project init [--package name] [--py version]")
+        output.contains("px init [--package NAME] [--py VERSION]")
+            || output.contains("px init [--package name] [--py version]")
     );
     assert!(
-        output.contains("px project init --package demo_pkg --py 3.11"),
+        output.contains("px init --package demo_pkg --py 3.11"),
         "init example missing override: {output}"
     );
 }
@@ -66,15 +66,15 @@ fn cache_prune_help_mentions_dry_run_example() {
 }
 
 #[test]
-fn store_prefetch_help_shows_workspace_example() {
-    let output = help_output(&["store", "prefetch", "--help"]);
+fn cache_prefetch_help_shows_workspace_example() {
+    let output = help_output(&["cache", "prefetch", "--help"]);
     assert!(
-        output.contains("Hydrate lock artifacts into the cache (workspace optional)."),
-        "store prefetch about missing: {output}"
+        output.contains("Prefetch and cache artifacts for offline use."),
+        "cache prefetch about missing: {output}"
     );
     assert!(
-        output.contains("PX_ONLINE=1 px store prefetch --workspace"),
-        "store prefetch example missing gating note: {output}"
+        output.contains("PX_ONLINE=1 px cache prefetch --workspace"),
+        "cache prefetch example missing gating note: {output}"
     );
 }
 
@@ -82,7 +82,7 @@ fn store_prefetch_help_shows_workspace_example() {
 fn build_help_mentions_skip_tests_example() {
     let output = help_output(&["build", "--help"]);
     assert!(
-        output.contains("Build sdists and wheels into the project build/ folder."),
+        output.contains("Build distributable artifacts."),
         "build about missing: {output}"
     );
     assert!(

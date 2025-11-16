@@ -44,13 +44,13 @@ fn install_pinned_fetches_artifact() {
 
     cargo_bin_cmd!("px")
         .current_dir(&project_root)
-        .args(["project", "init", "--package", "demo_pin"])
+        .args(["init", "--package", "demo_pin"])
         .assert()
         .success();
 
     cargo_bin_cmd!("px")
         .current_dir(&project_root)
-        .args(["project", "add", "packaging==24.1"])
+        .args(["add", "packaging==24.1"])
         .assert()
         .success();
 
@@ -106,13 +106,13 @@ fn install_rejects_unpinned_specs() {
 
     cargo_bin_cmd!("px")
         .current_dir(&project_root)
-        .args(["project", "init", "--package", "unpinned"])
+        .args(["init", "--package", "unpinned"])
         .assert()
         .success();
 
     cargo_bin_cmd!("px")
         .current_dir(&project_root)
-        .args(["project", "add", "packaging>=24"])
+        .args(["add", "packaging>=24"])
         .assert()
         .success();
 

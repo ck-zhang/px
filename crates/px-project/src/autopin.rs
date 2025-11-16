@@ -392,7 +392,10 @@ dependencies = ["demo>=1.0", "helper==0.5"]
                 let contents = plan.doc_contents.expect("pyproject contents");
                 let doc: DocumentMut = contents.parse()?;
                 let deps = read_dependencies_from_doc(&doc);
-                assert_eq!(deps, vec!["demo==1.2.3".to_string(), "helper==0.5".to_string()]);
+                assert_eq!(
+                    deps,
+                    vec!["demo==1.2.3".to_string(), "helper==0.5".to_string()]
+                );
             }
             _ => panic!("unexpected autopin state"),
         }

@@ -26,7 +26,7 @@ fn env_python_prints_interpreter_path() {
         .to_string();
 
     assert!(
-        stdout.starts_with("px infra env:"),
+        stdout.starts_with("✔ px env python:"),
         "expected prefixed output: {stdout}"
     );
     let path_segment = stdout
@@ -89,7 +89,7 @@ fn env_paths_prints_human_lines() {
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains("px infra env: pythonpath entries:"),
+        stdout.contains("px env paths: pythonpath entries:"),
         "paths output should summarize entry count: {stdout:?}"
     );
 }
@@ -127,7 +127,7 @@ fn tidy_reports_single_line_and_hint() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains("px quality tidy: px.lock matches pyproject"),
+        stdout.contains("px tidy: px.lock matches pyproject"),
         "tidy clean output should mention matches: {stdout:?}"
     );
     assert!(
@@ -150,7 +150,7 @@ fn tidy_reports_single_line_and_hint() {
         .failure();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains("px quality tidy: px.lock is out of date"),
+        stdout.contains("px tidy: px.lock is out of date"),
         "tidy drift output should call out stale lock: {stdout:?}"
     );
     assert!(
@@ -296,7 +296,7 @@ fn run_errors_when_no_default_entry_available() {
     let message = payload["message"].as_str().expect("message string");
     assert!(message.contains("pyproject.toml"));
     let hint = payload["details"]["hint"].as_str().expect("hint string");
-    assert!(hint.contains("px migrate --write"));
+    assert!(hint.contains("px migrate --apply"));
 }
 
 fn write_module(project: &Path, module: &str, body: &str) {

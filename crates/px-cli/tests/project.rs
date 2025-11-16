@@ -10,23 +10,57 @@ mod common;
 use common::parse_json;
 
 #[test]
-fn project_init_creates_scaffold_and_runs() {
+fn project_init_creates_minimal_shape() {
     let temp = tempfile::tempdir().expect("tempdir");
-    scaffold_demo(&temp, "demo_pkg");
+    let project_dir = temp.path().join("demo_shape");
+    fs::create_dir_all(&project_dir).expect("create project dir");
 
-    let project_dir = temp.path();
-    assert!(project_dir.join("pyproject.toml").exists());
-    assert!(project_dir.join("demo_pkg").join("cli.py").exists());
-    assert!(project_dir.join("tests").join("test_cli.py").exists());
-
-    let assert = cargo_bin_cmd!("px")
-        .current_dir(project_dir)
-        .args(["run", "demo_pkg.cli"])
+    cargo_bin_cmd!("px")
+        .current_dir(&project_dir)
+        .arg("init")
         .assert()
         .success();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("Hello, World!"));
+    let pyproject = project_dir.join("pyproject.toml");
+    assert!(pyproject.exists(), "pyproject should be created");
+    assert!(
+        !project_dir.join("px.lock").exists(),
+        "px init must not create px.lock"
+    );
+    assert!(
+        !project_dir.join("demo_shape").exists(),
+        "px init must not scaffold package code"
+    );
+    assert!(
+        !project_dir.join("dist").exists(),
+        "px init must not create dist/"
+    );
+
+    let px_dir = project_dir.join(".px");
+    assert!(px_dir.is_dir(), ".px directory should exist after init");
+    assert!(px_dir.join("envs").is_dir(), ".px/envs should exist");
+    assert!(px_dir.join("logs").is_dir(), ".px/logs should exist");
+    assert!(
+        px_dir.join("state.json").exists(),
+        ".px/state.json should exist"
+    );
+
+    let contents = fs::read_to_string(&pyproject).expect("read pyproject");
+    let doc: DocumentMut = contents.parse().expect("valid pyproject");
+    let project = doc["project"].as_table().expect("project table");
+    let deps = project
+        .get("dependencies")
+        .and_then(|item| item.as_array())
+        .map(|array| array.len())
+        .unwrap_or(0);
+    assert_eq!(deps, 0, "dependencies should start empty");
+    assert!(
+        doc.get("tool")
+            .and_then(|tool| tool.as_table())
+            .and_then(|table| table.get("px"))
+            .is_some(),
+        "pyproject should include [tool.px]"
+    );
 }
 
 #[test]
@@ -37,13 +71,13 @@ fn project_init_infers_package_name_from_directory() {
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project_dir)
-        .args(["project", "init"])
+        .args(["init"])
         .assert()
         .success();
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains("px project init: initialized project fancy_app"),
+        stdout.contains("px init: initialized project fancy_app"),
         "expected concise init message, got {stdout:?}"
     );
 
@@ -59,13 +93,13 @@ fn project_init_refuses_when_pyproject_exists() {
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(project_dir)
-        .args(["project", "init"])
+        .args(["init"])
         .assert()
         .failure();
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains("px project init: project already initialized"),
+        stdout.contains("px init: project already initialized"),
         "expected polite refusal, got {stdout:?}"
     );
     assert!(stdout.contains("Hint:"), "expected a single hint line");
@@ -79,20 +113,30 @@ fn project_init_json_reports_details() {
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project_dir)
-        .args(["--json", "project", "init"])
+        .args(["--json", "init"])
         .assert()
         .success();
 
     let payload: Value = parse_json(&assert);
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["details"]["package"], "json_demo");
+    let created = payload["details"]["files_created"]
+        .as_array()
+        .expect("files array")
+        .iter()
+        .filter_map(|entry| entry.as_str())
+        .collect::<Vec<_>>();
     assert!(
-        payload["details"]["files_created"]
-            .as_array()
-            .unwrap()
-            .len()
-            >= 3,
-        "expected files_created list"
+        created.contains(&"pyproject.toml"),
+        "pyproject should be recorded in files_created: {created:?}"
+    );
+    assert!(
+        created.iter().any(|entry| entry.starts_with(".px")),
+        "files_created should include .px paths: {created:?}"
+    );
+    assert!(
+        created.iter().any(|entry| entry == &".px/state.json"),
+        "state tracking should be recorded"
     );
 }
 
@@ -104,7 +148,7 @@ fn project_add_inserts_dependency() {
 
     cargo_bin_cmd!("px")
         .current_dir(project_dir)
-        .args(["project", "add", "requests==2.32.3"])
+        .args(["add", "requests==2.32.3"])
         .assert()
         .success();
 
@@ -120,13 +164,13 @@ fn project_remove_deletes_dependency() {
 
     cargo_bin_cmd!("px")
         .current_dir(project_dir)
-        .args(["project", "add", "foo==1.0"])
+        .args(["add", "foo==1.0"])
         .assert()
         .success();
 
     cargo_bin_cmd!("px")
         .current_dir(project_dir)
-        .args(["project", "remove", "foo"])
+        .args(["remove", "foo"])
         .assert()
         .success();
 
@@ -134,10 +178,52 @@ fn project_remove_deletes_dependency() {
     assert!(deps.iter().all(|dep| !dep.starts_with("foo")));
 }
 
+#[test]
+fn px_commands_require_project_root() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(temp.path())
+        .args(["add", "requests==2.32.3"])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("No px project found. Run `px init` in your project directory first."),
+        "expected root error, got stderr: {stderr:?}"
+    );
+}
+
+#[test]
+fn px_commands_walk_up_to_project_root() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("root-app");
+    fs::create_dir_all(project_dir.join("nested").join("deep")).expect("create dirs");
+
+    cargo_bin_cmd!("px")
+        .current_dir(&project_dir)
+        .args(["init", "--package", "root_app"])
+        .assert()
+        .success();
+
+    let nested = project_dir.join("nested").join("deep");
+    cargo_bin_cmd!("px")
+        .current_dir(&nested)
+        .args(["add", "requests==2.32.3"])
+        .assert()
+        .success();
+
+    let deps = read_dependencies(project_dir.join("pyproject.toml"));
+    assert!(
+        deps.iter().any(|dep| dep == "requests==2.32.3"),
+        "dependency should be added from nested directory: {deps:?}"
+    );
+}
+
 fn scaffold_demo(temp: &TempDir, package: &str) {
     cargo_bin_cmd!("px")
         .current_dir(temp.path())
-        .args(["project", "init", "--package", package])
+        .args(["init", "--package", package])
         .assert()
         .success();
 }

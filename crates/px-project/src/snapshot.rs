@@ -54,7 +54,39 @@ impl ProjectSnapshot {
 }
 
 pub fn current_project_root() -> Result<PathBuf> {
-    env::current_dir().context("unable to determine project root")
+    match discover_project_root()? {
+        Some(root) => Ok(root),
+        None => Err(anyhow!(
+            "No px project found. Run `px init` in your project directory first."
+        )),
+    }
+}
+
+pub fn discover_project_root() -> Result<Option<PathBuf>> {
+    let mut dir = env::current_dir().context("unable to determine project root")?;
+    loop {
+        if dir.join("px.lock").exists() {
+            return Ok(Some(dir));
+        }
+        let pyproject = dir.join("pyproject.toml");
+        if pyproject.exists() && pyproject_has_tool_px(&pyproject)? {
+            return Ok(Some(dir));
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    Ok(None)
+}
+
+fn pyproject_has_tool_px(path: &Path) -> Result<bool> {
+    let contents = fs::read_to_string(path)?;
+    let doc: DocumentMut = contents.parse()?;
+    Ok(doc
+        .get("tool")
+        .and_then(|item| item.as_table())
+        .and_then(|table| table.get("px"))
+        .is_some())
 }
 
 pub fn project_name_from_pyproject(path: &Path) -> Result<Option<String>> {

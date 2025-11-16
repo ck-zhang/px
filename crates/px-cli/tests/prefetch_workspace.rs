@@ -38,7 +38,7 @@ fn workspace_prefetch_rehydrates_members() {
         .current_dir(&root)
         .env("PX_ONLINE", "1")
         .env("PX_CACHE_PATH", &cache_root)
-        .args(["store", "prefetch", "--workspace"])
+        .args(["cache", "prefetch", "--workspace"])
         .assert()
         .success();
 
@@ -65,7 +65,7 @@ fn workspace_prefetch_dry_run_reports_totals() {
         .current_dir(&root)
         .env_remove("PX_ONLINE")
         .env("PX_CACHE_PATH", &cache_root)
-        .args(["--json", "store", "prefetch", "--workspace", "--dry-run"])
+        .args(["--json", "cache", "prefetch", "--workspace", "--dry-run"])
         .assert()
         .success();
 
@@ -89,7 +89,7 @@ fn hydrate_workspace_members(root: &Path, cache_root: &Path) {
         cargo_bin_cmd!("px")
             .current_dir(&member_dir)
             .env("PX_ONLINE", "1")
-            .args(["project", "add", "packaging==24.1"])
+            .args(["add", "packaging==24.1"])
             .assert()
             .success();
 

@@ -27,9 +27,9 @@ use px_project::resolver::{
     autopin_pin_key, autopin_spec_key, marker_applies, merge_resolved_dependencies,
 };
 use px_project::{
-    collect_pyproject_packages, collect_requirement_packages, plan_autopin, prepare_pyproject_plan,
-    resolve_onboard_path, AutopinEntry, AutopinState, BackupManager, InstallOverride,
-    ManifestEditor, PinSpec, ProjectInitializer,
+    collect_pyproject_packages, collect_requirement_packages, discover_project_root, plan_autopin,
+    prepare_pyproject_plan, resolve_onboard_path, AutopinEntry, AutopinState, BackupManager,
+    InstallOverride, ManifestEditor, PinSpec, ProjectInitializer,
 };
 use px_python;
 use px_resolver::{ResolveRequest as ResolverRequest, ResolverEnv, ResolverTags};
@@ -72,29 +72,51 @@ pub struct GlobalOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CommandGroup {
-    Project,
-    Workflow,
-    Quality,
-    Output,
-    Infra,
+    Init,
+    Add,
+    Remove,
+    Install,
+    Update,
+    Run,
+    Test,
+    Fmt,
+    Lint,
+    Tidy,
+    Build,
+    Publish,
+    Migrate,
+    Status,
+    Env,
+    Cache,
     Lock,
     Workspace,
-    Store,
-    Migrate,
+    Explain,
+    Why,
 }
 
 impl fmt::Display for CommandGroup {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            CommandGroup::Project => "project",
-            CommandGroup::Workflow => "workflow",
-            CommandGroup::Quality => "quality",
-            CommandGroup::Output => "output",
-            CommandGroup::Infra => "infra",
+            CommandGroup::Init => "init",
+            CommandGroup::Add => "add",
+            CommandGroup::Remove => "remove",
+            CommandGroup::Install => "install",
+            CommandGroup::Update => "update",
+            CommandGroup::Run => "run",
+            CommandGroup::Test => "test",
+            CommandGroup::Fmt => "fmt",
+            CommandGroup::Lint => "lint",
+            CommandGroup::Tidy => "tidy",
+            CommandGroup::Build => "build",
+            CommandGroup::Publish => "publish",
+            CommandGroup::Migrate => "migrate",
+            CommandGroup::Status => "status",
+            CommandGroup::Env => "env",
+            CommandGroup::Cache => "cache",
             CommandGroup::Lock => "lock",
             CommandGroup::Workspace => "workspace",
-            CommandGroup::Store => "store",
-            CommandGroup::Migrate => "migrate",
+            CommandGroup::Explain => "explain",
+            CommandGroup::Why => "why",
         };
         f.write_str(name)
     }
@@ -737,7 +759,7 @@ impl DefaultEntryIssue {
             DefaultEntryIssue::MissingManifest(path) => ExecutionOutcome::user_error(
                 format!("pyproject.toml not found in {}", ctx.project_root.display()),
                 json!({
-                    "hint": "run `px migrate --write` or pass ENTRY explicitly",
+                    "hint": "run `px migrate --apply` or pass ENTRY explicitly",
                     "project_root": ctx.project_root.display().to_string(),
                     "manifest": path.display().to_string(),
                 }),
@@ -1488,7 +1510,10 @@ fn store_prefetch_outcome(
 }
 
 pub fn migrate(ctx: &CommandContext, request: MigrateRequest) -> Result<ExecutionOutcome> {
-    let root = ctx.project_root()?;
+    let root = match discover_project_root()? {
+        Some(path) => path,
+        None => env::current_dir().context("unable to determine current directory")?,
+    };
     let pyproject_path = root.join("pyproject.toml");
     let pyproject_exists = pyproject_path.exists();
 
@@ -1622,7 +1647,7 @@ pub fn migrate(ctx: &CommandContext, request: MigrateRequest) -> Result<Executio
 
     if !write_requested {
         details["hint"] =
-            Value::String("Preview confirmed; rerun with --write to apply".to_string());
+            Value::String("Preview confirmed; rerun with --apply to write changes".to_string());
         return Ok(ExecutionOutcome::success(message, details));
     }
 
@@ -1723,7 +1748,7 @@ pub fn migrate(ctx: &CommandContext, request: MigrateRequest) -> Result<Executio
         }
     }
 
-    let snapshot = manifest_snapshot()?;
+    let snapshot = manifest_snapshot_at(&root)?;
     let lock_needs_backup = snapshot.lock_path.exists() && !lock_is_fresh(&snapshot)?;
     if lock_needs_backup {
         backups.backup(&snapshot.lock_path)?;
@@ -2193,7 +2218,10 @@ impl CommandHandler<ProjectInitRequest> for ProjectInitHandler {
         ctx: &CommandContext,
         request: ProjectInitRequest,
     ) -> Result<ExecutionOutcome> {
-        let root = ctx.project_root()?;
+        let root = match discover_project_root()? {
+            Some(path) => path,
+            None => env::current_dir().context("unable to determine current directory")?,
+        };
         let pyproject_path = root.join("pyproject.toml");
 
         if pyproject_path.exists() {
@@ -2259,8 +2287,7 @@ fn existing_pyproject_response(pyproject_path: &Path) -> Result<ExecutionOutcome
         details["package"] = Value::String(name);
     }
     details["hint"] = Value::String(
-        "pyproject.toml already exists; run `px project add` or start in an empty directory."
-            .to_string(),
+        "pyproject.toml already exists; run `px add` or start in an empty directory.".to_string(),
     );
     Ok(ExecutionOutcome::user_error(
         "project already initialized (pyproject.toml present)",
@@ -2286,7 +2313,7 @@ pub fn project_add(ctx: &CommandContext, request: ProjectAddRequest) -> Result<E
     if request.specs.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "provide at least one dependency",
-            json!({ "hint": "run `px project add name==version`" }),
+            json!({ "hint": "run `px add name==version`" }),
         ));
     }
 
@@ -2301,7 +2328,7 @@ pub fn project_add(ctx: &CommandContext, request: ProjectAddRequest) -> Result<E
     if cleaned_specs.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "provide at least one dependency",
-            json!({ "hint": "run `px project add name==version`" }),
+            json!({ "hint": "run `px add name==version`" }),
         ));
     }
 
@@ -2337,7 +2364,7 @@ pub fn project_remove(
     if request.specs.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "provide at least one dependency to remove",
-            json!({ "hint": "run `px project remove name`" }),
+            json!({ "hint": "run `px remove name`" }),
         ));
     }
 
@@ -2443,7 +2470,7 @@ fn quality_tidy_outcome() -> Result<ExecutionOutcome> {
         Some(lock) => lock,
         None => {
             return Ok(ExecutionOutcome::user_error(
-                "px quality tidy: px.lock not found (run `px install`)",
+                "px tidy: px.lock not found (run `px install`)",
                 json!({
                     "lockfile": snapshot.lock_path.display().to_string(),
                     "hint": "run `px install` to generate px.lock before running tidy",
@@ -2614,8 +2641,7 @@ pub(crate) fn install_snapshot(
             && ctx.config().resolver.enabled
         {
             let resolved = resolve_dependencies(ctx, snapshot)?;
-            dependencies =
-                merge_resolved_dependencies(&dependencies, &resolved.specs, &marker_env);
+            dependencies = merge_resolved_dependencies(&dependencies, &resolved.specs, &marker_env);
             resolved_override = Some(resolved.pins);
             persist_resolved_dependencies(snapshot, &dependencies)?;
         }
@@ -3588,14 +3614,11 @@ pub fn to_json_response(info: CommandInfo, outcome: &ExecutionOutcome, _code: i3
 
 pub fn format_status_message(info: CommandInfo, message: &str) -> String {
     let group_name = info.group.to_string();
-    let prefix =
-        if matches!(info.group, CommandGroup::Output) && matches!(info.name, "build" | "publish") {
-            format!("px {}", info.name)
-        } else if group_name == info.name {
-            format!("px {}", info.name)
-        } else {
-            format!("px {} {}", group_name, info.name)
-        };
+    let prefix = if group_name == info.name {
+        format!("px {}", info.name)
+    } else {
+        format!("px {} {}", group_name, info.name)
+    };
     if message.is_empty() {
         prefix
     } else if message.starts_with(&prefix) {

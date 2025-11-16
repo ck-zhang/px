@@ -11,7 +11,7 @@ fn cache_path_prefixes_message() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout");
     assert!(
-        stdout.starts_with("px infra cache: "),
+        stdout.starts_with("✔ px cache"),
         "unexpected prefix: {}",
         stdout
     );
@@ -46,7 +46,7 @@ fn json_envelope_is_minimal() {
         obj["message"]
             .as_str()
             .unwrap_or_default()
-            .starts_with("px infra cache: "),
+            .starts_with("px cache"),
         "message should be prefixed"
     );
 }

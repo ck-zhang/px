@@ -66,7 +66,7 @@ fn migrate_reports_pyproject_dependencies() {
 
     cargo_bin_cmd!("px")
         .current_dir(temp.path())
-        .args(["project", "add", "requests==2.32.3"])
+        .args(["add", "requests==2.32.3"])
         .assert()
         .success();
 
@@ -107,6 +107,41 @@ fn migrate_reads_requirements_with_json() {
 }
 
 #[test]
+fn migrate_apply_works_without_tool_section() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pyproject = temp.path().join("pyproject.toml");
+    fs::write(
+        &pyproject,
+        r#"[project]
+name = "tool-less"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["rich==13.7.1"]
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#,
+    )
+    .expect("write pyproject");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(temp.path())
+        .args(["--json", "migrate", "--apply", "--allow-dirty"])
+        .assert()
+        .success();
+    let payload: Value = serde_json::from_slice(&assert.get_output().stdout).expect("json payload");
+    assert_eq!(payload["status"], "ok");
+    assert!(
+        temp.path().join("px.lock").exists(),
+        "px.lock should be created"
+    );
+}
+
+#[test]
 fn migrate_errors_without_project_files() {
     let temp = tempfile::tempdir().expect("tempdir");
     cargo_bin_cmd!("px")
@@ -127,7 +162,7 @@ fn migrate_write_creates_lock_from_requirements() {
         .args([
             "--json",
             "migrate",
-            "--write",
+            "--apply",
             "--source",
             "requirements.txt",
         ])
@@ -155,7 +190,7 @@ fn migrate_write_backs_up_pyproject() {
         .args([
             "--json",
             "migrate",
-            "--write",
+            "--apply",
             "--source",
             "requirements.txt",
         ])
@@ -182,7 +217,7 @@ fn migrate_autopins_loose_requirements() {
     }
     let temp = tempfile::tempdir().expect("tempdir");
     write_file(&temp, "requirements.txt", "packaging>=23.0\n");
-    let output = run_migrate_json(&temp, &["--write", "--source", "requirements.txt"]);
+    let output = run_migrate_json(&temp, &["--apply", "--source", "requirements.txt"]);
     assert!(
         !autopinned(&output["details"]).is_empty(),
         "expected autopinned entries"
@@ -202,7 +237,7 @@ fn migrate_autopins_only_loose_specs() {
     }
     let temp = tempfile::tempdir().expect("tempdir");
     write_file(&temp, "requirements.txt", "attrs==23.2.0\nrequests>=2.30\n");
-    let output = run_migrate_json(&temp, &["--write", "--source", "requirements.txt"]);
+    let output = run_migrate_json(&temp, &["--apply", "--source", "requirements.txt"]);
     let names = autopinned(&output["details"]);
     assert_eq!(
         names,
@@ -230,7 +265,7 @@ fn migrate_no_autopin_flag_errors() {
     let assert = px_command(&temp)
         .args([
             "migrate",
-            "--write",
+            "--apply",
             "--source",
             "requirements.txt",
             "--no-autopin",
@@ -252,7 +287,7 @@ fn migrate_autopin_reports_resolver_failure() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_file(&temp, "requirements.txt", "definitely-not-a-real-pkg>=1\n");
     let assert = px_command(&temp)
-        .args(["migrate", "--write", "--source", "requirements.txt"])
+        .args(["migrate", "--apply", "--source", "requirements.txt"])
         .assert()
         .failure();
     let output = command_output(&assert);
@@ -270,7 +305,7 @@ fn migrate_autopins_dev_requirements() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_file(&temp, "requirements.txt", "packaging==23.2\n");
     write_file(&temp, "requirements-dev.txt", "pytest>=7.0\n");
-    let output = run_migrate_json(&temp, &["--write"]);
+    let output = run_migrate_json(&temp, &["--apply"]);
     let names = autopinned(&output["details"]);
     assert!(
         names.contains(&"pytest".to_string()),
@@ -311,7 +346,7 @@ dependencies = [
 px-dev = ["pytest>=7.0"]
 "#,
     );
-    let output = run_migrate_json(&temp, &["--write"]);
+    let output = run_migrate_json(&temp, &["--apply"]);
     let names = autopinned(&output["details"]);
     assert!(names.iter().any(|name| name == "click" || name == "pytest"));
     assert!(
@@ -323,7 +358,7 @@ px-dev = ["pytest>=7.0"]
 fn scaffold_demo(temp: &TempDir, package: &str) {
     cargo_bin_cmd!("px")
         .current_dir(temp.path())
-        .args(["project", "init", "--package", package])
+        .args(["init", "--package", package])
         .assert()
         .success();
 }

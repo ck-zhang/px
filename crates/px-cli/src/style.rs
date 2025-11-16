@@ -16,33 +16,66 @@ impl Style {
     }
 
     pub fn status(&self, status: &CommandStatus, text: &str) -> String {
-        match status {
-            CommandStatus::Ok => self.paint(text, (45, 204, 159), true),
-            CommandStatus::UserError => self.paint(text, (240, 180, 41), true),
-            CommandStatus::Failure => self.paint(text, (224, 69, 95), true),
-        }
+        let (symbol, tone) = match status {
+            CommandStatus::Ok => ("✔", Tone::Green),
+            CommandStatus::UserError => ("✗", Tone::Yellow),
+            CommandStatus::Failure => ("✖", Tone::Red),
+        };
+        let line = format!("{symbol} {text}");
+        self.paint(&line, tone, true)
     }
 
     pub fn info(&self, text: &str) -> String {
-        self.paint(text, (92, 106, 196), false)
+        self.paint(text, Tone::Blue, false)
     }
 
     pub fn table_header(&self, text: &str) -> String {
         if !self.enabled {
             return text.to_string();
         }
-        text.truecolor(74, 85, 104).bold().to_string()
+        text.bold().to_string()
     }
 
-    fn paint(&self, text: &str, rgb: (u8, u8, u8), bold: bool) -> String {
+    fn paint(&self, text: &str, tone: Tone, bold: bool) -> String {
         if !self.enabled {
             return text.to_string();
         }
-        let colored = text.truecolor(rgb.0, rgb.1, rgb.2);
-        if bold {
-            colored.bold().to_string()
-        } else {
-            colored.to_string()
+        match tone {
+            Tone::Green => {
+                if bold {
+                    text.green().bold().to_string()
+                } else {
+                    text.green().to_string()
+                }
+            }
+            Tone::Yellow => {
+                if bold {
+                    text.yellow().bold().to_string()
+                } else {
+                    text.yellow().to_string()
+                }
+            }
+            Tone::Red => {
+                if bold {
+                    text.red().bold().to_string()
+                } else {
+                    text.red().to_string()
+                }
+            }
+            Tone::Blue => {
+                if bold {
+                    text.cyan().bold().to_string()
+                } else {
+                    text.cyan().to_string()
+                }
+            }
         }
     }
+}
+
+enum Tone {
+    Green,
+    Yellow,
+    Red,
+    Blue,
 }

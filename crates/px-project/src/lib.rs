@@ -20,5 +20,6 @@ pub use onboard::{
 };
 pub use resolver::{current_marker_environment, InstallOverride, PinSpec, ResolvedSpecOutput};
 pub use snapshot::{
-    current_project_root, ensure_pyproject_exists, project_name_from_pyproject, ProjectSnapshot,
+    current_project_root, discover_project_root, ensure_pyproject_exists,
+    project_name_from_pyproject, ProjectSnapshot,
 };

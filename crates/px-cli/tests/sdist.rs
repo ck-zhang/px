@@ -107,7 +107,7 @@ fn run_force_sdist_install(project: &Path, cache: &Path) {
 fn add_dependency(project: &Path, spec: &str) {
     cargo_bin_cmd!("px")
         .current_dir(project)
-        .args(["project", "add", spec])
+        .args(["add", spec])
         .assert()
         .success();
 }
