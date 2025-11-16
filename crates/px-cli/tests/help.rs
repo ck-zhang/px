@@ -9,7 +9,7 @@ fn help_output(args: &[&str]) -> String {
 fn run_help_mentions_usage_and_examples() {
     let output = help_output(&["run", "--help"]);
     assert!(
-        output.contains("Run a named task or script."),
+        output.contains("Run scripts/tasks with auto-sync unless --frozen or CI=1."),
         "run help missing updated about: {output}"
     );
     assert!(
@@ -17,8 +17,8 @@ fn run_help_mentions_usage_and_examples() {
             || output.contains("px run [entry] [-- <arg>...]")
     );
     assert!(
-        output.contains("px run sample_px_app.cli -- -n Demo"),
-        "run example missing entry override: {output}"
+        output.contains("--frozen"),
+        "run help should mention the --frozen guard: {output}"
     );
 }
 
@@ -26,55 +26,44 @@ fn run_help_mentions_usage_and_examples() {
 fn init_help_lists_examples() {
     let output = help_output(&["init", "--help"]);
     assert!(
-        output.contains("Create a new px project and environment."),
+        output.contains("Start a px project: writes pyproject, px.lock, and an empty env."),
         "init about missing: {output}"
     );
     assert!(
         output.contains("px init [--package NAME] [--py VERSION]")
             || output.contains("px init [--package name] [--py version]")
     );
-    assert!(
-        output.contains("px init --package demo_pkg --py 3.11"),
-        "init example missing override: {output}"
-    );
 }
 
 #[test]
 fn env_help_highlights_modes() {
-    let output = help_output(&["env", "--help"]);
+    let output = help_output(&["debug", "env", "--help"]);
     assert!(
-        output.contains("px env [python|info|paths]"),
+        output.contains("px debug env [python|info|paths]")
+            || output.contains("px debug env [python|info|paths"),
         "env usage missing modes: {output}"
     );
     assert!(
-        output.contains("px env python"),
-        "env example missing python shim: {output}"
+        output.contains("Output mode: info, paths, or python"),
+        "env flag description missing: {output}"
     );
 }
 
 #[test]
 fn cache_prune_help_mentions_dry_run_example() {
-    let output = help_output(&["cache", "prune", "--help"]);
+    let output = help_output(&["debug", "cache", "prune", "--help"]);
     assert!(
         output.contains("Prune cache files (pair with --dry-run to preview)."),
         "cache prune about missing: {output}"
-    );
-    assert!(
-        output.contains("px cache prune --all --dry-run"),
-        "cache prune example missing: {output}"
     );
 }
 
 #[test]
 fn cache_prefetch_help_shows_workspace_example() {
-    let output = help_output(&["cache", "prefetch", "--help"]);
+    let output = help_output(&["debug", "cache", "prefetch", "--help"]);
     assert!(
         output.contains("Prefetch and cache artifacts for offline use."),
         "cache prefetch about missing: {output}"
-    );
-    assert!(
-        output.contains("PX_ONLINE=1 px cache prefetch --workspace"),
-        "cache prefetch example missing gating note: {output}"
     );
 }
 
@@ -82,11 +71,7 @@ fn cache_prefetch_help_shows_workspace_example() {
 fn build_help_mentions_skip_tests_example() {
     let output = help_output(&["build", "--help"]);
     assert!(
-        output.contains("Build distributable artifacts."),
+        output.contains("Build sdists/wheels using the px env (prep for px publish)."),
         "build about missing: {output}"
-    );
-    assert!(
-        output.contains("PX_SKIP_TESTS=1 px build"),
-        "build example missing skip-tests hint: {output}"
     );
 }

@@ -85,7 +85,7 @@ fn frozen_install_verifies_built_wheels() {
         .env("PX_ONLINE", "1")
         .env("PX_FORCE_SDIST", "1")
         .env("PX_CACHE_PATH", cache.path())
-        .args(["--json", "install", "--frozen"])
+        .args(["--json", "sync", "--frozen"])
         .assert()
         .success();
 
@@ -99,7 +99,7 @@ fn run_force_sdist_install(project: &Path, cache: &Path) {
         .env("PX_ONLINE", "1")
         .env("PX_FORCE_SDIST", "1")
         .env("PX_CACHE_PATH", cache)
-        .args(["install"])
+        .args(["sync"])
         .assert()
         .success();
 }

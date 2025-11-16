@@ -102,7 +102,7 @@ No scaffolding code.
 
 ---
 
-### 4.2 After first dependency resolution (`px add` / `px install`)
+### 4.2 After first dependency resolution (`px add` / `px sync`)
 
 Example:
 
@@ -235,7 +235,7 @@ Must **not**:
 
 ---
 
-### 5.3 `px install`
+### 5.3 `px sync`
 
 May:
 

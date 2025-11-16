@@ -6,7 +6,7 @@ fn cache_path_prefixes_message() {
     let temp = tempfile::tempdir().expect("tempdir");
     let assert = cargo_bin_cmd!("px")
         .env("PX_CACHE_PATH", temp.path())
-        .args(["cache", "path"])
+        .args(["debug", "cache", "path"])
         .assert()
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout");
@@ -22,7 +22,7 @@ fn cache_prune_user_error_includes_hint() {
     let temp = tempfile::tempdir().expect("tempdir");
     let assert = cargo_bin_cmd!("px")
         .env("PX_CACHE_PATH", temp.path())
-        .args(["cache", "prune"])
+        .args(["debug", "cache", "prune"])
         .assert()
         .failure();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout");
@@ -34,7 +34,7 @@ fn json_envelope_is_minimal() {
     let temp = tempfile::tempdir().expect("tempdir");
     let assert = cargo_bin_cmd!("px")
         .env("PX_CACHE_PATH", temp.path())
-        .args(["--json", "cache", "stats"])
+        .args(["--json", "debug", "cache", "stats"])
         .assert()
         .success();
     let payload: Value = serde_json::from_slice(&assert.get_output().stdout).expect("json");
@@ -56,7 +56,7 @@ fn quiet_flag_suppresses_human_output() {
     let temp = tempfile::tempdir().expect("tempdir");
     let assert = cargo_bin_cmd!("px")
         .env("PX_CACHE_PATH", temp.path())
-        .args(["-q", "cache", "path"])
+        .args(["-q", "debug", "cache", "path"])
         .assert()
         .success();
     assert!(assert.get_output().stdout.is_empty());

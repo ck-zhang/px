@@ -5,8 +5,8 @@
 - **Onboarding + auto-pin:** `px migrate --write` backfills `pyproject.toml`,
   snapshots `.px/onboard-backups/`, and auto-pins loose specs in the base
   dependencies plus the `px-dev` optional group when markers apply.
-- **Lock + install:** `px install` regenerates `px.lock`, refreshes `.px/site`,
-  and surfaces drift via `px install --frozen` and `px tidy`. `px lock diff`
+- **Lock + install:** `px sync` regenerates `px.lock`, refreshes `.px/site`,
+  and surfaces drift via `px sync --frozen` and `px tidy`. `px lock diff`
   reports schema / dependency mismatches, while `px lock upgrade` emits the v2
   graph when it exists.
 - **Runner UX:** `px run <module|script>` infers defaults from
@@ -41,10 +41,10 @@
 | pyproject onboarding & autopin | [x] | `px migrate --write` + backup manager handle single projects with prod/dev scopes |
 | requirements parser (markers/comments) | [x] | `requirements*.txt` parsing strips comments and respects markers during autopin |
 | dependency resolver for ranges | [~] | Resolver runs by default (set `PX_RESOLVER=0` to disable) and auto-pins bare names/ranges/extras/markers; URLs still unsupported |
-| pinned installs + lockfile authoring | [x] | `px install` enforces `name==version`, renders `px.lock`, refreshes `.px/site` |
+| pinned installs + lockfile authoring | [x] | `px sync` enforces `name==version`, renders `px.lock`, refreshes `.px/site` |
 | installer extras / URL support | [~] | Extras/markers now flow through pinned installs; URL deps remain rejected |
 | marker awareness in installs | [x] | Resolver + install honor markers when pinning/spec normalization |
-| lock verification / drift detection | [x] | `px install --frozen`, `px tidy`, `px lock diff` reuse shared drift analyzers |
+| lock verification / drift detection | [x] | `px sync --frozen`, `px tidy`, `px lock diff` reuse shared drift analyzers |
 | wheel cache + store | [x] | `px-store` downloads/caches wheels, supports prefetch via lock metadata |
 | workspace support | [~] | Install/tidy/verify implemented; migrate/update automation missing |
 | script/test runner | [x] | `px run`/`px test` wrap python/pytest with passthrough fallbacks |
@@ -63,7 +63,7 @@ Legend: `[x]` implemented, `[~]` partial, `[ ]` missing.
 # Sample project (fixtures/sample_px_app)
 cd fixtures/sample_px_app
 ../../target/debug/px migrate --write --allow-dirty
-../../target/debug/px install
+../../target/debug/px sync
 ../../target/debug/px run sample_px_app.cli -- -n Demo
 ../../target/debug/px test
 

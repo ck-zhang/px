@@ -7,7 +7,7 @@ use toml_edit::DocumentMut;
 
 mod common;
 
-use common::parse_json;
+use common::{parse_json, require_online};
 
 #[test]
 fn project_init_creates_minimal_shape() {
@@ -24,8 +24,8 @@ fn project_init_creates_minimal_shape() {
     let pyproject = project_dir.join("pyproject.toml");
     assert!(pyproject.exists(), "pyproject should be created");
     assert!(
-        !project_dir.join("px.lock").exists(),
-        "px init must not create px.lock"
+        project_dir.join("px.lock").exists(),
+        "px init must create px.lock"
     );
     assert!(
         !project_dir.join("demo_shape").exists(),
@@ -43,6 +43,10 @@ fn project_init_creates_minimal_shape() {
     assert!(
         px_dir.join("state.json").exists(),
         ".px/state.json should exist"
+    );
+    assert!(
+        px_dir.join("site").join("px.pth").exists(),
+        ".px/site/px.pth should be created"
     );
 
     let contents = fs::read_to_string(&pyproject).expect("read pyproject");
@@ -131,6 +135,10 @@ fn project_init_json_reports_details() {
         "pyproject should be recorded in files_created: {created:?}"
     );
     assert!(
+        created.contains(&"px.lock"),
+        "px.lock should be recorded in files_created: {created:?}"
+    );
+    assert!(
         created.iter().any(|entry| entry.starts_with(".px")),
         "files_created should include .px paths: {created:?}"
     );
@@ -142,6 +150,9 @@ fn project_init_json_reports_details() {
 
 #[test]
 fn project_add_inserts_dependency() {
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     scaffold_demo(&temp, "demo_add");
     let project_dir = temp.path();
@@ -158,24 +169,50 @@ fn project_add_inserts_dependency() {
 
 #[test]
 fn project_remove_deletes_dependency() {
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     scaffold_demo(&temp, "demo_remove");
     let project_dir = temp.path();
 
     cargo_bin_cmd!("px")
         .current_dir(project_dir)
-        .args(["add", "foo==1.0"])
+        .args(["add", "requests==2.32.3"])
         .assert()
         .success();
 
     cargo_bin_cmd!("px")
         .current_dir(project_dir)
-        .args(["remove", "foo"])
+        .args(["remove", "requests"])
         .assert()
         .success();
 
     let deps = read_dependencies(project_dir.join("pyproject.toml"));
-    assert!(deps.iter().all(|dep| !dep.starts_with("foo")));
+    assert!(deps.iter().all(|dep| !dep.starts_with("requests")));
+}
+
+#[test]
+fn project_remove_requires_direct_dependency() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    scaffold_demo(&temp, "demo_remove_missing");
+    let project_dir = temp.path();
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(project_dir)
+        .args(["remove", "missing-pkg"])
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("px remove: package is not a direct dependency"),
+        "expected a clear error when removing unknown packages, got {stdout:?}"
+    );
+    assert!(
+        stdout.contains("px why"),
+        "expected hint to mention px why, got {stdout:?}"
+    );
 }
 
 #[test]
@@ -196,6 +233,9 @@ fn px_commands_require_project_root() {
 
 #[test]
 fn px_commands_walk_up_to_project_root() {
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path().join("root-app");
     fs::create_dir_all(project_dir.join("nested").join("deep")).expect("create dirs");

@@ -11,7 +11,7 @@
 
    * Anything a new user needs in the first week is `px <verb>`, no nouns:
 
-     * `px init`, `px add`, `px remove`, `px install`, `px update`, `px run`, `px test`.
+     * `px init`, `px add`, `px remove`, `px sync`, `px update`, `px run`, `px test`.
 
 2. **Concepts are nouns, not taxonomies**
 
@@ -48,7 +48,7 @@ This is what `px --help` should show. No other top-levels.
 px init       Create a new px project and environment
 px add        Add dependencies and update lock/env
 px remove     Remove dependencies and update lock/env
-px install    Sync environment from lockfile
+px sync    Sync environment from lockfile
 px update     Update dependencies and lockfile
 px run        Run a named task or script
 px test       Run tests
@@ -120,7 +120,7 @@ Everything else (old `project`, `workflow`, `quality`, `output`, `infra`, `store
 * Remove from spec, update lock & env.
 * Similar shape to `add`.
 
-**`px install [--frozen]`**
+**`px sync [--frozen]`**
 
 * Install from lockfile only.
 * `--frozen` = fail if lock and spec diverge.
@@ -264,7 +264,7 @@ px lock upgrade      Refresh lockfile without installing
 ```text
 px workspace list      List projects in the workspace
 px workspace verify    Check workspace consistency
-px workspace install   Install all workspace dependencies
+px workspace sync   Install all workspace dependencies
 px workspace tidy      Cleanup workspace-wide artifacts
 ```
 
@@ -342,7 +342,7 @@ No default stack traces. No hairball resolver logs unless `--debug`.
   * env type,
   * whether it’s synced with `px.lock`.
 
-Deterministic identity of an env is `(lock hash, platform, Python version)`, and you *surface* that in `px install`, `px update`, `px migrate`.
+Deterministic identity of an env is `(lock hash, platform, Python version)`, and you *surface* that in `px sync`, `px update`, `px migrate`.
 
 ---
 

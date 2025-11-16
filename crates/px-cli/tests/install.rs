@@ -58,7 +58,7 @@ fn install_pinned_fetches_artifact() {
         .current_dir(&project_root)
         .env("PX_ONLINE", "1")
         .env("PX_CACHE_PATH", &cache_dir)
-        .args(["install"])
+        .args(["sync"])
         .assert()
         .success();
 
@@ -90,7 +90,7 @@ fn install_pinned_fetches_artifact() {
         .current_dir(&project_root)
         .env("PX_ONLINE", "1")
         .env("PX_CACHE_PATH", &cache_dir)
-        .args(["install", "--frozen"])
+        .args(["sync", "--frozen"])
         .assert()
         .success();
 }
@@ -119,7 +119,7 @@ fn install_rejects_unpinned_specs() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project_root)
         .env("PX_ONLINE", "1")
-        .args(["install"])
+        .args(["sync"])
         .assert()
         .failure();
     let output = assert.get_output();
@@ -147,7 +147,7 @@ fn install_skips_nonmatching_marker_specs() {
         .current_dir(temp.path())
         .env("PX_ONLINE", "1")
         .env("PX_CACHE_PATH", &cache_dir)
-        .args(["install"])
+        .args(["sync"])
         .assert()
         .success();
 
@@ -181,7 +181,7 @@ fn install_accepts_pinned_marker_spec() {
         .current_dir(temp.path())
         .env("PX_ONLINE", "1")
         .env("PX_CACHE_PATH", &cache_dir)
-        .args(["install"])
+        .args(["sync"])
         .assert()
         .success();
 
@@ -214,7 +214,7 @@ fn install_errors_on_applicable_loose_marker() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(temp.path())
         .env("PX_ONLINE", "1")
-        .args(["install"])
+        .args(["sync"])
         .assert()
         .failure();
     let output = assert.get_output();

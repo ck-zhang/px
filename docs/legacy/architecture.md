@@ -29,7 +29,7 @@ px/                             # root workspace (Cargo)
 - `px.lock`, `pyproject.toml`, and `.px/` stay per-project with enforced
   layout (see `docs/spec.md` §2–4).
 - `.px/` remains hidden; it stores `site/px.pth`, shimmed binaries, derived
-  metadata, and the runner bootstrap regenerated whenever `px install` runs.
+  metadata, and the runner bootstrap regenerated whenever `px sync` runs.
 
 ## Crate Responsibilities
 
@@ -79,12 +79,12 @@ interpreters, policy hooks) extend these flags rather than rewiring crates.
 - Centralized `px-core::Error` (via `thiserror` + `miette`) wraps context such
   as `command`, `workspace`, and `path`.
 - CLI reporting mirrors `docs/spec.md` §5/§11: headline + explicit next step
-  (e.g., “Lockfile drift detected → run `px install` or `px update <dep>`”).
+  (e.g., “Lockfile drift detected → run `px sync` or `px update <dep>`”).
 - Runtime/resolver/store emit structured metadata for machine consumption
   (`--json` planned in Phase B) and log spans (`resolve`, `download`, `build`,
   `install`) using `tracing`.
 - Commands either succeed or leave `.px/site` in a deterministic state;
-  `px cache prune` never corrupts CAS; `px install` rolls back partial work.
+  `px cache prune` never corrupts CAS; `px sync` rolls back partial work.
 - Later phases layer telemetry/policy hooks without changing the success/error
   contract.
 
@@ -93,7 +93,7 @@ interpreters, policy hooks) extend these flags rather than rewiring crates.
 - **Project scaffolding** – `px init` creates the enforced layout
   (`pyproject`, `.px/`, lock template) via `px-project`, `px-cli`, and
   `px-lockfile`.
-- **Dependency lifecycle** – `px add`, `px install`, `px update`, `px remove`
+- **Dependency lifecycle** – `px add`, `px sync`, `px update`, `px remove`
   resolve specs, update CAS, regenerate `.px/site`, and enforce `--frozen`
   through `px-resolver`, `px-store`, `px-lockfile`, and `px-project`.
 - **Execution** – `px run [module|script|entry]` bootstraps the runner, injects
@@ -143,7 +143,7 @@ future workspace/multi-target additions plug in without major UX rewrites.
 
 ### Lockfile & Install (Phase A slice)
 
-- `px install` now implements a **pinned-only** path. It requires each
+- `px sync` now implements a **pinned-only** path. It requires each
   `[project].dependencies` entry to be an exact `name==version` pin. For every
   pin, px fetches `https://pypi.org/pypi/{name}/{version}/json`, selects the
   best wheel (preferring `py3-none-any`, otherwise the interpreter’s ABI/plat
@@ -154,7 +154,7 @@ future workspace/multi-target additions plug in without major UX rewrites.
   - `[project]` name + `[python].requirement`
   - `[[dependencies]]` tables containing `name`, `specifier`, and
     `artifact.{filename,url,sha256,size,cached_path,python_tag,abi_tag,platform_tag}`
-- `px install --frozen` skips network work and ensures both the manifest and the
+- `px sync --frozen` skips network work and ensures both the manifest and the
   cached artifacts match the lock (missing wheels, size mismatches, or checksum
   drift all trigger a `user-error`).
 - `px tidy` reuses the drift detector but never rewrites files; it reports

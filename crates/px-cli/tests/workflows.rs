@@ -16,7 +16,7 @@ fn env_python_prints_interpreter_path() {
     let (_tmp, project) = prepare_fixture("env-python");
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
-        .args(["env", "python"])
+        .args(["debug", "env", "python"])
         .assert()
         .success();
 
@@ -47,7 +47,7 @@ fn env_info_json_contains_core_keys() {
     let (_tmp, project) = prepare_fixture("env-info-json");
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
-        .args(["--json", "env", "info"])
+        .args(["--json", "debug", "env", "info"])
         .assert()
         .success();
 
@@ -83,7 +83,7 @@ fn env_paths_prints_human_lines() {
     let (_tmp, project) = prepare_fixture("env-paths");
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
-        .args(["env", "paths"])
+        .args(["debug", "env", "paths"])
         .assert()
         .success();
 
@@ -116,13 +116,13 @@ fn tidy_reports_single_line_and_hint() {
 
     cargo_bin_cmd!("px")
         .current_dir(&project)
-        .arg("install")
+        .arg("sync")
         .assert()
         .success();
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
-        .arg("tidy")
+        .args(["debug", "tidy"])
         .assert()
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
@@ -145,7 +145,7 @@ fn tidy_reports_single_line_and_hint() {
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
-        .arg("tidy")
+        .args(["debug", "tidy"])
         .assert()
         .failure();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
@@ -154,7 +154,7 @@ fn tidy_reports_single_line_and_hint() {
         "tidy drift output should call out stale lock: {stdout:?}"
     );
     assert!(
-        stdout.contains("Hint: rerun `px install`"),
+        stdout.contains("Hint: rerun `px sync`"),
         "tidy drift should emit remediation hint: {stdout:?}"
     );
 }
@@ -352,7 +352,7 @@ fn cache_path_resolves_to_override_directory() {
     let custom_store = temp.path().join("store");
     let assert = cargo_bin_cmd!("px")
         .env("PX_CACHE_PATH", custom_store.as_os_str())
-        .args(["--json", "cache", "path"])
+        .args(["--json", "debug", "cache", "path"])
         .assert()
         .success();
 

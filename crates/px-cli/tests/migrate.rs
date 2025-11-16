@@ -61,6 +61,9 @@ fn command_output(assert: &assert_cmd::assert::Assert) -> String {
 
 #[test]
 fn migrate_reports_pyproject_dependencies() {
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     scaffold_demo(&temp, "demo_onboard");
 
@@ -153,6 +156,9 @@ fn migrate_errors_without_project_files() {
 
 #[test]
 fn migrate_write_creates_lock_from_requirements() {
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     let requirements = temp.path().join("requirements.txt");
     fs::write(&requirements, "rich==13.7.1\n").expect("write requirements");
@@ -180,6 +186,9 @@ fn migrate_write_creates_lock_from_requirements() {
 
 #[test]
 fn migrate_write_backs_up_pyproject() {
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     scaffold_demo(&temp, "demo_backup");
     let requirements = temp.path().join("requirements.txt");

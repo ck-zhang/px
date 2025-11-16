@@ -97,7 +97,7 @@ fn hydrate_workspace_members(root: &Path, cache_root: &Path) {
             .current_dir(&member_dir)
             .env("PX_ONLINE", "1")
             .env("PX_CACHE_PATH", cache_root)
-            .args(["install"])
+            .args(["sync"])
             .assert()
             .success();
     }

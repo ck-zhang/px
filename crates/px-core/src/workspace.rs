@@ -88,7 +88,7 @@ pub(crate) fn prefetch(ctx: &CommandContext, dry_run: bool) -> Result<ExecutionO
                     },
                     None => {
                         status = "missing-lock".to_string();
-                        error = Some("px.lock not found (run `px install`)".to_string());
+                        error = Some("px.lock not found (run `px sync`)".to_string());
                         had_error = true;
                     }
                 },
@@ -274,7 +274,7 @@ pub(crate) fn verify(ctx: &CommandContext) -> Result<ExecutionOutcome> {
 
     if has_drift {
         details["hint"] = Value::String(
-            "run `px workspace install` or `px install` inside drifted members".to_string(),
+            "run `px workspace sync` or `px sync` inside drifted members".to_string(),
         );
         let summary = summarize_workspace_issue(first_issue);
         Ok(ExecutionOutcome::user_error(summary, details))
@@ -358,9 +358,9 @@ pub(crate) fn install(ctx: &CommandContext, frozen: bool) -> Result<ExecutionOut
 
     finalize_workspace_outcome(
         if frozen {
-            "workspace install --frozen"
+            "workspace sync --frozen"
         } else {
-            "workspace install"
+            "workspace sync"
         },
         workspace,
         reports,

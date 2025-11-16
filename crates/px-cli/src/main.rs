@@ -19,6 +19,34 @@ mod style;
 
 use style::Style;
 
+const PX_HELP_TEMPLATE: &str = "{before-help}\nUsage:\n    {usage}\n\nGlobal options:\n{options}\n";
+
+const PX_BEFORE_HELP: &str = concat!(
+    "px ",
+    env!("CARGO_PKG_VERSION"),
+    " – deterministic Python project manager\n\n",
+    "\x1b[1;36mCore workflow\x1b[0m\n",
+    "  init             Start a px project; writes pyproject.toml, px.lock, and .px/.\n",
+    "  add / remove     Declare or drop dependencies; px.lock and the env stay in sync.\n",
+    "  sync             Reconcile the environment with px.lock (use --frozen in CI).\n",
+    "  update           Resolve newer pins, rewrite px.lock, then sync the env.\n",
+    "  run              Execute scripts/tasks; auto-sync unless --frozen or CI=1.\n",
+    "  test             Run tests with the same auto-sync rules as `px run`.\n\n",
+    "\x1b[1;36mEssentials\x1b[0m\n",
+    "  status           Check whether pyproject, px.lock, and the env still agree.\n",
+    "  fmt | lint       Run configured formatters/linters inside the px environment.\n",
+    "  build            Produce sdists/wheels from the px-managed environment.\n",
+    "  publish          Upload previously built artifacts (dry-run by default).\n",
+    "  migrate          Create px metadata for an existing project.\n\n",
+    "\x1b[1;36mAdvanced\x1b[0m\n",
+    "  lock ...         Inspect or upgrade px.lock before running `px sync`.\n",
+    "  workspace ...    Apply sync/tidy/status across all workspace members.\n",
+    "  debug env        Show interpreter info or pythonpath.\n",
+    "  debug cache      Inspect cached artifacts (path, stats, prune, prefetch).\n",
+    "  debug tidy       Clean cached metadata and stray files.\n",
+    "  debug why        Advanced dependency provenance (coming soon).\n",
+);
+
 fn main() -> Result<()> {
     color_eyre::install()?;
 
@@ -79,6 +107,10 @@ fn emit_output(cli: &PxCli, info: CommandInfo, outcome: &px_core::ExecutionOutco
         let payload = px_core::to_json_response(info, outcome, code);
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else if !cli.quiet {
+        if let Some(note) = autosync_note_from_details(&outcome.details) {
+            let line = format!("px {}: {}", info.name, note);
+            println!("{}", style.info(&line));
+        }
         if is_passthrough(&outcome.details) {
             println!("{}", outcome.message);
         } else {
@@ -106,6 +138,15 @@ fn hint_from_details(details: &Value) -> Option<&str> {
     details
         .as_object()
         .and_then(|map| map.get("hint"))
+        .and_then(Value::as_str)
+}
+
+fn autosync_note_from_details(details: &Value) -> Option<&str> {
+    details
+        .as_object()
+        .and_then(|map| map.get("autosync"))
+        .and_then(Value::as_object)
+        .and_then(|map| map.get("note"))
         .and_then(Value::as_str)
 }
 
@@ -287,9 +328,9 @@ fn dispatch_command(
             };
             core_call(info, px_core::project_remove(ctx, request))
         }
-        CommandGroupCli::Install(args) => {
-            let info = CommandInfo::new(CommandGroup::Install, "install");
-            let request = project_install_request_from_args(args);
+        CommandGroupCli::Sync(args) => {
+            let info = CommandInfo::new(CommandGroup::Sync, "sync");
+            let request = project_sync_request_from_args(args);
             core_call(info, px_core::project_install(ctx, request))
         }
         CommandGroupCli::Update(args) => {
@@ -319,11 +360,6 @@ fn dispatch_command(
             let request = tool_command_request_from_args(args);
             core_call(info, px_core::quality_lint(ctx, request))
         }
-        CommandGroupCli::Tidy(args) => {
-            let info = CommandInfo::new(CommandGroup::Tidy, "tidy");
-            let request = quality_tidy_request_from_args(args);
-            core_call(info, px_core::quality_tidy(ctx, request))
-        }
         CommandGroupCli::Build(args) => {
             let info = CommandInfo::new(CommandGroup::Build, "build");
             let request = output_build_request_from_args(args);
@@ -339,13 +375,10 @@ fn dispatch_command(
             let request = migrate_request_from_args(args);
             core_call(info, px_core::migrate(ctx, request))
         }
-        CommandGroupCli::Status => upcoming_command(
-            CommandInfo::new(CommandGroup::Status, "status"),
-            "status reporting is not available yet",
-            "Use `px env info` and `px lock diff` until this lands.",
-        ),
-        CommandGroupCli::Env(args) => handle_env_command(ctx, args),
-        CommandGroupCli::Cache(args) => handle_cache_command(ctx, &args.command),
+        CommandGroupCli::Status => {
+            let info = CommandInfo::new(CommandGroup::Status, "status");
+            core_call(info, px_core::project_status(ctx))
+        }
         CommandGroupCli::Lock(cmd) => match cmd {
             LockCommand::Diff => {
                 let info = CommandInfo::new(CommandGroup::Lock, "diff");
@@ -365,9 +398,9 @@ fn dispatch_command(
                 let info = CommandInfo::new(CommandGroup::Workspace, "verify");
                 core_call(info, px_core::workspace_verify(ctx, WorkspaceVerifyRequest))
             }
-            WorkspaceCommand::Install(args) => {
-                let info = CommandInfo::new(CommandGroup::Workspace, "install");
-                let request = workspace_install_request_from_args(args);
+            WorkspaceCommand::Sync(args) => {
+                let info = CommandInfo::new(CommandGroup::Workspace, "sync");
+                let request = workspace_sync_request_from_args(args);
                 core_call(info, px_core::workspace_install(ctx, request))
             }
             WorkspaceCommand::Tidy => {
@@ -375,16 +408,25 @@ fn dispatch_command(
                 core_call(info, px_core::workspace_tidy(ctx, WorkspaceTidyRequest))
             }
         },
-        CommandGroupCli::Explain(_args) => upcoming_command(
-            CommandInfo::new(CommandGroup::Explain, "explain"),
-            "issue explanations are not available yet",
-            "Capture the issue id and check docs/design.md for roadmap updates.",
-        ),
-        CommandGroupCli::Why(_args) => upcoming_command(
-            CommandInfo::new(CommandGroup::Why, "why"),
-            "dependency provenance is not available yet",
-            "Inspect px.lock manually until the `px why` flow lands.",
-        ),
+        CommandGroupCli::Debug(cmd) => match cmd {
+            DebugCommand::Env(args) => handle_env_command(ctx, args),
+            DebugCommand::Cache(args) => handle_cache_command(ctx, &args.command),
+            DebugCommand::Tidy(args) => {
+                let info = CommandInfo::new(CommandGroup::Tidy, "tidy");
+                let request = quality_tidy_request_from_args(args);
+                core_call(info, px_core::quality_tidy(ctx, request))
+            }
+            DebugCommand::Why(_args) => upcoming_command(
+                CommandInfo::new(CommandGroup::Why, "why"),
+                "dependency provenance is not available yet",
+                "Inspect px.lock manually until the `px debug why` flow lands.",
+            ),
+            DebugCommand::Explain(_args) => upcoming_command(
+                CommandInfo::new(CommandGroup::Explain, "explain"),
+                "issue explanations are not available yet",
+                "Capture the issue id and check docs/design.md for roadmap updates.",
+            ),
+        },
         CommandGroupCli::Project(cmd) => match cmd {
             ProjectCommand::Init(args) => {
                 let info = CommandInfo::new(CommandGroup::Init, "init");
@@ -405,9 +447,9 @@ fn dispatch_command(
                 };
                 core_call(info, px_core::project_remove(ctx, request))
             }
-            ProjectCommand::Install(args) => {
-                let info = CommandInfo::new(CommandGroup::Install, "install");
-                let request = project_install_request_from_args(args);
+            ProjectCommand::Sync(args) => {
+                let info = CommandInfo::new(CommandGroup::Sync, "sync");
+                let request = project_sync_request_from_args(args);
                 core_call(info, px_core::project_install(ctx, request))
             }
             ProjectCommand::Update(args) => {
@@ -480,6 +522,7 @@ fn dispatch_command(
 fn workflow_test_request_from_args(args: &TestArgs) -> WorkflowTestRequest {
     WorkflowTestRequest {
         pytest_args: args.args.clone(),
+        frozen: args.frozen,
     }
 }
 
@@ -489,6 +532,7 @@ fn workflow_run_request_from_args(args: &RunArgs) -> WorkflowRunRequest {
         entry,
         target: args.target.clone(),
         args: forwarded_args,
+        frozen: args.frozen,
     }
 }
 
@@ -546,13 +590,13 @@ fn output_publish_request_from_args(args: &PublishArgs) -> OutputPublishRequest 
     }
 }
 
-fn project_install_request_from_args(args: &InstallArgs) -> ProjectInstallRequest {
+fn project_sync_request_from_args(args: &SyncArgs) -> ProjectInstallRequest {
     ProjectInstallRequest {
         frozen: args.frozen,
     }
 }
 
-fn workspace_install_request_from_args(args: &WorkspaceInstallArgs) -> WorkspaceInstallRequest {
+fn workspace_sync_request_from_args(args: &WorkspaceSyncArgs) -> WorkspaceInstallRequest {
     WorkspaceInstallRequest {
         frozen: args.frozen,
     }
@@ -593,9 +637,9 @@ fn normalize_run_invocation(args: &RunArgs) -> (Option<String>, Vec<String>) {
 #[command(
     author,
     version,
-    about = "Opinionated Python toolchain (Phase A)",
-    long_about = "Pinned installs, workspace utilities, and cache helpers for px.",
-    after_help = "Examples:\n  px add requests==2.32.3\n  px env info --json\n  px cache prefetch --workspace --dry-run"
+    disable_help_subcommand = true,
+    before_help = PX_BEFORE_HELP,
+    help_template = PX_HELP_TEMPLATE
 )]
 struct PxCli {
     #[arg(
@@ -621,88 +665,81 @@ struct PxCli {
 #[derive(Subcommand, Debug)]
 enum CommandGroupCli {
     #[command(
-        about = "Create a new px project and environment.",
+        about = "Start a px project: writes pyproject, px.lock, and an empty env.",
         override_usage = "px init [--package NAME] [--py VERSION]",
-        after_help = "Examples:\n  px init\n  px init --package demo_pkg --py 3.11\n"
     )]
     Init(InitArgs),
     #[command(
-        about = "Add dependencies and update lock/env.",
+        about = "Declare direct dependencies and immediately sync px.lock + env.",
         override_usage = "px add <SPEC> [SPEC ...]",
-        after_help = "Examples:\n  px add requests==2.32.3\n  px add pandas==2.2.3\n"
     )]
     Add(SpecArgs),
     #[command(
-        about = "Remove dependencies and update lock/env.",
+        about = "Remove direct dependencies and re-sync px.lock + env.",
         override_usage = "px remove <NAME> [NAME ...]",
-        after_help = "Example:\n  px remove requests\n"
     )]
     Remove(SpecArgs),
     #[command(
-        about = "Sync environment from px.lock.",
-        override_usage = "px install [--frozen]",
-        after_help = "Examples:\n  px install\n  px install --frozen\n"
+        about = "Sync the project environment from px.lock (run after clone or drift).",
+        override_usage = "px sync [--frozen]",
     )]
-    Install(InstallArgs),
+    Sync(SyncArgs),
     #[command(
-        about = "Update dependencies and lockfile.",
+        about = "Resolve newer versions, rewrite px.lock, then sync the env.",
         override_usage = "px update [<SPEC> ...]",
-        after_help = "Examples:\n  px update\n  px update requests\n"
     )]
     Update(SpecArgs),
     #[command(
-        about = "Run a named task or script.",
+        about = "Run scripts/tasks with auto-sync unless --frozen or CI=1.",
         override_usage = "px run [ENTRY] [-- <ARG>...]",
-        after_help = "Examples:\n  px run\n  px run sample_px_app.cli -- -n Demo\n"
     )]
     Run(RunArgs),
     #[command(
-        about = "Run tests in the px environment.",
+        about = "Run tests with the same auto-sync rules as px run.",
         override_usage = "px test [-- <PYTEST_ARG>...]",
-        after_help = "Examples:\n  px test\n  px test -- -k smoke\n"
     )]
     Test(TestArgs),
-    #[command(about = "Format code with configured formatters.")]
-    Fmt(ToolArgs),
-    #[command(about = "Lint code with configured linters.")]
-    Lint(ToolArgs),
-    #[command(about = "Clean up project artifacts and metadata.")]
-    Tidy(TidyArgs),
     #[command(
-        about = "Build distributable artifacts.",
+        about = "Run configured formatters inside the px environment.",
+        override_usage = "px fmt [-- <ARG>...]",
+    )]
+    Fmt(ToolArgs),
+    #[command(
+        about = "Run configured linters inside the px environment.",
+        override_usage = "px lint [-- <ARG>...]",
+    )]
+    Lint(ToolArgs),
+    #[command(
+        about = "Report whether pyproject, px.lock, and the env are in sync (read-only).",
+    )]
+    Status,
+    #[command(
+        about = "Build sdists/wheels using the px env (prep for px publish).",
         override_usage = "px build [sdist|wheel|both] [--out DIR]",
-        after_help = "Examples:\n  PX_SKIP_TESTS=1 px build\n  px build wheel --out dist\n"
     )]
     Build(BuildArgs),
     #[command(
-        about = "Publish build artifacts (dry-run by default).",
+        about = "Publish previously built artifacts; dry-run by default.",
         override_usage = "px publish [--dry-run] [--registry NAME] [--token-env VAR]",
-        after_help = "Examples:\n  px publish --dry-run\n  PX_ONLINE=1 PX_PUBLISH_TOKEN=<token> px publish\n"
     )]
     Publish(PublishArgs),
-    #[command(about = "Convert an existing project to deterministic px.")]
+    #[command(about = "Create px metadata for an existing project.")]
     Migrate(MigrateArgs),
-    #[command(about = "Show project/env/lock status at a glance.")]
-    Status,
     #[command(
-        about = "Inspect and manage the runtime environment.",
-        override_usage = "px env [python|info|paths]",
-        after_help = "Examples:\n  px env python\n  px env info\n  px env paths\n"
+        about = "Advanced lock maintenance (fix issues via `px sync`).",
+        subcommand
     )]
-    Env(EnvArgs),
-    #[command(
-        about = "Inspect and manage caches.",
-        after_help = "Examples:\n  px cache path\n  px cache stats\n  px cache prefetch --workspace --dry-run\n"
-    )]
-    Cache(CacheArgs),
-    #[command(about = "Inspect and manage the lockfile.", subcommand)]
     Lock(LockCommand),
-    #[command(about = "Work with multi-project workspaces.", subcommand)]
+    #[command(
+        about = "Apply sync/tidy/status across workspace members.",
+        subcommand
+    )]
     Workspace(WorkspaceCommand),
-    #[command(about = "Show detailed explanation for a recorded issue/resolution.")]
-    Explain(ExplainArgs),
-    #[command(about = "Explain why a given package is present.")]
-    Why(WhyArgs),
+    #[command(
+        about = "Advanced utilities (env, cache, fmt, lint, tidy, why).",
+        subcommand
+    )]
+    Debug(DebugCommand),
     #[command(subcommand, hide = true)]
     Project(ProjectCommand),
     #[command(subcommand, hide = true)]
@@ -724,26 +761,22 @@ enum ProjectCommand {
     #[command(
         about = "Scaffold pyproject, src/, and tests using the current folder.",
         override_usage = "px project init [--package NAME] [--py VERSION]",
-        after_help = "Examples:\n  px project init\n  px project init --package demo_pkg --py 3.11\n"
     )]
     Init(InitArgs),
     #[command(
         about = "Add or update pinned dependencies in pyproject.toml.",
         override_usage = "px project add <SPEC> [SPEC ...]",
-        after_help = "Examples:\n  px project add requests==2.32.3\n  px project add pandas==2.2.3\n"
     )]
     Add(SpecArgs),
     #[command(
         about = "Remove dependencies by name across prod and dev scopes.",
         override_usage = "px project remove <NAME> [NAME ...]",
-        after_help = "Example:\n  px project remove requests\n"
     )]
     Remove(SpecArgs),
-    Install(InstallArgs),
+    Sync(SyncArgs),
     #[command(
         about = "Update named dependencies to the newest allowed versions.",
         override_usage = "px project update <SPEC> [SPEC ...]",
-        after_help = "Example:\n  px project update requests\n"
     )]
     Update(SpecArgs),
 }
@@ -753,13 +786,11 @@ enum WorkflowCommand {
     #[command(
         about = "Run the inferred entry or a named module inside px.",
         override_usage = "px workflow run [ENTRY] [-- <ARG>...]",
-        after_help = "Examples:\n  px workflow run\n  px workflow run sample_px_app.cli -- -n Demo\n"
     )]
     Run(RunArgs),
     #[command(
         about = "Run pytest (or px's fallback) with cached dependencies.",
         override_usage = "px workflow test [-- <PYTEST_ARG>...]",
-        after_help = "Examples:\n  px workflow test\n  PX_TEST_FALLBACK_STD=1 px workflow test -- -k smoke\n"
     )]
     Test(TestArgs),
 }
@@ -776,13 +807,11 @@ enum OutputCommand {
     #[command(
         about = "Build sdists and wheels into the project build/ folder.",
         override_usage = "px output build [sdist|wheel|both] [--out DIR]",
-        after_help = "Examples:\n  PX_SKIP_TESTS=1 px output build\n  px output build wheel --out dist\n"
     )]
     Build(BuildArgs),
     #[command(
         about = "Publish build artifacts (dry-run by default).",
         override_usage = "px output publish [--dry-run] [--registry NAME] [--token-env VAR]",
-        after_help = "Examples:\n  px output publish --dry-run\n  PX_ONLINE=1 PX_PUBLISH_TOKEN=<token> px output publish\n"
     )]
     Publish(PublishArgs),
 }
@@ -797,9 +826,28 @@ enum InfraCommand {
 enum StoreCommand {
     #[command(
         about = "Legacy alias for `px cache prefetch` (workspace optional).",
-        after_help = "Examples:\n  px cache prefetch --dry-run\n  PX_ONLINE=1 px cache prefetch --workspace\n"
     )]
     Prefetch(StorePrefetchArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum DebugCommand {
+    #[command(
+        about = "Show interpreter info or pythonpath.",
+        override_usage = "px debug env [python|info|paths]"
+    )]
+    Env(EnvArgs),
+    #[command(
+        about = "Inspect or manage cached artifacts (path, stats, prune, prefetch).",
+        override_usage = "px debug cache <SUBCOMMAND>"
+    )]
+    Cache(CacheArgs),
+    #[command(about = "Clean cached metadata and stray files.")]
+    Tidy(TidyArgs),
+    #[command(about = "Explain why a dependency is present (advanced).")]
+    Why(WhyArgs),
+    #[command(name = "explain", hide = true)]
+    Explain(ExplainArgs),
 }
 
 #[derive(Args, Debug)]
@@ -870,13 +918,11 @@ struct StorePrefetchArgs {
 #[derive(Subcommand, Debug)]
 enum LockCommand {
     #[command(
-        about = "Compare px.lock to pyproject dependencies without mutating files.",
-        after_help = "Examples:\n  px lock diff\n  px --json lock diff\n"
+        about = "Compare px.lock to pyproject dependencies (run `px sync` to fix).",
     )]
     Diff,
     #[command(
-        about = "Upgrade px.lock to the latest schema or dependency pins.",
-        after_help = "Example:\n  px lock upgrade\n"
+        about = "Rewrite px.lock to the latest format; rerun `px sync` afterward.",
     )]
     Upgrade,
 }
@@ -884,29 +930,25 @@ enum LockCommand {
 #[derive(Subcommand, Debug)]
 enum WorkspaceCommand {
     #[command(
-        about = "List workspace members from pyproject.toml.",
-        after_help = "Example:\n  px workspace list\n"
+        about = "List workspace members discovered in pyproject.toml.",
     )]
     List,
     #[command(
-        about = "Verify each workspace member for lock drift or missing files.",
-        after_help = "Examples:\n  px workspace verify\n  px workspace verify --json\n"
+        about = "Verify each workspace member with `px status`.",
     )]
     Verify,
     #[command(
-        about = "Install dependencies for every workspace member.",
-        after_help = "Examples:\n  px workspace install\n  px workspace install --frozen\n"
+        about = "Run `px sync` for every workspace member.",
     )]
-    Install(WorkspaceInstallArgs),
+    Sync(WorkspaceSyncArgs),
     #[command(
-        about = "Clean drift and metadata across workspace members.",
-        after_help = "Example:\n  px workspace tidy\n"
+        about = "Run `px tidy` across workspace members.",
     )]
     Tidy,
 }
 
 #[derive(Args, Debug)]
-struct WorkspaceInstallArgs {
+struct WorkspaceSyncArgs {
     #[arg(long)]
     frozen: bool,
 }
@@ -954,7 +996,7 @@ struct WhyArgs {
 }
 
 #[derive(Args, Debug)]
-struct InstallArgs {
+struct SyncArgs {
     #[command(flatten)]
     common: CommonFlags,
     #[arg(long)]
@@ -973,6 +1015,11 @@ struct RunArgs {
     #[arg(long)]
     target: Option<String>,
     #[arg(
+        long,
+        help = "Fail if px.lock is missing or the environment is out of sync"
+    )]
+    frozen: bool,
+    #[arg(
         value_name = "ARG",
         trailing_var_arg = true,
         allow_hyphen_values = true,
@@ -985,6 +1032,11 @@ struct RunArgs {
 struct TestArgs {
     #[command(flatten)]
     common: CommonFlags,
+    #[arg(
+        long,
+        help = "Fail if px.lock is missing or the environment is out of sync"
+    )]
+    frozen: bool,
     #[arg(last = true, value_name = "PYTEST_ARG")]
     args: Vec<String>,
 }
@@ -1040,22 +1092,18 @@ struct CacheArgs {
 enum CacheSubcommand {
     #[command(
         about = "Print the resolved px cache directory.",
-        after_help = "Example:\n  px cache path\n"
     )]
     Path,
     #[command(
         about = "Report cache entry counts and total bytes.",
-        after_help = "Example:\n  px cache stats\n"
     )]
     Stats,
     #[command(
         about = "Prune cache files (pair with --dry-run to preview).",
-        after_help = "Examples:\n  px cache prune --all --dry-run\n  px cache prune --all\n"
     )]
     Prune(PruneArgs),
     #[command(
         about = "Prefetch and cache artifacts for offline use.",
-        after_help = "Examples:\n  px cache prefetch --dry-run\n  PX_ONLINE=1 px cache prefetch --workspace\n"
     )]
     Prefetch(StorePrefetchArgs),
 }

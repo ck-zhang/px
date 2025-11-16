@@ -351,22 +351,31 @@ pub(crate) fn ensure_optional_dependency_array_mut<'a>(
     doc: &'a mut DocumentMut,
     group: &str,
 ) -> &'a mut Array {
-    if !doc["project"].is_table() {
-        doc["project"] = Item::Table(Table::default());
+    let project_entry = doc
+        .entry("project")
+        .or_insert(Item::Table(Table::default()));
+    if !project_entry.is_table() {
+        *project_entry = Item::Table(Table::default());
     }
-    let project_table = doc["project"].as_table_mut().unwrap();
-    if !project_table.contains_key("optional-dependencies")
-        || !project_table["optional-dependencies"].is_table()
-    {
-        project_table["optional-dependencies"] = Item::Table(Table::default());
-    }
-    let table = project_table["optional-dependencies"]
+    let project_table = project_entry
         .as_table_mut()
-        .unwrap();
-    if !table.contains_key(group) || !table[group].is_array() {
-        table[group] = Item::Value(TomlValue::Array(Array::new()));
+        .expect("[project] must be a table");
+    let optional_entry = project_table
+        .entry("optional-dependencies")
+        .or_insert(Item::Table(Table::default()));
+    if !optional_entry.is_table() {
+        *optional_entry = Item::Table(Table::default());
     }
-    table[group].as_array_mut().unwrap()
+    let table = optional_entry
+        .as_table_mut()
+        .expect("optional-dependencies must be a table");
+    let group_entry = table
+        .entry(group)
+        .or_insert(Item::Value(TomlValue::Array(Array::new())));
+    if !group_entry.is_array() {
+        *group_entry = Item::Value(TomlValue::Array(Array::new()));
+    }
+    group_entry.as_array_mut().unwrap()
 }
 
 pub(crate) fn merge_dependency_specs(doc: &mut DocumentMut, specs: &[String]) -> bool {
@@ -410,13 +419,22 @@ pub(crate) fn overwrite_dev_dependency_specs(doc: &mut DocumentMut, specs: &[Str
 }
 
 pub(crate) fn ensure_dependencies_array_mut(doc: &mut DocumentMut) -> &mut Array {
-    if !doc["project"].is_table() {
-        doc["project"] = Item::Table(Table::default());
+    let project_entry = doc
+        .entry("project")
+        .or_insert(Item::Table(Table::default()));
+    if !project_entry.is_table() {
+        *project_entry = Item::Table(Table::default());
     }
-    if !doc["project"]["dependencies"].is_array() {
-        doc["project"]["dependencies"] = Item::Value(TomlValue::Array(Array::new()));
+    let project_table = project_entry
+        .as_table_mut()
+        .expect("[project] must be a table");
+    let deps_entry = project_table
+        .entry("dependencies")
+        .or_insert(Item::Value(TomlValue::Array(Array::new())));
+    if !deps_entry.is_array() {
+        *deps_entry = Item::Value(TomlValue::Array(Array::new()));
     }
-    doc["project"]["dependencies"].as_array_mut().unwrap()
+    deps_entry.as_array_mut().expect("dependencies should be an array")
 }
 
 pub(crate) enum InsertOutcome {

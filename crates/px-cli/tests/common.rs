@@ -7,6 +7,7 @@ use std::{
 
 use assert_cmd::assert::Assert;
 use serde_json::Value;
+use std::env;
 use tempfile::TempDir;
 use toml_edit::DocumentMut;
 
@@ -63,6 +64,16 @@ fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
 
 pub fn parse_json(assert: &Assert) -> Value {
     serde_json::from_slice(&assert.get_output().stdout).expect("valid json")
+}
+
+pub fn require_online() -> bool {
+    match env::var("PX_ONLINE").ok().as_deref() {
+        Some("1") => true,
+        _ => {
+            eprintln!("skipping test that needs PX_ONLINE=1");
+            false
+        }
+    }
 }
 
 pub fn artifact_from_lock(project_root: &Path, name: &str) -> PathBuf {

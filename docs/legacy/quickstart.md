@@ -147,17 +147,17 @@ $ cargo run -q -- --json tidy
 }
 ```
 
-- `px install` now resolves bare names, ranges, extras, and markers
+- `px sync` now resolves bare names, ranges, extras, and markers
   automatically (set `PX_RESOLVER=0` to return to the legacy
   `name==version` enforcement) and then writes the pinned specifiers back to
   `pyproject.toml`.
 - Extras and basic PEP 508 markers are normalized during pinning so the
-  resulting `px.lock` carries the same metadata that `px lock diff`/`px install
+  resulting `px.lock` carries the same metadata that `px lock diff`/`px sync
   --frozen` compare against.
 - The command queries the PyPI JSON API for every pin, selects a compatible
   wheel (preferring `py3-none-any`), downloads it into the px cache, verifies
   the SHA256 digest, and records the artifact metadata inside `px.lock`.
-- When PyPI lacks a compatible wheel (or `PX_FORCE_SDIST=1`), `px install`
+- When PyPI lacks a compatible wheel (or `PX_FORCE_SDIST=1`), `px sync`
   fetches the sdist, builds a wheel via `python -m build --wheel` inside the
   cache, stores the result in the deterministic cache layout, and records the
   artifact in `px.lock`. The fallback needs `PX_ONLINE=1`, reuses the same
@@ -172,7 +172,7 @@ $ cargo run -q -- --json tidy
   tests; without it `cargo test` skips the network-backed cases.
 - `--frozen` and `px tidy` both fail (exit code 1) when the lock is missing or
   out of sync, and their JSON envelopes include `details.drift` so CI can show
-  the reason. Fix drift by re-running `px install`.
+  the reason. Fix drift by re-running `px sync`.
 
 ## 8. Inspect diffs and cache usage
 
@@ -208,8 +208,8 @@ upgraded px.lock to version 2
 - `px lock upgrade` rewrites the lock to schema v2 (graph nodes/targets/
   artifacts) while leaving the v1 dependency block in place for tooling that
   still expects it. Rerunning is safe and only updates timestamps.
-- `px install` keeps writing v1 by default, so it is fine to mix lock versions
-  across branches. `px lock diff`, `px install --frozen`, and `px tidy` accept
+- `px sync` keeps writing v1 by default, so it is fine to mix lock versions
+  across branches. `px lock diff`, `px sync --frozen`, and `px tidy` accept
   both formats and compare the normalized dependency graph.
 
 ## 9. Migrate an existing project
@@ -353,13 +353,13 @@ $ cargo run -q -- --json workspace verify
 $ rm member_beta/px.lock
 $ cargo run -q -- workspace verify
 px workspace verify: drift in member-beta (px.lock missing)
-Hint: run `px workspace install` or `px install` inside drifted members
+Hint: run `px workspace sync` or `px sync` inside drifted members
 
 # repair the drifted member
-$ cargo run -q -- workspace install
-workspace install: all 2 members clean
+$ cargo run -q -- workspace sync
+workspace sync: all 2 members clean
 
-$ cargo run -q -- --json workspace install --frozen
+$ cargo run -q -- --json workspace sync --frozen
 { "status": "ok", "details": { "workspace": { "counts": { "ok": 2 }, ... } } }
 
 $ cargo run -q -- --json workspace tidy
@@ -376,9 +376,9 @@ $ cargo run -q -- --json workspace tidy
 - `px workspace list --json` enumerates `[tool.px.workspace].members` so you can
   script against the `details.workspace.members` array.
 - `px workspace verify` fails when any member is missing its manifest/lock (or
-  the lock is stale). Re-running `px install` inside the affected member(s)
+  the lock is stale). Re-running `px sync` inside the affected member(s)
   restores a clean state.
-- `px workspace install` rewrites missing/out-of-date locks for every member.
+- `px workspace sync` rewrites missing/out-of-date locks for every member.
   Pass `--frozen` to verify the entire workspace without touching the files.
 - `px workspace tidy` is a read-only drift check that fails when any member is
   missing its lock or has drift; run it after bulk installs to confirm everything

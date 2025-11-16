@@ -127,7 +127,7 @@ pub enum CommandGroup {
     Init,
     Add,
     Remove,
-    Install,
+    Sync,
     Update,
     Run,
     Test,
@@ -152,7 +152,7 @@ impl fmt::Display for CommandGroup {
             CommandGroup::Init => "init",
             CommandGroup::Add => "add",
             CommandGroup::Remove => "remove",
-            CommandGroup::Install => "install",
+            CommandGroup::Sync => "sync",
             CommandGroup::Update => "update",
             CommandGroup::Run => "run",
             CommandGroup::Test => "test",
@@ -391,6 +391,10 @@ impl<'a> CommandContext<'a> {
     pub fn env_contains(&self, key: &str) -> bool {
         self.env.contains(key)
     }
+
+    pub fn env_flag_enabled(&self, key: &str) -> bool {
+        self.env.flag_is_enabled(key)
+    }
 }
 
 pub trait CommandHandler<R> {
@@ -429,6 +433,7 @@ pub struct WorkspaceVerifyRequest;
 #[derive(Clone, Debug)]
 pub struct WorkflowTestRequest {
     pub pytest_args: Vec<String>,
+    pub frozen: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -483,6 +488,7 @@ pub struct WorkflowRunRequest {
     pub entry: Option<String>,
     pub target: Option<String>,
     pub args: Vec<String>,
+    pub frozen: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -733,8 +739,14 @@ fn env_outcome(ctx: &CommandContext, mode: EnvMode) -> Result<ExecutionOutcome> 
 }
 
 pub fn workflow_run(ctx: &CommandContext, request: WorkflowRunRequest) -> Result<ExecutionOutcome> {
-    let py_ctx = match python_context(ctx) {
-        Ok(py) => py,
+    let strict = request.frozen || ctx.env_flag_enabled("CI");
+    let guard = if strict {
+        EnvGuard::Strict
+    } else {
+        EnvGuard::AutoSync
+    };
+    let (py_ctx, sync_report) = match python_context_with_mode(ctx, guard) {
+        Ok(result) => result,
         Err(outcome) => return Ok(outcome),
     };
     let extra_args = request.args.clone();
@@ -745,7 +757,10 @@ pub fn workflow_run(ctx: &CommandContext, request: WorkflowRunRequest) -> Result
     });
     if let Some(entry) = request.entry.as_deref() {
         if let Some(target) = detect_passthrough_target(entry, &py_ctx) {
-            return run_passthrough(ctx, &py_ctx, target, extra_args, &command_args);
+            let mut outcome =
+                run_passthrough(ctx, &py_ctx, target, extra_args.clone(), &command_args)?;
+            attach_autosync_details(&mut outcome, sync_report);
+            return Ok(outcome);
         }
     }
 
@@ -764,8 +779,9 @@ pub fn workflow_run(ctx: &CommandContext, request: WorkflowRunRequest) -> Result
             }
         }
     };
-
-    run_module_entry(ctx, &py_ctx, resolved, extra_args, &command_args)
+    let mut outcome = run_module_entry(ctx, &py_ctx, resolved, extra_args, &command_args)?;
+    attach_autosync_details(&mut outcome, sync_report);
+    Ok(outcome)
 }
 
 #[derive(Debug, Clone)]
@@ -1105,21 +1121,32 @@ fn resolve_executable_path(entry: &str, root: &Path) -> (String, Option<String>)
     }
 }
 
-fn workflow_test_outcome(ctx: &CommandContext, pytest_args: &[String]) -> Result<ExecutionOutcome> {
-    let py_ctx = match python_context(ctx) {
-        Ok(py) => py,
+fn workflow_test_outcome(
+    ctx: &CommandContext,
+    request: &WorkflowTestRequest,
+) -> Result<ExecutionOutcome> {
+    let strict = request.frozen || ctx.env_flag_enabled("CI");
+    let guard = if strict {
+        EnvGuard::Strict
+    } else {
+        EnvGuard::AutoSync
+    };
+    let (py_ctx, sync_report) = match python_context_with_mode(ctx, guard) {
+        Ok(result) => result,
         Err(outcome) => return Ok(outcome),
     };
-    let command_args = json!({ "pytest_args": pytest_args });
+    let command_args = json!({ "pytest_args": request.pytest_args });
     let mut envs = py_ctx.base_env(&command_args)?;
     envs.push(("PX_TEST_RUNNER".into(), "pytest".into()));
 
     if ctx.config().test.fallback_builtin {
-        return run_builtin_tests("test", ctx, py_ctx, envs);
+        let mut outcome = run_builtin_tests("test", ctx, py_ctx, envs)?;
+        attach_autosync_details(&mut outcome, sync_report);
+        return Ok(outcome);
     }
 
     let mut pytest_cmd = vec!["-m".to_string(), "pytest".to_string(), "tests".to_string()];
-    pytest_cmd.extend(pytest_args.iter().cloned());
+    pytest_cmd.extend(request.pytest_args.iter().cloned());
 
     let output = ctx.python_runtime().run_command(
         &py_ctx.python,
@@ -1128,23 +1155,27 @@ fn workflow_test_outcome(ctx: &CommandContext, pytest_args: &[String]) -> Result
         &py_ctx.project_root,
     )?;
     if output.code == 0 {
-        return Ok(outcome_from_output(
-            "test", "pytest", output, "px test", None,
-        ));
+        let mut outcome = outcome_from_output("test", "pytest", output, "px test", None);
+        attach_autosync_details(&mut outcome, sync_report);
+        return Ok(outcome);
     }
 
     if missing_pytest(&output.stderr) {
-        return run_builtin_tests("test", ctx, py_ctx, envs);
+        let mut outcome = run_builtin_tests("test", ctx, py_ctx, envs)?;
+        attach_autosync_details(&mut outcome, sync_report);
+        return Ok(outcome);
     }
 
-    Ok(ExecutionOutcome::failure(
+    let mut outcome = ExecutionOutcome::failure(
         format!("px test failed (exit {})", output.code),
         json!({
             "stdout": output.stdout,
             "stderr": output.stderr,
             "code": output.code,
         }),
-    ))
+    );
+    attach_autosync_details(&mut outcome, sync_report);
+    Ok(outcome)
 }
 
 fn output_build_outcome(
@@ -1890,10 +1921,10 @@ fn handle_project_prefetch(ctx: &CommandContext, dry_run: bool) -> Result<Execut
         Some(lock) => lock,
         None => {
             return Ok(ExecutionOutcome::user_error(
-                "px.lock not found (run `px install`)",
+                "px.lock not found (run `px sync`)",
                 json!({
                     "lockfile": snapshot.lock_path.display().to_string(),
-                    "hint": "run `px install` to regenerate the lockfile",
+                    "hint": "run `px sync` to regenerate the lockfile",
                 }),
             ))
         }
@@ -2071,7 +2102,7 @@ impl CommandHandler<WorkflowTestRequest> for WorkflowTestHandler {
         ctx: &CommandContext,
         request: WorkflowTestRequest,
     ) -> Result<ExecutionOutcome> {
-        workflow_test_outcome(ctx, &request.pytest_args)
+        workflow_test_outcome(ctx, &request)
     }
 }
 
@@ -2291,14 +2322,18 @@ impl CommandHandler<ProjectInitRequest> for ProjectInitHandler {
         ctx: &CommandContext,
         request: ProjectInitRequest,
     ) -> Result<ExecutionOutcome> {
-        let root = match discover_project_root()? {
-            Some(path) => path,
-            None => env::current_dir().context("unable to determine current directory")?,
-        };
+        let cwd = env::current_dir().context("unable to determine current directory")?;
+        if let Some(existing_root) = discover_project_root()? {
+            return existing_pyproject_response(&existing_root.join("pyproject.toml"));
+        }
+        let root = cwd;
         let pyproject_path = root.join("pyproject.toml");
+        let pyproject_preexisting = pyproject_path.exists();
 
-        if pyproject_path.exists() {
-            return existing_pyproject_response(&pyproject_path);
+        if pyproject_preexisting {
+            if let Some(conflict) = detect_init_conflict(&pyproject_path)? {
+                return Ok(conflict.into_outcome(&pyproject_path));
+            }
         }
 
         if !request.force {
@@ -2315,17 +2350,32 @@ impl CommandHandler<ProjectInitRequest> for ProjectInitHandler {
             .map(str::trim)
             .filter(|s| !s.is_empty());
         let (package, inferred) = px_project::infer_package_name(package_arg, &root)?;
-        let package_name = package.clone();
         let python_req = resolve_python_requirement_arg(request.python.as_deref());
 
-        let files = ProjectInitializer::scaffold(&root, &package, &python_req)?;
+        let mut files = ProjectInitializer::scaffold(&root, &package, &python_req)?;
+        let snapshot = manifest_snapshot_at(&root)?;
+        let actual_name = snapshot.name.clone();
+        let lock_existed = snapshot.lock_path.exists();
+        match install_snapshot(ctx, &snapshot, false, None) {
+            Ok(_) => {}
+            Err(err) => match err.downcast::<InstallUserError>() {
+                Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                Err(err) => return Err(err),
+            },
+        };
+        refresh_project_site(&snapshot, ctx.fs())?;
+        if !lock_existed {
+            files.push(relative_path_str(&snapshot.lock_path, &snapshot.root));
+        }
+
         let mut details = json!({
-            "package": package,
+            "package": actual_name,
             "python": python_req,
             "files_created": files,
             "project_root": root.display().to_string(),
+            "lockfile": snapshot.lock_path.display().to_string(),
         });
-        if inferred {
+        if inferred && !pyproject_preexisting {
             details["inferred_package"] = Value::Bool(true);
             details["hint"] = Value::String(
                 "Pass --package <name> to override the inferred module name.".to_string(),
@@ -2333,7 +2383,7 @@ impl CommandHandler<ProjectInitRequest> for ProjectInitHandler {
         }
 
         Ok(ExecutionOutcome::success(
-            format!("initialized project {package_name}"),
+            format!("initialized project {actual_name}"),
             details,
         ))
     }
@@ -2350,6 +2400,78 @@ fn resolve_python_requirement_arg(raw: Option<&str>) -> String {
             }
         })
         .unwrap_or_else(|| ">=3.12".to_string())
+}
+
+#[derive(Debug)]
+enum InitConflict {
+    OtherTool(String),
+    ExistingDependencies,
+}
+
+impl InitConflict {
+    fn into_outcome(self, pyproject_path: &Path) -> ExecutionOutcome {
+        match self {
+            InitConflict::OtherTool(tool) => ExecutionOutcome::user_error(
+                format!("pyproject managed by {tool}; run `px migrate --apply` to adopt px"),
+                json!({
+                    "pyproject": pyproject_path.display().to_string(),
+                    "tool": tool,
+                    "hint": "Run `px migrate --apply` to convert this project to px.",
+                }),
+            ),
+            InitConflict::ExistingDependencies => ExecutionOutcome::user_error(
+                "pyproject already declares dependencies",
+                json!({
+                    "pyproject": pyproject_path.display().to_string(),
+                    "hint": "Run `px migrate --apply` to import existing dependencies into px.",
+                }),
+            ),
+        }
+    }
+}
+
+fn detect_init_conflict(pyproject_path: &Path) -> Result<Option<InitConflict>> {
+    let contents = fs::read_to_string(pyproject_path)?;
+    let doc: DocumentMut = contents.parse()?;
+    if let Some(tool) = detect_foreign_tool(&doc) {
+        return Ok(Some(InitConflict::OtherTool(tool)));
+    }
+    if project_dependencies_declared(&doc) {
+        return Ok(Some(InitConflict::ExistingDependencies));
+    }
+    Ok(None)
+}
+
+fn detect_foreign_tool(doc: &DocumentMut) -> Option<String> {
+    let tools = doc
+        .get("tool")
+        .and_then(Item::as_table)
+        .map(|table| {
+            table
+                .iter()
+                .filter_map(|(key, _)| {
+                    let name = key.to_string();
+                    match name.as_str() {
+                        "px" => None,
+                        "poetry" | "pdm" | "hatch" | "flit" | "rye" => {
+                            Some(name)
+                        }
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    tools.into_iter().next()
+}
+
+fn project_dependencies_declared(doc: &DocumentMut) -> bool {
+    doc.get("project")
+        .and_then(Item::as_table)
+        .and_then(|table| table.get("dependencies"))
+        .and_then(Item::as_array)
+        .map(|array| !array.is_empty())
+        .unwrap_or(false)
 }
 
 fn existing_pyproject_response(pyproject_path: &Path) -> Result<ExecutionOutcome> {
@@ -2405,29 +2527,48 @@ pub fn project_add(ctx: &CommandContext, request: ProjectAddRequest) -> Result<E
         ));
     }
 
-    let mut editor = ManifestEditor::open(&pyproject_path)?;
-    let report = editor.add_specs(&cleaned_specs)?;
+    let lock_path = root.join("px.lock");
+    let backup = ManifestLockBackup::capture(&pyproject_path, &lock_path)?;
+    let mut needs_restore = true;
 
-    if report.added.is_empty() && report.updated.is_empty() {
-        return Ok(ExecutionOutcome::success(
-            "dependencies already satisfied",
-            json!({ "pyproject": pyproject_path.display().to_string() }),
-        ));
+    let outcome = (|| -> Result<ExecutionOutcome> {
+        let mut editor = ManifestEditor::open(&pyproject_path)?;
+        let report = editor.add_specs(&cleaned_specs)?;
+
+        if report.added.is_empty() && report.updated.is_empty() {
+            needs_restore = false;
+            return Ok(ExecutionOutcome::success(
+                "dependencies already satisfied",
+                json!({ "pyproject": pyproject_path.display().to_string() }),
+            ));
+        }
+
+        let (snapshot, _install) = match sync_manifest_environment(ctx) {
+            Ok(result) => result,
+            Err(outcome) => return Ok(outcome),
+        };
+        needs_restore = false;
+        let message = format!(
+            "updated dependencies (added {}, updated {})",
+            report.added.len(),
+            report.updated.len()
+        );
+        Ok(ExecutionOutcome::success(
+            message,
+            json!({
+                "pyproject": pyproject_path.display().to_string(),
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "added": report.added,
+                "updated": report.updated,
+            }),
+        ))
+    })();
+
+    if needs_restore {
+        backup.restore()?;
     }
 
-    let message = format!(
-        "updated dependencies (added {}, updated {})",
-        report.added.len(),
-        report.updated.len()
-    );
-    Ok(ExecutionOutcome::success(
-        message,
-        json!({
-            "pyproject": pyproject_path.display().to_string(),
-            "added": report.added,
-            "updated": report.updated,
-        }),
-    ))
+    outcome
 }
 
 pub fn project_remove(
@@ -2456,22 +2597,172 @@ pub fn project_remove(
         ));
     }
 
-    let mut editor = ManifestEditor::open(&pyproject_path)?;
-    let report = editor.remove_specs(&cleaned_specs)?;
-    if report.removed.is_empty() {
-        return Ok(ExecutionOutcome::success(
-            "no matching dependencies found",
-            json!({ "removed": [] }),
-        ));
+    let lock_path = root.join("px.lock");
+    let backup = ManifestLockBackup::capture(&pyproject_path, &lock_path)?;
+    let mut needs_restore = true;
+
+    let outcome = (|| -> Result<ExecutionOutcome> {
+        let mut editor = ManifestEditor::open(&pyproject_path)?;
+        let report = editor.remove_specs(&cleaned_specs)?;
+        if report.removed.is_empty() {
+            let names: Vec<String> = cleaned_specs
+                .iter()
+                .map(|spec| dependency_name(spec))
+                .filter(|name| !name.is_empty())
+                .collect();
+            needs_restore = false;
+            return Ok(ExecutionOutcome::user_error(
+                "package is not a direct dependency",
+                json!({
+                    "packages": names,
+                    "hint": "Use `px why <package>` to inspect transitive requirements.",
+                }),
+            ));
+        }
+
+        let (snapshot, _install) = match sync_manifest_environment(ctx) {
+            Ok(result) => result,
+            Err(outcome) => return Ok(outcome),
+        };
+        needs_restore = false;
+        Ok(ExecutionOutcome::success(
+            "removed dependencies",
+            json!({
+                "pyproject": pyproject_path.display().to_string(),
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "removed": report.removed,
+            }),
+        ))
+    })();
+
+    if needs_restore {
+        backup.restore()?;
     }
 
-    Ok(ExecutionOutcome::success(
-        "removed dependencies",
-        json!({
-            "pyproject": pyproject_path.display().to_string(),
-            "removed": report.removed,
-        }),
-    ))
+    outcome
+}
+
+pub fn project_status(ctx: &CommandContext) -> Result<ExecutionOutcome> {
+    let snapshot = manifest_snapshot()?;
+    let outcome = match install_snapshot(ctx, &snapshot, true, None) {
+        Ok(outcome) => outcome,
+        Err(err) => match err.downcast::<InstallUserError>() {
+            Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+            Err(err) => return Err(err),
+        },
+    };
+    let mut details = json!({
+        "pyproject": snapshot.manifest_path.display().to_string(),
+        "lockfile": snapshot.lock_path.display().to_string(),
+    });
+    match outcome.state {
+        InstallState::UpToDate => {
+            details["status"] = Value::String("in-sync".to_string());
+            Ok(ExecutionOutcome::success(
+                "Environment is in sync with px.lock",
+                details,
+            ))
+        }
+        InstallState::Drift => {
+            details["status"] = Value::String("drift".to_string());
+            details["issues"] = Value::Array(outcome.drift.into_iter().map(|d| json!(d)).collect());
+            details["hint"] = Value::String("Run `px sync` to refresh px.lock".to_string());
+            Ok(ExecutionOutcome::user_error(
+                "Environment is out of sync with px.lock",
+                details,
+            ))
+        }
+        InstallState::MissingLock => {
+            details["status"] = Value::String("missing-lock".to_string());
+            details["hint"] = Value::String("Run `px sync` to create px.lock".to_string());
+            Ok(ExecutionOutcome::user_error("px.lock not found", details))
+        }
+        _ => Ok(ExecutionOutcome::failure(
+            "Unable to determine project status",
+            json!({ "status": "unknown" }),
+        )),
+    }
+}
+
+struct ManifestLockBackup {
+    pyproject_path: PathBuf,
+    lock_path: PathBuf,
+    pyproject_contents: String,
+    lock_contents: Option<String>,
+    lock_preexisting: bool,
+}
+
+impl ManifestLockBackup {
+    fn capture(pyproject_path: &Path, lock_path: &Path) -> Result<Self> {
+        let pyproject_contents = fs::read_to_string(pyproject_path)?;
+        let lock_preexisting = lock_path.exists();
+        let lock_contents = if lock_preexisting {
+            Some(fs::read_to_string(lock_path)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            pyproject_path: pyproject_path.to_path_buf(),
+            lock_path: lock_path.to_path_buf(),
+            pyproject_contents,
+            lock_contents,
+            lock_preexisting,
+        })
+    }
+
+    fn restore(&self) -> Result<()> {
+        fs::write(&self.pyproject_path, &self.pyproject_contents)?;
+        match (&self.lock_contents, self.lock_preexisting) {
+            (Some(contents), _) => {
+                fs::write(&self.lock_path, contents)?;
+            }
+            (None, false) => {
+                if self.lock_path.exists() {
+                    fs::remove_file(&self.lock_path)?;
+                }
+            }
+            (None, true) => {
+                debug_assert!(
+                    false,
+                    "lock_preexisting implies lock contents should have been captured"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn sync_manifest_environment(
+    ctx: &CommandContext,
+) -> Result<(ManifestSnapshot, InstallOutcome), ExecutionOutcome> {
+    let snapshot = match manifest_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            return Err(ExecutionOutcome::failure(
+                "failed to read project manifest",
+                json!({ "error": err.to_string() }),
+            ))
+        }
+    };
+    let outcome = match install_snapshot(ctx, &snapshot, false, None) {
+        Ok(outcome) => outcome,
+        Err(err) => match err.downcast::<InstallUserError>() {
+            Ok(user) => return Err(ExecutionOutcome::user_error(user.message, user.details)),
+            Err(err) => {
+                return Err(ExecutionOutcome::failure(
+                    "failed to install dependencies",
+                    json!({ "error": err.to_string() }),
+                ))
+            }
+        },
+    };
+    if let Err(err) = refresh_project_site(&snapshot, ctx.fs()) {
+        return Err(ExecutionOutcome::failure(
+            "failed to update project environment",
+            json!({ "error": err.to_string() }),
+        ));
+    }
+    Ok((snapshot, outcome))
 }
 
 pub fn project_update(
@@ -2518,19 +2809,19 @@ fn project_install_outcome(ctx: &CommandContext, frozen: bool) -> Result<Executi
         }
         InstallState::Drift => {
             details["drift"] = Value::Array(outcome.drift.iter().map(|d| json!(d)).collect());
-            details["hint"] = Value::String("rerun `px install` to refresh px.lock".to_string());
+            details["hint"] = Value::String("rerun `px sync` to refresh px.lock".to_string());
             Ok(ExecutionOutcome::user_error(
                 "px.lock is out of date",
                 details,
             ))
         }
         InstallState::MissingLock => Ok(ExecutionOutcome::user_error(
-            "px.lock not found (run `px install`)",
+            "px.lock not found (run `px sync`)",
             json!({
                 "lockfile": outcome.lockfile,
                 "project": snapshot.name,
                 "python": snapshot.python_requirement,
-                "hint": "run `px install` to generate a lockfile",
+                "hint": "run `px sync` to generate a lockfile",
             }),
         )),
     }
@@ -2543,10 +2834,10 @@ fn quality_tidy_outcome() -> Result<ExecutionOutcome> {
         Some(lock) => lock,
         None => {
             return Ok(ExecutionOutcome::user_error(
-                "px tidy: px.lock not found (run `px install`)",
+                "px tidy: px.lock not found (run `px sync`)",
                 json!({
                     "lockfile": snapshot.lock_path.display().to_string(),
-                    "hint": "run `px install` to generate px.lock before running tidy",
+                    "hint": "run `px sync` to generate px.lock before running tidy",
                 }),
             ))
         }
@@ -2568,7 +2859,7 @@ fn quality_tidy_outcome() -> Result<ExecutionOutcome> {
                 "status": "drift",
                 "lockfile": snapshot.lock_path.display().to_string(),
                 "drift": drift,
-                "hint": "rerun `px install` to refresh the lockfile",
+                "hint": "rerun `px sync` to refresh the lockfile",
             }),
         ))
     }
@@ -2584,7 +2875,7 @@ fn lock_diff_outcome() -> Result<ExecutionOutcome> {
                 Ok(ExecutionOutcome::success(report.summary(), details))
             } else {
                 details["hint"] = Value::String(
-                    "run `px install` (or `px lock upgrade`) to regenerate the lock".to_string(),
+                    "run `px sync` (or `px lock upgrade`) to regenerate the lock".to_string(),
                 );
                 Ok(ExecutionOutcome::user_error(report.summary(), details))
             }
@@ -2600,11 +2891,11 @@ fn lock_diff_outcome() -> Result<ExecutionOutcome> {
                 "version_mismatch": Value::Null,
                 "python_mismatch": Value::Null,
                 "mode_mismatch": Value::Null,
-                "hint": "run `px install` to generate px.lock before diffing",
+                "hint": "run `px sync` to generate px.lock before diffing",
             });
             Ok(ExecutionOutcome::user_error(
                 format!(
-                    "missing px.lock at {} (run `px install` first)",
+                    "missing px.lock at {} (run `px sync` first)",
                     snapshot.lock_path.display()
                 ),
                 details,
@@ -2623,11 +2914,11 @@ pub fn lock_upgrade(
         Some(lock) => lock,
         None => {
             return Ok(ExecutionOutcome::user_error(
-                "missing px.lock (run `px install` first)",
+                "missing px.lock (run `px sync` first)",
                 json!({
                     "status": "missing_lock",
                     "lockfile": lock_path.display().to_string(),
-                    "hint": "run `px install` to create a lock before upgrading",
+                    "hint": "run `px sync` to create a lock before upgrading",
                 }),
             ))
         }
@@ -2741,7 +3032,7 @@ pub(crate) fn install_snapshot(
 fn refresh_project_site(snapshot: &ManifestSnapshot, fs: &dyn effects::FileSystem) -> Result<()> {
     let lock = load_lockfile_optional(&snapshot.lock_path)?.ok_or_else(|| {
         anyhow!(
-            "px install: lockfile missing at {}",
+            "px sync: lockfile missing at {}",
             snapshot.lock_path.display()
         )
     })?;
@@ -3014,7 +3305,7 @@ fn parse_exact_pin(spec: &str) -> Result<PinSpec> {
         }
         None => {
             return Err(InstallUserError::new(
-                format!("px install requires `name==version`; `{trimmed}` is not pinned"),
+                format!("px sync requires `name==version`; `{trimmed}` is not pinned"),
                 json!({ "specifier": trimmed }),
             )
             .into())
@@ -3022,14 +3313,14 @@ fn parse_exact_pin(spec: &str) -> Result<PinSpec> {
     };
     let parsed = VersionSpecifiers::from_str(&version_spec).map_err(|_| {
         InstallUserError::new(
-            format!("px install requires `name==version`; `{trimmed}` is not pinned"),
+            format!("px sync requires `name==version`; `{trimmed}` is not pinned"),
             json!({ "specifier": trimmed }),
         )
     })?;
     let mut iter = parsed.iter();
     let Some(first) = iter.next() else {
         return Err(InstallUserError::new(
-            format!("px install requires `name==version`; `{trimmed}` is not pinned"),
+            format!("px sync requires `name==version`; `{trimmed}` is not pinned"),
             json!({ "specifier": trimmed }),
         )
         .into());
@@ -3037,7 +3328,7 @@ fn parse_exact_pin(spec: &str) -> Result<PinSpec> {
     if iter.next().is_some() || !matches!(first.operator(), Operator::Equal | Operator::ExactEqual)
     {
         return Err(InstallUserError::new(
-            format!("px install requires `name==version`; `{trimmed}` is not pinned"),
+            format!("px sync requires `name==version`; `{trimmed}` is not pinned"),
             json!({ "specifier": trimmed }),
         )
         .into());
@@ -3834,19 +4125,95 @@ struct PythonContext {
     allowed_paths: Vec<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum EnvGuard {
+    Strict,
+    AutoSync,
+}
+
+#[derive(Clone, Debug)]
+struct EnvironmentSyncReport {
+    action: &'static str,
+    note: String,
+}
+
+impl EnvironmentSyncReport {
+    fn new(issue: EnvironmentIssue) -> Self {
+        Self {
+            action: issue.action_key(),
+            note: issue.note().to_string(),
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "action": self.action,
+            "note": self.note,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum EnvironmentIssue {
+    MissingLock,
+    LockDrift,
+    MissingArtifacts,
+}
+
+impl EnvironmentIssue {
+    fn from_details(details: &Value) -> Option<Self> {
+        let reason = details
+            .as_object()
+            .and_then(|map| map.get("reason"))
+            .and_then(Value::as_str)?;
+        match reason {
+            "missing_lock" => Some(EnvironmentIssue::MissingLock),
+            "lock_drift" => Some(EnvironmentIssue::LockDrift),
+            "missing_artifacts" => Some(EnvironmentIssue::MissingArtifacts),
+            _ => None,
+        }
+    }
+
+    fn note(&self) -> &'static str {
+        match self {
+            EnvironmentIssue::MissingLock => "No px.lock found, resolving dependencies…",
+            EnvironmentIssue::LockDrift => {
+                "Manifest drift detected; syncing px.lock and environment…"
+            }
+            EnvironmentIssue::MissingArtifacts => {
+                "Cached artifacts missing; rehydrating environment…"
+            }
+        }
+    }
+
+    fn action_key(&self) -> &'static str {
+        match self {
+            EnvironmentIssue::MissingLock => "lock-bootstrap",
+            EnvironmentIssue::LockDrift => "lock-sync",
+            EnvironmentIssue::MissingArtifacts => "env-rehydrate",
+        }
+    }
+}
+
 impl PythonContext {
-    fn new(ctx: &CommandContext) -> Result<Self> {
+    fn new_with_guard(
+        ctx: &CommandContext,
+        guard: EnvGuard,
+    ) -> Result<(Self, Option<EnvironmentSyncReport>)> {
         let project_root = ctx.project_root()?;
-        ensure_project_environment_synced(&project_root)?;
+        let sync_report = ensure_environment_with_guard(ctx, &project_root, guard)?;
         ensure_project_site_bootstrap(&project_root, ctx.fs());
         let python = ctx.python_runtime().detect_interpreter()?;
         let (pythonpath, allowed_paths) = build_pythonpath(ctx.fs(), &project_root)?;
-        Ok(Self {
-            project_root,
-            python,
-            pythonpath,
-            allowed_paths,
-        })
+        Ok((
+            Self {
+                project_root,
+                python,
+                pythonpath,
+                allowed_paths,
+            },
+            sync_report,
+        ))
     }
 
     fn base_env(&self, command_args: &Value) -> Result<Vec<(String, String)>> {
@@ -3919,6 +4286,7 @@ fn ensure_project_environment_synced(project_root: &Path) -> Result<()> {
                 "hint": "run `px migrate --apply` or pass ENTRY explicitly",
                 "project_root": project_root.display().to_string(),
                 "manifest": manifest_path.display().to_string(),
+                "reason": "missing_manifest",
             }),
         )
         .into());
@@ -3929,10 +4297,11 @@ fn ensure_project_environment_synced(project_root: &Path) -> Result<()> {
         Some(lock) => lock,
         None => {
             return Err(InstallUserError::new(
-                "missing px.lock (run `px install`)",
+                "missing px.lock (run `px sync`)",
                 json!({
                     "lockfile": lock_path.display().to_string(),
-                    "hint": "run `px install` to generate px.lock before running this command",
+                    "hint": "run `px sync` to generate px.lock before running this command",
+                    "reason": "missing_lock",
                 }),
             )
             .into())
@@ -3946,7 +4315,8 @@ fn ensure_project_environment_synced(project_root: &Path) -> Result<()> {
             json!({
                 "lockfile": lock_path.display().to_string(),
                 "drift": drift,
-                "hint": "run `px install` to refresh px.lock",
+                "hint": "run `px sync` to refresh px.lock",
+                "reason": "lock_drift",
             }),
         )
         .into());
@@ -3959,7 +4329,8 @@ fn ensure_project_environment_synced(project_root: &Path) -> Result<()> {
             json!({
                 "lockfile": lock_path.display().to_string(),
                 "missing": missing,
-                "hint": "run `px install` to rehydrate the environment",
+                "hint": "run `px sync` to rehydrate the environment",
+                "reason": "missing_artifacts",
             }),
         )
         .into());
@@ -3968,9 +4339,72 @@ fn ensure_project_environment_synced(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn ensure_environment_with_guard(
+    ctx: &CommandContext,
+    project_root: &Path,
+    guard: EnvGuard,
+) -> Result<Option<EnvironmentSyncReport>> {
+    match ensure_project_environment_synced(project_root) {
+        Ok(()) => Ok(None),
+        Err(err) => match err.downcast::<InstallUserError>() {
+            Ok(user) => match guard {
+                EnvGuard::Strict => Err(user.into()),
+                EnvGuard::AutoSync => {
+                    if let Some(issue) = EnvironmentIssue::from_details(&user.details) {
+                        auto_sync_environment(ctx, project_root, issue)
+                    } else {
+                        Err(user.into())
+                    }
+                }
+            },
+            Err(err) => Err(err),
+        },
+    }
+}
+
+fn auto_sync_environment(
+    ctx: &CommandContext,
+    project_root: &Path,
+    issue: EnvironmentIssue,
+) -> Result<Option<EnvironmentSyncReport>> {
+    let snapshot = manifest_snapshot_at(project_root)?;
+    install_snapshot(ctx, &snapshot, false, None)?;
+    refresh_project_site(&snapshot, ctx.fs())?;
+    Ok(Some(EnvironmentSyncReport::new(issue)))
+}
+
+fn attach_autosync_details(outcome: &mut ExecutionOutcome, report: Option<EnvironmentSyncReport>) {
+    let Some(report) = report else {
+        return;
+    };
+    let autosync = report.to_json();
+    match outcome.details {
+        Value::Object(ref mut map) => {
+            map.insert("autosync".to_string(), autosync);
+        }
+        Value::Null => {
+            outcome.details = json!({ "autosync": autosync });
+        }
+        ref mut other => {
+            let previous = other.take();
+            outcome.details = json!({
+                "value": previous,
+                "autosync": autosync,
+            });
+        }
+    }
+}
+
 fn python_context(ctx: &CommandContext) -> Result<PythonContext, ExecutionOutcome> {
-    match PythonContext::new(ctx) {
-        Ok(py) => Ok(py),
+    python_context_with_mode(ctx, EnvGuard::Strict).map(|(py, _)| py)
+}
+
+fn python_context_with_mode(
+    ctx: &CommandContext,
+    guard: EnvGuard,
+) -> Result<(PythonContext, Option<EnvironmentSyncReport>), ExecutionOutcome> {
+    match PythonContext::new_with_guard(ctx, guard) {
+        Ok(result) => Ok(result),
         Err(err) => match err.downcast::<InstallUserError>() {
             Ok(user) => Err(ExecutionOutcome::user_error(user.message, user.details)),
             Err(err) => Err(ExecutionOutcome::failure(

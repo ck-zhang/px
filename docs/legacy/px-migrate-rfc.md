@@ -14,7 +14,7 @@ non-interactive CI-friendly flags, dry-run previews, backups, and structured
 
 - `px project init` only scaffolds greenfield projects; existing repos must
   manually edit `pyproject.toml` before px can help (docs/cli.md:143-178).
-- `px install` historically rejected ranges/extras unless `PX_RESOLVER=1` was
+- `px sync` historically rejected ranges/extras unless `PX_RESOLVER=1` was
   set; the resolver now runs by default (set `PX_RESOLVER=0` to opt out), so
   migrate should lean on that behavior to keep users from hand-pinning
   (docs/cli.md:194-206).
@@ -37,7 +37,7 @@ non-interactive CI-friendly flags, dry-run previews, backups, and structured
 ## Non-Goals
 
 - Replacing the existing resolver; `px migrate` will call the same resolution
-  pipeline used by `px install` (which can still be disabled via
+  pipeline used by `px sync` (which can still be disabled via
   `PX_RESOLVER=0`).
 - Full Poetry/uv lock import (future work once the base command ships).
 

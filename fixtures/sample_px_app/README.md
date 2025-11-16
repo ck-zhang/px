@@ -7,7 +7,7 @@ and publish steps always touch at least one third-party wheel.
 ## Try it with px
 
 1. `cd fixtures/sample_px_app`.
-2. `cargo run -q -- install` (or `px install`) to build `px.lock` and fetch
+2. `cargo run -q -- install` (or `px sync`) to build `px.lock` and fetch
    `rich`.
 3. `cargo run -q -- run sample-px-app -- -n Demo` to see the Rich-powered
    greeting.

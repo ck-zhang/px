@@ -54,7 +54,7 @@ is a TTY. Colors are automatically disabled when piping output, when the
 ## Command map
 
 - **Project:** `px project init|add|remove|install|update`
-- **Install shortcut:** `px install [--frozen]` (same as `px project install`)
+- **Install shortcut:** `px sync [--frozen]` (same as `px project install`)
 - **Lock:** `px lock diff|upgrade`
 - **Workflow:** `px run`, `px test`
 - **Quality:** `px fmt`, `px lint`, `px tidy`
@@ -235,11 +235,11 @@ $ cargo run -q -- --json install --frozen
   markers automatically; set `PX_RESOLVER=0` to revert to the legacy
   `name==version` enforcement.
 - Extras and basic PEP 508 markers are preserved in the pinned specifiers so
-  `px.lock`, `px lock diff`, and `px install --frozen` stay deterministic.
-- `px install` queries the PyPI JSON API for each pin, picks the best wheel
+  `px.lock`, `px lock diff`, and `px sync --frozen` stay deterministic.
+- `px sync` queries the PyPI JSON API for each pin, picks the best wheel
   (prefer `py3-none-any`, otherwise the interpreter’s tags), downloads it to
   the px cache, and verifies the SHA256 digest before writing `px.lock`.
-- When no compatible wheel exists (or `PX_FORCE_SDIST=1`), `px install`
+- When no compatible wheel exists (or `PX_FORCE_SDIST=1`), `px sync`
   downloads the sdist, runs `python -m build --wheel` inside the cache, moves
   the built wheel into the deterministic cache layout, and records the
   artifact metadata in `px.lock`. The fallback requires `PX_ONLINE=1`, honors
@@ -252,10 +252,10 @@ $ cargo run -q -- --json install --frozen
   tables while adding `[[graph.nodes]]`, `[[graph.targets]]`, and
   `[[graph.artifacts]]` sections for future multi-target installs. The command
   is idempotent and never touches `pyproject.toml`.
-- v1 remains the default output for `px install` until the resolver/store grow
+- v1 remains the default output for `px sync` until the resolver/store grow
   full graph support. Mixed repos are safe because the diff/frozen flows accept
   either version.
-- `px lock diff`, `px install --frozen`, and `px tidy` normalize both
+- `px lock diff`, `px sync --frozen`, and `px tidy` normalize both
   versions before comparing, so a project can upgrade gradually without noisy
   drift reports.
 - `--frozen` still surfaces drift, and it now also fails when cached wheels are
@@ -524,7 +524,7 @@ the original `[[dependencies]]` block for backward compatibility, then
 materializes `[[graph.nodes]]` (name/version/marker/parents),
 `[[graph.targets]]` (python/abi/platform triples), and `[[graph.artifacts]]`
 entries keyed by target. It is idempotent: rerunning simply confirms the file
-is already at v2. Because `px install` still writes v1 by default, you can
+is already at v2. Because `px sync` still writes v1 by default, you can
 upgrade repositories gradually or mix versions across branches without drift
 noise—diff/frozen automatically compare the normalized graph view.
 
@@ -568,10 +568,10 @@ $ cargo run -q -- --json workspace verify
 ### Workspace install & tidy
 
 ```bash
-$ cargo run -q -- workspace install
-workspace install: all 2 members clean
+$ cargo run -q -- workspace sync
+workspace sync: all 2 members clean
 
-$ cargo run -q -- --json workspace install --frozen
+$ cargo run -q -- --json workspace sync --frozen
 {
   "status": "ok",
   "details": {
@@ -597,13 +597,13 @@ $ cargo run -q -- --json workspace tidy
 }
 ```
 
-- `px workspace install` iterates members from `[tool.px.workspace].members`,
+- `px workspace sync` iterates members from `[tool.px.workspace].members`,
   running the existing per-project install logic. In offline Phase C this
   rewrites missing/out-of-date locks; `--frozen` switches to verification only
   and fails fast if any member drifts or lacks a lock.
 - `px workspace tidy` is a read-only drift check that reports each member’s
   status (`tidied`, `drift`, `missing-lock`, etc.) and fails whenever a member
-  needs `px install`.
+  needs `px sync`.
 
 ### Tidy (lock drift check)
 
@@ -680,7 +680,7 @@ px store prefetch: dry-run 12 artifacts (11 cached)
   `PX_ONLINE=1` unless `--dry-run` is provided.
 - `--workspace` walks each `[tool.px.workspace].members` entry so every member
   lock is hydrated in one command.
-- Reuses the same downloader as `px install`, so proxy and `no_proxy` behavior
+- Reuses the same downloader as `px sync`, so proxy and `no_proxy` behavior
   stays consistent. `--dry-run` surfaces what would be fetched without touching
   the network.
 - Pass `--json` to obtain per-run stats; with `--workspace` the payload adds

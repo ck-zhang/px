@@ -35,7 +35,7 @@ fn prefetch_hydrates_missing_artifact() {
         .current_dir(&project)
         .env("PX_ONLINE", "1")
         .env("PX_CACHE_PATH", &cache_root)
-        .args(["install"])
+        .args(["sync"])
         .assert()
         .success();
 
@@ -47,7 +47,7 @@ fn prefetch_hydrates_missing_artifact() {
         .current_dir(&project)
         .env("PX_ONLINE", "1")
         .env("PX_CACHE_PATH", &cache_root)
-        .args(["cache", "prefetch"])
+        .args(["debug", "cache", "prefetch"])
         .assert()
         .success();
 
@@ -69,14 +69,14 @@ fn prefetch_dry_run_reports_counts() {
         .current_dir(&project)
         .env("PX_ONLINE", "1")
         .env("PX_CACHE_PATH", &cache_root)
-        .args(["install"])
+        .args(["sync"])
         .assert()
         .success();
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_CACHE_PATH", &cache_root)
-        .args(["--json", "cache", "prefetch", "--dry-run"])
+        .args(["--json", "debug", "cache", "prefetch", "--dry-run"])
         .assert()
         .success();
     let payload = parse_json(&assert);
@@ -92,7 +92,7 @@ fn store_prefetch_requires_px_online_for_downloads() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_ONLINE", "0")
-        .args(["cache", "prefetch"])
+        .args(["debug", "cache", "prefetch"])
         .assert()
         .failure();
 
@@ -119,7 +119,7 @@ fn store_prefetch_dry_run_emits_status_and_json_flag() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_ONLINE", "0")
-        .args(["cache", "prefetch", "--dry-run"])
+        .args(["debug", "cache", "prefetch", "--dry-run"])
         .assert()
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
@@ -135,7 +135,7 @@ fn store_prefetch_dry_run_emits_status_and_json_flag() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_ONLINE", "0")
-        .args(["--json", "cache", "prefetch", "--dry-run"])
+        .args(["--json", "debug", "cache", "prefetch", "--dry-run"])
         .assert()
         .success();
     let payload = parse_json(&assert);
@@ -163,7 +163,7 @@ fn run_online_install(project: &Path) {
     cargo_bin_cmd!("px")
         .current_dir(project)
         .env("PX_ONLINE", "1")
-        .arg("install")
+        .arg("sync")
         .assert()
         .success();
 }

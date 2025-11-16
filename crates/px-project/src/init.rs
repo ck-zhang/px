@@ -1,8 +1,9 @@
 use std::{fs, path::Path};
 
 use anyhow::{bail, Result};
+use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 
-use crate::manifest::relative_path;
+use crate::manifest::{ensure_dependencies_array_mut, relative_path};
 
 pub struct ProjectInitializer;
 
@@ -10,11 +11,24 @@ impl ProjectInitializer {
     pub fn scaffold(root: &Path, package: &str, python_req: &str) -> Result<Vec<String>> {
         let mut files = Vec::new();
         let pyproject_path = root.join("pyproject.toml");
-        let pyproject = format!(
-            "[project]\nname = \"{package}\"\nversion = \"0.1.0\"\nrequires-python = \"{python_req}\"\ndependencies = []\n\n[tool.px]\n\n[build-system]\nrequires = [\"setuptools>=70\", \"wheel\"]\nbuild-backend = \"setuptools.build_meta\"\n"
-        );
-        fs::write(&pyproject_path, pyproject)?;
-        files.push(relative_path(root, &pyproject_path));
+        let mut doc = if pyproject_path.exists() {
+            let contents = fs::read_to_string(&pyproject_path)?;
+            contents.parse::<DocumentMut>()?
+        } else {
+            DocumentMut::new()
+        };
+        let mut pyproject_changed = false;
+
+        ensure_project_table(&mut doc);
+        pyproject_changed |= ensure_project_identity(&mut doc, package, python_req);
+        pyproject_changed |= ensure_project_dependencies(&mut doc);
+        pyproject_changed |= ensure_tool_px_section(&mut doc);
+        pyproject_changed |= ensure_build_system(&mut doc);
+
+        if pyproject_changed {
+            fs::write(&pyproject_path, doc.to_string())?;
+            files.push(relative_path(root, &pyproject_path));
+        }
 
         let px_root = root.join(".px");
         ensure_dir(&px_root, root, &mut files)?;
@@ -28,6 +42,81 @@ impl ProjectInitializer {
 
         Ok(files)
     }
+}
+
+fn ensure_project_table(doc: &mut DocumentMut) {
+    let needs_reset = match doc.get("project") {
+        Some(item) => !item.is_table(),
+        None => true,
+    };
+    if needs_reset {
+        doc.as_table_mut()
+            .insert("project", Item::Table(Table::new()));
+    }
+}
+
+fn ensure_project_identity(doc: &mut DocumentMut, package: &str, python_req: &str) -> bool {
+    let mut changed = false;
+    let table = doc["project"].as_table_mut().expect("project table");
+    if !table.contains_key("name") {
+        table["name"] = Item::Value(TomlValue::from(package));
+        changed = true;
+    }
+    if !table.contains_key("version") {
+        table["version"] = Item::Value(TomlValue::from("0.1.0"));
+        changed = true;
+    }
+    if !table.contains_key("requires-python") {
+        table["requires-python"] = Item::Value(TomlValue::from(python_req));
+        changed = true;
+    }
+    changed
+}
+
+fn ensure_project_dependencies(doc: &mut DocumentMut) -> bool {
+    let deps = ensure_dependencies_array_mut(doc);
+    if deps.is_empty() {
+        return false;
+    }
+    deps.clear();
+    true
+}
+
+fn ensure_tool_px_section(doc: &mut DocumentMut) -> bool {
+    let tool_entry = doc
+        .entry("tool")
+        .or_insert(Item::Table(Table::new()));
+    if !tool_entry.is_table() {
+        *tool_entry = Item::Table(Table::new());
+    }
+    let tool_table = tool_entry.as_table_mut().expect("tool table");
+    if tool_table.contains_key("px") {
+        return false;
+    }
+    tool_table.insert("px", Item::Table(Table::new()));
+    true
+}
+
+fn ensure_build_system(doc: &mut DocumentMut) -> bool {
+    if doc
+        .get("build-system")
+        .map(|item| item.is_table())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    let mut requires = Array::new();
+    requires.push("setuptools>=70");
+    requires.push("wheel");
+    let mut table = Table::new();
+    table.insert("requires", Item::Value(TomlValue::Array(requires)));
+    table.insert(
+        "build-backend",
+        Item::Value(TomlValue::from("setuptools.build_meta")),
+    );
+    doc.as_table_mut()
+        .insert("build-system", Item::Table(table));
+    true
 }
 
 pub fn infer_package_name(explicit: Option<&str>, root: &Path) -> Result<(String, bool)> {

@@ -14,7 +14,7 @@ dependencies.
   with markers/extras, PyPI client, wheel build/install; single-target
   `px.lock`; no manual venv activation.
 - **Exit check:** create sample project, lock it, and reproduce elsewhere via
-  `px install --frozen` followed by `px test`.
+  `px sync --frozen` followed by `px test`.
 - **Prioritized backlog:** (1) CAS store + `.px` bootstrap runner + env
   injection; (2) resolver + PyPI client + wheel build/install backing the CLI;
   (3) single-target lock emit/consume plus `--frozen` enforcement and smoke
@@ -29,7 +29,7 @@ dependencies.
 - **Acceptance criteria:** lock diffing + `--json` outputs; CI cache flows +
   offline install; VCS/path deps pinned to commits; hardened Windows shims; IDE
   interpreter shim via `px env python`.
-- **Exit check:** fresh clone → `px install --frozen` → `px test` hits caches
+- **Exit check:** fresh clone → `px sync --frozen` → `px test` hits caches
   in CI/IDE scenarios with diff tooling for reviews.
 - **Prioritized backlog:** (1) lock diff + JSON plumbing + exit codes; (2)
   cache priming/offline install flows, Windows shim parity, registry auth

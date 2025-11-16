@@ -48,7 +48,7 @@ fn workspace_verify_detects_and_clears_drift() {
 
     cargo_bin_cmd!("px")
         .current_dir(&beta)
-        .arg("install")
+        .arg("sync")
         .assert()
         .success();
 
@@ -98,7 +98,7 @@ fn workspace_verify_human_messages_reflect_state() {
         "drift output should mention member-beta drift: {stdout:?}"
     );
     assert!(
-        stdout.contains("Hint: run `px workspace install`"),
+        stdout.contains("Hint: run `px workspace sync`"),
         "drift output should emit remediation hint: {stdout:?}"
     );
 }
@@ -113,7 +113,7 @@ fn workspace_install_restores_missing_locks() {
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&root)
-        .args(["--json", "workspace", "install"])
+        .args(["--json", "workspace", "sync"])
         .assert()
         .success();
     let payload = parse_json(&assert);
@@ -142,7 +142,7 @@ fn workspace_tidy_reports_and_clears_drift() {
 
     cargo_bin_cmd!("px")
         .current_dir(&root)
-        .args(["workspace", "install"])
+        .args(["workspace", "sync"])
         .assert()
         .success();
 
@@ -165,7 +165,7 @@ fn workspace_install_frozen_requires_clean_state() {
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&root)
-        .args(["--json", "workspace", "install", "--frozen"])
+        .args(["--json", "workspace", "sync", "--frozen"])
         .assert()
         .failure();
     let payload = parse_json(&assert);
@@ -177,13 +177,13 @@ fn workspace_install_frozen_requires_clean_state() {
 
     cargo_bin_cmd!("px")
         .current_dir(&root)
-        .args(["workspace", "install"])
+        .args(["workspace", "sync"])
         .assert()
         .success();
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&root)
-        .args(["--json", "workspace", "install", "--frozen"])
+        .args(["--json", "workspace", "sync", "--frozen"])
         .assert()
         .success();
     let payload = parse_json(&assert);

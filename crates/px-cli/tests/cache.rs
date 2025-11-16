@@ -16,7 +16,7 @@ fn cache_stats_reports_entries_and_size() {
 
     let assert = cargo_bin_cmd!("px")
         .env("PX_CACHE_PATH", &store)
-        .args(["--json", "cache", "stats"])
+        .args(["--json", "debug", "cache", "stats"])
         .assert()
         .success();
     let payload = parse_json(&assert);
@@ -35,7 +35,7 @@ fn cache_prune_respects_dry_run_and_all() {
 
     let assert = cargo_bin_cmd!("px")
         .env("PX_CACHE_PATH", &store)
-        .args(["--json", "cache", "prune", "--all", "--dry-run"])
+        .args(["--json", "debug", "cache", "prune", "--all", "--dry-run"])
         .assert()
         .success();
     let payload = parse_json(&assert);
@@ -44,7 +44,7 @@ fn cache_prune_respects_dry_run_and_all() {
 
     let assert = cargo_bin_cmd!("px")
         .env("PX_CACHE_PATH", &store)
-        .args(["--json", "cache", "prune", "--all"])
+        .args(["--json", "debug", "cache", "prune", "--all"])
         .assert()
         .success();
     let payload = parse_json(&assert);
@@ -60,7 +60,7 @@ fn cache_path_human_output_is_prefixed() {
 
     let assert = cargo_bin_cmd!("px")
         .env("PX_CACHE_PATH", &cache_dir)
-        .args(["cache", "path"])
+        .args(["debug", "cache", "path"])
         .assert()
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
@@ -78,7 +78,7 @@ fn cache_prune_dry_run_human_message_is_concise() {
 
     let assert = cargo_bin_cmd!("px")
         .env("PX_CACHE_PATH", &store)
-        .args(["cache", "prune", "--all", "--dry-run"])
+        .args(["debug", "cache", "prune", "--all", "--dry-run"])
         .assert()
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();

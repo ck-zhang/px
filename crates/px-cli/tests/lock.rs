@@ -22,7 +22,7 @@ fn install_writes_lockfile_for_fixture() {
     let (_tmp, project) = prepare_fixture("install-lock");
     let lock_path = project.join("px.lock");
 
-    run_install(&project);
+    run_sync(&project);
 
     assert!(lock_path.exists(), "px.lock should be created");
     let contents = fs::read_to_string(&lock_path).expect("read lockfile");
@@ -58,11 +58,11 @@ fn install_writes_lockfile_for_fixture() {
 #[test]
 fn install_frozen_passes_when_lock_matches() {
     let (_tmp, project) = prepare_fixture("install-frozen");
-    run_install(&project);
+    run_sync(&project);
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
-        .args(["--json", "install", "--frozen"])
+        .args(["--json", "sync", "--frozen"])
         .assert()
         .success();
 
@@ -73,12 +73,12 @@ fn install_frozen_passes_when_lock_matches() {
 #[test]
 fn install_frozen_fails_on_manifest_drift() {
     let (_tmp, project) = prepare_fixture("install-frozen-drift");
-    run_install(&project);
+    run_sync(&project);
     add_dependency(&project, "requests==2.32.3");
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
-        .args(["--json", "install", "--frozen"])
+        .args(["--json", "sync", "--frozen"])
         .assert()
         .failure();
 
@@ -95,13 +95,16 @@ fn install_frozen_fails_on_manifest_drift() {
 
 #[test]
 fn tidy_reports_drift_until_lock_regenerated() {
+    if !require_online() {
+        return;
+    }
     let (_tmp, project) = prepare_fixture("tidy-drift");
-    run_install(&project);
+    run_sync(&project);
     bump_python_requirement(&project, ">=3.13");
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
-        .args(["--json", "tidy"])
+        .args(["--json", "debug", "tidy"])
         .assert()
         .failure();
     let payload = parse_json(&assert);
@@ -114,11 +117,11 @@ fn tidy_reports_drift_until_lock_regenerated() {
         "tidy should report drift"
     );
 
-    run_install(&project);
+    run_sync(&project);
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
-        .args(["--json", "tidy"])
+        .args(["--json", "debug", "tidy"])
         .assert()
         .success();
     let payload = parse_json(&assert);
@@ -128,7 +131,7 @@ fn tidy_reports_drift_until_lock_regenerated() {
 #[test]
 fn lock_diff_is_clean_after_install() {
     let (_tmp, project) = prepare_fixture("lock-diff-clean");
-    run_install(&project);
+    run_sync(&project);
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
@@ -158,7 +161,7 @@ fn lock_diff_is_clean_after_install() {
 #[test]
 fn lock_diff_detects_python_mismatch() {
     let (_tmp, project) = prepare_fixture("lock-diff-drift");
-    run_install(&project);
+    run_sync(&project);
     bump_python_requirement(&project, ">=3.13");
 
     let assert = cargo_bin_cmd!("px")
@@ -200,7 +203,7 @@ fn lock_diff_reports_missing_lock() {
         "human output should mention missing lock: {stdout:?}"
     );
     assert!(
-        stdout.contains("Hint: run `px install`"),
+        stdout.contains("Hint: run `px sync`"),
         "missing-lock output should include remediation hint: {stdout:?}"
     );
 }
@@ -212,7 +215,7 @@ fn lock_upgrade_writes_v2_graph() {
     }
     let (_tmp, project) = prepare_fixture("lock-upgrade-v2");
     add_dependency(&project, "packaging==24.1");
-    run_install(&project);
+    run_sync(&project);
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
@@ -254,7 +257,7 @@ fn lock_diff_detects_graph_mutation() {
     }
     let (_tmp, project) = prepare_fixture("lock-upgrade-drift");
     add_dependency(&project, "packaging==24.1");
-    run_install(&project);
+    run_sync(&project);
 
     cargo_bin_cmd!("px")
         .current_dir(&project)
@@ -288,7 +291,7 @@ fn install_frozen_accepts_v2_lock() {
     }
     let (_tmp, project) = prepare_fixture("lock-upgrade-frozen");
     add_dependency(&project, "packaging==24.1");
-    run_install(&project);
+    run_sync(&project);
 
     cargo_bin_cmd!("px")
         .current_dir(&project)
@@ -298,17 +301,17 @@ fn install_frozen_accepts_v2_lock() {
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
-        .args(["--json", "install", "--frozen"])
+        .args(["--json", "sync", "--frozen"])
         .assert()
         .success();
     let payload = parse_json(&assert);
     assert_eq!(payload["status"], "ok");
 }
 
-fn run_install(project: &Path) {
+fn run_sync(project: &Path) {
     cargo_bin_cmd!("px")
         .current_dir(project)
-        .arg("install")
+        .arg("sync")
         .assert()
         .success();
 }

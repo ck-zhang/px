@@ -8,7 +8,7 @@ cd fixtures/sample_px_app
 px project init                # clean init (no flags)
 px project add requests==2.32.3
 px project remove requests
-px install && px tidy
+px sync && px tidy
 px lock diff && px lock upgrade
 px run -- -n Demo              # default entry inference
 px run python -- -m sample_px_app.cli -n Demo
@@ -18,7 +18,7 @@ px cache prune --all --dry-run
 px store prefetch --dry-run    # PX_ONLINE=1 optional for dry-run
 PX_ONLINE=1 px store prefetch
 px workspace list
-px workspace install && px workspace verify --json
+px workspace sync && px workspace verify --json
 PX_SKIP_TESTS=1 px build --json
 PX_ONLINE=1 PX_PUBLISH_TOKEN=… px publish --dry-run --json
 
@@ -54,7 +54,7 @@ Each row matches `px <group> <command>` with expected copy.
 | `px store prefetch` | `px store prefetch: hydrated N artifacts (M cached, K fetched)` | `{details:{status:"prefetched"}}` |
 | `px store prefetch` gated | `px store prefetch: PX_ONLINE=1 required for downloads`<br>`Hint: export PX_ONLINE=1 or add --dry-run to inspect work without downloading` | `{status:"user-error",details:{status:"gated-offline"}}` |
 | `px workspace list` | `px workspace list: member-alpha, member-beta` | `{details:{workspace:{members:[…]}}}` |
-| `px workspace install` | `px workspace install: all N members clean` or drift summary | `{details:{workspace:{counts:{ok,drifted,failed}}}}` |
+| `px workspace sync` | `px workspace sync: all N members clean` or drift summary | `{details:{workspace:{counts:{ok,drifted,failed}}}}` |
 | `px workspace verify` | `px workspace verify: all N members clean` or `drift in member-X …` + Hint | `{details:{status:"clean|drift"}}` |
 | `px workspace tidy` | `px workspace tidy: all N members clean` | `{details:{workspace:{members:[…]}}}` |
 | `px quality tidy` | `px quality tidy: px.lock matches pyproject` | `{details:{status:"clean"}}` |

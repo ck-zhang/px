@@ -72,7 +72,7 @@ project/
 px init [--package <name>] [--py <X.Y>]
 px add <spec>... [--dev] [--extra <name>]
 px remove <name>...
-px install [--frozen] [--offline]
+px sync [--frozen] [--offline]
 px update [<name>...] [--latest]
 px run [<module|script|entry>] [-- <args...>]
 px test [-- <pytest_args...>]
@@ -103,7 +103,7 @@ px env [info|paths|python|materialize --mode {pep582|venv}]
 * Full PEP 440/508, markers/extras, platform tags; prefer wheels, fallback to sdists.
 * Deterministic backtracking; clear conflict messages.
 * **Lockfile (`px.lock`, TOML):** exact artifacts (`name`, `version`, `filename`, `sha256`, `tags`, parents).
-* **Install rules:** Only `px update` changes versions; `px install --frozen` enforces lock.
+* **Install rules:** Only `px update` changes versions; `px sync --frozen` enforces lock.
 
 ---
 
@@ -156,7 +156,7 @@ upload = "https://pypi.corp/upload/"
 
 * `px env python` → path to **project interpreter shim** that preloads `.px/site` (works in IDEs).
 * VS Code/PyCharm snippets generated.
-* CI: `px install --frozen`; cache `px cache path`.
+* CI: `px sync --frozen`; cache `px cache path`.
 
 ---
 
@@ -204,7 +204,7 @@ upload = "https://pypi.corp/upload/"
 * VCS/path deps with commit pinning; robust Windows shims.
 * IDE shims: `px env python` works everywhere.
 
-**Exit:** Multi‑dev project clone → `px install --frozen` → `px test` reliably; high cache hits.
+**Exit:** Multi‑dev project clone → `px sync --frozen` → `px test` reliably; high cache hits.
 
 ---
 
@@ -230,11 +230,11 @@ upload = "https://pypi.corp/upload/"
   outputs.
 * `[[graph.artifacts]]` link nodes to targets and record the same wheel
   metadata used in v1 (`filename`, `url`, `sha256`, `size`, `cached_path`).
-* `px install` continues to emit v1 by default until the full resolver/store
+* `px sync` continues to emit v1 by default until the full resolver/store
   understands multi-target graphs. `px lock upgrade` converts existing locks to
   version 2 by dual-writing the new graph tables alongside the legacy
   dependency list.
-* Verification flows (`px lock diff`, `px install --frozen`, workspace tidy
+* Verification flows (`px lock diff`, `px sync --frozen`, workspace tidy
   modes) normalize either version into a comparable snapshot so mixed repos can
   migrate gradually without drift noise.
 
@@ -299,7 +299,7 @@ px run -m acme_demo.app
 px test
 px fmt && px lint
 px build both
-px install --frozen   # CI
+px sync --frozen   # CI
 px tidy               # plan
 px tidy --apply       # apply
 ```
