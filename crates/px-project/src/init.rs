@@ -83,9 +83,7 @@ fn ensure_project_dependencies(doc: &mut DocumentMut) -> bool {
 }
 
 fn ensure_tool_px_section(doc: &mut DocumentMut) -> bool {
-    let tool_entry = doc
-        .entry("tool")
-        .or_insert(Item::Table(Table::new()));
+    let tool_entry = doc.entry("tool").or_insert(Item::Table(Table::new()));
     if !tool_entry.is_table() {
         *tool_entry = Item::Table(Table::new());
     }

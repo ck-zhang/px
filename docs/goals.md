@@ -5,7 +5,7 @@
 - [x] Deterministic CLI surface wired to `px-core`, covering init/add/remove/sync/update/run/test plus supporting verbs such as `status`, `fmt`, `lint`, `build`, and `migrate` (`crates/px-cli/src/main.rs`).
 - [x] Resolver + lockfile pipeline that understands pinned dependency graphs and artifacts via `pep440_rs`/`pep508_rs` (`crates/px-resolver`, `crates/px-lockfile`).
 - [x] Pyproject authoring that edits `[project]` metadata and dependency arrays directly (PEP 621 aligned) (`crates/px-project/src/manifest.rs`).
-- [ ] Color-coded Python tracebacks with px-specific remediation hints surfaced under failures in `px-cli`.
+- [x] Color-coded Python tracebacks with px-specific remediation hints surfaced under failures in `px-cli`.
 
 ## PEP compatibility tracker
 
@@ -49,24 +49,119 @@
 
 ## Traceback UX & px recommendations
 
-- [ ] Apply px-specific color theming to the default Python traceback to highlight file/line/module, error type, and message.
-- [ ] Missing import → suggest `px add <pkg>`.
-- [ ] Declared dependency not installed → suggest `px install`.
-- [ ] Environment out of sync with lock → suggest `px install`.
-- [ ] No px project found → suggest `px init`.
-- [ ] Legacy project detected → suggest `px migrate`.
-- [ ] Dependency version incompatible with Python → suggest `px env python <ver>` or a compatible version.
-- [ ] Dependency version incompatible with constraints → suggest a relaxed spec or a compatible version.
-- [ ] Wrong interpreter (system python) detected → suggest `px run ...`.
-- [ ] Missing dev tool during command → suggest `px add --dev <tool>`.
-- [ ] Missing build backend → suggest adding one (e.g., `hatchling`).
-- [ ] Typos in command → suggest the closest matching px verb.
-- [ ] ABI mismatch (e.g., numpy) → suggest reinstalling or bumping Python.
-- [ ] Newer versions available → suggest `px update`.
-- [ ] Attempt to run Python file outside a project → suggest `px init` or `px run --no-project`.
-- [ ] Attempt to add invalid package spec → suggest corrected syntax.
-- [ ] Missing script/run target → suggest available tasks from `[tool.px.scripts]`.
-- [ ] Missing or unsupported Python version → suggest a valid interpreter target.
-- [ ] `requirements.txt` present → suggest `px migrate`.
-- [ ] Multiple conflicting dependency sources → suggest choosing one or using `px migrate --from`.
-- [ ] User runs `px install` with no deps → show hint about `px add`.
+Every failure that surfaces in `px` eventually reduces to a Python traceback or a CLI level diagnostic. The goal of this section is to ensure both flows share the same opinionated structure: make the failing frame obvious, highlight why px cares, and present the single best next command to copy–paste. The resolver work and lockfile pipeline already make failures deterministic; this UX spec makes those failures actionable.
+
+### Baseline rendering
+
+1. **Color surfacing.** Use the px CLI palette: the `Traceback (most recent call last)` header uses the accent color, file/module names are printed in the primary color, and the error type/message adopt the error color. Everything else (line numbers, code excerpts) stays dim so the eye lands on the important tokens.
+2. **Frame formatting.** Each frame keeps the default two-line form but adds inline emphasis—`File "foo.py" line 42 in bar` becomes a single line with the file path underlined and the callable name bolded. The following source line is syntax highlighted with gray gutter characters. Multiline frames (async, chained exceptions) repeat the pattern.
+3. **px hint block.** The final line after `ValueError: ...` is reserved for a px recommendation. The label (`Hint`, `Next`, or `px`) stays constant, and the block gets bordered (e.g., `px ▸ Hint: run ...`). If multiple hints qualify, show the highest priority and note that additional context is available via `px explain <code>`.
+4. **Copyable commands.** Example commands are always wrapped in backticks, contain no shell prompts, and are already resolved to the active project (no `...` placeholders unless the user must replace text like `<pkg>`).
+5. **Structured JSON.** Under `--json` the same metadata is emitted as `{ "traceback": [...], "error": {...}, "recommendation": {...} }` so that editor integrations can show the same hints.
+
+### Recommendation catalog
+
+Each heuristic below maps a concrete failure pattern to a px-branded suggestion. When multiple heuristics trigger, order them by confidence (A → lower letter signals fallback). All detections rely on data the CLI already owns—parsed tracebacks, resolver metadata, pyproject state, and environment fingerprints.
+
+**Missing import (`ModuleNotFoundError`, `ImportError`)**
+
+- *Signal.* Error message `No module named '<mod>'` with `<mod>` not provided by stdlib or installed artifacts in `.px/envs/...`.
+- *Copy.* `px ▸ Hint: add '<mod>' with "px add <mod>" and re-run.`
+- *Notes.* Use requirement normalization to map packages like `import yaml` → `pyyaml` suggestions when known aliases exist.
+
+**Declared dependency not installed**
+
+- *Signal.* `DistributionNotFound` or resolver metadata indicates dependency listed in `[project.dependencies]` but missing from env hash.
+- *Copy.* `px ▸ Hint: run "px install" to sync the environment with px.lock.`
+
+**Environment out of sync with lock**
+
+- *Signal.* Lock hash mismatch (`px.lock` hash differs from `.px/state.json`) even before Python execution.
+- *Copy.* `px ▸ Hint: "px install" will recreate the env from px.lock.`
+
+**No px project found**
+
+- *Signal.* `px` invoked outside a directory containing `pyproject.toml` or `.px/` metadata.
+- *Copy.* `px ▸ Hint: start a new project with "px init".`
+
+**Legacy project detected**
+
+- *Signal.* `requirements.txt`, `Pipfile`, or non-deterministic env artifacts present without px metadata.
+- *Copy.* `px ▸ Hint: convert this project with "px migrate".`
+
+**Dependency version incompatible with Python**
+
+- *Signal.* Resolver failure referencing `Requires-Python` or pyproject marker mismatch against current interpreter.
+- *Copy.* `px ▸ Hint: "px env python <version>" selects a compatible interpreter, or pick a release that supports Python ${current}.`
+
+**Dependency version incompatible with constraints**
+
+- *Signal.* Resolver conflict such as `Found existing <pkg>==1.0 but >=2.0 required`.
+- *Copy.* `px ▸ Hint: relax the spec in pyproject (e.g. "<pkg>=^2") or upgrade dependents.`
+
+**Wrong interpreter detected**
+
+- *Signal.* Traceback shows `sys.prefix` outside `.px/envs`, indicating user ran `python` directly.
+- *Copy.* `px ▸ Hint: use "px run <cmd>" to ensure the px-managed interpreter is active.`
+
+**Missing dev tool**
+
+- *Signal.* CLI invocation fails because `ruff`, `pytest`, etc., are missing while running a px verb that expects them.
+- *Copy.* `px ▸ Hint: add the tool with "px add --dev <tool>".`
+
+**Missing build backend**
+
+- *Signal.* `pyproject` lacks `[build-system]` or backend distribution missing.
+- *Copy.* `px ▸ Hint: declare a backend such as "hatchling" in [build-system] or add it as a dependency.`
+
+**Command typo**
+
+- *Signal.* Unknown px verb; Levenshtein distance < 3 to a supported verb.
+- *Copy.* `px ▸ Hint: did you mean "px <closest>"?` (auto-suggest within the same block).
+
+**ABI mismatch**
+
+- *Signal.* Traceback contains `ImportError: cannot import name ... from partially initialized extension` or `mach-o`/`ELF` mismatch referencing numpy/scipy.
+- *Copy.* `px ▸ Hint: reinstall the package or upgrade the interpreter ("px env python <new>" then "px install").`
+
+**Newer versions available**
+
+- *Signal.* Resolver warns about yanked/vulnerable releases or known CVE metadata.
+- *Copy.* `px ▸ Hint: update with "px update" to pull in the latest compatible versions.`
+
+**Running Python files outside a project**
+
+- *Signal.* User executes `px run python file.py` without a project, or `python file.py` with px shim.
+- *Copy.* `px ▸ Hint: create a project ("px init") or run ad-hoc code via "px run --no-project python file.py".`
+
+**Invalid package spec**
+
+- *Signal.* Resolver/`px add` rejects requirement strings (bad extras, invalid version pins).
+- *Copy.* `px ▸ Hint: fix the spec (e.g., "pkg>=1.0") and rerun "px add".`
+
+**Missing script/run target**
+
+- *Signal.* `px run foo` references an undefined script.
+- *Copy.* `px ▸ Hint: define "foo" in [tool.px.scripts] or run one of: <autogenerated list>.`
+
+**Missing or unsupported Python version**
+
+- *Signal.* Requested interpreter is not installed locally or not downloadable for platform.
+- *Copy.* `px ▸ Hint: install an available version with "px env python <valid>".`
+
+**requirements.txt present**
+
+- *Signal.* Migration guard finds `requirements.txt` without px metadata while running px CLI commands.
+- *Copy.* `px ▸ Hint: migrate deterministic dependencies with "px migrate".`
+
+**Multiple conflicting dependency sources**
+
+- *Signal.* Project includes `[project.dependencies]`, `requirements.txt`, and `poetry.lock` simultaneously.
+- *Copy.* `px ▸ Hint: pick one source or call "px migrate --from <source>" to unify.`
+
+**`px install` with no dependencies**
+
+- *Signal.* `pyproject` contains zero dependencies and user runs `px install`.
+- *Copy.* `px ▸ Hint: add packages with "px add <name>"; install will do nothing until dependencies exist.`
+
+These behaviors give px a single recognizable “panic kit”: consistent colors, deterministic hints, and actionable commands.

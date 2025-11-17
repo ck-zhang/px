@@ -434,7 +434,9 @@ pub(crate) fn ensure_dependencies_array_mut(doc: &mut DocumentMut) -> &mut Array
     if !deps_entry.is_array() {
         *deps_entry = Item::Value(TomlValue::Array(Array::new()));
     }
-    deps_entry.as_array_mut().expect("dependencies should be an array")
+    deps_entry
+        .as_array_mut()
+        .expect("dependencies should be an array")
 }
 
 pub(crate) enum InsertOutcome {

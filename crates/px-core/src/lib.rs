@@ -48,9 +48,11 @@ use tracing::warn;
 use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 
 use crate::pypi::{PypiFile, PypiReleaseResponse};
+use crate::traceback::{analyze_python_traceback, TracebackContext};
 
 mod effects;
 mod pypi;
+mod traceback;
 mod workspace;
 
 pub use effects::SystemEffects;
@@ -2453,9 +2455,7 @@ fn detect_foreign_tool(doc: &DocumentMut) -> Option<String> {
                     let name = key.to_string();
                     match name.as_str() {
                         "px" => None,
-                        "poetry" | "pdm" | "hatch" | "flit" | "rye" => {
-                            Some(name)
-                        }
+                        "poetry" | "pdm" | "hatch" | "flit" | "rye" => Some(name),
                         _ => None,
                     }
                 })
@@ -3461,7 +3461,6 @@ pub(crate) fn build_http_client() -> Result<Client> {
     Client::builder()
         .user_agent(format!("px/{PX_VERSION}"))
         .timeout(Duration::from_secs(60))
-        .no_proxy()
         .build()
         .context("failed to build HTTP client")
 }
@@ -4068,6 +4067,8 @@ fn outcome_from_output(
     prefix: &str,
     extra: Option<Value>,
 ) -> ExecutionOutcome {
+    let mut extra_details = extra;
+    let context = TracebackContext::new(command_name, target, extra_details.as_ref());
     let mut details = json!({
         "stdout": output.stdout,
         "stderr": output.stderr,
@@ -4075,7 +4076,7 @@ fn outcome_from_output(
         "target": target,
     });
 
-    if let Some(extra_value) = extra {
+    if let Some(extra_value) = extra_details.take() {
         if let Value::Object(map) = extra_value {
             if let Some(details_map) = details.as_object_mut() {
                 for (key, value) in map {
@@ -4084,6 +4085,28 @@ fn outcome_from_output(
             }
         } else {
             details["extra"] = extra_value;
+        }
+    }
+
+    let mut has_traceback = false;
+    if output.code != 0 {
+        if let Some(report) = analyze_python_traceback(&output.stderr, &context) {
+            has_traceback = true;
+            let recommendation = report.recommendation.clone();
+            let trace_value = serde_json::to_value(&report).expect("traceback serialization");
+            if let Some(map) = details.as_object_mut() {
+                map.insert("traceback".to_string(), trace_value);
+            }
+            if let Some(rec) = recommendation {
+                let hint_text = rec.hint.clone();
+                let rec_value = serde_json::to_value(&rec).expect("traceback recommendation");
+                if let Some(map) = details.as_object_mut() {
+                    map.insert("recommendation".to_string(), rec_value);
+                    if !map.contains_key("hint") {
+                        map.insert("hint".to_string(), Value::String(hint_text));
+                    }
+                }
+            }
         }
     }
 
@@ -4101,7 +4124,8 @@ fn outcome_from_output(
         let message = format!("{prefix} {command_name}({target}) succeeded");
         ExecutionOutcome::success(message, details)
     } else {
-        let message = if output.stderr.trim().is_empty() {
+        let trimmed_stderr = output.stderr.trim();
+        let message = if trimmed_stderr.is_empty() || has_traceback {
             format!(
                 "{prefix} {command_name}({target}) exited with {}",
                 output.code

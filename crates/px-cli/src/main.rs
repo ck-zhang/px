@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 mod style;
+mod traceback;
 
 use style::Style;
 
@@ -116,14 +117,24 @@ fn emit_output(cli: &PxCli, info: CommandInfo, outcome: &px_core::ExecutionOutco
         } else {
             let message = px_core::format_status_message(info, &outcome.message);
             println!("{}", style.status(&outcome.status, &message));
-            if let Some(hint) = hint_from_details(&outcome.details) {
-                let hint_label = match outcome.status {
-                    CommandStatus::Ok => "Tip",
-                    CommandStatus::UserError => "Hint",
-                    CommandStatus::Failure => "Note",
-                };
-                let hint_line = format!("{hint_label}: {hint}");
-                println!("{}", style.info(&hint_line));
+            let mut hint_emitted = false;
+            if let Some(trace) = traceback_from_details(&style, &outcome.details) {
+                println!("{}", trace.body);
+                if let Some(line) = trace.hint_line {
+                    println!("{}", line);
+                    hint_emitted = true;
+                }
+            }
+            if !hint_emitted {
+                if let Some(hint) = hint_from_details(&outcome.details) {
+                    let hint_label = match outcome.status {
+                        CommandStatus::Ok => "Tip",
+                        CommandStatus::UserError => "Hint",
+                        CommandStatus::Failure => "Note",
+                    };
+                    let hint_line = format!("{hint_label}: {hint}");
+                    println!("{}", style.info(&hint_line));
+                }
             }
             if let Some(table) = render_migrate_table(&style, info, &outcome.details) {
                 println!("{}", table);
@@ -139,6 +150,12 @@ fn hint_from_details(details: &Value) -> Option<&str> {
         .as_object()
         .and_then(|map| map.get("hint"))
         .and_then(Value::as_str)
+}
+
+fn traceback_from_details(style: &Style, details: &Value) -> Option<traceback::TracebackDisplay> {
+    let map = details.as_object()?;
+    let traceback_value = map.get("traceback")?;
+    traceback::format_traceback(style, traceback_value)
 }
 
 fn autosync_note_from_details(details: &Value) -> Option<&str> {
@@ -666,61 +683,59 @@ struct PxCli {
 enum CommandGroupCli {
     #[command(
         about = "Start a px project: writes pyproject, px.lock, and an empty env.",
-        override_usage = "px init [--package NAME] [--py VERSION]",
+        override_usage = "px init [--package NAME] [--py VERSION]"
     )]
     Init(InitArgs),
     #[command(
         about = "Declare direct dependencies and immediately sync px.lock + env.",
-        override_usage = "px add <SPEC> [SPEC ...]",
+        override_usage = "px add <SPEC> [SPEC ...]"
     )]
     Add(SpecArgs),
     #[command(
         about = "Remove direct dependencies and re-sync px.lock + env.",
-        override_usage = "px remove <NAME> [NAME ...]",
+        override_usage = "px remove <NAME> [NAME ...]"
     )]
     Remove(SpecArgs),
     #[command(
         about = "Sync the project environment from px.lock (run after clone or drift).",
-        override_usage = "px sync [--frozen]",
+        override_usage = "px sync [--frozen]"
     )]
     Sync(SyncArgs),
     #[command(
         about = "Resolve newer versions, rewrite px.lock, then sync the env.",
-        override_usage = "px update [<SPEC> ...]",
+        override_usage = "px update [<SPEC> ...]"
     )]
     Update(SpecArgs),
     #[command(
         about = "Run scripts/tasks with auto-sync unless --frozen or CI=1.",
-        override_usage = "px run [ENTRY] [-- <ARG>...]",
+        override_usage = "px run [ENTRY] [-- <ARG>...]"
     )]
     Run(RunArgs),
     #[command(
         about = "Run tests with the same auto-sync rules as px run.",
-        override_usage = "px test [-- <PYTEST_ARG>...]",
+        override_usage = "px test [-- <PYTEST_ARG>...]"
     )]
     Test(TestArgs),
     #[command(
         about = "Run configured formatters inside the px environment.",
-        override_usage = "px fmt [-- <ARG>...]",
+        override_usage = "px fmt [-- <ARG>...]"
     )]
     Fmt(ToolArgs),
     #[command(
         about = "Run configured linters inside the px environment.",
-        override_usage = "px lint [-- <ARG>...]",
+        override_usage = "px lint [-- <ARG>...]"
     )]
     Lint(ToolArgs),
-    #[command(
-        about = "Report whether pyproject, px.lock, and the env are in sync (read-only).",
-    )]
+    #[command(about = "Report whether pyproject, px.lock, and the env are in sync (read-only).")]
     Status,
     #[command(
         about = "Build sdists/wheels using the px env (prep for px publish).",
-        override_usage = "px build [sdist|wheel|both] [--out DIR]",
+        override_usage = "px build [sdist|wheel|both] [--out DIR]"
     )]
     Build(BuildArgs),
     #[command(
         about = "Publish previously built artifacts; dry-run by default.",
-        override_usage = "px publish [--dry-run] [--registry NAME] [--token-env VAR]",
+        override_usage = "px publish [--dry-run] [--registry NAME] [--token-env VAR]"
     )]
     Publish(PublishArgs),
     #[command(about = "Create px metadata for an existing project.")]
@@ -730,10 +745,7 @@ enum CommandGroupCli {
         subcommand
     )]
     Lock(LockCommand),
-    #[command(
-        about = "Apply sync/tidy/status across workspace members.",
-        subcommand
-    )]
+    #[command(about = "Apply sync/tidy/status across workspace members.", subcommand)]
     Workspace(WorkspaceCommand),
     #[command(
         about = "Advanced utilities (env, cache, fmt, lint, tidy, why).",
@@ -760,23 +772,23 @@ enum CommandGroupCli {
 enum ProjectCommand {
     #[command(
         about = "Scaffold pyproject, src/, and tests using the current folder.",
-        override_usage = "px project init [--package NAME] [--py VERSION]",
+        override_usage = "px project init [--package NAME] [--py VERSION]"
     )]
     Init(InitArgs),
     #[command(
         about = "Add or update pinned dependencies in pyproject.toml.",
-        override_usage = "px project add <SPEC> [SPEC ...]",
+        override_usage = "px project add <SPEC> [SPEC ...]"
     )]
     Add(SpecArgs),
     #[command(
         about = "Remove dependencies by name across prod and dev scopes.",
-        override_usage = "px project remove <NAME> [NAME ...]",
+        override_usage = "px project remove <NAME> [NAME ...]"
     )]
     Remove(SpecArgs),
     Sync(SyncArgs),
     #[command(
         about = "Update named dependencies to the newest allowed versions.",
-        override_usage = "px project update <SPEC> [SPEC ...]",
+        override_usage = "px project update <SPEC> [SPEC ...]"
     )]
     Update(SpecArgs),
 }
@@ -785,12 +797,12 @@ enum ProjectCommand {
 enum WorkflowCommand {
     #[command(
         about = "Run the inferred entry or a named module inside px.",
-        override_usage = "px workflow run [ENTRY] [-- <ARG>...]",
+        override_usage = "px workflow run [ENTRY] [-- <ARG>...]"
     )]
     Run(RunArgs),
     #[command(
         about = "Run pytest (or px's fallback) with cached dependencies.",
-        override_usage = "px workflow test [-- <PYTEST_ARG>...]",
+        override_usage = "px workflow test [-- <PYTEST_ARG>...]"
     )]
     Test(TestArgs),
 }
@@ -806,12 +818,12 @@ enum QualityCommand {
 enum OutputCommand {
     #[command(
         about = "Build sdists and wheels into the project build/ folder.",
-        override_usage = "px output build [sdist|wheel|both] [--out DIR]",
+        override_usage = "px output build [sdist|wheel|both] [--out DIR]"
     )]
     Build(BuildArgs),
     #[command(
         about = "Publish build artifacts (dry-run by default).",
-        override_usage = "px output publish [--dry-run] [--registry NAME] [--token-env VAR]",
+        override_usage = "px output publish [--dry-run] [--registry NAME] [--token-env VAR]"
     )]
     Publish(PublishArgs),
 }
@@ -824,9 +836,7 @@ enum InfraCommand {
 
 #[derive(Subcommand, Debug)]
 enum StoreCommand {
-    #[command(
-        about = "Legacy alias for `px cache prefetch` (workspace optional).",
-    )]
+    #[command(about = "Legacy alias for `px cache prefetch` (workspace optional).")]
     Prefetch(StorePrefetchArgs),
 }
 
@@ -917,33 +927,21 @@ struct StorePrefetchArgs {
 
 #[derive(Subcommand, Debug)]
 enum LockCommand {
-    #[command(
-        about = "Compare px.lock to pyproject dependencies (run `px sync` to fix).",
-    )]
+    #[command(about = "Compare px.lock to pyproject dependencies (run `px sync` to fix).")]
     Diff,
-    #[command(
-        about = "Rewrite px.lock to the latest format; rerun `px sync` afterward.",
-    )]
+    #[command(about = "Rewrite px.lock to the latest format; rerun `px sync` afterward.")]
     Upgrade,
 }
 
 #[derive(Subcommand, Debug)]
 enum WorkspaceCommand {
-    #[command(
-        about = "List workspace members discovered in pyproject.toml.",
-    )]
+    #[command(about = "List workspace members discovered in pyproject.toml.")]
     List,
-    #[command(
-        about = "Verify each workspace member with `px status`.",
-    )]
+    #[command(about = "Verify each workspace member with `px status`.")]
     Verify,
-    #[command(
-        about = "Run `px sync` for every workspace member.",
-    )]
+    #[command(about = "Run `px sync` for every workspace member.")]
     Sync(WorkspaceSyncArgs),
-    #[command(
-        about = "Run `px tidy` across workspace members.",
-    )]
+    #[command(about = "Run `px tidy` across workspace members.")]
     Tidy,
 }
 
@@ -1090,21 +1088,13 @@ struct CacheArgs {
 
 #[derive(Subcommand, Debug)]
 enum CacheSubcommand {
-    #[command(
-        about = "Print the resolved px cache directory.",
-    )]
+    #[command(about = "Print the resolved px cache directory.")]
     Path,
-    #[command(
-        about = "Report cache entry counts and total bytes.",
-    )]
+    #[command(about = "Report cache entry counts and total bytes.")]
     Stats,
-    #[command(
-        about = "Prune cache files (pair with --dry-run to preview).",
-    )]
+    #[command(about = "Prune cache files (pair with --dry-run to preview).")]
     Prune(PruneArgs),
-    #[command(
-        about = "Prefetch and cache artifacts for offline use.",
-    )]
+    #[command(about = "Prefetch and cache artifacts for offline use.")]
     Prefetch(StorePrefetchArgs),
 }
 

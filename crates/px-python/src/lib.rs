@@ -1,11 +1,8 @@
-
-
 #![allow(dead_code)]
 
 use std::env;
 
 use anyhow::{bail, Result};
-
 
 pub fn detect_interpreter() -> Result<String> {
     if let Some(explicit) = env::var("PX_RUNTIME_PYTHON").ok() {

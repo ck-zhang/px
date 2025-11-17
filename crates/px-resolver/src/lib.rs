@@ -1,6 +1,3 @@
-
-
-
 use std::{collections::BTreeMap, str::FromStr};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -11,7 +8,6 @@ use serde::Deserialize;
 
 const PYPI_BASE: &str = "https://pypi.org/pypi";
 
-
 #[derive(Debug, Clone)]
 pub struct ResolveRequest {
     pub project: String,
@@ -20,15 +16,12 @@ pub struct ResolveRequest {
     pub env: ResolverEnv,
 }
 
-
-
 #[derive(Debug, Clone, Default)]
 pub struct ResolverTags {
     pub python: Vec<String>,
     pub abi: Vec<String>,
     pub platform: Vec<String>,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct ResolverEnv {
@@ -44,7 +37,6 @@ pub struct ResolverEnv {
     pub python_version: String,
     pub sys_platform: String,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct ResolvedSpecifier {
@@ -140,7 +132,6 @@ fn build_http_client() -> Result<Client> {
     Client::builder()
         .user_agent(format!("px-resolver/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(30))
-        .no_proxy()
         .build()
         .context("failed to build HTTP client")
 }

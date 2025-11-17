@@ -1,5 +1,3 @@
-
-
 use std::{
     env,
     fs::{self, File},
@@ -26,7 +24,6 @@ const DOWNLOAD_ATTEMPTS: usize = 3;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 const WHEEL_MARKER_NAME: &str = ".px-wheel.json";
 
-
 pub struct ArtifactRequest<'a> {
     pub name: &'a str,
     pub version: &'a str,
@@ -34,7 +31,6 @@ pub struct ArtifactRequest<'a> {
     pub url: &'a str,
     pub sha256: &'a str,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct CachedArtifact {
@@ -48,7 +44,6 @@ struct CachedWheelFile {
     path: PathBuf,
     size: u64,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct PrefetchSpec<'a> {
@@ -374,7 +369,6 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
     };
     persist_metadata(&meta_path, &built)?;
 
-    
     let _ = fs::remove_dir_all(&src_dir);
     let _ = fs::remove_dir_all(&dist_dir);
 
@@ -616,7 +610,6 @@ pub struct SdistRequest<'a> {
     pub python_path: &'a str,
 }
 
-
 #[derive(Debug, Clone)]
 pub struct BuiltWheel {
     pub filename: String,
@@ -629,7 +622,6 @@ pub struct BuiltWheel {
     pub abi_tag: String,
     pub platform_tag: String,
 }
-
 
 pub fn cache_wheel(cache_root: &Path, request: &ArtifactRequest<'_>) -> Result<CachedArtifact> {
     let dest = wheel_path(cache_root, request.name, request.version, request.filename);
@@ -900,7 +892,6 @@ fn http_client() -> Result<Client> {
     Client::builder()
         .user_agent(USER_AGENT)
         .timeout(HTTP_TIMEOUT)
-        .no_proxy()
         .build()
         .context("failed to build http client")
 }
