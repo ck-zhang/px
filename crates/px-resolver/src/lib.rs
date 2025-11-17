@@ -1,5 +1,5 @@
-//! Minimal resolver for Phase A: converts simple range specs into exact pins by
-//! consulting the PyPI JSON API and selecting a `py3-none-any` wheel.
+
+
 
 use std::{collections::BTreeMap, str::FromStr};
 
@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 const PYPI_BASE: &str = "https://pypi.org/pypi";
 
-/// Input for the resolver.
+
 #[derive(Debug, Clone)]
 pub struct ResolveRequest {
     pub project: String,
@@ -20,8 +20,8 @@ pub struct ResolveRequest {
     pub env: ResolverEnv,
 }
 
-/// Interpreter/environment tags. Only python tags are used today, but keeping
-/// abi/platform lets us grow into richer selection logic later.
+
+
 #[derive(Debug, Clone, Default)]
 pub struct ResolverTags {
     pub python: Vec<String>,
@@ -29,7 +29,7 @@ pub struct ResolverTags {
     pub platform: Vec<String>,
 }
 
-/// Snapshot of interpreter metadata for marker evaluation.
+
 #[derive(Debug, Clone)]
 pub struct ResolverEnv {
     pub implementation_name: String,
@@ -45,7 +45,7 @@ pub struct ResolverEnv {
     pub sys_platform: String,
 }
 
-/// Outcome for each requirement.
+
 #[derive(Debug, Clone)]
 pub struct ResolvedSpecifier {
     pub name: String,

@@ -1,4 +1,4 @@
-//! Minimal Python runner for the Phase A vertical slice.
+
 
 use std::{
     path::Path,
@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 
-/// Captured interpreter output.
+
 #[derive(Debug, Clone)]
 pub struct RunOutput {
     pub code: i32,

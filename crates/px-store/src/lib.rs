@@ -1,4 +1,4 @@
-//! Minimal artifact downloader for pinned installs.
+
 
 use std::{
     env,
@@ -26,7 +26,7 @@ const DOWNLOAD_ATTEMPTS: usize = 3;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 const WHEEL_MARKER_NAME: &str = ".px-wheel.json";
 
-/// Request describing a wheel that should be cached locally.
+
 pub struct ArtifactRequest<'a> {
     pub name: &'a str,
     pub version: &'a str,
@@ -35,7 +35,7 @@ pub struct ArtifactRequest<'a> {
     pub sha256: &'a str,
 }
 
-/// Result of caching a wheel on disk.
+
 #[derive(Debug, Clone)]
 pub struct CachedArtifact {
     pub wheel_path: PathBuf,
@@ -49,7 +49,7 @@ struct CachedWheelFile {
     size: u64,
 }
 
-/// Artifact entry captured from `px.lock` for prefetching.
+
 #[derive(Debug, Clone)]
 pub struct PrefetchSpec<'a> {
     pub name: &'a str,
@@ -274,7 +274,6 @@ pub struct CachePruneResult {
     pub errors: Vec<CachePruneError>,
 }
 
-/// Build an sdist into a cached wheel and return its metadata.
 pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Result<BuiltWheel> {
     let precomputed_id = request.sha256.map(|sha| build_identifier(request, sha));
     if let Some(id) = &precomputed_id {
@@ -375,7 +374,7 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
     };
     persist_metadata(&meta_path, &built)?;
 
-    // Best effort cleanup of extracted sources to keep the cache small.
+    
     let _ = fs::remove_dir_all(&src_dir);
     let _ = fs::remove_dir_all(&dist_dir);
 
@@ -608,7 +607,6 @@ fn parse_wheel_tags(filename: &str) -> Option<(String, String, String)> {
     ))
 }
 
-/// Input describing an sdist that should be built into a wheel.
 pub struct SdistRequest<'a> {
     pub normalized_name: &'a str,
     pub version: &'a str,
@@ -618,7 +616,7 @@ pub struct SdistRequest<'a> {
     pub python_path: &'a str,
 }
 
-/// Result of building an sdist into a cached wheel.
+
 #[derive(Debug, Clone)]
 pub struct BuiltWheel {
     pub filename: String,
@@ -632,7 +630,7 @@ pub struct BuiltWheel {
     pub platform_tag: String,
 }
 
-/// Ensure a wheel exists in the cache, downloading and verifying if needed.
+
 pub fn cache_wheel(cache_root: &Path, request: &ArtifactRequest<'_>) -> Result<CachedArtifact> {
     let dest = wheel_path(cache_root, request.name, request.version, request.filename);
     let wheel = match validate_existing(&dest, request.sha256)? {
@@ -669,14 +667,12 @@ fn validate_existing(path: &Path, expected_sha: &str) -> Result<Option<CachedWhe
             }))
         }
         Ok(_) | Err(_) => {
-            // Remove mismatched/corrupt file and re-download.
             let _ = fs::remove_file(path);
             Ok(None)
         }
     }
 }
 
-/// Ensure that the provided artifacts exist in the cache.
 pub fn prefetch_artifacts(
     cache_root: &Path,
     specs: &[PrefetchSpec<'_>],
