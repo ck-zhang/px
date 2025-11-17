@@ -7,6 +7,11 @@
 - [x] Pyproject authoring that edits `[project]` metadata and dependency arrays directly (PEP 621 aligned) (`crates/px-project/src/manifest.rs`).
 - [x] Color-coded Python tracebacks with px-specific remediation hints surfaced under failures in `px-cli`.
 
+## Known placeholders
+
+- [ ] `px fmt` / `px lint` are stubbed in `crates/px-core/src/lib.rs` (lines 613–625); they only echo arguments in the JSON details and never invoke formatters/linters.
+- [ ] `px update` is stubbed in `crates/px-core/src/lib.rs` (lines 2773–2781); it emits `"stubbed project update"` without touching the resolver or lockfile.
+
 ## PEP compatibility tracker
 
 - [x] **PEP 440** – Version specifiers enforced everywhere via `pep440_rs`.
