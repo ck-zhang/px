@@ -2,10 +2,15 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, VecDeque},
     env, fmt, fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
     str::FromStr,
-    sync::OnceLock,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
+        mpsc, Arc, Mutex, OnceLock,
+    },
+    thread,
     time::Duration,
 };
 
@@ -446,6 +451,123 @@ pub enum CommandStatus {
     Failure,
 }
 
+fn progress_enabled() -> bool {
+    env::var("PX_PROGRESS").map(|v| v != "0").unwrap_or(true)
+}
+
+struct ProgressReporter {
+    current: Arc<AtomicUsize>,
+    stop: Option<Arc<AtomicBool>>,
+    handle: Option<thread::JoinHandle<()>>,
+    enabled: bool,
+}
+
+impl ProgressReporter {
+    fn spinner(label: impl Into<String>) -> Self {
+        Self::start(label.into(), None)
+    }
+
+    fn bar(label: impl Into<String>, total: usize) -> Self {
+        if total == 0 {
+            return Self::spinner(label);
+        }
+        Self::start(label.into(), Some(total))
+    }
+
+    fn start(label: String, total: Option<usize>) -> Self {
+        if !progress_enabled() {
+            return Self {
+                current: Arc::new(AtomicUsize::new(0)),
+                stop: None,
+                handle: None,
+                enabled: false,
+            };
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let current = Arc::new(AtomicUsize::new(0));
+        let thread_label = label.clone();
+        let thread_total = total;
+        let thread_stop = Arc::clone(&stop);
+        let thread_current = Arc::clone(&current);
+        let handle = thread::spawn(move || {
+            ProgressReporter::run(thread_label, thread_total, thread_current, thread_stop)
+        });
+
+        Self {
+            current,
+            stop: Some(stop),
+            handle: Some(handle),
+            enabled: true,
+        }
+    }
+
+    fn increment(&self) {
+        if self.enabled {
+            self.current.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    }
+
+    fn finish(mut self, message: impl Into<String>) {
+        if self.enabled {
+            if let Some(stop) = self.stop.take() {
+                stop.store(true, AtomicOrdering::Relaxed);
+            }
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+            let _ = io::stderr().write_all(b"\r\x1b[2K");
+            let _ = io::stderr().flush();
+        }
+        eprintln!("px ▸ {}", message.into());
+    }
+
+    fn run(label: String, total: Option<usize>, current: Arc<AtomicUsize>, stop: Arc<AtomicBool>) {
+        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let mut idx = 0;
+        while !stop.load(AtomicOrdering::Relaxed) {
+            let frame = FRAMES[idx % FRAMES.len()];
+            idx += 1;
+            let line = if let Some(total) = total {
+                let current = current.load(AtomicOrdering::Relaxed).min(total);
+                format!("\r\x1b[2Kpx ▸ {} [{}/{}] {}", label, current, total, frame)
+            } else {
+                format!("\r\x1b[2Kpx ▸ {} {}", label, frame)
+            };
+            let _ = io::stderr().write_all(line.as_bytes());
+            let _ = io::stderr().flush();
+            thread::sleep(Duration::from_millis(80));
+        }
+    }
+}
+
+fn download_concurrency(total: usize) -> usize {
+    let requested = env::var("PX_DOWNLOADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok());
+    let available = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(1);
+    let max_workers = requested.unwrap_or(available).clamp(1, 16);
+    max_workers.min(total.max(1))
+}
+
+impl Drop for ProgressReporter {
+    fn drop(&mut self) {
+        if self.enabled {
+            if let Some(stop) = self.stop.take() {
+                stop.store(true, AtomicOrdering::Relaxed);
+            }
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+            let _ = io::stderr().write_all(b"\r\x1b[2K");
+            let _ = io::stderr().flush();
+        }
+    }
+}
+
 pub use commands::cache::{
     cache_path, cache_prune, cache_stats, CachePathRequest, CachePruneRequest, CacheStatsRequest,
 };
@@ -719,6 +841,7 @@ fn resolve_dependencies_with_effects(
     effects: &dyn Effects,
     snapshot: &ManifestSnapshot,
 ) -> Result<ResolvedSpecOutput> {
+    let spinner = ProgressReporter::spinner("Resolving dependencies");
     let python = effects.python().detect_interpreter()?;
     let tags = detect_interpreter_tags_with(&python)?;
     let marker_env = detect_marker_environment_with(&python)?;
@@ -757,6 +880,7 @@ fn resolve_dependencies_with_effects(
             marker: spec.marker,
         });
     }
+    spinner.finish(format!("Resolved {} dependencies", specs.len()));
     Ok(ResolvedSpecOutput { specs, pins })
 }
 
@@ -891,65 +1015,132 @@ fn resolve_pins(
     }
 
     let python = px_python::detect_interpreter()?;
-    let tags = detect_interpreter_tags_with(&python)?;
-    let mut resolved = Vec::new();
+    let tags = Arc::new(detect_interpreter_tags_with(&python)?);
+    let cache = ctx.cache().clone();
+    let effects = ctx.shared_effects();
+
+    let progress = ProgressReporter::bar("Downloading artifacts", pins.len());
+    let worker_count = download_concurrency(pins.len());
+    let (job_tx, job_rx) = mpsc::channel();
     for pin in pins {
-        let release = ctx
-            .pypi()
-            .fetch_release(&pin.normalized, &pin.version, &pin.specifier)?;
-        let artifact = if force_sdist {
-            build_wheel_via_sdist(ctx, &release, pin, &python)?
-        } else {
-            match select_wheel(&release.urls, &tags, &pin.specifier) {
-                Ok(wheel) => {
-                    let request = ArtifactRequest {
-                        name: &pin.normalized,
-                        version: &pin.version,
-                        filename: &wheel.filename,
-                        url: &wheel.url,
-                        sha256: &wheel.sha256,
-                    };
-                    let cached = ctx.cache_store().cache_wheel(&ctx.cache().path, &request)?;
-                    LockedArtifact {
-                        filename: wheel.filename.clone(),
-                        url: wheel.url.clone(),
-                        sha256: wheel.sha256.clone(),
-                        size: cached.size,
-                        cached_path: cached.wheel_path.display().to_string(),
-                        python_tag: wheel.python_tag.clone(),
-                        abi_tag: wheel.abi_tag.clone(),
-                        platform_tag: wheel.platform_tag.clone(),
+        job_tx.send(pin.clone()).expect("queue artifacts");
+    }
+    drop(job_tx);
+
+    let job_rx = Arc::new(Mutex::new(job_rx));
+    let (result_tx, result_rx) = mpsc::channel();
+
+    for _ in 0..worker_count {
+        let work_rx = Arc::clone(&job_rx);
+        let result_tx = result_tx.clone();
+        let effects = effects.clone();
+        let cache = cache.clone();
+        let python = python.clone();
+        let tags = Arc::clone(&tags);
+        thread::spawn(move || {
+            let pypi = effects.pypi();
+            let cache_store = effects.cache();
+            loop {
+                let pin = {
+                    let guard = work_rx.lock().expect("lock job receiver");
+                    match guard.recv() {
+                        Ok(pin) => pin,
+                        Err(_) => break,
                     }
+                };
+
+                let outcome = download_artifact(
+                    pypi,
+                    cache_store,
+                    &cache,
+                    &python,
+                    tags.as_ref(),
+                    pin,
+                    force_sdist,
+                );
+                if result_tx.send(outcome).is_err() {
+                    break;
                 }
-                Err(err) => match build_wheel_via_sdist(ctx, &release, pin, &python) {
-                    Ok(artifact) => artifact,
-                    Err(build_err) => {
-                        return Err(err.context(format!("sdist fallback failed: {build_err}")))
-                    }
-                },
             }
-        };
-        resolved.push(ResolvedDependency {
-            name: pin.name.clone(),
-            specifier: pin.specifier.clone(),
-            extras: pin.extras.clone(),
-            marker: pin.marker.clone(),
-            artifact,
         });
     }
+    drop(result_tx);
 
+    let mut resolved = Vec::with_capacity(pins.len());
+    for result in result_rx {
+        progress.increment();
+        match result {
+            Ok(dep) => resolved.push(dep),
+            Err(err) => return Err(err),
+        }
+    }
+
+    progress.finish(format!("Downloaded {} artifacts", resolved.len()));
     Ok(resolved)
 }
 
+fn download_artifact(
+    pypi: &dyn effects::PypiClient,
+    cache_store: &dyn effects::CacheStore,
+    cache: &CacheLocation,
+    python: &str,
+    tags: &InterpreterTags,
+    pin: PinSpec,
+    force_sdist: bool,
+) -> Result<ResolvedDependency> {
+    let release = pypi.fetch_release(&pin.normalized, &pin.version, &pin.specifier)?;
+    let artifact = if force_sdist {
+        build_wheel_via_sdist(cache_store, cache, &release, &pin, python)?
+    } else {
+        match select_wheel(&release.urls, tags, &pin.specifier) {
+            Ok(wheel) => {
+                let request = ArtifactRequest {
+                    name: &pin.normalized,
+                    version: &pin.version,
+                    filename: &wheel.filename,
+                    url: &wheel.url,
+                    sha256: &wheel.sha256,
+                };
+                let cached = cache_store.cache_wheel(&cache.path, &request)?;
+                LockedArtifact {
+                    filename: wheel.filename.clone(),
+                    url: wheel.url.clone(),
+                    sha256: wheel.sha256.clone(),
+                    size: cached.size,
+                    cached_path: cached.wheel_path.display().to_string(),
+                    python_tag: wheel.python_tag.clone(),
+                    abi_tag: wheel.abi_tag.clone(),
+                    platform_tag: wheel.platform_tag.clone(),
+                }
+            }
+            Err(err) => match build_wheel_via_sdist(cache_store, cache, &release, &pin, python) {
+                Ok(artifact) => artifact,
+                Err(build_err) => {
+                    return Err(err.context(format!("sdist fallback failed: {build_err}")))
+                }
+            },
+        }
+    };
+
+    Ok(ResolvedDependency {
+        name: pin.name,
+        specifier: pin.specifier,
+        extras: pin.extras,
+        marker: pin.marker,
+        artifact,
+    })
+}
+
 fn build_wheel_via_sdist(
-    ctx: &CommandContext,
+    cache_store: &dyn effects::CacheStore,
+    cache: &CacheLocation,
     release: &PypiReleaseResponse,
     pin: &PinSpec,
     python: &str,
 ) -> Result<LockedArtifact> {
     let sdist = select_sdist(&release.urls, &pin.specifier)?;
-    let built = ctx.cache_store().ensure_sdist_build(
-        &ctx.cache().path,
+    let built = cache_store.ensure_sdist_build(
+        &cache.path,
         &SdistRequest {
             normalized_name: &pin.normalized,
             version: &pin.version,
@@ -1440,6 +1631,7 @@ struct WheelCandidate {
     platform_tag: String,
 }
 
+#[derive(Clone)]
 struct InterpreterTags {
     python: Vec<String>,
     abi: Vec<String>,
