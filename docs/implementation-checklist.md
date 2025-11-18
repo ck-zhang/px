@@ -26,7 +26,7 @@ Reminder: use [ ] for items that simply haven’t been built yet, and reserve [!
 
 ## Distribution & Introspection
 
-- [!] **`px why`** – Intended spec 4.5 introspection command is stubbed out as “upcoming”; progress is blocked on dependency provenance plumbing in px-core (`crates/px-cli/src/main.rs:428`).
+- [x] **`px why`** – Added a top-level `px why` that inspects the project env metadata and reports direct or transitive dependency chains (`crates/px-core/src/commands/project.rs:512-890`, `crates/px-cli/src/main.rs:658-1110`).
 - [x] **CLI surface mismatches** – Removed the `px lock`, `px workspace`, and legacy `px cache`/`px env` aliases so only the spec-authorized commands remain visible; helper commands now live solely under `px debug …` (`crates/px-cli/src/main.rs:26-200,660-865`, `crates/px-cli/tests/prefetch_workspace.rs`).
 
 ## Error & Output Model

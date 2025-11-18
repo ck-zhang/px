@@ -102,13 +102,7 @@ fn px_reports_recommendations_for_builtin_exceptions() {
     for name in fixture_cases() {
         let assert = cargo_bin_cmd!("px")
             .current_dir(&project)
-            .args([
-                "--json",
-                "run",
-                "python",
-                "demo_tracebacks.py",
-                name,
-            ])
+            .args(["--json", "run", "python", "demo_tracebacks.py", name])
             .assert()
             .failure();
         let payload = parse_json(&assert);
@@ -121,10 +115,7 @@ fn verify_traceback(payload: &Value, expected_type: &str, expected_reason: Optio
         .get("details")
         .and_then(Value::as_object)
         .expect("details map");
-    let Some(traceback) = details
-        .get("traceback")
-        .and_then(Value::as_object)
-    else {
+    let Some(traceback) = details.get("traceback").and_then(Value::as_object) else {
         assert!(
             expected_reason.is_none(),
             "expected recommendation for {expected_type} but no traceback was captured"

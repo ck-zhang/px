@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet, VecDeque},
     env, fs,
     path::{Path, PathBuf},
     str::FromStr,
@@ -13,8 +13,9 @@ use toml_edit::{DocumentMut, Item};
 
 use crate::{
     dependency_name, install_snapshot, manifest_snapshot, manifest_snapshot_at,
-    refresh_project_site, relative_path_str, CommandContext, ExecutionOutcome, InstallOutcome,
-    InstallState, InstallUserError, ManifestSnapshot,
+    python_context_with_mode, refresh_project_site, relative_path_str, CommandContext, EnvGuard,
+    ExecutionOutcome, InstallOutcome, InstallState, InstallUserError, ManifestSnapshot,
+    PythonContext,
 };
 use px_project::{
     discover_project_root, infer_package_name, InstallOverride, ManifestEditor, ProjectInitializer,
@@ -46,6 +47,12 @@ pub struct ProjectRemoveRequest {
 #[derive(Clone, Debug)]
 pub struct ProjectUpdateRequest {
     pub specs: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProjectWhyRequest {
+    pub package: Option<String>,
+    pub issue: Option<String>,
 }
 
 pub fn project_init(ctx: &CommandContext, request: ProjectInitRequest) -> Result<ExecutionOutcome> {
@@ -460,6 +467,88 @@ pub fn project_update(
     }
 }
 
+pub fn project_why(ctx: &CommandContext, request: ProjectWhyRequest) -> Result<ExecutionOutcome> {
+    if let Some(issue) = request.issue {
+        return Ok(ExecutionOutcome::user_error(
+            "px why --issue is not implemented yet",
+            json!({
+                "issue": issue,
+                "hint": "Issue introspection will arrive in a future release.",
+            }),
+        ));
+    }
+    let package = match request.package {
+        Some(pkg) if !pkg.trim().is_empty() => pkg.trim().to_string(),
+        _ => {
+            return Ok(ExecutionOutcome::user_error(
+                "px why requires a package name",
+                json!({ "hint": "run `px why <package>` to inspect dependencies" }),
+            ))
+        }
+    };
+    let snapshot = manifest_snapshot()?;
+    let target = dependency_name(&package);
+    if target.is_empty() {
+        return Ok(ExecutionOutcome::user_error(
+            "unable to normalize package name",
+            json!({
+                "package": package,
+                "hint": "use names like `rich` or `requests`",
+            }),
+        ));
+    }
+    let roots: HashSet<String> = snapshot
+        .dependencies
+        .iter()
+        .map(|spec| dependency_name(spec))
+        .filter(|name| !name.is_empty())
+        .collect();
+    let (py_ctx, _) = match python_context_with_mode(ctx, EnvGuard::Strict) {
+        Ok(value) => value,
+        Err(outcome) => return Ok(outcome),
+    };
+    let graph = match collect_dependency_graph(ctx, &py_ctx) {
+        Ok(graph) => graph,
+        Err(outcome) => return Ok(outcome),
+    };
+    let entry = graph.packages.get(&target);
+    if entry.is_none() {
+        return Ok(ExecutionOutcome::user_error(
+            format!("{package} is not installed in this project"),
+            json!({
+                "package": package,
+                "hint": "run `px sync` to refresh the environment, then retry",
+            }),
+        ));
+    }
+    let entry = entry.unwrap();
+    let chains = find_dependency_chains(&graph.reverse, &roots, &target, 5);
+    let direct = roots.contains(&target);
+    let version = entry.version.clone();
+    let message = if direct {
+        format!("{}=={} is declared in pyproject.toml", entry.name, version)
+    } else if chains.is_empty() {
+        format!(
+            "{}=={} is present but no dependency chain was found",
+            entry.name, version
+        )
+    } else {
+        let chain = chains
+            .first()
+            .map(|path| path.join(" -> "))
+            .unwrap_or_else(|| entry.name.clone());
+        format!("{}=={} is required by {chain}", entry.name, version)
+    };
+    let details = json!({
+        "package": entry.name,
+        "normalized": target,
+        "version": version,
+        "direct": direct,
+        "chains": chains,
+    });
+    Ok(ExecutionOutcome::success(message, details))
+}
+
 #[derive(Debug)]
 enum LoosenOutcome {
     Modified(String),
@@ -607,10 +696,7 @@ fn project_name_from_pyproject(pyproject_path: &Path) -> Result<Option<String>> 
     px_project::project_name_from_pyproject(pyproject_path)
 }
 
-fn detect_runtime_details(
-    ctx: &CommandContext,
-    snapshot: &ManifestSnapshot,
-) -> Option<Value> {
+fn detect_runtime_details(ctx: &CommandContext, snapshot: &ManifestSnapshot) -> Option<Value> {
     let python = ctx.python_runtime().detect_interpreter().ok()?;
     match probe_python_version(ctx, snapshot, &python) {
         Ok(version) => Some(json!({
@@ -789,4 +875,145 @@ fn project_install_outcome(ctx: &CommandContext, frozen: bool) -> Result<Executi
             }),
         )),
     }
+}
+
+const WHY_GRAPH_SCRIPT: &str = r#"
+import importlib.metadata as im
+import json
+
+def normalize(name: str) -> str:
+    return name.strip().lower()
+
+packages = []
+for dist in im.distributions():
+    name = dist.metadata.get('Name') or dist.name
+    if not name:
+        continue
+    normalized = normalize(name)
+    requires = []
+    if dist.requires:
+        for req in dist.requires:
+            head = req.split(';', 1)[0].strip()
+            if not head:
+                continue
+            token = head.split()[0]
+            if not token:
+                continue
+            base = token.split('[', 1)[0].strip()
+            if base:
+                requires.append(normalize(base))
+    packages.append({
+        'name': name,
+        'normalized': normalized,
+        'version': dist.version or '',
+        'requires': requires,
+    })
+
+print(json.dumps({'packages': packages}))
+"#;
+
+struct WhyGraph {
+    packages: HashMap<String, WhyPackage>,
+    reverse: HashMap<String, Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct WhyGraphPayload {
+    packages: Vec<WhyPackage>,
+}
+
+#[derive(Clone, Deserialize)]
+struct WhyPackage {
+    name: String,
+    normalized: String,
+    version: String,
+    requires: Vec<String>,
+}
+
+fn collect_dependency_graph(
+    ctx: &CommandContext,
+    py_ctx: &PythonContext,
+) -> Result<WhyGraph, ExecutionOutcome> {
+    let envs = py_ctx
+        .base_env(&json!({ "reason": "why" }))
+        .map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to prepare project environment",
+                json!({ "error": err.to_string() }),
+            )
+        })?;
+    let args = vec!["-c".to_string(), WHY_GRAPH_SCRIPT.to_string()];
+    let output = ctx
+        .python_runtime()
+        .run_command(&py_ctx.python, &args, &envs, &py_ctx.project_root)
+        .map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to inspect dependencies",
+                json!({ "error": err.to_string() }),
+            )
+        })?;
+    if output.code != 0 {
+        return Err(ExecutionOutcome::failure(
+            "python exited with errors while reading metadata",
+            json!({
+                "stderr": output.stderr,
+                "status": output.code,
+            }),
+        ));
+    }
+    let payload: WhyGraphPayload = serde_json::from_str(output.stdout.trim()).map_err(|err| {
+        ExecutionOutcome::failure(
+            "invalid dependency metadata payload",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    let mut packages = HashMap::new();
+    let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
+    for package in payload.packages {
+        for dep in &package.requires {
+            reverse
+                .entry(dep.clone())
+                .or_default()
+                .push(package.normalized.clone());
+        }
+        packages.insert(package.normalized.clone(), package);
+    }
+    Ok(WhyGraph { packages, reverse })
+}
+
+fn find_dependency_chains(
+    reverse: &HashMap<String, Vec<String>>,
+    roots: &HashSet<String>,
+    target: &str,
+    limit: usize,
+) -> Vec<Vec<String>> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut results = Vec::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(vec![target.to_string()]);
+
+    while let Some(path) = queue.pop_front() {
+        let current = path.last().cloned().unwrap_or_else(|| target.to_string());
+        if roots.contains(&current) {
+            let mut chain = path.clone();
+            chain.reverse();
+            results.push(chain);
+            if results.len() >= limit {
+                break;
+            }
+        }
+        if let Some(parents) = reverse.get(&current) {
+            for parent in parents {
+                if path.iter().any(|node| node == parent) {
+                    continue;
+                }
+                let mut next = path.clone();
+                next.push(parent.clone());
+                queue.push_back(next);
+            }
+        }
+    }
+    results
 }

@@ -7,9 +7,9 @@ use px_core::{
     self, CachePathRequest, CachePruneRequest, CacheStatsRequest, CommandContext, CommandGroup,
     CommandInfo, CommandStatus, EnvMode as CoreEnvMode, EnvRequest, GlobalOptions, MigrateRequest,
     OutputBuildRequest, OutputPublishRequest, ProjectAddRequest, ProjectInitRequest,
-    ProjectInstallRequest, ProjectRemoveRequest, ProjectUpdateRequest, QualityTidyRequest,
-    StorePrefetchRequest, SystemEffects, ToolCommandRequest, WorkflowRunRequest,
-    WorkflowTestRequest,
+    ProjectInstallRequest, ProjectRemoveRequest, ProjectUpdateRequest, ProjectWhyRequest,
+    QualityTidyRequest, StorePrefetchRequest, SystemEffects, ToolCommandRequest,
+    WorkflowRunRequest, WorkflowTestRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -34,6 +34,7 @@ const PX_BEFORE_HELP: &str = concat!(
     "  test             Run tests with the same auto-sync rules as `px run`.\n\n",
     "\x1b[1;36mEssentials\x1b[0m\n",
     "  status           Check whether pyproject, px.lock, and the env still agree.\n",
+    "  why              Explain why a dependency is present.\n",
     "  fmt | lint       Run configured formatters/linters inside the px environment.\n",
     "  build            Produce sdists/wheels from the px-managed environment.\n",
     "  publish          Upload previously built artifacts (dry-run by default).\n",
@@ -42,7 +43,7 @@ const PX_BEFORE_HELP: &str = concat!(
     "  debug env        Show interpreter info or pythonpath.\n",
     "  debug cache      Inspect cached artifacts (path, stats, prune, prefetch).\n",
     "  debug tidy       Clean cached metadata and stray files.\n",
-    "  debug why        Advanced dependency provenance (coming soon).\n",
+    "  debug why        Alias for `px why` (deprecated).\n",
 );
 
 fn main() -> Result<()> {
@@ -440,6 +441,15 @@ fn handle_cache_command(
     }
 }
 
+fn handle_why_command(
+    ctx: &CommandContext,
+    args: &WhyArgs,
+) -> Result<(CommandInfo, px_core::ExecutionOutcome)> {
+    let info = CommandInfo::new(CommandGroup::Why, "why");
+    let request = project_why_request_from_args(args);
+    core_call(info, px_core::project_why(ctx, request))
+}
+
 fn dispatch_command(
     ctx: &CommandContext,
     group: &CommandGroupCli,
@@ -511,6 +521,7 @@ fn dispatch_command(
             let request = migrate_request_from_args(args);
             core_call(info, px_core::migrate(ctx, request))
         }
+        CommandGroupCli::Why(args) => handle_why_command(ctx, args),
         CommandGroupCli::Status => {
             let info = CommandInfo::new(CommandGroup::Status, "status");
             core_call(info, px_core::project_status(ctx))
@@ -523,11 +534,7 @@ fn dispatch_command(
                 let request = quality_tidy_request_from_args(args);
                 core_call(info, px_core::quality_tidy(ctx, request))
             }
-            DebugCommand::Why(_args) => upcoming_command(
-                CommandInfo::new(CommandGroup::Why, "why"),
-                "dependency provenance is not available yet",
-                "Inspect px.lock manually until the `px debug why` flow lands.",
-            ),
+            DebugCommand::Why(args) => handle_why_command(ctx, args),
             DebugCommand::Explain(_args) => upcoming_command(
                 CommandInfo::new(CommandGroup::Explain, "explain"),
                 "issue explanations are not available yet",
@@ -695,6 +702,13 @@ fn project_sync_request_from_args(args: &SyncArgs) -> ProjectInstallRequest {
     }
 }
 
+fn project_why_request_from_args(args: &WhyArgs) -> ProjectWhyRequest {
+    ProjectWhyRequest {
+        package: args.package.clone(),
+        issue: args.issue.clone(),
+    }
+}
+
 fn env_request_from_args(args: &EnvArgs) -> EnvRequest {
     let mode = match args.mode {
         EnvMode::Info => CoreEnvMode::Info,
@@ -816,6 +830,11 @@ enum CommandGroupCli {
     Publish(PublishArgs),
     #[command(about = "Create px metadata for an existing project.")]
     Migrate(MigrateArgs),
+    #[command(
+        about = "Explain why a dependency is present in the project.",
+        override_usage = "px why <PACKAGE>"
+    )]
+    Why(WhyArgs),
     #[command(
         about = "Advanced utilities (env, cache, fmt, lint, tidy, why).",
         subcommand
@@ -1016,8 +1035,10 @@ struct ExplainArgs {
 
 #[derive(Args, Debug)]
 struct WhyArgs {
-    #[arg(value_name = "PACKAGE")]
-    package: String,
+    #[arg(value_name = "PACKAGE", conflicts_with = "issue")]
+    package: Option<String>,
+    #[arg(long, value_name = "ID", conflicts_with = "package")]
+    issue: Option<String>,
 }
 
 #[derive(Args, Debug)]

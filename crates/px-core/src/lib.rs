@@ -579,8 +579,8 @@ pub use commands::output::{
 };
 pub use commands::project::{
     project_add, project_init, project_install, project_remove, project_status, project_update,
-    ProjectAddRequest, ProjectInitRequest, ProjectInstallRequest, ProjectRemoveRequest,
-    ProjectUpdateRequest,
+    project_why, ProjectAddRequest, ProjectInitRequest, ProjectInstallRequest,
+    ProjectRemoveRequest, ProjectUpdateRequest, ProjectWhyRequest,
 };
 pub use commands::quality::{
     quality_fmt, quality_lint, quality_tidy, QualityTidyRequest, ToolCommandRequest,

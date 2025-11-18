@@ -1,13 +1,13 @@
 use std::{fs, path::Path};
 
 use assert_cmd::cargo::cargo_bin_cmd;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tempfile::TempDir;
 use toml_edit::DocumentMut;
 
 mod common;
 
-use common::{parse_json, require_online};
+use common::{parse_json, prepare_fixture, require_online};
 
 #[test]
 fn project_init_creates_minimal_shape() {
@@ -145,6 +145,79 @@ fn project_init_json_reports_details() {
     assert!(
         created.iter().any(|entry| entry == &".px/state.json"),
         "state tracking should be recorded"
+    );
+}
+
+#[test]
+fn px_why_reports_direct_dependency() {
+    if !require_online() {
+        return;
+    }
+    let (_tmp, project) = prepare_fixture("why-direct");
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_ONLINE", "1")
+        .arg("sync")
+        .assert()
+        .success();
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_ONLINE", "1")
+        .args(["--json", "why", "rich"])
+        .assert()
+        .success();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["details"]["direct"], Value::Bool(true));
+    let chains = payload["details"]["chains"]
+        .as_array()
+        .expect("chains array");
+    assert!(
+        chains.iter().any(|chain| chain == &json!(["rich"])),
+        "expected at least one direct chain: {chains:?}"
+    );
+}
+
+#[test]
+fn px_why_reports_transitive_chain() {
+    if !require_online() {
+        return;
+    }
+    let (_tmp, project) = prepare_fixture("why-transitive");
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_ONLINE", "1")
+        .arg("sync")
+        .assert()
+        .success();
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_ONLINE", "1")
+        .args(["--json", "why", "markdown-it-py"])
+        .assert()
+        .success();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["details"]["direct"], Value::Bool(false));
+    let chains = payload["details"]["chains"]
+        .as_array()
+        .expect("chains array");
+    assert!(!chains.is_empty(), "expected at least one dependency chain");
+    let first = chains[0]
+        .as_array()
+        .expect("first chain array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        first.last(),
+        Some(&"markdown-it-py"),
+        "chain should terminate at target: {first:?}"
+    );
+    assert_eq!(
+        first.first(),
+        Some(&"rich"),
+        "rich should be the root pulling markdown-it-py"
     );
 }
 

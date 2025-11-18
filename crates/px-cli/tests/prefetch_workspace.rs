@@ -65,7 +65,14 @@ fn workspace_prefetch_dry_run_reports_totals() {
         .current_dir(&root)
         .env_remove("PX_ONLINE")
         .env("PX_CACHE_PATH", &cache_root)
-        .args(["--json", "debug", "cache", "prefetch", "--workspace", "--dry-run"])
+        .args([
+            "--json",
+            "debug",
+            "cache",
+            "prefetch",
+            "--workspace",
+            "--dry-run",
+        ])
         .assert()
         .success();
 
