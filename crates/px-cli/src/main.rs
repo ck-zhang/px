@@ -328,8 +328,25 @@ fn collect_why_bullets(details: &Value, fallback: &str) -> Vec<String> {
         push_unique(&mut bullets, format!("Status: {status}"));
     }
     if let Some(issues) = details.get("issues").and_then(Value::as_array) {
-        for issue in issues.iter().filter_map(Value::as_str) {
-            push_unique(&mut bullets, issue.to_string());
+        for entry in issues {
+            match entry {
+                Value::String(message) => push_unique(&mut bullets, message.to_string()),
+                Value::Object(map) => {
+                    let message = map
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if message.is_empty() {
+                        continue;
+                    }
+                    if let Some(id) = map.get("id").and_then(Value::as_str) {
+                        push_unique(&mut bullets, format!("{}: {}", id, message));
+                    } else {
+                        push_unique(&mut bullets, message.to_string());
+                    }
+                }
+                _ => {}
+            }
         }
     }
     if let Some(drift) = details.get("drift").and_then(Value::as_array) {

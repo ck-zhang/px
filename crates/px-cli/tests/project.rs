@@ -116,10 +116,10 @@ fn project_init_refuses_when_pyproject_exists() {
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains("px init: project already initialized"),
+        stdout.contains("PX101") && stdout.contains("project already initialized"),
         "expected polite refusal, got {stdout:?}"
     );
-    assert!(stdout.contains("Hint:"), "expected a single hint line");
+    assert!(stdout.contains("Fix:"), "expected remediation guidance");
 }
 
 #[test]
@@ -292,7 +292,7 @@ fn project_remove_requires_direct_dependency() {
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains("px remove: package is not a direct dependency"),
+        stdout.contains("PX111") && stdout.contains("package is not a direct dependency"),
         "expected a clear error when removing unknown packages, got {stdout:?}"
     );
     assert!(

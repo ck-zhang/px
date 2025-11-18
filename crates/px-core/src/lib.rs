@@ -614,6 +614,7 @@ pub(crate) struct InstallOutcome {
     verified: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum InstallState {
     Installed,
     UpToDate,
@@ -797,7 +798,7 @@ fn persist_project_state(
     write_project_state(fs, project_root, &state)
 }
 
-fn load_project_state(fs: &dyn effects::FileSystem, project_root: &Path) -> ProjectState {
+pub(crate) fn load_project_state(fs: &dyn effects::FileSystem, project_root: &Path) -> ProjectState {
     let path = project_root.join(".px").join("state.json");
     match fs.read_to_string(&path) {
         Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
@@ -833,13 +834,13 @@ fn resolve_project_site(fs: &dyn effects::FileSystem, project_root: &Path) -> Op
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct ProjectState {
+pub(crate) struct ProjectState {
     #[serde(default)]
     current_env: Option<StoredEnvironment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredEnvironment {
+pub(crate) struct StoredEnvironment {
     id: String,
     lock_hash: String,
     platform: String,
@@ -848,7 +849,7 @@ struct StoredEnvironment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredPython {
+pub(crate) struct StoredPython {
     path: String,
     version: String,
 }
@@ -2152,6 +2153,18 @@ impl PythonContext {
         guard: EnvGuard,
     ) -> Result<(Self, Option<EnvironmentSyncReport>)> {
         let project_root = ctx.project_root()?;
+        let manifest_path = project_root.join("pyproject.toml");
+        if !manifest_path.exists() {
+            return Err(InstallUserError::new(
+                format!("pyproject.toml not found in {}", project_root.display()),
+                json!({
+                    "pyproject": manifest_path.display().to_string(),
+                    "hint": "run `px migrate --apply` or create pyproject.toml first",
+                    "reason": "missing_manifest",
+                }),
+            )
+            .into());
+        }
         let snapshot = manifest_snapshot_at(&project_root)?;
         let runtime = prepare_project_runtime(&snapshot)?;
         let sync_report = ensure_environment_with_guard(ctx, &snapshot, guard)?;
@@ -2295,7 +2308,7 @@ pub(crate) fn ensure_project_environment_synced(
     ensure_env_matches_lock(ctx, snapshot, &lock_hash)
 }
 
-fn ensure_env_matches_lock(
+pub(crate) fn ensure_env_matches_lock(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
     lock_hash: &str,

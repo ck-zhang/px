@@ -26,7 +26,7 @@ fn cache_prune_user_error_includes_hint() {
         .assert()
         .failure();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout");
-    assert!(stdout.contains("Hint:"), "expected hint line: {}", stdout);
+    assert!(stdout.contains("Fix:"), "expected fix section: {}", stdout);
 }
 
 #[test]

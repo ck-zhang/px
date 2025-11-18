@@ -7,15 +7,18 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use pep508_rs::{Requirement as PepRequirement, VersionOrUrl};
+use px_lockfile::{detect_lock_drift, load_lockfile_optional};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, Item};
 
 use crate::{
-    dependency_name, detect_runtime_metadata, install_snapshot, manifest_snapshot,
-    manifest_snapshot_at, python_context_with_mode, refresh_project_site, relative_path_str,
-    CommandContext, EnvGuard, ExecutionOutcome, InstallOutcome, InstallState, InstallUserError,
-    ManifestSnapshot, PythonContext,
+    compute_lock_hash, dependency_name, detect_runtime_metadata, ensure_env_matches_lock,
+    install_snapshot, load_project_state, manifest_snapshot, manifest_snapshot_at,
+    python_context_with_mode, refresh_project_site, relative_path_str, CommandContext, EnvGuard,
+    ExecutionOutcome, InstallOutcome, InstallState, InstallUserError, ManifestSnapshot,
+    PythonContext,
 };
 use px_project::{
     discover_project_root, infer_package_name, InstallOverride, ManifestEditor, ProjectInitializer,
@@ -288,6 +291,11 @@ pub fn project_status(ctx: &CommandContext) -> Result<ExecutionOutcome> {
     if let Some(runtime) = detect_runtime_details(ctx, &snapshot) {
         details["runtime"] = runtime;
     }
+    details["environment"] = collect_environment_status(
+        ctx,
+        &snapshot,
+        outcome.state != InstallState::MissingLock,
+    )?;
     match outcome.state {
         InstallState::UpToDate => {
             details["status"] = Value::String("in-sync".to_string());
@@ -298,7 +306,7 @@ pub fn project_status(ctx: &CommandContext) -> Result<ExecutionOutcome> {
         }
         InstallState::Drift => {
             details["status"] = Value::String("drift".to_string());
-            details["issues"] = Value::Array(outcome.drift.into_iter().map(|d| json!(d)).collect());
+            details["issues"] = issue_values(outcome.drift);
             details["hint"] = Value::String("Run `px sync` to refresh px.lock".to_string());
             Ok(ExecutionOutcome::user_error(
                 "Environment is out of sync with px.lock",
@@ -469,13 +477,7 @@ pub fn project_update(
 
 pub fn project_why(ctx: &CommandContext, request: ProjectWhyRequest) -> Result<ExecutionOutcome> {
     if let Some(issue) = request.issue {
-        return Ok(ExecutionOutcome::user_error(
-            "px why --issue is not implemented yet",
-            json!({
-                "issue": issue,
-                "hint": "Issue introspection will arrive in a future release.",
-            }),
-        ));
+        return explain_issue(ctx, &issue);
     }
     let package = match request.package {
         Some(pkg) if !pkg.trim().is_empty() => pkg.trim().to_string(),
@@ -569,6 +571,127 @@ fn loosen_dependency_spec(spec: &str) -> Result<LoosenOutcome> {
         Some(VersionOrUrl::Url(_)) => Ok(LoosenOutcome::Unsupported),
         None => Ok(LoosenOutcome::AlreadyLoose),
     }
+}
+
+fn explain_issue(_ctx: &CommandContext, issue_id: &str) -> Result<ExecutionOutcome> {
+    let trimmed = issue_id.trim();
+    if trimmed.is_empty() {
+        return Ok(ExecutionOutcome::user_error(
+            "px why --issue requires an ID",
+            json!({ "hint": "Run `px status` to list current issue IDs." }),
+        ));
+    }
+    let snapshot = manifest_snapshot()?;
+    let lock = match load_lockfile_optional(&snapshot.lock_path)? {
+        Some(lock) => lock,
+        None => {
+            return Ok(ExecutionOutcome::user_error(
+                "px why --issue: px.lock not found",
+                json!({
+                    "lockfile": snapshot.lock_path.display().to_string(),
+                    "hint": "Run `px sync` to create px.lock before inspecting issues.",
+                }),
+            ))
+        }
+    };
+    let drift = detect_lock_drift(&snapshot, &lock, None);
+    let mut normalized = trimmed.to_string();
+    normalized.make_ascii_uppercase();
+    for message in drift {
+        let id = issue_id_for(&message);
+        if id.eq_ignore_ascii_case(&normalized) {
+            let summary = format!("Issue {id}: {message}");
+            let details = json!({
+                "id": id,
+                "message": message,
+                "pyproject": snapshot.manifest_path.display().to_string(),
+                "lockfile": snapshot.lock_path.display().to_string(),
+            });
+            return Ok(ExecutionOutcome::success(summary, details));
+        }
+    }
+    Ok(ExecutionOutcome::user_error(
+        format!("issue {} not found", issue_id),
+        json!({
+            "issue": issue_id,
+            "hint": "Run `px status` to list current issue IDs before retrying.",
+        }),
+    ))
+}
+
+fn collect_environment_status(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+    lock_ready: bool,
+) -> Result<Value> {
+    if !lock_ready {
+        return Ok(json!({
+            "status": "unknown",
+            "reason": "missing-lock",
+            "hint": "Run `px sync` to create px.lock before checking the environment.",
+        }));
+    }
+    let state = load_project_state(ctx.fs(), &snapshot.root);
+    let Some(env) = state.current_env.clone() else {
+        return Ok(json!({
+            "status": "missing",
+            "reason": "uninitialized",
+            "hint": "Run `px sync` to build the px environment.",
+        }));
+    };
+    let lock_hash = compute_lock_hash(&snapshot.lock_path)?;
+    let mut details = json!({
+        "status": "in-sync",
+        "env": {
+            "id": env.id,
+            "site": env.site_packages,
+            "python": env.python.version,
+            "platform": env.platform,
+        },
+    });
+    match ensure_env_matches_lock(ctx, snapshot, &lock_hash) {
+        Ok(()) => Ok(details),
+        Err(err) => match err.downcast::<InstallUserError>() {
+            Ok(user) => {
+                let status = match user.details.get("reason").and_then(Value::as_str) {
+                    Some("missing_env") => "missing",
+                    _ => "out-of-sync",
+                };
+                details["status"] = Value::String(status.to_string());
+                if let Some(reason) = user.details.get("reason") {
+                    details["reason"] = reason.clone();
+                }
+                if let Some(hint) = user.details.get("hint") {
+                    details["hint"] = hint.clone();
+                }
+                Ok(details)
+            }
+            Err(other) => Err(other),
+        },
+    }
+}
+
+fn issue_values(messages: Vec<String>) -> Value {
+    let entries: Vec<Value> = messages
+        .into_iter()
+        .map(|message| {
+            let id = issue_id_for(&message);
+            json!({
+                "id": id,
+                "message": message,
+            })
+        })
+        .collect();
+    Value::Array(entries)
+}
+
+fn issue_id_for(message: &str) -> String {
+    let digest = Sha256::digest(message.as_bytes());
+    let mut short = String::new();
+    for byte in digest[..6].iter() {
+        short.push_str(&format!("{:02x}", byte));
+    }
+    format!("ISS-{}", short.to_ascii_uppercase())
 }
 
 #[cfg(test)]

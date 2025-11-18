@@ -102,8 +102,8 @@ fn store_prefetch_requires_px_online_for_downloads() {
         "gated run should mention PX_ONLINE requirement: {stdout:?}"
     );
     assert!(
-        stdout.contains("Hint: export PX_ONLINE=1"),
-        "gated run should emit hint with remediation: {stdout:?}"
+        stdout.contains("export PX_ONLINE=1"),
+        "gated run should emit remediation guidance: {stdout:?}"
     );
 }
 

@@ -20,19 +20,17 @@ fn env_python_prints_interpreter_path() {
         .assert()
         .success();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone())
-        .expect("utf8")
-        .trim()
-        .to_string();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8");
+    let first_line = stdout.lines().next().unwrap_or("").trim().to_string();
 
     assert!(
-        stdout.starts_with("✔ px env python:"),
+        first_line.starts_with("✔ px env python:"),
         "expected prefixed output: {stdout}"
     );
-    let path_segment = stdout
+    let path_segment = first_line
         .split_once(':')
         .map(|(_, rest)| rest.trim())
-        .unwrap_or(&stdout);
+        .unwrap_or(first_line.as_str());
     let interpreter = Path::new(path_segment);
     assert!(interpreter.is_absolute(), "path must be absolute: {stdout}");
     assert!(interpreter.exists(), "interpreter does not exist: {stdout}");
@@ -150,12 +148,12 @@ fn tidy_reports_single_line_and_hint() {
         .failure();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains("px tidy: px.lock is out of date"),
+        stdout.contains("px.lock is out of date"),
         "tidy drift output should call out stale lock: {stdout:?}"
     );
     assert!(
-        stdout.contains("Hint: rerun `px sync`"),
-        "tidy drift should emit remediation hint: {stdout:?}"
+        stdout.contains("rerun `px sync`"),
+        "tidy drift should emit remediation guidance: {stdout:?}"
     );
 }
 

@@ -1,17 +1,20 @@
+use std::env;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use flate2::{write::GzEncoder, Compression};
+use reqwest::{blocking::Client, StatusCode};
 use serde::Serialize;
 use serde_json::json;
 use tar::Builder;
+use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
 use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 
 use crate::{
-    project_table, python_context, relative_path_str, CommandContext, ExecutionOutcome,
-    PythonContext,
+    build_http_client, project_table, python_context, relative_path_str, CommandContext,
+    ExecutionOutcome, PythonContext,
 };
 
 #[derive(Clone, Debug)]
@@ -27,6 +30,39 @@ pub struct OutputPublishRequest {
     pub registry: Option<String>,
     pub token_env: Option<String>,
     pub dry_run: bool,
+}
+
+const PYPI_UPLOAD_URL: &str = "https://upload.pypi.org/legacy/";
+const TEST_PYPI_UPLOAD_URL: &str = "https://test.pypi.org/legacy/";
+
+#[derive(Clone, Debug)]
+struct PublishMetadata {
+    name: String,
+    version: String,
+    summary: Option<String>,
+    description: Option<String>,
+    description_content_type: Option<String>,
+    keywords: Option<String>,
+    license: Option<String>,
+    home_page: Option<String>,
+    project_urls: Vec<String>,
+    classifiers: Vec<String>,
+    requires_python: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct PublishRegistry {
+    label: String,
+    url: String,
+}
+
+enum ArtifactUploadKind {
+    Wheel {
+        pyversion: String,
+        abi: String,
+        platform: String,
+    },
+    Sdist,
 }
 
 pub fn output_build(ctx: &CommandContext, request: OutputBuildRequest) -> Result<ExecutionOutcome> {
@@ -182,15 +218,46 @@ fn output_publish_outcome(
         ));
     }
 
+    let token_value = env::var(&token_env).map_err(|err| {
+        anyhow!("failed to read {token_env} from environment: {err}")
+    })?;
+    if token_value.trim().is_empty() {
+        return Ok(ExecutionOutcome::user_error(
+            format!("px publish: {token_env} is empty"),
+            json!({
+                "registry": registry,
+                "token_env": token_env,
+                "hint": format!("export {token_env}=<token> before publishing"),
+            }),
+        ));
+    }
+
+    let registry_info = resolve_publish_registry(request.registry.as_deref());
+    let metadata = load_publish_metadata(&py_ctx.project_root)?;
+    let client = build_http_client()?;
+    for summary in &artifacts {
+        let file_path = py_ctx.project_root.join(&summary.path);
+        upload_artifact(
+            &client,
+            &registry_info,
+            &token_value,
+            &metadata,
+            summary,
+            &file_path,
+        )?;
+    }
+
+    let count = artifacts.len();
     let details = json!({
-        "registry": registry,
+        "registry": registry_info.label,
         "token_env": token_env,
         "dry_run": false,
-        "artifacts": artifacts.clone(),
+        "artifacts": artifacts,
     });
     let message = format!(
-        "px publish: uploaded {} artifacts to {registry}",
-        artifacts.len()
+        "px publish: uploaded {} artifacts to {}",
+        count,
+        registry_info.label
     );
     Ok(ExecutionOutcome::success(message, details))
 }
@@ -419,4 +486,313 @@ fn compute_file_sha256(path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     io::copy(&mut file, &mut hasher)?;
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn resolve_publish_registry(selection: Option<&str>) -> PublishRegistry {
+    let trimmed = selection.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    match trimmed {
+        None => PublishRegistry {
+            label: "pypi".to_string(),
+            url: PYPI_UPLOAD_URL.to_string(),
+        },
+        Some(value) if value.starts_with("http://") || value.starts_with("https://") => {
+            PublishRegistry {
+                label: value.to_string(),
+                url: value.to_string(),
+            }
+        }
+        Some(value) => match value.to_ascii_lowercase().as_str() {
+            "pypi" => PublishRegistry {
+                label: "pypi".to_string(),
+                url: PYPI_UPLOAD_URL.to_string(),
+            },
+            "testpypi" | "test-pypi" => PublishRegistry {
+                label: value.to_string(),
+                url: TEST_PYPI_UPLOAD_URL.to_string(),
+            },
+            _ => PublishRegistry {
+                label: value.to_string(),
+                url: format!("https://{value}/legacy/"),
+            },
+        },
+    }
+}
+
+fn load_publish_metadata(project_root: &Path) -> Result<PublishMetadata> {
+    let pyproject_path = project_root.join("pyproject.toml");
+    let contents = fs::read_to_string(&pyproject_path)
+        .with_context(|| format!("reading {}", pyproject_path.display()))?;
+    let doc: DocumentMut = contents.parse()?;
+    let project = project_table(&doc)?;
+    let name = project
+        .get("name")
+        .and_then(Item::as_str)
+        .ok_or_else(|| anyhow!("pyproject missing [project].name"))?
+        .to_string();
+    let version = project
+        .get("version")
+        .and_then(Item::as_str)
+        .ok_or_else(|| anyhow!("pyproject missing [project].version"))?
+        .to_string();
+    let summary = project
+        .get("description")
+        .and_then(Item::as_str)
+        .map(|s| s.to_string());
+    let description = summary.clone();
+    let description_content_type = summary
+        .as_ref()
+        .map(|_| "text/plain; charset=UTF-8".to_string());
+    let keywords = {
+        let values = parse_string_list(project.get("keywords"));
+        if values.is_empty() {
+            None
+        } else {
+            Some(values.join(" "))
+        }
+    };
+    let license = parse_license(project.get("license"));
+    let requires_python = project
+        .get("requires-python")
+        .and_then(Item::as_str)
+        .map(|s| s.to_string());
+    let project_urls = collect_project_urls(project.get("urls").and_then(Item::as_table));
+    let home_page = project_urls.iter().find_map(|entry| {
+        let mut parts = entry.splitn(2, ',');
+        let label = parts.next()?.trim().to_ascii_lowercase();
+        let value = parts.next()?.trim();
+        if label == "homepage" {
+            Some(value.to_string())
+        } else {
+            None
+        }
+    });
+    let classifiers = parse_string_list(project.get("classifiers"));
+    Ok(PublishMetadata {
+        name,
+        version,
+        summary,
+        description,
+        description_content_type,
+        keywords,
+        license,
+        home_page,
+        project_urls,
+        classifiers,
+        requires_python,
+    })
+}
+
+fn parse_license(item: Option<&Item>) -> Option<String> {
+    let entry = item?;
+    if let Some(value) = entry.as_str() {
+        return Some(value.to_string());
+    }
+    if let Some(table) = entry.as_inline_table() {
+        if let Some(text) = table.get("text").and_then(TomlValue::as_str) {
+            return Some(text.to_string());
+        }
+    }
+    if let Some(table) = entry.as_table() {
+        if let Some(text) = table.get("text").and_then(Item::as_str) {
+            return Some(text.to_string());
+        }
+    }
+    None
+}
+
+fn parse_string_list(item: Option<&Item>) -> Vec<String> {
+    let Some(array) = item.and_then(Item::as_array) else {
+        return Vec::new();
+    };
+    array
+        .iter()
+        .filter_map(|value| value.as_str())
+        .map(|value| value.to_string())
+        .collect()
+}
+
+fn collect_project_urls(table: Option<&Table>) -> Vec<String> {
+    let mut urls = Vec::new();
+    if let Some(entries) = table {
+        for (label, value) in entries.iter() {
+            if let Some(url) = value.as_str() {
+                urls.push(format!("{}, {}", label, url));
+            }
+        }
+    }
+    urls
+}
+
+fn upload_artifact(
+    client: &Client,
+    registry: &PublishRegistry,
+    token: &str,
+    metadata: &PublishMetadata,
+    summary: &ArtifactSummary,
+    file_path: &Path,
+) -> Result<()> {
+    let filename = Path::new(&summary.path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("invalid artifact path {}", summary.path))?;
+    let kind = classify_artifact(filename)?;
+    let bytes = fs::read(file_path)
+        .with_context(|| format!("reading {}", file_path.display()))?;
+    let boundary = format!(
+        "----pxpublish{}",
+        &summary.sha256[..summary.sha256.len().min(12)],
+    );
+    let mut body = Vec::new();
+    append_form_field(&mut body, &boundary, ":action", "file_upload");
+    append_form_field(&mut body, &boundary, "protocol_version", "1");
+    append_form_field(&mut body, &boundary, "metadata_version", "2.1");
+    append_form_field(&mut body, &boundary, "name", &metadata.name);
+    append_form_field(&mut body, &boundary, "version", &metadata.version);
+    append_form_field(
+        &mut body,
+        &boundary,
+        "summary",
+        metadata.summary.as_deref().unwrap_or(""),
+    );
+    append_form_field(
+        &mut body,
+        &boundary,
+        "description",
+        metadata.description.as_deref().unwrap_or(""),
+    );
+    append_form_field(
+        &mut body,
+        &boundary,
+        "description_content_type",
+        metadata.description_content_type.as_deref().unwrap_or(""),
+    );
+    append_form_field(
+        &mut body,
+        &boundary,
+        "keywords",
+        metadata.keywords.as_deref().unwrap_or(""),
+    );
+    append_form_field(
+        &mut body,
+        &boundary,
+        "home_page",
+        metadata.home_page.as_deref().unwrap_or(""),
+    );
+    append_form_field(
+        &mut body,
+        &boundary,
+        "license",
+        metadata.license.as_deref().unwrap_or(""),
+    );
+    if let Some(req) = metadata.requires_python.as_deref() {
+        append_form_field(&mut body, &boundary, "requires_python", req);
+    }
+    for classifier in &metadata.classifiers {
+        append_form_field(&mut body, &boundary, "classifiers", classifier);
+    }
+    for entry in &metadata.project_urls {
+        append_form_field(&mut body, &boundary, "project_urls", entry);
+    }
+    append_form_field(&mut body, &boundary, "sha256_digest", &summary.sha256);
+    append_form_field(&mut body, &boundary, "size", &summary.bytes.to_string());
+    append_form_field(&mut body, &boundary, "comment", "");
+    match &kind {
+        ArtifactUploadKind::Wheel {
+            pyversion,
+            abi,
+            platform,
+        } => {
+            append_form_field(&mut body, &boundary, "filetype", "bdist_wheel");
+            append_form_field(&mut body, &boundary, "pyversion", pyversion);
+            append_form_field(&mut body, &boundary, "platform", platform);
+            append_form_field(&mut body, &boundary, "abi", abi);
+        }
+        ArtifactUploadKind::Sdist => {
+            append_form_field(&mut body, &boundary, "filetype", "sdist");
+            append_form_field(&mut body, &boundary, "pyversion", "source");
+        }
+    }
+    append_file_field(&mut body, &boundary, "content", filename, &bytes);
+    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+
+    let response = client
+        .post(&registry.url)
+        .basic_auth("__token__", Some(token))
+        .header(
+            "Content-Type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(body)
+        .send()
+        .with_context(|| format!("failed to upload {}", filename))?;
+    if response.status() == StatusCode::FORBIDDEN {
+        return Err(anyhow!(
+            "registry {} rejected the provided credentials",
+            registry.label
+        ));
+    }
+    response
+        .error_for_status()
+        .with_context(|| format!("upload failed for {}", filename))?;
+    Ok(())
+}
+
+fn append_form_field(buf: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
+    buf.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+    buf.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"{}\"\r\n\r\n", name).as_bytes(),
+    );
+    buf.extend_from_slice(value.as_bytes());
+    buf.extend_from_slice(b"\r\n");
+}
+
+fn append_file_field(
+    buf: &mut Vec<u8>,
+    boundary: &str,
+    name: &str,
+    filename: &str,
+    bytes: &[u8],
+) {
+    buf.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+    buf.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n",
+            name, filename
+        )
+        .as_bytes(),
+    );
+    buf.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+    buf.extend_from_slice(bytes);
+    buf.extend_from_slice(b"\r\n");
+}
+
+fn classify_artifact(filename: &str) -> Result<ArtifactUploadKind> {
+    if let Some(stem) = filename.strip_suffix(".whl") {
+        let mut parts = stem.rsplitn(3, '-');
+        let platform = parts
+            .next()
+            .ok_or_else(|| anyhow!("wheel filename missing platform tag"))?;
+        let abi = parts
+            .next()
+            .ok_or_else(|| anyhow!("wheel filename missing abi tag"))?;
+        let pyversion = parts
+            .next()
+            .ok_or_else(|| anyhow!("wheel filename missing python tag"))?;
+        return Ok(ArtifactUploadKind::Wheel {
+            pyversion: pyversion.to_string(),
+            abi: abi.to_string(),
+            platform: platform.to_string(),
+        });
+    }
+    if filename.ends_with(".tar.gz") || filename.ends_with(".zip") {
+        return Ok(ArtifactUploadKind::Sdist);
+    }
+    Err(anyhow!("unsupported artifact type: {}", filename))
 }

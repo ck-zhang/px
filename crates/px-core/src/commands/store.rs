@@ -24,7 +24,7 @@ fn store_prefetch_outcome(
 ) -> Result<ExecutionOutcome> {
     if !request.dry_run && !ctx.is_online() {
         return Ok(ExecutionOutcome::user_error(
-            "PX_ONLINE=1 required for downloads",
+            "px cache prefetch: PX_ONLINE=1 required for downloads",
             json!({
                 "status": "gated-offline",
                 "dry_run": request.dry_run,

@@ -17,7 +17,7 @@ Reminder: use [ ] for items that simply haven’t been built yet, and reserve [!
 - [x] **`px fmt`/`px lint`** – Respect CI guard, read `[tool.px.fmt|lint]`, default to Ruff, and operate inside the px environment (`px-core/src/commands/quality.rs`).
 - [x] **Default script lookup** – `px run` now falls back to `[tool.px.scripts]` when `[project].scripts` is absent, matching spec 5.6 (`crates/px-core/src/commands/workflow.rs:160-520`).
 - [x] **`px fmt` / `px lint` tool installation UX** – Both commands now accept `--frozen`/`CI=1` guards and emit actionable `px add --group dev …` suggestions instead of mutating dependencies when tools are missing (`crates/px-core/src/commands/quality.rs:21-360`, `crates/px-cli/src/main.rs:660-969`, `docs/spec.md:472-485`).
-- [x] **`px status` output** – Status details now include project name/root plus the active runtime path/version per spec 5.9 (`crates/px-core/src/commands/project.rs:262-360`).
+- [x] **`px status` output** – Details now include `environment.status` derived from `.px/state.json` (present/missing/in-sync/out-of-sync) alongside drift issues with stable IDs (`crates/px-core/src/commands/project.rs:270-335`).
 
 ## Tools & Runtimes
 
@@ -26,7 +26,8 @@ Reminder: use [ ] for items that simply haven’t been built yet, and reserve [!
 
 ## Distribution & Introspection
 
-- [x] **`px why`** – Added a top-level `px why` that inspects the project env metadata and reports direct or transitive dependency chains (`crates/px-core/src/commands/project.rs:512-890`, `crates/px-cli/src/main.rs:658-1110`).
+- [x] **`px why`** – Added `--issue` support keyed off the `ISS-…` identifiers emitted by `px status`, so issue explanations now match spec §4.5 (`crates/px-core/src/commands/project.rs:470-620`).
+- [x] **`px publish` uploads** – Implemented real legacy PyPI uploads (multipart POST with metadata, runtime checks, registry selection, `PX_PUBLISH_TOKEN` auth) instead of stubbing success (`crates/px-core/src/commands/output.rs:120-520`).
 - [x] **CLI surface mismatches** – Removed the `px lock`, `px workspace`, and legacy `px cache`/`px env` aliases so only the spec-authorized commands remain visible; helper commands now live solely under `px debug …` (`crates/px-cli/src/main.rs:26-200,660-865`, `crates/px-cli/tests/prefetch_workspace.rs`).
 
 ## Error & Output Model
