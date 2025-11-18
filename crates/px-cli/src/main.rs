@@ -313,17 +313,17 @@ fn error_code(info: CommandInfo) -> &'static str {
 fn collect_why_bullets(details: &Value, fallback: &str) -> Vec<String> {
     let mut bullets = Vec::new();
     if let Some(reason) = details.get("reason").and_then(Value::as_str) {
-        push_unique(&mut bullets, reason);
+        push_unique(
+            &mut bullets,
+            reason_display(reason).unwrap_or(reason).to_string(),
+        );
     }
     if let Some(status) = details.get("status").and_then(Value::as_str) {
         push_unique(&mut bullets, format!("Status: {status}"));
     }
     if let Some(issues) = details.get("issues").and_then(Value::as_array) {
-        if !issues.is_empty() {
-            push_unique(
-                &mut bullets,
-                format!("Detected {} issue(s) in the environment", issues.len()),
-            );
+        for issue in issues.iter().filter_map(Value::as_str) {
+            push_unique(&mut bullets, issue.to_string());
         }
     }
     if let Some(drift) = details.get("drift").and_then(Value::as_array) {
@@ -370,6 +370,16 @@ fn push_unique(vec: &mut Vec<String>, text: impl Into<String>) {
     }
     if !vec.iter().any(|existing| existing == &entry) {
         vec.push(entry);
+    }
+}
+
+fn reason_display(code: &str) -> Option<&'static str> {
+    match code {
+        "resolve_no_match" => Some("No compatible release satisfied the requested constraint."),
+        "invalid_requirement" => Some("One of the requirements is invalid (PEP 508 parse failed)."),
+        "pypi_unreachable" => Some("Unable to reach PyPI while resolving dependencies."),
+        "resolve_failed" => Some("Dependency resolver failed."),
+        _ => None,
     }
 }
 

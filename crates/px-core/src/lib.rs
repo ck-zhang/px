@@ -857,8 +857,8 @@ fn resolve_dependencies_with_effects(
     };
     let resolved = px_resolver::resolve(request).map_err(|err| {
         InstallUserError::new(
-            format!("resolver failed: {err}"),
-            json!({ "error": err.to_string() }),
+            "dependency resolution failed",
+            resolver_failure_details(&err),
         )
     })?;
     let mut specs = Vec::new();
@@ -882,6 +882,50 @@ fn resolve_dependencies_with_effects(
     }
     spinner.finish(format!("Resolved {} dependencies", specs.len()));
     Ok(ResolvedSpecOutput { specs, pins })
+}
+
+fn resolver_failure_details(err: &anyhow::Error) -> Value {
+    let message = err.to_string();
+    let issue = message.clone();
+    if let Some(req) = extract_quoted_requirement(&message) {
+        if message.contains("unable to resolve") {
+            return json!({
+                "reason": "resolve_no_match",
+                "issues": [issue],
+                "requirement": req,
+                "hint": format!("Relax or remove `{}` in pyproject.toml, then rerun `px sync`.", req),
+            });
+        }
+        if message.contains("failed to parse requirement")
+            || message.contains("failed to parse specifiers")
+        {
+            return json!({
+                "reason": "invalid_requirement",
+                "issues": [issue],
+                "requirement": req,
+                "hint": format!("Fix `{}` to a valid PEP 508 requirement, then rerun `px sync`.", req),
+            });
+        }
+    }
+    if message.contains("failed to query PyPI") || message.contains("PyPI error") {
+        return json!({
+            "reason": "pypi_unreachable",
+            "issues": [issue],
+            "hint": "Check your network connection (PX_ONLINE=1) and rerun `px sync`.",
+        });
+    }
+    json!({
+        "reason": "resolve_failed",
+        "issues": [issue],
+        "hint": "Inspect dependency constraints and rerun `px sync`.",
+    })
+}
+
+fn extract_quoted_requirement(message: &str) -> Option<String> {
+    let start = message.find('`')?;
+    let rest = &message[start + 1..];
+    let end = rest.find('`')?;
+    Some(rest[..end].to_string())
 }
 
 fn persist_resolved_dependencies(snapshot: &ManifestSnapshot, specs: &[String]) -> Result<()> {

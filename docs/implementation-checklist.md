@@ -33,7 +33,7 @@ Reminder: use [ ] for items that simply haven’t been built yet, and reserve [!
 
 - [x] **Heuristics for missing imports & drift** – Implemented via structured tracebacks and `InstallUserError` details (spec 8.2) (`px-core/src/traceback.rs`, `px-core/src/lib.rs:1868-2040`).
 - [x] **PX-styled envelopes (`PX123 / Why / Fix`)** – Human output now emits PX codes, “Why” bullets, and “Fix” bullets with colored headers plus post-summary tracebacks per spec 8.1 (`crates/px-cli/src/main.rs:70-230`, `crates/px-cli/src/style.rs:11-62`).
-- [ ] **Resolver error UX** – Spec 5.2/5.3 demands “What / Why / Fix” copy-pasteable suggestions when resolution fails; existing errors provide single-line hints only (`px-core/src/commands/project.rs:124-259`).
+- [x] **Resolver error UX** – Resolver failures now emit structured `reason`/`issues`/`hint` details so CLI surfaces actionable “Why / Fix” guidance per spec 5.2/5.3 (`crates/px-core/src/lib.rs:833-924`, `crates/px-cli/src/main.rs:95-374`).
 
 ## Next Actions
 
