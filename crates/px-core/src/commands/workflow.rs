@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde_json::{json, Value};
-use toml_edit::{DocumentMut, Item, Table};
+use toml_edit::{DocumentMut, Item};
 
 use crate::{
     attach_autosync_details, outcome_from_output, project_table, python_context_with_mode,
@@ -160,6 +160,7 @@ impl ResolvedEntry {
 enum EntrySource {
     Explicit,
     ProjectScript { script: String },
+    PxScript { script: String },
     PackageCli { package: String },
 }
 
@@ -168,6 +169,7 @@ impl EntrySource {
         match self {
             EntrySource::Explicit => "explicit",
             EntrySource::ProjectScript { .. } => "project-scripts",
+            EntrySource::PxScript { .. } => "px-scripts",
             EntrySource::PackageCli { .. } => "package-cli",
         }
     }
@@ -175,6 +177,7 @@ impl EntrySource {
     fn script_name(&self) -> Option<&str> {
         match self {
             EntrySource::ProjectScript { script } => Some(script.as_str()),
+            EntrySource::PxScript { script } => Some(script.as_str()),
             _ => None,
         }
     }
@@ -202,9 +205,9 @@ impl DefaultEntryIssue {
                 }),
             ),
             DefaultEntryIssue::NoScripts(path) => ExecutionOutcome::user_error(
-                "no default entry found; add [project.scripts] or pass ENTRY",
+                "no default entry found; add [project.scripts] or [tool.px.scripts]",
                 json!({
-                    "hint": "add [project.scripts] to pyproject.toml or run `px run <module>`",
+                    "hint": "define a script under [project.scripts] or [tool.px.scripts], or run `px run <module>` explicitly",
                     "manifest": path.display().to_string(),
                 }),
             ),
@@ -445,10 +448,23 @@ fn infer_default_entry(manifest: &Path) -> Result<Option<ResolvedEntry>> {
     let doc: DocumentMut = contents.parse()?;
     let project = project_table(&doc)?;
 
-    if let Some((script, module)) = first_script_entry(project) {
+    if let Some((script, module)) = first_script_entry(project.get("scripts")) {
         return Ok(Some(ResolvedEntry {
             entry: module,
             source: EntrySource::ProjectScript { script },
+        }));
+    }
+
+    let px_scripts_item = doc
+        .get("tool")
+        .and_then(Item::as_table)
+        .and_then(|tool| tool.get("px"))
+        .and_then(Item::as_table)
+        .and_then(|px| px.get("scripts"));
+    if let Some((script, module)) = first_script_entry(px_scripts_item) {
+        return Ok(Some(ResolvedEntry {
+            entry: module,
+            source: EntrySource::PxScript { script },
         }));
     }
 
@@ -467,8 +483,8 @@ fn infer_default_entry(manifest: &Path) -> Result<Option<ResolvedEntry>> {
     Ok(None)
 }
 
-fn first_script_entry(project: &Table) -> Option<(String, String)> {
-    let scripts = project.get("scripts")?.as_table()?;
+fn first_script_entry(item: Option<&Item>) -> Option<(String, String)> {
+    let scripts = item?.as_table()?;
     for (name, item) in scripts.iter() {
         if let Some(value) = item.as_str() {
             if let Some(module) = parse_script_value(value) {
@@ -502,4 +518,62 @@ fn package_module_name(name: &str) -> String {
 
 fn missing_pytest(stderr: &str) -> bool {
     stderr.contains("No module named") && stderr.contains("pytest")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write_manifest(contents: &str) -> (tempfile::TempDir, PathBuf) {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("pyproject.toml");
+        fs::write(&path, contents).expect("write manifest");
+        (temp, path)
+    }
+
+    #[test]
+    fn prefers_project_scripts_over_px_scripts() {
+        let manifest = r#"
+[project]
+name = "demo-app"
+version = "0.1.0"
+
+[project.scripts]
+app = "demo.app:main"
+
+[tool.px.scripts]
+alt = "demo.alt:main"
+"#;
+        let (_tmp, path) = write_manifest(manifest);
+        let resolved = infer_default_entry(&path)
+            .expect("entry lookup")
+            .expect("default entry");
+        assert_eq!(resolved.entry, "demo.app");
+        match resolved.source {
+            EntrySource::ProjectScript { script } => assert_eq!(script, "app"),
+            other => panic!("expected project script, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn falls_back_to_px_scripts_when_project_scripts_missing() {
+        let manifest = r#"
+[project]
+name = "demo-app"
+version = "0.1.0"
+
+[tool.px.scripts]
+lint = "demo.lint:main"
+"#;
+        let (_tmp, path) = write_manifest(manifest);
+        let resolved = infer_default_entry(&path)
+            .expect("entry lookup")
+            .expect("default entry");
+        assert_eq!(resolved.entry, "demo.lint");
+        match resolved.source {
+            EntrySource::PxScript { script } => assert_eq!(script, "lint"),
+            other => panic!("expected px script, got {:?}", other),
+        }
+    }
 }
