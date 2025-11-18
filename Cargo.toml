@@ -43,6 +43,7 @@ assert_cmd = "2"
 tempfile = "3"
 dirs-next = "2"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
 
 [workspace.metadata]
 px.description = "Opinionated Python toolchain scaffolding"

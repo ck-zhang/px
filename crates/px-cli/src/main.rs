@@ -9,6 +9,7 @@ use px_core::{
     OutputBuildRequest, OutputPublishRequest, ProjectAddRequest, ProjectInitRequest,
     ProjectInstallRequest, ProjectRemoveRequest, ProjectUpdateRequest, ProjectWhyRequest,
     QualityTidyRequest, StorePrefetchRequest, SystemEffects, ToolCommandRequest,
+    ToolInstallRequest, ToolListRequest, ToolRemoveRequest, ToolRunRequest, ToolUpgradeRequest,
     WorkflowRunRequest, WorkflowTestRequest,
 };
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,7 @@ const PX_BEFORE_HELP: &str = concat!(
     "  publish          Upload previously built artifacts (dry-run by default).\n",
     "  migrate          Create px metadata for an existing project.\n\n",
     "\x1b[1;36mAdvanced\x1b[0m\n",
+    "  tool             Install and run px-managed global tools.\n",
     "  debug env        Show interpreter info or pythonpath.\n",
     "  debug cache      Inspect cached artifacts (path, stats, prune, prefetch).\n",
     "  debug tidy       Clean cached metadata and stray files.\n",
@@ -309,6 +311,7 @@ fn error_code(info: CommandInfo) -> &'static str {
         CommandGroup::Workspace => "PX620",
         CommandGroup::Explain => "PX701",
         CommandGroup::Why => "PX702",
+        CommandGroup::Tool => "PX640",
         CommandGroup::Python => "PX650",
     }
 }
@@ -528,6 +531,32 @@ fn dispatch_command(
             let info = CommandInfo::new(CommandGroup::Status, "status");
             core_call(info, px_core::project_status(ctx))
         }
+        CommandGroupCli::Tool(cmd) => match cmd {
+            ToolCommand::Install(args) => {
+                let info = CommandInfo::new(CommandGroup::Tool, "install");
+                let request = tool_install_request_from_args(args);
+                core_call(info, px_core::tool_install(ctx, request))
+            }
+            ToolCommand::Run(args) => {
+                let info = CommandInfo::new(CommandGroup::Tool, "run");
+                let request = tool_run_request_from_args(args);
+                core_call(info, px_core::tool_run(ctx, request))
+            }
+            ToolCommand::List => {
+                let info = CommandInfo::new(CommandGroup::Tool, "list");
+                core_call(info, px_core::tool_list(ctx, ToolListRequest::default()))
+            }
+            ToolCommand::Remove(args) => {
+                let info = CommandInfo::new(CommandGroup::Tool, "remove");
+                let request = tool_remove_request_from_args(args);
+                core_call(info, px_core::tool_remove(ctx, request))
+            }
+            ToolCommand::Upgrade(args) => {
+                let info = CommandInfo::new(CommandGroup::Tool, "upgrade");
+                let request = tool_upgrade_request_from_args(args);
+                core_call(info, px_core::tool_upgrade(ctx, request))
+            }
+        },
         CommandGroupCli::Python(cmd) => match cmd {
             PythonCommand::List => {
                 let info = CommandInfo::new(CommandGroup::Python, "list");
@@ -676,6 +705,35 @@ fn tool_command_request_from_args(args: &ToolArgs) -> ToolCommandRequest {
     ToolCommandRequest {
         args: args.args.clone(),
         frozen: args.frozen,
+    }
+}
+
+fn tool_install_request_from_args(args: &ToolInstallArgs) -> ToolInstallRequest {
+    ToolInstallRequest {
+        name: args.name.clone(),
+        spec: args.spec.clone(),
+        python: args.python.clone(),
+        entry: args.module.clone(),
+    }
+}
+
+fn tool_run_request_from_args(args: &ToolRunArgs) -> ToolRunRequest {
+    ToolRunRequest {
+        name: args.name.clone(),
+        args: args.args.clone(),
+    }
+}
+
+fn tool_remove_request_from_args(args: &ToolRemoveArgs) -> ToolRemoveRequest {
+    ToolRemoveRequest {
+        name: args.name.clone(),
+    }
+}
+
+fn tool_upgrade_request_from_args(args: &ToolUpgradeArgs) -> ToolUpgradeRequest {
+    ToolUpgradeRequest {
+        name: args.name.clone(),
+        python: args.python.clone(),
     }
 }
 
@@ -875,6 +933,12 @@ enum CommandGroupCli {
     )]
     Why(WhyArgs),
     #[command(
+        about = "Manage px-managed CLI tools.",
+        override_usage = "px tool <install|run|list|remove|upgrade>",
+        subcommand
+    )]
+    Tool(ToolCommand),
+    #[command(
         about = "Manage px Python runtimes.",
         override_usage = "px python <list|install|use|info>",
         subcommand
@@ -1003,6 +1067,29 @@ enum DebugCommand {
     Why(WhyArgs),
     #[command(name = "explain", hide = true)]
     Explain(ExplainArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ToolCommand {
+    #[command(
+        about = "Install a px-managed CLI tool.",
+        override_usage = "px tool install <NAME> [SPEC] [--python VERSION] [--module MODULE]"
+    )]
+    Install(ToolInstallArgs),
+    #[command(
+        about = "Run an installed tool (forwards arguments after --).",
+        override_usage = "px tool run <NAME> [-- <ARG>...]"
+    )]
+    Run(ToolRunArgs),
+    #[command(about = "List installed px-managed tools.")]
+    List,
+    #[command(about = "Remove an installed tool and its cached environment.")]
+    Remove(ToolRemoveArgs),
+    #[command(
+        about = "Upgrade a tool's dependencies to the latest allowed versions.",
+        override_usage = "px tool upgrade <NAME> [--python VERSION]"
+    )]
+    Upgrade(ToolUpgradeArgs),
 }
 
 #[derive(Args, Debug)]
@@ -1171,6 +1258,60 @@ struct ToolArgs {
     frozen: bool,
     #[arg(last = true, value_name = "ARG")]
     args: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+struct ToolInstallArgs {
+    #[arg(value_name = "NAME")]
+    name: String,
+    #[arg(
+        value_name = "SPEC",
+        help = "Optional requirement spec (default: NAME)"
+    )]
+    spec: Option<String>,
+    #[arg(
+        long,
+        value_name = "VERSION",
+        help = "Bind to a specific runtime version"
+    )]
+    python: Option<String>,
+    #[arg(
+        long,
+        value_name = "MODULE",
+        help = "Override module entry point (defaults to NAME)"
+    )]
+    module: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct ToolRunArgs {
+    #[arg(value_name = "NAME")]
+    name: String,
+    #[arg(
+        value_name = "ARG",
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        last = true
+    )]
+    args: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+struct ToolRemoveArgs {
+    #[arg(value_name = "NAME")]
+    name: String,
+}
+
+#[derive(Args, Debug)]
+struct ToolUpgradeArgs {
+    #[arg(value_name = "NAME")]
+    name: String,
+    #[arg(
+        long,
+        value_name = "VERSION",
+        help = "Switch the runtime version for this tool"
+    )]
+    python: Option<String>,
 }
 
 #[derive(Args, Debug)]

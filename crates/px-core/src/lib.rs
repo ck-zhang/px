@@ -138,6 +138,7 @@ pub enum CommandGroup {
     Workspace,
     Explain,
     Why,
+    Tool,
     Python,
 }
 
@@ -164,6 +165,7 @@ impl fmt::Display for CommandGroup {
             CommandGroup::Workspace => "workspace",
             CommandGroup::Explain => "explain",
             CommandGroup::Why => "why",
+            CommandGroup::Tool => "tool",
             CommandGroup::Python => "python",
         };
         f.write_str(name)
@@ -593,6 +595,10 @@ pub use commands::quality::{
     quality_fmt, quality_lint, quality_tidy, QualityTidyRequest, ToolCommandRequest,
 };
 pub use commands::store::{store_prefetch, StorePrefetchRequest};
+pub use commands::tool::{
+    tool_install, tool_list, tool_remove, tool_run, tool_upgrade, ToolInstallRequest,
+    ToolListRequest, ToolRemoveRequest, ToolRunRequest, ToolUpgradeRequest,
+};
 pub use commands::workflow::{
     workflow_run, workflow_test, WorkflowRunRequest, WorkflowTestRequest,
 };
@@ -2181,7 +2187,7 @@ impl PythonContext {
     }
 }
 
-fn build_pythonpath(
+pub(crate) fn build_pythonpath(
     fs: &dyn effects::FileSystem,
     project_root: &Path,
 ) -> Result<(String, Vec<PathBuf>)> {
@@ -2224,7 +2230,7 @@ fn build_pythonpath(
     Ok((pythonpath, paths))
 }
 
-fn ensure_project_environment_synced(
+pub(crate) fn ensure_project_environment_synced(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
 ) -> Result<()> {

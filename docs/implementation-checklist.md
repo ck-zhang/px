@@ -21,7 +21,7 @@ Reminder: use [ ] for items that simply haven’t been built yet, and reserve [!
 
 ## Tools & Runtimes
 
-- [!] **Global tool lifecycle** – Spec 1.3/4.2/6 require `px tool install/run/list/remove/upgrade` with isolated CAS envs. Implementation is blocked on the forthcoming CAS-backed tool store and UX design (`crates/px-cli/src/main.rs:683-769`).
+- [x] **Global tool lifecycle** – Added `px tool install/run/list/remove/upgrade`, which manages tools under `~/.px/tools/<name>` with dedicated `pyproject.toml`, `px.lock`, `.px/site`, and metadata (`crates/px-core/src/commands/tool.rs`, `crates/px-cli/src/main.rs:760-980`). Each install resolves pins via the shared resolver, binds to a runtime from `px python`, and `px tool run` executes inside the cached CAS-backed env with drift/runtimes enforced.
 - [x] **Runtime management (`px python …`)** – Added a JSON-backed runtime registry plus `px python list/install/use/info` commands (`crates/px-core/src/runtime.rs`, `crates/px-core/src/commands/python.rs`, `crates/px-cli/src/main.rs:760-930`). Projects now honor `[tool.px].python` and fall back to registry runtimes before touching the host interpreter.
 
 ## Distribution & Introspection
@@ -37,6 +37,6 @@ Reminder: use [ ] for items that simply haven’t been built yet, and reserve [!
 
 ## Next Actions
 
-1. Implement the global tool lifecycle (`px tool install/run/list/remove/upgrade`) with isolated CAS-backed envs per spec §6.
-2. Build the CAS-backed tool store + shims so global tools can bind to px-managed runtimes without leaking into projects.
-3. Extend runtime/tool integration so global installs reuse the runtime registry (e.g., default tool runtimes, runtime upgrades, failure UX).
+1. Generate console-script shims for installed tools so `px tool run` can invoke entry points that don’t expose `python -m` modules, and cache binary stubs for faster dispatch.
+2. Share tool envs across machines via a CAS-aware tool store (dedupe downloads, support multi-platform locks) and add richer upgrade controls (e.g., `px tool upgrade black==X`).
+3. Expand automated tests/fixtures to cover tool lifecycle flows without requiring PyPI (local index or wheel fixtures) to ensure CI coverage.
