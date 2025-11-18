@@ -91,6 +91,29 @@ impl ManifestEditor {
         self.save()
     }
 
+    pub fn set_tool_python(&mut self, version: &str) -> Result<bool> {
+        let tool_entry = self.doc.entry("tool").or_insert(Item::Table(Table::new()));
+        if !tool_entry.is_table() {
+            *tool_entry = Item::Table(Table::new());
+        }
+        let tool_table = tool_entry.as_table_mut().expect("tool table");
+        let px_entry = tool_table.entry("px").or_insert(Item::Table(Table::new()));
+        if !px_entry.is_table() {
+            *px_entry = Item::Table(Table::new());
+        }
+        let px_table = px_entry.as_table_mut().expect("px table");
+        let current = px_table
+            .get("python")
+            .and_then(Item::as_value)
+            .and_then(|value| value.as_str());
+        if current == Some(version) {
+            return Ok(false);
+        }
+        px_table.insert("python", Item::Value(TomlValue::from(version)));
+        self.save()?;
+        Ok(true)
+    }
+
     pub(crate) fn doc(&self) -> &DocumentMut {
         &self.doc
     }

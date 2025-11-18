@@ -43,6 +43,7 @@ use crate::traceback::{analyze_python_traceback, TracebackContext};
 mod commands;
 mod effects;
 mod pypi;
+mod runtime;
 mod traceback;
 mod workspace;
 
@@ -137,6 +138,7 @@ pub enum CommandGroup {
     Workspace,
     Explain,
     Why,
+    Python,
 }
 
 impl fmt::Display for CommandGroup {
@@ -162,6 +164,7 @@ impl fmt::Display for CommandGroup {
             CommandGroup::Workspace => "workspace",
             CommandGroup::Explain => "explain",
             CommandGroup::Why => "why",
+            CommandGroup::Python => "python",
         };
         f.write_str(name)
     }
@@ -582,6 +585,10 @@ pub use commands::project::{
     project_why, ProjectAddRequest, ProjectInitRequest, ProjectInstallRequest,
     ProjectRemoveRequest, ProjectUpdateRequest, ProjectWhyRequest,
 };
+pub use commands::python::{
+    python_info, python_install, python_list, python_use, PythonInfoRequest, PythonInstallRequest,
+    PythonListRequest, PythonUseRequest,
+};
 pub use commands::quality::{
     quality_fmt, quality_lint, quality_tidy, QualityTidyRequest, ToolCommandRequest,
 };
@@ -637,6 +644,7 @@ pub(crate) fn install_snapshot(
     override_pins: Option<&InstallOverride>,
 ) -> Result<InstallOutcome> {
     let lockfile = snapshot.lock_path.display().to_string();
+    let _ = prepare_project_runtime(snapshot)?;
 
     if frozen {
         return verify_lock(snapshot);
@@ -693,6 +701,7 @@ pub(crate) fn refresh_project_site(
     snapshot: &ManifestSnapshot,
     ctx: &CommandContext,
 ) -> Result<()> {
+    let _ = prepare_project_runtime(snapshot)?;
     let lock = load_lockfile_optional(&snapshot.lock_path)?.ok_or_else(|| {
         anyhow!(
             "px sync: lockfile missing at {}",
@@ -843,6 +852,24 @@ struct RuntimeMetadata {
     path: String,
     version: String,
     platform: String,
+}
+
+fn prepare_project_runtime(snapshot: &ManifestSnapshot) -> Result<runtime::RuntimeSelection> {
+    let selection = runtime::resolve_runtime(
+        snapshot.python_override.as_deref(),
+        &snapshot.python_requirement,
+    )
+    .map_err(|err| {
+        InstallUserError::new(
+            "python runtime unavailable",
+            json!({
+                "hint": err.to_string(),
+                "reason": "missing_runtime",
+            }),
+        )
+    })?;
+    env::set_var("PX_RUNTIME_PYTHON", &selection.record.path);
+    Ok(selection)
 }
 
 fn detect_runtime_metadata(
@@ -2119,8 +2146,10 @@ impl PythonContext {
         guard: EnvGuard,
     ) -> Result<(Self, Option<EnvironmentSyncReport>)> {
         let project_root = ctx.project_root()?;
-        let sync_report = ensure_environment_with_guard(ctx, &project_root, guard)?;
-        let python = ctx.python_runtime().detect_interpreter()?;
+        let snapshot = manifest_snapshot_at(&project_root)?;
+        let runtime = prepare_project_runtime(&snapshot)?;
+        let sync_report = ensure_environment_with_guard(ctx, &snapshot, guard)?;
+        let python = runtime.record.path.clone();
         let (pythonpath, allowed_paths) = build_pythonpath(ctx.fs(), &project_root)?;
         Ok((
             Self {
@@ -2195,21 +2224,22 @@ fn build_pythonpath(
     Ok((pythonpath, paths))
 }
 
-fn ensure_project_environment_synced(ctx: &CommandContext, project_root: &Path) -> Result<()> {
-    let manifest_path = project_root.join("pyproject.toml");
-    if !manifest_path.exists() {
+fn ensure_project_environment_synced(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+) -> Result<()> {
+    if !snapshot.manifest_path.exists() {
         return Err(InstallUserError::new(
-            format!("pyproject.toml not found in {}", project_root.display()),
+            format!("pyproject.toml not found in {}", snapshot.root.display()),
             json!({
                 "hint": "run `px migrate --apply` or pass ENTRY explicitly",
-                "project_root": project_root.display().to_string(),
-                "manifest": manifest_path.display().to_string(),
+                "project_root": snapshot.root.display().to_string(),
+                "manifest": snapshot.manifest_path.display().to_string(),
                 "reason": "missing_manifest",
             }),
         )
         .into());
     }
-    let snapshot = manifest_snapshot_at(project_root)?;
     let lock_path = snapshot.lock_path.clone();
     let lock = match load_lockfile_optional(&lock_path)? {
         Some(lock) => lock,
@@ -2255,7 +2285,8 @@ fn ensure_project_environment_synced(ctx: &CommandContext, project_root: &Path) 
     }
 
     let lock_hash = compute_lock_hash(&lock_path)?;
-    ensure_env_matches_lock(ctx, &snapshot, &lock_hash)
+    let _ = prepare_project_runtime(snapshot)?;
+    ensure_env_matches_lock(ctx, snapshot, &lock_hash)
 }
 
 fn ensure_env_matches_lock(
@@ -2323,17 +2354,17 @@ fn ensure_env_matches_lock(
 
 fn ensure_environment_with_guard(
     ctx: &CommandContext,
-    project_root: &Path,
+    snapshot: &ManifestSnapshot,
     guard: EnvGuard,
 ) -> Result<Option<EnvironmentSyncReport>> {
-    match ensure_project_environment_synced(ctx, project_root) {
+    match ensure_project_environment_synced(ctx, snapshot) {
         Ok(()) => Ok(None),
         Err(err) => match err.downcast::<InstallUserError>() {
             Ok(user) => match guard {
                 EnvGuard::Strict => Err(user.into()),
                 EnvGuard::AutoSync => {
                     if let Some(issue) = EnvironmentIssue::from_details(&user.details) {
-                        auto_sync_environment(ctx, project_root, issue)
+                        auto_sync_environment(ctx, snapshot, issue)
                     } else {
                         Err(user.into())
                     }
@@ -2346,12 +2377,11 @@ fn ensure_environment_with_guard(
 
 fn auto_sync_environment(
     ctx: &CommandContext,
-    project_root: &Path,
+    snapshot: &ManifestSnapshot,
     issue: EnvironmentIssue,
 ) -> Result<Option<EnvironmentSyncReport>> {
-    let snapshot = manifest_snapshot_at(project_root)?;
-    install_snapshot(ctx, &snapshot, false, None)?;
-    refresh_project_site(&snapshot, ctx)?;
+    install_snapshot(ctx, snapshot, false, None)?;
+    refresh_project_site(snapshot, ctx)?;
     Ok(Some(EnvironmentSyncReport::new(issue)))
 }
 
@@ -2551,6 +2581,7 @@ mod tests {
             name: "demo".into(),
             python_requirement: ">=3.11".into(),
             dependencies: Vec::new(),
+            python_override: None,
         };
         let lock = LockSnapshot {
             version: 1,
@@ -2606,6 +2637,7 @@ mod tests {
             name: "demo".into(),
             python_requirement: ">=3.11".into(),
             dependencies: Vec::new(),
+            python_override: None,
         };
         let lock = LockSnapshot {
             version: 1,

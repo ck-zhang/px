@@ -1178,6 +1178,7 @@ dependencies = [
  "thiserror 1.0.69",
  "toml_edit",
  "tracing",
+ "which",
  "zip",
 ]
 

@@ -4,6 +4,7 @@ pub mod lock;
 pub mod migrate;
 pub mod output;
 pub mod project;
+pub mod python;
 pub mod quality;
 pub mod store;
 pub mod workflow;

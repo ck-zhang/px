@@ -1089,6 +1089,7 @@ mod tests {
             name: "demo".into(),
             python_requirement: ">=3.12".into(),
             dependencies: vec!["demo==1.0.0".into()],
+            python_override: None,
         }
     }
 

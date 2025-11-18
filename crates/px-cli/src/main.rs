@@ -43,6 +43,7 @@ const PX_BEFORE_HELP: &str = concat!(
     "  debug env        Show interpreter info or pythonpath.\n",
     "  debug cache      Inspect cached artifacts (path, stats, prune, prefetch).\n",
     "  debug tidy       Clean cached metadata and stray files.\n",
+    "  python           Manage px Python runtimes (list/install/use/info).\n",
     "  debug why        Alias for `px why` (deprecated).\n",
 );
 
@@ -308,6 +309,7 @@ fn error_code(info: CommandInfo) -> &'static str {
         CommandGroup::Workspace => "PX620",
         CommandGroup::Explain => "PX701",
         CommandGroup::Why => "PX702",
+        CommandGroup::Python => "PX650",
     }
 }
 
@@ -526,6 +528,26 @@ fn dispatch_command(
             let info = CommandInfo::new(CommandGroup::Status, "status");
             core_call(info, px_core::project_status(ctx))
         }
+        CommandGroupCli::Python(cmd) => match cmd {
+            PythonCommand::List => {
+                let info = CommandInfo::new(CommandGroup::Python, "list");
+                core_call(info, px_core::python_list(ctx, px_core::PythonListRequest))
+            }
+            PythonCommand::Info => {
+                let info = CommandInfo::new(CommandGroup::Python, "info");
+                core_call(info, px_core::python_info(ctx, px_core::PythonInfoRequest))
+            }
+            PythonCommand::Install(args) => {
+                let info = CommandInfo::new(CommandGroup::Python, "install");
+                let request = python_install_request_from_args(args);
+                core_call(info, px_core::python_install(ctx, request))
+            }
+            PythonCommand::Use(args) => {
+                let info = CommandInfo::new(CommandGroup::Python, "use");
+                let request = python_use_request_from_args(args);
+                core_call(info, px_core::python_use(ctx, request))
+            }
+        },
         CommandGroupCli::Debug(cmd) => match cmd {
             DebugCommand::Env(args) => handle_env_command(ctx, args),
             DebugCommand::Cache(args) => handle_cache_command(ctx, &args.command),
@@ -709,6 +731,23 @@ fn project_why_request_from_args(args: &WhyArgs) -> ProjectWhyRequest {
     }
 }
 
+fn python_install_request_from_args(args: &PythonInstallArgs) -> px_core::PythonInstallRequest {
+    px_core::PythonInstallRequest {
+        version: args.version.clone(),
+        path: args
+            .path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+        set_default: args.default,
+    }
+}
+
+fn python_use_request_from_args(args: &PythonUseArgs) -> px_core::PythonUseRequest {
+    px_core::PythonUseRequest {
+        version: args.version.clone(),
+    }
+}
+
 fn env_request_from_args(args: &EnvArgs) -> EnvRequest {
     let mode = match args.mode {
         EnvMode::Info => CoreEnvMode::Info,
@@ -836,6 +875,12 @@ enum CommandGroupCli {
     )]
     Why(WhyArgs),
     #[command(
+        about = "Manage px Python runtimes.",
+        override_usage = "px python <list|install|use|info>",
+        subcommand
+    )]
+    Python(PythonCommand),
+    #[command(
         about = "Advanced utilities (env, cache, fmt, lint, tidy, why).",
         subcommand
     )]
@@ -896,6 +941,34 @@ enum QualityCommand {
     Fmt(ToolArgs),
     Lint(ToolArgs),
     Tidy(TidyArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum PythonCommand {
+    #[command(about = "List registered px runtimes.")]
+    List,
+    #[command(about = "Show the runtime in use for this project (and default).")]
+    Info,
+    #[command(about = "Register a Python interpreter for px to use.")]
+    Install(PythonInstallArgs),
+    #[command(about = "Record the runtime version for the current project.")]
+    Use(PythonUseArgs),
+}
+
+#[derive(Args, Debug)]
+struct PythonInstallArgs {
+    #[arg(value_name = "VERSION", help = "Python version channel (e.g. 3.11)")]
+    version: String,
+    #[arg(long, value_parser = value_parser!(PathBuf), help = "Explicit interpreter path")]
+    path: Option<PathBuf>,
+    #[arg(long, help = "Mark this runtime as px's default")]
+    default: bool,
+}
+
+#[derive(Args, Debug)]
+struct PythonUseArgs {
+    #[arg(value_name = "VERSION", help = "Python version channel (e.g. 3.11)")]
+    version: String,
 }
 
 #[derive(Subcommand, Debug)]

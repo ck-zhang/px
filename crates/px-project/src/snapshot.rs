@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use toml_edit::DocumentMut;
+use toml_edit::{DocumentMut, Item};
 
 use crate::manifest::{project_table, read_dependencies_from_doc};
 
@@ -16,6 +16,7 @@ pub struct ProjectSnapshot {
     pub name: String,
     pub python_requirement: String,
     pub dependencies: Vec<String>,
+    pub python_override: Option<String>,
 }
 
 impl ProjectSnapshot {
@@ -42,6 +43,14 @@ impl ProjectSnapshot {
             .map(|s| s.to_string())
             .unwrap_or_else(|| ">=3.12".to_string());
         let dependencies = read_dependencies_from_doc(&doc);
+        let python_override = doc
+            .get("tool")
+            .and_then(Item::as_table)
+            .and_then(|tool| tool.get("px"))
+            .and_then(Item::as_table)
+            .and_then(|px| px.get("python"))
+            .and_then(Item::as_str)
+            .map(|value| value.to_string());
         Ok(Self {
             root: root.to_path_buf(),
             manifest_path,
@@ -49,6 +58,7 @@ impl ProjectSnapshot {
             name,
             python_requirement,
             dependencies,
+            python_override,
         })
     }
 }

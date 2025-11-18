@@ -22,7 +22,7 @@ Reminder: use [ ] for items that simply haven’t been built yet, and reserve [!
 ## Tools & Runtimes
 
 - [!] **Global tool lifecycle** – Spec 1.3/4.2/6 require `px tool install/run/list/remove/upgrade` with isolated CAS envs. Implementation is blocked on the forthcoming CAS-backed tool store and UX design (`crates/px-cli/src/main.rs:683-769`).
-- [!] **Runtime management (`px python …`)** – Section 4.3 & 7 define runtime discovery, install, selection, and failure messaging. Work is blocked until the runtime installer/registry story is defined beyond `PX_RUNTIME_PYTHON`.
+- [x] **Runtime management (`px python …`)** – Added a JSON-backed runtime registry plus `px python list/install/use/info` commands (`crates/px-core/src/runtime.rs`, `crates/px-core/src/commands/python.rs`, `crates/px-cli/src/main.rs:760-930`). Projects now honor `[tool.px].python` and fall back to registry runtimes before touching the host interpreter.
 
 ## Distribution & Introspection
 
@@ -37,6 +37,6 @@ Reminder: use [ ] for items that simply haven’t been built yet, and reserve [!
 
 ## Next Actions
 
-1. Ship the px-managed runtime registry and `px python list/install/use/info` commands defined in spec §7 so projects can explicitly select and install interpreters.
-2. Implement the global tool lifecycle (`px tool install/run/list/remove/upgrade`) with isolated CAS-backed envs per spec §6.
-3. Connect the new runtime registry to tool/env selection so `.px/state.json` consistently reflects both project and global runtime choices.
+1. Implement the global tool lifecycle (`px tool install/run/list/remove/upgrade`) with isolated CAS-backed envs per spec §6.
+2. Build the CAS-backed tool store + shims so global tools can bind to px-managed runtimes without leaking into projects.
+3. Extend runtime/tool integration so global installs reuse the runtime registry (e.g., default tool runtimes, runtime upgrades, failure UX).
