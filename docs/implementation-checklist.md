@@ -37,6 +37,6 @@ Reminder: use [ ] for items that simply haven’t been built yet, and reserve [!
 
 ## Next Actions
 
-1. Design and implement px-managed runtimes/env directories plus the `px python` surface so environments are deterministic and separate from the host interpreter.
-2. Bring the CLI surface in line with the spec (remove or hide disallowed commands, add the tool lifecycle and `px why`).
-3. Align artifacts/error UX with the spec (write to `dist/`, emit PX error envelopes, implement `[tool.px].scripts` + frozen modes for fmt/lint).
+1. Ship the px-managed runtime registry and `px python list/install/use/info` commands defined in spec §7 so projects can explicitly select and install interpreters.
+2. Implement the global tool lifecycle (`px tool install/run/list/remove/upgrade`) with isolated CAS-backed envs per spec §6.
+3. Connect the new runtime registry to tool/env selection so `.px/state.json` consistently reflects both project and global runtime choices.
