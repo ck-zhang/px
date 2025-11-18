@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use pep508_rs::{Requirement as PepRequirement, VersionOrUrl};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use toml_edit::{DocumentMut, Item};
 
@@ -271,7 +272,15 @@ pub fn project_status(ctx: &CommandContext) -> Result<ExecutionOutcome> {
     let mut details = json!({
         "pyproject": snapshot.manifest_path.display().to_string(),
         "lockfile": snapshot.lock_path.display().to_string(),
+        "project": {
+            "root": snapshot.root.display().to_string(),
+            "name": snapshot.name.clone(),
+            "python_requirement": snapshot.python_requirement.clone(),
+        },
     });
+    if let Some(runtime) = detect_runtime_details(ctx, &snapshot) {
+        details["runtime"] = runtime;
+    }
     match outcome.state {
         InstallState::UpToDate => {
             details["status"] = Value::String("in-sync".to_string());
@@ -596,6 +605,47 @@ fn existing_pyproject_response(pyproject_path: &Path) -> Result<ExecutionOutcome
 
 fn project_name_from_pyproject(pyproject_path: &Path) -> Result<Option<String>> {
     px_project::project_name_from_pyproject(pyproject_path)
+}
+
+fn detect_runtime_details(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+) -> Option<Value> {
+    let python = ctx.python_runtime().detect_interpreter().ok()?;
+    match probe_python_version(ctx, snapshot, &python) {
+        Ok(version) => Some(json!({
+            "path": python,
+            "version": version,
+        })),
+        Err(err) => Some(json!({
+            "path": python,
+            "hint": format!("failed to detect python version: {err}"),
+        })),
+    }
+}
+
+fn probe_python_version(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+    python: &str,
+) -> Result<String> {
+    const SCRIPT: &str =
+        "import json, platform; print(json.dumps({'version': platform.python_version()}))";
+    let args = vec!["-c".to_string(), SCRIPT.to_string()];
+    let output = ctx
+        .python_runtime()
+        .run_command(python, &args, &[], &snapshot.root)?;
+    if output.code != 0 {
+        return Err(anyhow!("python exited with {}", output.code));
+    }
+    let payload: RuntimeProbe =
+        serde_json::from_str(output.stdout.trim()).context("invalid runtime probe payload")?;
+    Ok(payload.version)
+}
+
+#[derive(Deserialize)]
+struct RuntimeProbe {
+    version: String,
 }
 
 fn dirty_worktree_response(changes: Vec<String>) -> ExecutionOutcome {
