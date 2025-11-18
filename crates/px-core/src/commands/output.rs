@@ -218,9 +218,8 @@ fn output_publish_outcome(
         ));
     }
 
-    let token_value = env::var(&token_env).map_err(|err| {
-        anyhow!("failed to read {token_env} from environment: {err}")
-    })?;
+    let token_value = env::var(&token_env)
+        .map_err(|err| anyhow!("failed to read {token_env} from environment: {err}"))?;
     if token_value.trim().is_empty() {
         return Ok(ExecutionOutcome::user_error(
             format!("px publish: {token_env} is empty"),
@@ -256,8 +255,7 @@ fn output_publish_outcome(
     });
     let message = format!(
         "px publish: uploaded {} artifacts to {}",
-        count,
-        registry_info.label
+        count, registry_info.label
     );
     Ok(ExecutionOutcome::success(message, details))
 }
@@ -643,8 +641,7 @@ fn upload_artifact(
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow!("invalid artifact path {}", summary.path))?;
     let kind = classify_artifact(filename)?;
-    let bytes = fs::read(file_path)
-        .with_context(|| format!("reading {}", file_path.display()))?;
+    let bytes = fs::read(file_path).with_context(|| format!("reading {}", file_path.display()))?;
     let boundary = format!(
         "----pxpublish{}",
         &summary.sha256[..summary.sha256.len().min(12)],
@@ -753,13 +750,7 @@ fn append_form_field(buf: &mut Vec<u8>, boundary: &str, name: &str, value: &str)
     buf.extend_from_slice(b"\r\n");
 }
 
-fn append_file_field(
-    buf: &mut Vec<u8>,
-    boundary: &str,
-    name: &str,
-    filename: &str,
-    bytes: &[u8],
-) {
+fn append_file_field(buf: &mut Vec<u8>, boundary: &str, name: &str, filename: &str, bytes: &[u8]) {
     buf.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
     buf.extend_from_slice(
         format!(

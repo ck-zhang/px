@@ -291,11 +291,8 @@ pub fn project_status(ctx: &CommandContext) -> Result<ExecutionOutcome> {
     if let Some(runtime) = detect_runtime_details(ctx, &snapshot) {
         details["runtime"] = runtime;
     }
-    details["environment"] = collect_environment_status(
-        ctx,
-        &snapshot,
-        outcome.state != InstallState::MissingLock,
-    )?;
+    details["environment"] =
+        collect_environment_status(ctx, &snapshot, outcome.state != InstallState::MissingLock)?;
     match outcome.state {
         InstallState::UpToDate => {
             details["status"] = Value::String("in-sync".to_string());

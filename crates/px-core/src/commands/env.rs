@@ -5,8 +5,8 @@ use anyhow::{bail, Result};
 use serde_json::{json, Value};
 
 use crate::{
-    attach_autosync_details, build_pythonpath, python_context_with_mode, CommandContext,
-    EnvGuard, ExecutionOutcome, PythonContext,
+    attach_autosync_details, build_pythonpath, python_context_with_mode, CommandContext, EnvGuard,
+    ExecutionOutcome, PythonContext,
 };
 
 #[derive(Clone, Debug)]
@@ -136,23 +136,19 @@ fn resolve_env_context(ctx: &CommandContext) -> Result<EnvContextResult, Executi
                     json!({ "error": err.to_string() }),
                 )
             })?;
-            let python = ctx
-                .python_runtime()
-                .detect_interpreter()
-                .map_err(|err| {
-                    ExecutionOutcome::failure(
-                        "failed to locate python interpreter",
-                        json!({ "error": err.to_string() }),
-                    )
-                })?;
-            let (pythonpath, allowed_paths) = build_pythonpath(ctx.fs(), &project_root).map_err(
-                |err| {
+            let python = ctx.python_runtime().detect_interpreter().map_err(|err| {
+                ExecutionOutcome::failure(
+                    "failed to locate python interpreter",
+                    json!({ "error": err.to_string() }),
+                )
+            })?;
+            let (pythonpath, allowed_paths) =
+                build_pythonpath(ctx.fs(), &project_root).map_err(|err| {
                     ExecutionOutcome::failure(
                         "failed to build PYTHONPATH",
                         json!({ "error": err.to_string() }),
                     )
-                },
-            )?;
+                })?;
             Ok(EnvContextResult {
                 ctx: PythonContext {
                     project_root,
@@ -177,10 +173,13 @@ fn is_missing_env(details: &Value) -> bool {
 }
 
 fn apply_fallback_hint(details: &mut Value, hint: Option<&str>) {
-    let Some(text) = hint else { return; };
+    let Some(text) = hint else {
+        return;
+    };
     if let Value::Object(ref mut map) = details {
-        map.entry("warning".to_string())
-            .or_insert_with(|| Value::String("project environment missing; showing base interpreter".to_string()));
+        map.entry("warning".to_string()).or_insert_with(|| {
+            Value::String("project environment missing; showing base interpreter".to_string())
+        });
         map.insert("hint".to_string(), Value::String(text.to_string()));
     }
 }

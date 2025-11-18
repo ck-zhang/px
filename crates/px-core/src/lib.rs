@@ -45,7 +45,6 @@ mod effects;
 mod pypi;
 mod runtime;
 mod traceback;
-mod workspace;
 
 pub use effects::SystemEffects;
 
@@ -135,7 +134,6 @@ pub enum CommandGroup {
     Env,
     Cache,
     Lock,
-    Workspace,
     Explain,
     Why,
     Tool,
@@ -162,7 +160,6 @@ impl fmt::Display for CommandGroup {
             CommandGroup::Env => "env",
             CommandGroup::Cache => "cache",
             CommandGroup::Lock => "lock",
-            CommandGroup::Workspace => "workspace",
             CommandGroup::Explain => "explain",
             CommandGroup::Why => "why",
             CommandGroup::Tool => "tool",
@@ -602,10 +599,6 @@ pub use commands::tool::{
 pub use commands::workflow::{
     workflow_run, workflow_test, WorkflowRunRequest, WorkflowTestRequest,
 };
-pub use commands::workspace::{
-    workspace_install, workspace_list, workspace_tidy, workspace_verify, WorkspaceInstallRequest,
-    WorkspaceListRequest, WorkspaceTidyRequest, WorkspaceVerifyRequest,
-};
 
 pub(crate) struct InstallOutcome {
     state: InstallState,
@@ -798,7 +791,10 @@ fn persist_project_state(
     write_project_state(fs, project_root, &state)
 }
 
-pub(crate) fn load_project_state(fs: &dyn effects::FileSystem, project_root: &Path) -> ProjectState {
+pub(crate) fn load_project_state(
+    fs: &dyn effects::FileSystem,
+    project_root: &Path,
+) -> ProjectState {
     let path = project_root.join(".px").join("state.json");
     match fs.read_to_string(&path) {
         Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),

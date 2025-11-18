@@ -3,11 +3,10 @@ use px_lockfile::{load_lockfile_optional, lock_prefetch_specs};
 use px_store::PrefetchOptions as StorePrefetchOptions;
 use serde_json::json;
 
-use crate::{manifest_snapshot, store_prefetch_specs, workspace, CommandContext, ExecutionOutcome};
+use crate::{manifest_snapshot, store_prefetch_specs, CommandContext, ExecutionOutcome};
 
 #[derive(Clone, Debug)]
 pub struct StorePrefetchRequest {
-    pub workspace: bool,
     pub dry_run: bool,
 }
 
@@ -33,11 +32,7 @@ fn store_prefetch_outcome(
         ));
     }
 
-    if request.workspace {
-        workspace::prefetch(ctx, request.dry_run)
-    } else {
-        handle_project_prefetch(ctx, request.dry_run)
-    }
+    handle_project_prefetch(ctx, request.dry_run)
 }
 
 fn handle_project_prefetch(ctx: &CommandContext, dry_run: bool) -> Result<ExecutionOutcome> {

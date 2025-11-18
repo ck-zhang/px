@@ -59,7 +59,7 @@ fn cache_prune_help_mentions_dry_run_example() {
 }
 
 #[test]
-fn cache_prefetch_help_shows_workspace_example() {
+fn cache_prefetch_help_mentions_description() {
     let output = help_output(&["debug", "cache", "prefetch", "--help"]);
     assert!(
         output.contains("Prefetch and cache artifacts for offline use."),

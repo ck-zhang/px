@@ -9,4 +9,3 @@ pub mod quality;
 pub mod store;
 pub mod tool;
 pub mod workflow;
-pub mod workspace;

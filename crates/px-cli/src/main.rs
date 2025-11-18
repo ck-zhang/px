@@ -308,7 +308,6 @@ fn error_code(info: CommandInfo) -> &'static str {
         CommandGroup::Env => "PX601",
         CommandGroup::Cache => "PX602",
         CommandGroup::Lock => "PX610",
-        CommandGroup::Workspace => "PX620",
         CommandGroup::Explain => "PX701",
         CommandGroup::Why => "PX702",
         CommandGroup::Tool => "PX640",
@@ -835,7 +834,6 @@ fn env_request_from_args(args: &EnvArgs) -> EnvRequest {
 
 fn store_prefetch_request_from_args(args: &StorePrefetchArgs) -> StorePrefetchRequest {
     StorePrefetchRequest {
-        workspace: args.workspace,
         dry_run: args.common.dry_run,
     }
 }
@@ -1171,8 +1169,6 @@ struct MigrateArgs {
 struct StorePrefetchArgs {
     #[command(flatten)]
     common: CommonFlags,
-    #[arg(long)]
-    workspace: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
