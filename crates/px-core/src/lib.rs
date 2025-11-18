@@ -908,7 +908,7 @@ fn compute_environment_id(lock_hash: &str, runtime: &RuntimeMetadata) -> String 
     format!("env-{short}")
 }
 
-fn compute_lock_hash(lock_path: &Path) -> Result<String> {
+pub(crate) fn compute_lock_hash(lock_path: &Path) -> Result<String> {
     let contents = fs::read(lock_path)?;
     let mut hasher = Sha256::new();
     hasher.update(contents);

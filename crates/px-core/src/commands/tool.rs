@@ -15,12 +15,14 @@ use time::OffsetDateTime;
 use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 
 use crate::{
-    build_pythonpath, ensure_project_environment_synced, install_snapshot, outcome_from_output,
-    refresh_project_site, runtime, CommandContext, ExecutionOutcome, InstallUserError,
+    build_pythonpath, compute_lock_hash, ensure_project_environment_synced, install_snapshot,
+    outcome_from_output, refresh_project_site, runtime, CommandContext, ExecutionOutcome,
+    InstallUserError,
 };
 use px_project::manifest::ManifestEditor;
 
 const TOOLS_DIR_ENV: &str = "PX_TOOLS_DIR";
+const TOOL_STORE_ENV: &str = "PX_TOOL_STORE";
 const MIN_PYTHON_REQUIREMENT: &str = ">=3.8";
 
 #[derive(Clone, Debug)]
@@ -90,11 +92,12 @@ pub fn tool_install(ctx: &CommandContext, request: ToolInstallRequest) -> Result
     let snapshot = px_project::ProjectSnapshot::read_from(&tool_root)?;
     install_snapshot(ctx, &snapshot, false, None)?;
     refresh_project_site(&snapshot, ctx)?;
+    let store_site = finalize_tool_environment(&tool_root, &snapshot, &runtime_selection)?;
 
     let pinned = ManifestEditor::open(&pyproject)?.dependencies();
     let installed_spec = pinned.first().cloned().unwrap_or(spec.clone());
     let timestamp = timestamp_string()?;
-    let console_scripts = collect_console_scripts(&tool_root)?;
+    let console_scripts = collect_console_scripts(&store_site)?;
     let metadata = ToolMetadata {
         name: normalized.clone(),
         spec,
@@ -155,11 +158,15 @@ pub fn tool_run(ctx: &CommandContext, request: ToolRunRequest) -> Result<Executi
             Err(other) => Err(other),
         };
     }
-    let script_target = request.console.as_ref();
+    let mut script_name = request.console.clone();
+    if script_name.is_none() && metadata.console_scripts.contains_key(&metadata.name) {
+        script_name = Some(metadata.name.clone());
+    }
+    let script_target = script_name.as_deref();
     let (pythonpath, allowed_paths) = build_pythonpath(ctx.fs(), &tool_root)?;
     let mut args = if let Some(script) = script_target {
         match metadata.console_scripts.get(script) {
-            Some(entrypoint) => vec!["-c".to_string(), console_entry_invoke(entrypoint)?],
+            Some(entrypoint) => vec!["-c".to_string(), console_entry_invoke(script, entrypoint)?],
             None => {
                 return Ok(ExecutionOutcome::user_error(
                     format!("tool '{}' has no console script `{}`", normalized, script),
@@ -309,15 +316,17 @@ fn resolve_runtime(explicit: Option<&str>) -> Result<runtime::RuntimeSelection> 
     })
 }
 
-fn console_entry_invoke(entry: &str) -> Result<String> {
+fn console_entry_invoke(script: &str, entry: &str) -> Result<String> {
     let (module, target) = entry
         .split_once(':')
         .ok_or_else(|| anyhow!("invalid console entry `{entry}`"))?;
-    let call = target.trim().replace('"', "\"");
-    let import = module.trim();
+    let call = target.trim();
+    let module_name = module.trim();
     Ok(format!(
-        "import importlib, sys;sys.exit(getattr(importlib.import_module(\"{}\"), \"{}\")())",
-        import, call
+        "import importlib, sys; sys.argv[0] = {script:?}; sys.exit(getattr(importlib.import_module({module:?}), {call:?})())",
+        script = script,
+        module = module_name,
+        call = call,
     ))
 }
 
@@ -396,9 +405,33 @@ fn timestamp_string() -> Result<String> {
     Ok(now.format(&time::format_description::well_known::Rfc3339)?)
 }
 
-fn collect_console_scripts(root: &Path) -> Result<BTreeMap<String, String>> {
+fn finalize_tool_environment(
+    root: &Path,
+    snapshot: &px_project::ProjectSnapshot,
+    runtime: &runtime::RuntimeSelection,
+) -> Result<PathBuf> {
+    let lock_hash = compute_lock_hash(&snapshot.lock_path)?;
+    let env_id = format!(
+        "tool-{}-{}-{}",
+        normalize_tool_name(&snapshot.name),
+        runtime.record.version.replace('.', "_"),
+        &lock_hash[..lock_hash.len().min(12)]
+    );
+    let env_root = tools_env_store_root()?.join(&env_id);
+    let site_path = env_root.join("site");
+    if !site_path.exists() {
+        copy_dir_contents(&root.join(".px").join("site"), &site_path)?;
+    }
+    update_tool_state(root, &site_path, &env_id)?;
+    let _ = fs::remove_dir_all(root.join(".px").join("site"));
+    Ok(site_path)
+}
+
+fn collect_console_scripts(site_dir: &Path) -> Result<BTreeMap<String, String>> {
     let mut scripts = BTreeMap::new();
-    let site_dir = read_site_packages_path(root)?;
+    if !site_dir.exists() {
+        return Ok(scripts);
+    }
     let pth = site_dir.join("px.pth");
     if !pth.exists() {
         return Ok(scripts);
@@ -476,25 +509,57 @@ fn parse_entry_points(path: &Path, scripts: &mut BTreeMap<String, String>) -> Re
     Ok(())
 }
 
-fn read_site_packages_path(root: &Path) -> Result<PathBuf> {
+fn tools_env_store_root() -> Result<PathBuf> {
+    let base = if let Some(dir) = env::var_os(TOOL_STORE_ENV) {
+        PathBuf::from(dir)
+    } else {
+        let home = home_dir().ok_or_else(|| anyhow!("home directory not found"))?;
+        home.join(".px").join("tools").join("store")
+    };
+    fs::create_dir_all(&base)?;
+    let envs = base.join("envs");
+    fs::create_dir_all(&envs)?;
+    Ok(envs)
+}
+
+fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
+    if !src.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_contents(&path, &target)?;
+        } else {
+            fs::copy(&path, &target)
+                .with_context(|| format!("copying {} to {}", path.display(), target.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn update_tool_state(root: &Path, site_path: &Path, env_id: &str) -> Result<()> {
     let path = root.join(".px").join("state.json");
-    let contents =
-        fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let state: ToolState = serde_json::from_str(&contents).context("invalid tool state")?;
-    let env = state
-        .current_env
-        .ok_or_else(|| anyhow!("tool environment missing in state"))?;
-    Ok(PathBuf::from(env.site_packages))
-}
-
-#[derive(Deserialize)]
-struct ToolState {
-    current_env: Option<ToolEnvState>,
-}
-
-#[derive(Deserialize)]
-struct ToolEnvState {
-    site_packages: String,
+    let contents = fs::read_to_string(&path)?;
+    let mut value: serde_json::Value = serde_json::from_str(&contents)?;
+    if let Some(env) = value
+        .as_object_mut()
+        .and_then(|map| map.get_mut("current_env"))
+        .and_then(Value::as_object_mut)
+    {
+        env.insert(
+            "site_packages".into(),
+            Value::String(site_path.display().to_string()),
+        );
+        env.insert("id".into(), Value::String(env_id.to_string()));
+    }
+    let mut buf = serde_json::to_vec_pretty(&value)?;
+    buf.push(b'\n');
+    fs::write(path, buf)?;
+    Ok(())
 }
 
 fn write_console_shims(
