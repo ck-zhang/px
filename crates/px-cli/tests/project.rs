@@ -346,6 +346,62 @@ fn px_commands_walk_up_to_project_root() {
     );
 }
 
+#[test]
+fn project_status_reports_missing_lock() {
+    let (_tmp, project) = prepare_fixture("status-missing-lock");
+    let lock = project.join("px.lock");
+    fs::remove_file(&lock).expect("remove px.lock");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["--json", "status"])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(payload["details"]["status"], "missing-lock");
+    let hint = payload["details"]["hint"].as_str().expect("hint string");
+    assert!(
+        hint.contains("px sync"),
+        "missing-lock hint should suggest px sync: {hint:?}"
+    );
+}
+
+#[test]
+fn project_status_detects_manifest_drift() {
+    let (_tmp, project) = prepare_fixture("status-drift");
+    let pyproject = project.join("pyproject.toml");
+    let mut doc: DocumentMut = fs::read_to_string(&pyproject)
+        .expect("read pyproject")
+        .parse()
+        .expect("parse pyproject");
+    if let Some(array) = doc["project"]["dependencies"].as_array_mut() {
+        array.push("requests==2.32.3");
+    }
+    fs::write(&pyproject, doc.to_string()).expect("write pyproject");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["--json", "status"])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(payload["details"]["status"], "drift");
+    let issues = payload["details"]["issues"]
+        .as_array()
+        .expect("issues array");
+    assert!(
+        !issues.is_empty(),
+        "a drift status should include issue summaries: {payload:?}"
+    );
+    let hint = payload["details"]["hint"].as_str().expect("hint string");
+    assert!(
+        hint.contains("px sync"),
+        "drift hint should suggest px sync: {hint:?}"
+    );
+}
+
 fn scaffold_demo(temp: &TempDir, package: &str) {
     cargo_bin_cmd!("px")
         .current_dir(temp.path())

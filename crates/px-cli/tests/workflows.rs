@@ -297,6 +297,34 @@ fn run_errors_when_no_default_entry_available() {
     assert!(hint.contains("px migrate --apply"));
 }
 
+#[test]
+fn run_frozen_errors_when_environment_missing() {
+    let (_tmp, project) = prepare_fixture("run-frozen-missing-env");
+    if project.join(".px").exists() {
+        fs::remove_dir_all(project.join(".px")).expect("clean .px");
+    }
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["--json", "run", "--frozen"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    let message = payload["message"].as_str().expect("message string");
+    assert!(
+        message.contains("project environment missing"),
+        "expected strict mode to fail when env missing: {message:?}"
+    );
+    assert_eq!(payload["details"]["reason"], "missing_env");
+    let hint = payload["details"]["hint"].as_str().expect("hint field");
+    assert!(
+        hint.contains("px sync"),
+        "strict-mode hint should recommend px sync: {hint:?}"
+    );
+}
+
 fn write_module(project: &Path, module: &str, body: &str) {
     let module_path = project.join("sample_px_app").join(format!("{}.py", module));
     fs::write(module_path, body).expect("write module");

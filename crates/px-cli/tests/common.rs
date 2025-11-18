@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use assert_cmd::assert::Assert;
+use assert_cmd::{assert::Assert, cargo::cargo_bin_cmd};
 use serde_json::Value;
 use std::env;
 use tempfile::TempDir;
@@ -78,6 +78,38 @@ fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
 
 pub fn parse_json(assert: &Assert) -> Value {
     serde_json::from_slice(&assert.get_output().stdout).expect("valid json")
+}
+
+pub fn init_empty_project(prefix: &str) -> (TempDir, PathBuf) {
+    let temp = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .expect("tempdir");
+    cargo_bin_cmd!("px")
+        .current_dir(temp.path())
+        .arg("init")
+        .assert()
+        .success();
+    let root = temp.path().to_path_buf();
+    (temp, root)
+}
+
+pub fn project_identity(root: &Path) -> (String, String, String) {
+    let pyproject = root.join("pyproject.toml");
+    let doc: DocumentMut = fs::read_to_string(&pyproject)
+        .expect("read pyproject")
+        .parse()
+        .expect("parse pyproject");
+    let name = doc["project"]["name"]
+        .as_str()
+        .expect("project name")
+        .to_string();
+    let version = doc["project"]["version"]
+        .as_str()
+        .expect("project version")
+        .to_string();
+    let normalized = name.replace('-', "_");
+    (name, normalized, version)
 }
 
 pub fn require_online() -> bool {
