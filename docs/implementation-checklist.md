@@ -32,7 +32,7 @@ Reminder: use [ ] for items that simply haven’t been built yet, and reserve [!
 ## Error & Output Model
 
 - [x] **Heuristics for missing imports & drift** – Implemented via structured tracebacks and `InstallUserError` details (spec 8.2) (`px-core/src/traceback.rs`, `px-core/src/lib.rs:1868-2040`).
-- [ ] **PX-styled envelopes (`PX123 / Why / Fix`)** – Current output just prints `ExecutionOutcome` messages with optional hints; there is no PX code catalog or bullet formatting, and the CLI flag is `--trace` instead of spec’s `--debug` behavior (`px-core/src/lib.rs:397`, `px-cli/src/style.rs`, `px-cli/src/main.rs:662`).
+- [x] **PX-styled envelopes (`PX123 / Why / Fix`)** – Human output now emits PX codes, “Why” bullets, and “Fix” bullets with colored headers plus post-summary tracebacks per spec 8.1 (`crates/px-cli/src/main.rs:70-230`, `crates/px-cli/src/style.rs:11-62`).
 - [ ] **Resolver error UX** – Spec 5.2/5.3 demands “What / Why / Fix” copy-pasteable suggestions when resolution fails; existing errors provide single-line hints only (`px-core/src/commands/project.rs:124-259`).
 
 ## Next Actions

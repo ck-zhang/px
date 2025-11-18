@@ -29,6 +29,14 @@ impl Style {
         self.paint(text, Tone::Blue, false)
     }
 
+    pub fn error_header(&self, text: &str) -> String {
+        self.paint(text, Tone::Red, true)
+    }
+
+    pub fn fix_bullet(&self, text: &str) -> String {
+        self.paint(text, Tone::Blue, false)
+    }
+
     pub fn traceback_header(&self, text: &str) -> String {
         if !self.enabled {
             return text.to_string();

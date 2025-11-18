@@ -109,33 +109,57 @@ fn emit_output(cli: &PxCli, info: CommandInfo, outcome: &px_core::ExecutionOutco
             let line = format!("px {}: {}", info.name, note);
             println!("{}", style.info(&line));
         }
-        if is_passthrough(&outcome.details) {
-            println!("{}", outcome.message);
-        } else {
-            let message = px_core::format_status_message(info, &outcome.message);
-            println!("{}", style.status(&outcome.status, &message));
-            let mut hint_emitted = false;
-            if let Some(trace) = traceback_from_details(&style, &outcome.details) {
-                println!("{}", trace.body);
-                if let Some(line) = trace.hint_line {
-                    println!("{}", line);
-                    hint_emitted = true;
+        let migrate_table = render_migrate_table(&style, info, &outcome.details);
+        match outcome.status {
+            CommandStatus::Ok => {
+                if is_passthrough(&outcome.details) {
+                    println!("{}", outcome.message);
+                } else {
+                    let message = px_core::format_status_message(info, &outcome.message);
+                    println!("{}", style.status(&outcome.status, &message));
+                    let mut hint_emitted = false;
+                    if let Some(trace) = traceback_from_details(&style, &outcome.details) {
+                        println!("{}", trace.body);
+                        if let Some(line) = trace.hint_line {
+                            println!("{}", line);
+                            hint_emitted = true;
+                        }
+                    }
+                    if !hint_emitted {
+                        if let Some(hint) = hint_from_details(&outcome.details) {
+                            let hint_line = format!("Tip: {hint}");
+                            println!("{}", style.info(&hint_line));
+                        }
+                    }
                 }
             }
-            if !hint_emitted {
-                if let Some(hint) = hint_from_details(&outcome.details) {
-                    let hint_label = match outcome.status {
-                        CommandStatus::Ok => "Tip",
-                        CommandStatus::UserError => "Hint",
-                        CommandStatus::Failure => "Note",
-                    };
-                    let hint_line = format!("{hint_label}: {hint}");
-                    println!("{}", style.info(&hint_line));
+            _ => {
+                let header = format!("{}  {}", error_code(info), outcome.message);
+                println!("{}", style.error_header(&header));
+                println!();
+                println!("Why:");
+                for reason in collect_why_bullets(&outcome.details, &outcome.message) {
+                    println!("  • {}", reason);
+                }
+                let fixes = collect_fix_bullets(&outcome.details);
+                if !fixes.is_empty() {
+                    println!();
+                    println!("Fix:");
+                    for fix in fixes {
+                        println!("{}", style.fix_bullet(&format!("  • {fix}")));
+                    }
+                }
+                if let Some(trace) = traceback_from_details(&style, &outcome.details) {
+                    println!();
+                    println!("{}", trace.body);
+                    if let Some(line) = trace.hint_line {
+                        println!("{}", line);
+                    }
                 }
             }
-            if let Some(table) = render_migrate_table(&style, info, &outcome.details) {
-                println!("{}", table);
-            }
+        }
+        if let Some(table) = migrate_table {
+            println!("{}", table);
         }
     }
 
@@ -259,6 +283,94 @@ fn format_package_table(style: &Style, rows: &[PackageRow]) -> String {
     }
 
     lines.join("\n")
+}
+
+fn error_code(info: CommandInfo) -> &'static str {
+    match info.group {
+        CommandGroup::Init => "PX101",
+        CommandGroup::Add => "PX110",
+        CommandGroup::Remove => "PX111",
+        CommandGroup::Sync => "PX120",
+        CommandGroup::Update => "PX130",
+        CommandGroup::Status => "PX140",
+        CommandGroup::Run => "PX201",
+        CommandGroup::Test => "PX202",
+        CommandGroup::Fmt => "PX301",
+        CommandGroup::Lint => "PX302",
+        CommandGroup::Tidy => "PX303",
+        CommandGroup::Build => "PX401",
+        CommandGroup::Publish => "PX402",
+        CommandGroup::Migrate => "PX501",
+        CommandGroup::Env => "PX601",
+        CommandGroup::Cache => "PX602",
+        CommandGroup::Lock => "PX610",
+        CommandGroup::Workspace => "PX620",
+        CommandGroup::Explain => "PX701",
+        CommandGroup::Why => "PX702",
+    }
+}
+
+fn collect_why_bullets(details: &Value, fallback: &str) -> Vec<String> {
+    let mut bullets = Vec::new();
+    if let Some(reason) = details.get("reason").and_then(Value::as_str) {
+        push_unique(&mut bullets, reason);
+    }
+    if let Some(status) = details.get("status").and_then(Value::as_str) {
+        push_unique(&mut bullets, format!("Status: {status}"));
+    }
+    if let Some(issues) = details.get("issues").and_then(Value::as_array) {
+        if !issues.is_empty() {
+            push_unique(
+                &mut bullets,
+                format!("Detected {} issue(s) in the environment", issues.len()),
+            );
+        }
+    }
+    if let Some(drift) = details.get("drift").and_then(Value::as_array) {
+        if !drift.is_empty() {
+            push_unique(
+                &mut bullets,
+                format!("Manifest drift detected ({} entries)", drift.len()),
+            );
+        }
+    }
+    if bullets.is_empty() {
+        bullets.push(fallback.to_string());
+    }
+    bullets
+}
+
+fn collect_fix_bullets(details: &Value) -> Vec<String> {
+    let mut fixes = Vec::new();
+    if let Some(hint) = hint_from_details(details) {
+        push_unique(&mut fixes, hint.to_string());
+    }
+    if let Some(rec) = details
+        .as_object()
+        .and_then(|map| map.get("recommendation"))
+        .and_then(Value::as_object)
+    {
+        if let Some(command) = rec.get("command").and_then(Value::as_str) {
+            push_unique(&mut fixes, format!("Run `{command}`"));
+        }
+        if let Some(hint) = rec.get("hint").and_then(Value::as_str) {
+            push_unique(&mut fixes, hint.to_string());
+        }
+    }
+    if fixes.is_empty() {
+        fixes.push("Re-run with --help for usage or inspect the output above.".to_string());
+    }
+    fixes
+}
+
+fn push_unique(vec: &mut Vec<String>, text: impl Into<String>) {
+    let entry = text.into();
+    if entry.trim().is_empty() {
+        return;
+    }
+    if !vec.iter().any(|existing| existing == &entry) {
+        vec.push(entry);
+    }
 }
 
 fn core_call(
