@@ -1,0 +1,12 @@
+version = 1
+
+[metadata]
+px_version = "0.1.0"
+created_at = "2025-11-17T15:05:18.915746892Z"
+mode = "p0-pinned"
+
+[project]
+name = "traceback-lab"
+
+[python]
+requirement = ">=3.12"

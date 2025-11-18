@@ -42,6 +42,7 @@ fn cache_path_outcome(ctx: &CommandContext) -> Result<ExecutionOutcome> {
         json!({
             "status": "path",
             "cache_path": path_str,
+            "path": path_str,
             "source": cache.source,
         }),
     ))

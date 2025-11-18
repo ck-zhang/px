@@ -37,6 +37,10 @@ pub fn workspace_fixture_source() -> PathBuf {
     workspace_root().join("fixtures").join("workspace_dual")
 }
 
+pub fn traceback_fixture_source() -> PathBuf {
+    workspace_root().join("fixtures").join("traceback_lab")
+}
+
 pub fn prepare_workspace_fixture(prefix: &str) -> (TempDir, PathBuf) {
     let temp = tempfile::Builder::new()
         .prefix(prefix)
@@ -44,6 +48,16 @@ pub fn prepare_workspace_fixture(prefix: &str) -> (TempDir, PathBuf) {
         .expect("tempdir");
     let dst = temp.path().join("workspace_dual");
     copy_dir_all(&workspace_fixture_source(), &dst).expect("copy workspace");
+    (temp, dst)
+}
+
+pub fn prepare_traceback_fixture(prefix: &str) -> (TempDir, PathBuf) {
+    let temp = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .expect("tempdir");
+    let dst = temp.path().join("traceback_lab");
+    copy_dir_all(&traceback_fixture_source(), &dst).expect("copy traceback fixture");
     (temp, dst)
 }
 

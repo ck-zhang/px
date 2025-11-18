@@ -1,9 +1,12 @@
 use std::{
+    collections::HashSet,
     env, fs,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use pep508_rs::{Requirement as PepRequirement, VersionOrUrl};
 use serde_json::{json, Value};
 use toml_edit::{DocumentMut, Item};
 
@@ -12,7 +15,9 @@ use crate::{
     refresh_project_site, relative_path_str, CommandContext, ExecutionOutcome, InstallOutcome,
     InstallState, InstallUserError, ManifestSnapshot,
 };
-use px_project::{discover_project_root, infer_package_name, ManifestEditor, ProjectInitializer};
+use px_project::{
+    discover_project_root, infer_package_name, InstallOverride, ManifestEditor, ProjectInitializer,
+};
 
 #[derive(Clone, Debug)]
 pub struct ProjectInitRequest {
@@ -297,13 +302,197 @@ pub fn project_status(ctx: &CommandContext) -> Result<ExecutionOutcome> {
 }
 
 pub fn project_update(
-    _ctx: &CommandContext,
+    ctx: &CommandContext,
     request: ProjectUpdateRequest,
 ) -> Result<ExecutionOutcome> {
-    Ok(ExecutionOutcome::success(
-        "stubbed project update",
-        json!({ "specs": request.specs }),
-    ))
+    let root = ctx.project_root()?;
+    let pyproject_path = root.join("pyproject.toml");
+    let lock_path = root.join("px.lock");
+    if !lock_path.exists() {
+        return Ok(ExecutionOutcome::user_error(
+            "px update requires an existing px.lock (run `px sync`)",
+            json!({
+                "lockfile": lock_path.display().to_string(),
+                "hint": "run `px sync` to create px.lock before updating",
+            }),
+        ));
+    }
+
+    let snapshot = manifest_snapshot()?;
+    if snapshot.dependencies.is_empty() {
+        return Ok(ExecutionOutcome::user_error(
+            "px update: no dependencies declared",
+            json!({
+                "pyproject": pyproject_path.display().to_string(),
+                "hint": "add dependencies with `px add` before running update",
+            }),
+        ));
+    }
+
+    let targets: HashSet<String> = request
+        .specs
+        .iter()
+        .map(|spec| dependency_name(spec))
+        .filter(|name| !name.is_empty())
+        .collect();
+    let update_all = targets.is_empty();
+
+    let mut override_specs = snapshot.dependencies.clone();
+    let mut ready = Vec::new();
+    let mut ready_seen = HashSet::new();
+    let mut unsupported = Vec::new();
+    let mut unsupported_seen = HashSet::new();
+    let mut observed = HashSet::new();
+
+    for spec in override_specs.iter_mut() {
+        let name = dependency_name(spec);
+        if name.is_empty() {
+            continue;
+        }
+        if !update_all && !targets.contains(&name) {
+            continue;
+        }
+        observed.insert(name.clone());
+        match loosen_dependency_spec(spec)? {
+            LoosenOutcome::Modified(rewritten) => {
+                *spec = rewritten;
+                if ready_seen.insert(name.clone()) {
+                    ready.push(name.clone());
+                }
+            }
+            LoosenOutcome::AlreadyLoose => {
+                if ready_seen.insert(name.clone()) {
+                    ready.push(name.clone());
+                }
+            }
+            LoosenOutcome::Unsupported => {
+                if unsupported_seen.insert(name.clone()) {
+                    unsupported.push(name.clone());
+                }
+            }
+        }
+    }
+
+    if !update_all {
+        let missing: Vec<String> = targets.difference(&observed).cloned().collect();
+        if !missing.is_empty() {
+            return Ok(ExecutionOutcome::user_error(
+                "package is not a direct dependency",
+                json!({
+                    "packages": missing,
+                    "hint": "use `px add` to declare dependencies before updating",
+                }),
+            ));
+        }
+    }
+
+    if ready.is_empty() {
+        let mut details = json!({
+            "pyproject": pyproject_path.display().to_string(),
+        });
+        if !unsupported.is_empty() {
+            details["unsupported"] = json!(unsupported);
+            details["hint"] = json!("Dependencies pinned via direct URLs must be updated manually");
+        }
+        let message = if update_all {
+            "no dependencies eligible for px update"
+        } else {
+            "px update: requested packages cannot be updated"
+        };
+        return Ok(ExecutionOutcome::user_error(message, details));
+    }
+
+    let override_data = InstallOverride {
+        dependencies: override_specs,
+        pins: Vec::new(),
+    };
+
+    let install_outcome = match install_snapshot(ctx, &snapshot, false, Some(&override_data)) {
+        Ok(result) => result,
+        Err(err) => match err.downcast::<InstallUserError>() {
+            Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+            Err(err) => return Err(err),
+        },
+    };
+
+    refresh_project_site(&snapshot, ctx.fs())?;
+
+    let updated_count = ready.len();
+    let primary_label = ready.first().cloned();
+    let mut details = json!({
+        "pyproject": pyproject_path.display().to_string(),
+        "lockfile": snapshot.lock_path.display().to_string(),
+        "targets": ready,
+    });
+    if !unsupported.is_empty() {
+        details["skipped"] = json!(unsupported);
+        details["hint"] = json!("Dependencies pinned via direct URLs must be updated manually");
+    }
+
+    let message = if update_all {
+        "updated project dependencies".to_string()
+    } else if updated_count == 1 {
+        format!(
+            "updated {}",
+            primary_label.unwrap_or_else(|| "dependency".to_string())
+        )
+    } else {
+        format!("updated {} dependencies", updated_count)
+    };
+
+    match install_outcome.state {
+        InstallState::Installed | InstallState::UpToDate => {
+            Ok(ExecutionOutcome::success(message, details))
+        }
+        InstallState::Drift | InstallState::MissingLock => Ok(ExecutionOutcome::failure(
+            "px update failed to refresh px.lock",
+            json!({ "lockfile": snapshot.lock_path.display().to_string() }),
+        )),
+    }
+}
+
+#[derive(Debug)]
+enum LoosenOutcome {
+    Modified(String),
+    AlreadyLoose,
+    Unsupported,
+}
+
+fn loosen_dependency_spec(spec: &str) -> Result<LoosenOutcome> {
+    let trimmed = crate::strip_wrapping_quotes(spec.trim());
+    let requirement = PepRequirement::from_str(trimmed)
+        .map_err(|err| anyhow!("unable to parse dependency spec `{}`: {err}", spec))?;
+    match requirement.version_or_url {
+        Some(VersionOrUrl::VersionSpecifier(_)) => {
+            let mut unlocked = requirement.clone();
+            unlocked.version_or_url = None;
+            Ok(LoosenOutcome::Modified(unlocked.to_string()))
+        }
+        Some(VersionOrUrl::Url(_)) => Ok(LoosenOutcome::Unsupported),
+        None => Ok(LoosenOutcome::AlreadyLoose),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loosen_dependency_spec_removes_pin() {
+        match loosen_dependency_spec("requests==2.32.0").expect("parsed") {
+            LoosenOutcome::Modified(value) => assert_eq!(value, "requests"),
+            other => panic!("unexpected outcome: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn loosen_dependency_spec_detects_direct_urls() {
+        let spec = "demo @ https://example.invalid/demo-1.0.0.whl";
+        assert!(matches!(
+            loosen_dependency_spec(spec).expect("parsed"),
+            LoosenOutcome::Unsupported
+        ));
+    }
 }
 
 fn resolve_python_requirement_arg(raw: Option<&str>) -> String {

@@ -2194,6 +2194,7 @@ pub fn format_status_message(info: CommandInfo, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::workflow::python_script_target;
     use crate::pypi::{PypiDigests, PypiFile};
     use px_lockfile::LockedDependency;
     use std::path::PathBuf;

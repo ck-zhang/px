@@ -403,7 +403,7 @@ fn looks_like_path_target(entry: &str) -> bool {
     path.components().count() > 1 || entry.contains('/') || entry.contains('\\')
 }
 
-fn python_script_target(entry: &str, root: &Path) -> Option<(String, String)> {
+pub(crate) fn python_script_target(entry: &str, root: &Path) -> Option<(String, String)> {
     if !looks_like_python_script(entry) {
         return None;
     }
