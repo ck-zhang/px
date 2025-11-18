@@ -5,12 +5,11 @@ use clap::{value_parser, ArgAction, Args, Parser, Subcommand, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
 use px_core::{
     self, CachePathRequest, CachePruneRequest, CacheStatsRequest, CommandContext, CommandGroup,
-    CommandInfo, CommandStatus, EnvMode as CoreEnvMode, EnvRequest, GlobalOptions, LockDiffRequest,
-    LockUpgradeRequest, MigrateRequest, OutputBuildRequest, OutputPublishRequest,
-    ProjectAddRequest, ProjectInitRequest, ProjectInstallRequest, ProjectRemoveRequest,
-    ProjectUpdateRequest, QualityTidyRequest, StorePrefetchRequest, SystemEffects,
-    ToolCommandRequest, WorkflowRunRequest, WorkflowTestRequest, WorkspaceInstallRequest,
-    WorkspaceListRequest, WorkspaceTidyRequest, WorkspaceVerifyRequest,
+    CommandInfo, CommandStatus, EnvMode as CoreEnvMode, EnvRequest, GlobalOptions, MigrateRequest,
+    OutputBuildRequest, OutputPublishRequest, ProjectAddRequest, ProjectInitRequest,
+    ProjectInstallRequest, ProjectRemoveRequest, ProjectUpdateRequest, QualityTidyRequest,
+    StorePrefetchRequest, SystemEffects, ToolCommandRequest, WorkflowRunRequest,
+    WorkflowTestRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -40,8 +39,6 @@ const PX_BEFORE_HELP: &str = concat!(
     "  publish          Upload previously built artifacts (dry-run by default).\n",
     "  migrate          Create px metadata for an existing project.\n\n",
     "\x1b[1;36mAdvanced\x1b[0m\n",
-    "  lock ...         Inspect or upgrade px.lock before running `px sync`.\n",
-    "  workspace ...    Apply sync/tidy/status across all workspace members.\n",
     "  debug env        Show interpreter info or pythonpath.\n",
     "  debug cache      Inspect cached artifacts (path, stats, prune, prefetch).\n",
     "  debug tidy       Clean cached metadata and stray files.\n",
@@ -396,35 +393,6 @@ fn dispatch_command(
             let info = CommandInfo::new(CommandGroup::Status, "status");
             core_call(info, px_core::project_status(ctx))
         }
-        CommandGroupCli::Lock(cmd) => match cmd {
-            LockCommand::Diff => {
-                let info = CommandInfo::new(CommandGroup::Lock, "diff");
-                core_call(info, px_core::lock_diff(ctx, LockDiffRequest))
-            }
-            LockCommand::Upgrade => {
-                let info = CommandInfo::new(CommandGroup::Lock, "upgrade");
-                core_call(info, px_core::lock_upgrade(ctx, LockUpgradeRequest))
-            }
-        },
-        CommandGroupCli::Workspace(cmd) => match cmd {
-            WorkspaceCommand::List => {
-                let info = CommandInfo::new(CommandGroup::Workspace, "list");
-                core_call(info, px_core::workspace_list(ctx, WorkspaceListRequest))
-            }
-            WorkspaceCommand::Verify => {
-                let info = CommandInfo::new(CommandGroup::Workspace, "verify");
-                core_call(info, px_core::workspace_verify(ctx, WorkspaceVerifyRequest))
-            }
-            WorkspaceCommand::Sync(args) => {
-                let info = CommandInfo::new(CommandGroup::Workspace, "sync");
-                let request = workspace_sync_request_from_args(args);
-                core_call(info, px_core::workspace_install(ctx, request))
-            }
-            WorkspaceCommand::Tidy => {
-                let info = CommandInfo::new(CommandGroup::Workspace, "tidy");
-                core_call(info, px_core::workspace_tidy(ctx, WorkspaceTidyRequest))
-            }
-        },
         CommandGroupCli::Debug(cmd) => match cmd {
             DebugCommand::Env(args) => handle_env_command(ctx, args),
             DebugCommand::Cache(args) => handle_cache_command(ctx, &args.command),
@@ -518,15 +486,6 @@ fn dispatch_command(
                 core_call(info, px_core::output_publish(ctx, request))
             }
         },
-        CommandGroupCli::Infra(InfraCommand::Env(args)) => handle_env_command(ctx, args),
-        CommandGroupCli::Infra(InfraCommand::Cache(args)) => {
-            handle_cache_command(ctx, &args.command)
-        }
-        CommandGroupCli::Store(StoreCommand::Prefetch(args)) => {
-            let info = CommandInfo::new(CommandGroup::Cache, "prefetch");
-            let request = store_prefetch_request_from_args(args);
-            core_call(info, px_core::store_prefetch(ctx, request))
-        }
         CommandGroupCli::Onboard(args) => {
             eprintln!("`px onboard` is deprecated; use `px migrate`.");
             let info = CommandInfo::new(CommandGroup::Migrate, "migrate");
@@ -609,12 +568,6 @@ fn output_publish_request_from_args(args: &PublishArgs) -> OutputPublishRequest 
 
 fn project_sync_request_from_args(args: &SyncArgs) -> ProjectInstallRequest {
     ProjectInstallRequest {
-        frozen: args.frozen,
-    }
-}
-
-fn workspace_sync_request_from_args(args: &WorkspaceSyncArgs) -> WorkspaceInstallRequest {
-    WorkspaceInstallRequest {
         frozen: args.frozen,
     }
 }
@@ -741,13 +694,6 @@ enum CommandGroupCli {
     #[command(about = "Create px metadata for an existing project.")]
     Migrate(MigrateArgs),
     #[command(
-        about = "Advanced lock maintenance (fix issues via `px sync`).",
-        subcommand
-    )]
-    Lock(LockCommand),
-    #[command(about = "Apply sync/tidy/status across workspace members.", subcommand)]
-    Workspace(WorkspaceCommand),
-    #[command(
         about = "Advanced utilities (env, cache, fmt, lint, tidy, why).",
         subcommand
     )]
@@ -760,10 +706,6 @@ enum CommandGroupCli {
     Quality(QualityCommand),
     #[command(subcommand, hide = true)]
     Output(OutputCommand),
-    #[command(subcommand, hide = true)]
-    Infra(InfraCommand),
-    #[command(subcommand, hide = true)]
-    Store(StoreCommand),
     #[command(name = "onboard", hide = true)]
     Onboard(MigrateArgs),
 }
@@ -826,18 +768,6 @@ enum OutputCommand {
         override_usage = "px output publish [--dry-run] [--registry NAME] [--token-env VAR]"
     )]
     Publish(PublishArgs),
-}
-
-#[derive(Subcommand, Debug)]
-enum InfraCommand {
-    Cache(CacheArgs),
-    Env(EnvArgs),
-}
-
-#[derive(Subcommand, Debug)]
-enum StoreCommand {
-    #[command(about = "Legacy alias for `px cache prefetch` (workspace optional).")]
-    Prefetch(StorePrefetchArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -923,32 +853,6 @@ struct StorePrefetchArgs {
     common: CommonFlags,
     #[arg(long)]
     workspace: bool,
-}
-
-#[derive(Subcommand, Debug)]
-enum LockCommand {
-    #[command(about = "Compare px.lock to pyproject dependencies (run `px sync` to fix).")]
-    Diff,
-    #[command(about = "Rewrite px.lock to the latest format; rerun `px sync` afterward.")]
-    Upgrade,
-}
-
-#[derive(Subcommand, Debug)]
-enum WorkspaceCommand {
-    #[command(about = "List workspace members discovered in pyproject.toml.")]
-    List,
-    #[command(about = "Verify each workspace member with `px status`.")]
-    Verify,
-    #[command(about = "Run `px sync` for every workspace member.")]
-    Sync(WorkspaceSyncArgs),
-    #[command(about = "Run `px tidy` across workspace members.")]
-    Tidy,
-}
-
-#[derive(Args, Debug)]
-struct WorkspaceSyncArgs {
-    #[arg(long)]
-    frozen: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
