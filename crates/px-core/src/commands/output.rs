@@ -69,7 +69,7 @@ fn output_build_outcome(
 
     ctx.fs()
         .create_dir_all(&out_dir)
-        .context("creating build directory")?;
+        .with_context(|| format!("creating output directory at {}", out_dir.display()))?;
     let (name, version) = project_name_version(&py_ctx.project_root)?;
     let mut produced = Vec::new();
     if targets.sdist {
@@ -135,12 +135,12 @@ fn output_publish_outcome(
         .clone()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| ctx.config().publish.default_token_env.to_string());
-    let build_dir = py_ctx.project_root.join("build");
-    let artifacts = collect_artifact_summaries(&build_dir, None, &py_ctx)?;
+    let dist_dir = py_ctx.project_root.join("dist");
+    let artifacts = collect_artifact_summaries(&dist_dir, None, &py_ctx)?;
     if artifacts.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "px publish: no artifacts found (run `px build` first)",
-            json!({ "build_dir": relative_path_str(&build_dir, &py_ctx.project_root) }),
+            json!({ "dist_dir": relative_path_str(&dist_dir, &py_ctx.project_root) }),
         ));
     }
 
@@ -241,7 +241,7 @@ fn resolve_output_dir_from_request(ctx: &PythonContext, out: Option<&PathBuf>) -
             Ok(ctx.project_root.join(path))
         }
     } else {
-        Ok(ctx.project_root.join("build"))
+        Ok(ctx.project_root.join("dist"))
     }
 }
 

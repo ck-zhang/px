@@ -8,7 +8,7 @@ Reminder: use [ ] for items that simply haven’t been built yet, and reserve [!
 - [x] **Project discovery & ownership** – Matches spec 2.1/2.2: project roots are detected via `px.lock` or `[tool.px]`, and `px init` only edits `[project]`/`[tool.px]` (`px_project/src/snapshot.rs:56`, `px-project/src/init.rs:15`).
 - [x] **Self-consistency guarantees** – All mutating commands snapshot `pyproject.toml`/`px.lock`, restore on failure, and require `px sync` to rehydrate envs (`px-core/src/commands/project.rs:124`, `px-core/src/commands/project.rs:611`).
 - [!] **px-managed runtimes/envs** – Spec 2.2/3.2/5.1 call for `.px/envs/...` tied to lock/runtime, but current flows just call the process Python and rely on `.px/site/px.pth`; this is blocked on designing the runtime registry + materialization story.
-- [ ] **Artifacts live in `dist/`** – Spec 2.3/4.4 forbids creating `build/` unless configured, yet `px build` writes to `project_root/build` (`px-core/src/commands/output.rs:236`).
+- [x] **Artifacts live in `dist/`** – `px build` now defaults to `project_root/dist`, and `px publish` reads from the same directory per spec 2.3/4.4 (`crates/px-core/src/commands/output.rs:64-197`, `crates/px-cli/src/main.rs:820`).
 
 ## Core Workflow Commands
 

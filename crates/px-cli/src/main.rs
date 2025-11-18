@@ -817,12 +817,12 @@ enum QualityCommand {
 #[derive(Subcommand, Debug)]
 enum OutputCommand {
     #[command(
-        about = "Build sdists and wheels into the project build/ folder.",
+        about = "Build sdists and wheels into the project dist/ folder.",
         override_usage = "px output build [sdist|wheel|both] [--out DIR]"
     )]
     Build(BuildArgs),
     #[command(
-        about = "Publish build artifacts (dry-run by default).",
+        about = "Publish dist/ artifacts (dry-run by default).",
         override_usage = "px output publish [--dry-run] [--registry NAME] [--token-env VAR]"
     )]
     Publish(PublishArgs),
