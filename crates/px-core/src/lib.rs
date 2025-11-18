@@ -34,8 +34,8 @@ use px_store::{ArtifactRequest, CacheLocation, PrefetchSpec as StorePrefetchSpec
 use reqwest::{blocking::Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
-use tracing::warn;
 
 use crate::pypi::{PypiFile, PypiReleaseResponse};
 use crate::traceback::{analyze_python_traceback, TracebackContext};
@@ -691,7 +691,7 @@ pub(crate) fn install_snapshot(
 
 pub(crate) fn refresh_project_site(
     snapshot: &ManifestSnapshot,
-    fs: &dyn effects::FileSystem,
+    ctx: &CommandContext,
 ) -> Result<()> {
     let lock = load_lockfile_optional(&snapshot.lock_path)?.ok_or_else(|| {
         anyhow!(
@@ -699,16 +699,34 @@ pub(crate) fn refresh_project_site(
             snapshot.lock_path.display()
         )
     })?;
-    materialize_project_site(snapshot, &lock, fs)
+    let runtime = detect_runtime_metadata(ctx, snapshot)?;
+    let lock_hash = compute_lock_hash(&snapshot.lock_path)?;
+    let env_id = compute_environment_id(&lock_hash, &runtime);
+    let env_root = snapshot.root.join(".px").join("envs").join(&env_id);
+    ctx.fs().create_dir_all(&env_root)?;
+    let site_dir = env_root.join("site");
+    ctx.fs().create_dir_all(&site_dir)?;
+    materialize_project_site(&site_dir, &lock, ctx.fs())?;
+    let canonical_site = ctx.fs().canonicalize(&site_dir).unwrap_or(site_dir.clone());
+    let env_state = StoredEnvironment {
+        id: env_id,
+        lock_hash,
+        platform: runtime.platform,
+        site_packages: canonical_site.display().to_string(),
+        python: StoredPython {
+            path: runtime.path,
+            version: runtime.version,
+        },
+    };
+    persist_project_state(ctx.fs(), &snapshot.root, env_state)
 }
 
 fn materialize_project_site(
-    snapshot: &ManifestSnapshot,
+    site_dir: &Path,
     lock: &LockSnapshot,
     fs: &dyn effects::FileSystem,
 ) -> Result<()> {
-    let site_dir = snapshot.root.join(".px").join("site");
-    fs.create_dir_all(&site_dir)?;
+    fs.create_dir_all(site_dir)?;
     let pth_path = site_dir.join("px.pth");
 
     let mut entries = Vec::new();
@@ -745,7 +763,7 @@ fn materialize_project_site(
         contents.push('\n');
     }
     fs.write(&pth_path, contents.as_bytes())?;
-    write_sitecustomize(&site_dir, fs)?;
+    write_sitecustomize(site_dir, fs)?;
     Ok(())
 }
 
@@ -754,37 +772,138 @@ fn write_sitecustomize(site_dir: &Path, fs: &dyn effects::FileSystem) -> Result<
     fs.write(&path, SITE_CUSTOMIZE.as_bytes())
 }
 
-fn ensure_project_site_bootstrap(project_root: &Path, fs: &dyn effects::FileSystem) {
-    let pth_path = project_root.join(".px").join("site").join("px.pth");
-    if pth_path.exists() {
-        return;
+fn persist_project_state(
+    fs: &dyn effects::FileSystem,
+    project_root: &Path,
+    env: StoredEnvironment,
+) -> Result<()> {
+    let mut state = load_project_state(fs, project_root);
+    state.current_env = Some(env);
+    write_project_state(fs, project_root, &state)
+}
+
+fn load_project_state(fs: &dyn effects::FileSystem, project_root: &Path) -> ProjectState {
+    let path = project_root.join(".px").join("state.json");
+    match fs.read_to_string(&path) {
+        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+        Err(_) => ProjectState::default(),
     }
-    let lock_path = project_root.join("px.lock");
-    if !lock_path.exists() {
-        return;
-    }
-    let snapshot = ManifestSnapshot {
-        root: project_root.to_path_buf(),
-        manifest_path: project_root.join("pyproject.toml"),
-        lock_path,
-        name: String::new(),
-        python_requirement: String::new(),
-        dependencies: Vec::new(),
-    };
-    match load_lockfile_optional(&snapshot.lock_path) {
-        Ok(Some(lock)) => {
-            if let Err(err) = materialize_project_site(&snapshot, &lock, fs) {
-                warn!("failed to refresh .px/site from px.lock: {err:?}");
-            }
+}
+
+fn write_project_state(
+    fs: &dyn effects::FileSystem,
+    project_root: &Path,
+    state: &ProjectState,
+) -> Result<()> {
+    let path = project_root.join(".px").join("state.json");
+    let mut contents = serde_json::to_vec_pretty(state)?;
+    contents.push(b'\n');
+    fs.write(&path, &contents)
+}
+
+fn resolve_project_site(fs: &dyn effects::FileSystem, project_root: &Path) -> Option<PathBuf> {
+    let state = load_project_state(fs, project_root);
+    if let Some(env) = state.current_env {
+        let path = PathBuf::from(env.site_packages);
+        if path.exists() {
+            return Some(path);
         }
-        Ok(None) => {}
-        Err(err) => {
-            warn!(
-                "failed to load px.lock at {}: {err:?}",
-                snapshot.lock_path.display()
-            );
-        }
     }
+    let fallback = project_root.join(".px").join("site");
+    if fallback.exists() {
+        Some(fallback)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ProjectState {
+    #[serde(default)]
+    current_env: Option<StoredEnvironment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredEnvironment {
+    id: String,
+    lock_hash: String,
+    platform: String,
+    site_packages: String,
+    python: StoredPython,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredPython {
+    path: String,
+    version: String,
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeMetadata {
+    path: String,
+    version: String,
+    platform: String,
+}
+
+fn detect_runtime_metadata(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+) -> Result<RuntimeMetadata> {
+    let path = ctx.python_runtime().detect_interpreter()?;
+    let version = probe_python_version(ctx, snapshot, &path)?;
+    let tags = detect_interpreter_tags_with(&path)?;
+    let platform = tags
+        .platform
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "any".to_string());
+    Ok(RuntimeMetadata {
+        path,
+        version,
+        platform,
+    })
+}
+
+fn compute_environment_id(lock_hash: &str, runtime: &RuntimeMetadata) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(lock_hash.as_bytes());
+    hasher.update(runtime.version.as_bytes());
+    hasher.update(runtime.platform.as_bytes());
+    hasher.update(runtime.path.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    let short = &digest[..digest.len().min(16)];
+    format!("env-{short}")
+}
+
+fn compute_lock_hash(lock_path: &Path) -> Result<String> {
+    let contents = fs::read(lock_path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(contents);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn probe_python_version(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+    python: &str,
+) -> Result<String> {
+    const SCRIPT: &str =
+        "import json, platform; print(json.dumps({'version': platform.python_version()}))";
+    let args = vec!["-c".to_string(), SCRIPT.to_string()];
+    let output = ctx
+        .python_runtime()
+        .run_command(python, &args, &[], &snapshot.root)?;
+    if output.code != 0 {
+        return Err(anyhow!("python exited with {}", output.code));
+    }
+    let payload: RuntimeProbe =
+        serde_json::from_str(output.stdout.trim()).context("invalid runtime probe payload")?;
+    Ok(payload.version)
+}
+
+#[derive(Deserialize)]
+struct RuntimeProbe {
+    version: String,
 }
 
 fn verify_lock(snapshot: &ManifestSnapshot) -> Result<InstallOutcome> {
@@ -1941,6 +2060,9 @@ enum EnvironmentIssue {
     MissingLock,
     LockDrift,
     MissingArtifacts,
+    MissingEnv,
+    EnvOutdated,
+    RuntimeMismatch,
 }
 
 impl EnvironmentIssue {
@@ -1953,6 +2075,9 @@ impl EnvironmentIssue {
             "missing_lock" => Some(EnvironmentIssue::MissingLock),
             "lock_drift" => Some(EnvironmentIssue::LockDrift),
             "missing_artifacts" => Some(EnvironmentIssue::MissingArtifacts),
+            "missing_env" => Some(EnvironmentIssue::MissingEnv),
+            "env_outdated" => Some(EnvironmentIssue::EnvOutdated),
+            "runtime_mismatch" => Some(EnvironmentIssue::RuntimeMismatch),
             _ => None,
         }
     }
@@ -1966,6 +2091,13 @@ impl EnvironmentIssue {
             EnvironmentIssue::MissingArtifacts => {
                 "Cached artifacts missing; rehydrating environment…"
             }
+            EnvironmentIssue::MissingEnv => "Environment missing; rebuilding from px.lock…",
+            EnvironmentIssue::EnvOutdated => {
+                "Environment stale; syncing with latest lock and runtime…"
+            }
+            EnvironmentIssue::RuntimeMismatch => {
+                "Environment runtime mismatch; rebuilding for current Python…"
+            }
         }
     }
 
@@ -1974,6 +2106,9 @@ impl EnvironmentIssue {
             EnvironmentIssue::MissingLock => "lock-bootstrap",
             EnvironmentIssue::LockDrift => "lock-sync",
             EnvironmentIssue::MissingArtifacts => "env-rehydrate",
+            EnvironmentIssue::MissingEnv => "env-recreate",
+            EnvironmentIssue::EnvOutdated => "env-refresh",
+            EnvironmentIssue::RuntimeMismatch => "env-runtime",
         }
     }
 }
@@ -1985,7 +2120,6 @@ impl PythonContext {
     ) -> Result<(Self, Option<EnvironmentSyncReport>)> {
         let project_root = ctx.project_root()?;
         let sync_report = ensure_environment_with_guard(ctx, &project_root, guard)?;
-        ensure_project_site_bootstrap(&project_root, ctx.fs());
         let python = ctx.python_runtime().detect_interpreter()?;
         let (pythonpath, allowed_paths) = build_pythonpath(ctx.fs(), &project_root)?;
         Ok((
@@ -2029,9 +2163,10 @@ fn build_pythonpath(
     }
     paths.push(project_root.to_path_buf());
 
-    if let Ok(site_dir) = fs.canonicalize(&project_root.join(".px").join("site")) {
-        paths.push(site_dir.clone());
-        let pth = site_dir.join("px.pth");
+    if let Some(site_dir) = resolve_project_site(fs, project_root) {
+        let canonical = fs.canonicalize(&site_dir).unwrap_or(site_dir.clone());
+        paths.push(canonical.clone());
+        let pth = canonical.join("px.pth");
         if pth.exists() {
             if let Ok(contents) = fs.read_to_string(&pth) {
                 for line in contents.lines() {
@@ -2060,7 +2195,7 @@ fn build_pythonpath(
     Ok((pythonpath, paths))
 }
 
-fn ensure_project_environment_synced(project_root: &Path) -> Result<()> {
+fn ensure_project_environment_synced(ctx: &CommandContext, project_root: &Path) -> Result<()> {
     let manifest_path = project_root.join("pyproject.toml");
     if !manifest_path.exists() {
         return Err(InstallUserError::new(
@@ -2119,6 +2254,70 @@ fn ensure_project_environment_synced(project_root: &Path) -> Result<()> {
         .into());
     }
 
+    let lock_hash = compute_lock_hash(&lock_path)?;
+    ensure_env_matches_lock(ctx, &snapshot, &lock_hash)
+}
+
+fn ensure_env_matches_lock(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+    lock_hash: &str,
+) -> Result<()> {
+    let state = load_project_state(ctx.fs(), &snapshot.root);
+    let Some(env) = state.current_env else {
+        return Err(InstallUserError::new(
+            "project environment missing",
+            json!({
+                "hint": "run `px sync` to build the environment",
+                "reason": "missing_env",
+            }),
+        )
+        .into());
+    };
+    if env.lock_hash != lock_hash {
+        return Err(InstallUserError::new(
+            "environment is out of date",
+            json!({
+                "expected_lock_hash": lock_hash,
+                "current_lock_hash": env.lock_hash,
+                "hint": "run `px sync` to rebuild the environment",
+                "reason": "env_outdated",
+            }),
+        )
+        .into());
+    }
+    let site_dir = PathBuf::from(&env.site_packages);
+    if !site_dir.exists() {
+        return Err(InstallUserError::new(
+            "environment files missing",
+            json!({
+                "site": env.site_packages,
+                "hint": "run `px sync` to rebuild the environment",
+                "reason": "missing_env",
+            }),
+        )
+        .into());
+    }
+
+    let runtime = detect_runtime_metadata(ctx, snapshot)?;
+    if runtime.version != env.python.version || runtime.platform != env.platform {
+        return Err(InstallUserError::new(
+            format!(
+                "environment targets Python {} ({}) but {} ({}) is active",
+                env.python.version, env.platform, runtime.version, runtime.platform
+            ),
+            json!({
+                "expected_python": env.python.version,
+                "current_python": runtime.version,
+                "expected_platform": env.platform,
+                "current_platform": runtime.platform,
+                "hint": "run `px sync` to rebuild for the current runtime",
+                "reason": "runtime_mismatch",
+            }),
+        )
+        .into());
+    }
+
     Ok(())
 }
 
@@ -2127,7 +2326,7 @@ fn ensure_environment_with_guard(
     project_root: &Path,
     guard: EnvGuard,
 ) -> Result<Option<EnvironmentSyncReport>> {
-    match ensure_project_environment_synced(project_root) {
+    match ensure_project_environment_synced(ctx, project_root) {
         Ok(()) => Ok(None),
         Err(err) => match err.downcast::<InstallUserError>() {
             Ok(user) => match guard {
@@ -2152,7 +2351,7 @@ fn auto_sync_environment(
 ) -> Result<Option<EnvironmentSyncReport>> {
     let snapshot = manifest_snapshot_at(project_root)?;
     install_snapshot(ctx, &snapshot, false, None)?;
-    refresh_project_site(&snapshot, ctx.fs())?;
+    refresh_project_site(&snapshot, ctx)?;
     Ok(Some(EnvironmentSyncReport::new(issue)))
 }
 
@@ -2376,12 +2575,18 @@ mod tests {
         };
 
         let effects = SystemEffects::new();
-        materialize_project_site(&snapshot, &lock, effects.fs()).expect("materialize site");
+        let site_dir = snapshot
+            .root
+            .join(".px")
+            .join("envs")
+            .join("test-env")
+            .join("site");
+        materialize_project_site(&site_dir, &lock, effects.fs()).expect("materialize site");
 
-        let pxpth = snapshot.root.join(".px").join("site").join("px.pth");
+        let pxpth = site_dir.join("px.pth");
         assert!(
             pxpth.exists(),
-            ".px/site/px.pth should be created alongside install"
+            "env site px.pth should be created alongside install"
         );
         let contents = fs::read_to_string(pxpth).expect("read px.pth");
         assert!(
@@ -2425,9 +2630,15 @@ mod tests {
         };
 
         let effects = SystemEffects::new();
-        materialize_project_site(&snapshot, &lock, effects.fs())
+        let site_dir = snapshot
+            .root
+            .join(".px")
+            .join("envs")
+            .join("test-env")
+            .join("site");
+        materialize_project_site(&site_dir, &lock, effects.fs())
             .expect("materialize site with gap");
-        let pxpth = snapshot.root.join(".px").join("site").join("px.pth");
+        let pxpth = site_dir.join("px.pth");
         assert!(pxpth.exists(), "px.pth should still be created");
         let contents = fs::read_to_string(pxpth).expect("read px.pth");
         assert!(

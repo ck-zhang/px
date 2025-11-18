@@ -12,10 +12,10 @@ use serde_json::{json, Value};
 use toml_edit::{DocumentMut, Item};
 
 use crate::{
-    dependency_name, install_snapshot, manifest_snapshot, manifest_snapshot_at,
-    python_context_with_mode, refresh_project_site, relative_path_str, CommandContext, EnvGuard,
-    ExecutionOutcome, InstallOutcome, InstallState, InstallUserError, ManifestSnapshot,
-    PythonContext,
+    dependency_name, detect_runtime_metadata, install_snapshot, manifest_snapshot,
+    manifest_snapshot_at, python_context_with_mode, refresh_project_site, relative_path_str,
+    CommandContext, EnvGuard, ExecutionOutcome, InstallOutcome, InstallState, InstallUserError,
+    ManifestSnapshot, PythonContext,
 };
 use px_project::{
     discover_project_root, infer_package_name, InstallOverride, ManifestEditor, ProjectInitializer,
@@ -97,7 +97,7 @@ pub fn project_init(ctx: &CommandContext, request: ProjectInitRequest) -> Result
             Err(err) => return Err(err),
         },
     };
-    refresh_project_site(&snapshot, ctx.fs())?;
+    refresh_project_site(&snapshot, ctx)?;
     if !lock_existed {
         files.push(relative_path_str(&snapshot.lock_path, &snapshot.root));
     }
@@ -431,7 +431,7 @@ pub fn project_update(
         },
     };
 
-    refresh_project_site(&snapshot, ctx.fs())?;
+    refresh_project_site(&snapshot, ctx)?;
 
     let updated_count = ready.len();
     let primary_label = ready.first().cloned();
@@ -697,41 +697,16 @@ fn project_name_from_pyproject(pyproject_path: &Path) -> Result<Option<String>> 
 }
 
 fn detect_runtime_details(ctx: &CommandContext, snapshot: &ManifestSnapshot) -> Option<Value> {
-    let python = ctx.python_runtime().detect_interpreter().ok()?;
-    match probe_python_version(ctx, snapshot, &python) {
-        Ok(version) => Some(json!({
-            "path": python,
-            "version": version,
+    match detect_runtime_metadata(ctx, snapshot) {
+        Ok(meta) => Some(json!({
+            "path": meta.path,
+            "version": meta.version,
+            "platform": meta.platform,
         })),
         Err(err) => Some(json!({
-            "path": python,
-            "hint": format!("failed to detect python version: {err}"),
+            "hint": format!("failed to detect python runtime: {err}"),
         })),
     }
-}
-
-fn probe_python_version(
-    ctx: &CommandContext,
-    snapshot: &ManifestSnapshot,
-    python: &str,
-) -> Result<String> {
-    const SCRIPT: &str =
-        "import json, platform; print(json.dumps({'version': platform.python_version()}))";
-    let args = vec!["-c".to_string(), SCRIPT.to_string()];
-    let output = ctx
-        .python_runtime()
-        .run_command(python, &args, &[], &snapshot.root)?;
-    if output.code != 0 {
-        return Err(anyhow!("python exited with {}", output.code));
-    }
-    let payload: RuntimeProbe =
-        serde_json::from_str(output.stdout.trim()).context("invalid runtime probe payload")?;
-    Ok(payload.version)
-}
-
-#[derive(Deserialize)]
-struct RuntimeProbe {
-    version: String,
 }
 
 fn dirty_worktree_response(changes: Vec<String>) -> ExecutionOutcome {
@@ -816,7 +791,7 @@ fn sync_manifest_environment(
             }
         },
     };
-    if let Err(err) = refresh_project_site(&snapshot, ctx.fs()) {
+    if let Err(err) = refresh_project_site(&snapshot, ctx) {
         return Err(ExecutionOutcome::failure(
             "failed to update project environment",
             json!({ "error": err.to_string() }),
@@ -842,14 +817,14 @@ fn project_install_outcome(ctx: &CommandContext, frozen: bool) -> Result<Executi
 
     match outcome.state {
         InstallState::Installed => {
-            refresh_project_site(&snapshot, ctx.fs())?;
+            refresh_project_site(&snapshot, ctx)?;
             Ok(ExecutionOutcome::success(
                 format!("wrote {}", outcome.lockfile),
                 details,
             ))
         }
         InstallState::UpToDate => {
-            refresh_project_site(&snapshot, ctx.fs())?;
+            refresh_project_site(&snapshot, ctx)?;
             let message = if frozen && outcome.verified {
                 "lockfile verified".to_string()
             } else {

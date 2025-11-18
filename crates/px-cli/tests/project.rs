@@ -44,9 +44,22 @@ fn project_init_creates_minimal_shape() {
         px_dir.join("state.json").exists(),
         ".px/state.json should exist"
     );
+    let state: Value =
+        serde_json::from_str(&fs::read_to_string(px_dir.join("state.json")).expect("read state"))
+            .expect("state json");
+    let env = state
+        .get("current_env")
+        .and_then(|value| value.as_object())
+        .expect("active env state");
+    let site = env
+        .get("site_packages")
+        .and_then(Value::as_str)
+        .expect("site path");
+    let site_path = Path::new(site);
+    assert!(site_path.join("px.pth").exists(), "env px.pth should exist");
     assert!(
-        px_dir.join("site").join("px.pth").exists(),
-        ".px/site/px.pth should be created"
+        site_path.starts_with(&px_dir.join("envs")),
+        "site should live under .px/envs"
     );
 
     let contents = fs::read_to_string(&pyproject).expect("read pyproject");
