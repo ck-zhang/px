@@ -721,6 +721,7 @@ fn tool_run_request_from_args(args: &ToolRunArgs) -> ToolRunRequest {
     ToolRunRequest {
         name: args.name.clone(),
         args: args.args.clone(),
+        console: args.console.clone(),
     }
 }
 
@@ -1287,6 +1288,12 @@ struct ToolInstallArgs {
 struct ToolRunArgs {
     #[arg(value_name = "NAME")]
     name: String,
+    #[arg(
+        long,
+        value_name = "SCRIPT",
+        help = "Invoke the given console script for this tool"
+    )]
+    console: Option<String>,
     #[arg(
         value_name = "ARG",
         trailing_var_arg = true,

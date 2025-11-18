@@ -1,7 +1,11 @@
 use std::{
+    collections::{BTreeMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use anyhow::{anyhow, Context, Result};
 use dirs_next::home_dir;
@@ -31,6 +35,7 @@ pub struct ToolInstallRequest {
 pub struct ToolRunRequest {
     pub name: String,
     pub args: Vec<String>,
+    pub console: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -52,6 +57,7 @@ struct ToolMetadata {
     name: String,
     spec: String,
     entry: String,
+    console_scripts: BTreeMap<String, String>,
     runtime_version: String,
     runtime_full_version: String,
     runtime_path: String,
@@ -88,10 +94,12 @@ pub fn tool_install(ctx: &CommandContext, request: ToolInstallRequest) -> Result
     let pinned = ManifestEditor::open(&pyproject)?.dependencies();
     let installed_spec = pinned.first().cloned().unwrap_or(spec.clone());
     let timestamp = timestamp_string()?;
+    let console_scripts = collect_console_scripts(&tool_root)?;
     let metadata = ToolMetadata {
         name: normalized.clone(),
         spec,
         entry,
+        console_scripts: console_scripts.clone(),
         runtime_version: runtime_selection.record.version.clone(),
         runtime_full_version: runtime_selection.record.full_version.clone(),
         runtime_path: runtime_selection.record.path.clone(),
@@ -100,6 +108,7 @@ pub fn tool_install(ctx: &CommandContext, request: ToolInstallRequest) -> Result
         updated_at: timestamp,
     };
     write_metadata(&tool_root, &metadata)?;
+    write_console_shims(&tool_root, &metadata, &console_scripts)?;
     Ok(ExecutionOutcome::success(
         format!(
             "installed tool {} (Python {} via {})",
@@ -108,6 +117,7 @@ pub fn tool_install(ctx: &CommandContext, request: ToolInstallRequest) -> Result
         json!({
             "tool": metadata.name,
             "entry": metadata.entry,
+            "console_scripts": metadata.console_scripts.keys().collect::<Vec<_>>(),
             "spec": metadata.installed_spec,
             "runtime": {
                 "version": metadata.runtime_version,
@@ -145,8 +155,25 @@ pub fn tool_run(ctx: &CommandContext, request: ToolRunRequest) -> Result<Executi
             Err(other) => Err(other),
         };
     }
+    let script_target = request.console.as_ref();
     let (pythonpath, allowed_paths) = build_pythonpath(ctx.fs(), &tool_root)?;
-    let mut args = vec!["-m".to_string(), metadata.entry.clone()];
+    let mut args = if let Some(script) = script_target {
+        match metadata.console_scripts.get(script) {
+            Some(entrypoint) => vec!["-c".to_string(), console_entry_invoke(entrypoint)?],
+            None => {
+                return Ok(ExecutionOutcome::user_error(
+                    format!("tool '{}' has no console script `{}`", normalized, script),
+                    json!({
+                        "tool": metadata.name,
+                        "script": script,
+                        "hint": "run `px tool list` to view available scripts",
+                    }),
+                ))
+            }
+        }
+    } else {
+        vec!["-m".to_string(), metadata.entry.clone()]
+    };
     args.extend(request.args.clone());
     let allowed = env::join_paths(&allowed_paths)
         .context("allowed path contains invalid UTF-8")?
@@ -169,6 +196,7 @@ pub fn tool_run(ctx: &CommandContext, request: ToolRunRequest) -> Result<Executi
     let details = json!({
         "tool": metadata.name,
         "entry": metadata.entry,
+        "console_script": script_target,
         "runtime": runtime_selection.record.full_version,
         "args": args,
     });
@@ -211,6 +239,7 @@ pub fn tool_list(_ctx: &CommandContext, _request: ToolListRequest) -> Result<Exe
                 "spec": meta.installed_spec,
                 "runtime": meta.runtime_version,
                 "entry": meta.entry,
+                "console_scripts": meta.console_scripts.keys().collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -278,6 +307,18 @@ fn resolve_runtime(explicit: Option<&str>) -> Result<runtime::RuntimeSelection> 
             json!({ "hint": err.to_string() }),
         ))
     })
+}
+
+fn console_entry_invoke(entry: &str) -> Result<String> {
+    let (module, target) = entry
+        .split_once(':')
+        .ok_or_else(|| anyhow!("invalid console entry `{entry}`"))?;
+    let call = target.trim().replace('"', "\"");
+    let import = module.trim();
+    Ok(format!(
+        "import importlib, sys;sys.exit(getattr(importlib.import_module(\"{}\"), \"{}\")())",
+        import, call
+    ))
 }
 
 fn tools_root() -> Result<PathBuf> {
@@ -353,4 +394,150 @@ fn normalize_tool_name(raw: &str) -> String {
 fn timestamp_string() -> Result<String> {
     let now = OffsetDateTime::now_utc();
     Ok(now.format(&time::format_description::well_known::Rfc3339)?)
+}
+
+fn collect_console_scripts(root: &Path) -> Result<BTreeMap<String, String>> {
+    let mut scripts = BTreeMap::new();
+    let site_dir = read_site_packages_path(root)?;
+    let pth = site_dir.join("px.pth");
+    if !pth.exists() {
+        return Ok(scripts);
+    }
+    let contents = fs::read_to_string(&pth)?;
+    let mut visited = HashSet::new();
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let entry = PathBuf::from(trimmed);
+        let parent = entry.parent().unwrap_or(&entry);
+        scan_dist_infos(parent, &mut visited, &mut scripts)?;
+    }
+    Ok(scripts)
+}
+
+fn scan_dist_infos(
+    base: &Path,
+    visited: &mut HashSet<PathBuf>,
+    scripts: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    if !base.exists() {
+        return Ok(());
+    }
+    if is_dist_info(base) {
+        let canonical = base.canonicalize().unwrap_or(base.to_path_buf());
+        if visited.insert(canonical.clone()) {
+            parse_entry_points(&canonical.join("entry_points.txt"), scripts)?;
+        }
+        return Ok(());
+    }
+    for entry in fs::read_dir(base)? {
+        let entry = entry?;
+        let path = entry.path();
+        if is_dist_info(&path) {
+            let canonical = path.canonicalize().unwrap_or(path);
+            if visited.insert(canonical.clone()) {
+                parse_entry_points(&canonical.join("entry_points.txt"), scripts)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_dist_info(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.ends_with(".dist-info"))
+        .unwrap_or(false)
+}
+
+fn parse_entry_points(path: &Path, scripts: &mut BTreeMap<String, String>) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let contents = fs::read_to_string(path)?;
+    let mut in_section = false;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_section = trimmed.eq_ignore_ascii_case("[console_scripts]");
+            continue;
+        }
+        if !in_section || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((name, entry)) = trimmed.split_once('=') {
+            let script = name.trim().to_string();
+            let target = entry.trim().to_string();
+            scripts.entry(script).or_insert(target);
+        }
+    }
+    Ok(())
+}
+
+fn read_site_packages_path(root: &Path) -> Result<PathBuf> {
+    let path = root.join(".px").join("state.json");
+    let contents =
+        fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let state: ToolState = serde_json::from_str(&contents).context("invalid tool state")?;
+    let env = state
+        .current_env
+        .ok_or_else(|| anyhow!("tool environment missing in state"))?;
+    Ok(PathBuf::from(env.site_packages))
+}
+
+#[derive(Deserialize)]
+struct ToolState {
+    current_env: Option<ToolEnvState>,
+}
+
+#[derive(Deserialize)]
+struct ToolEnvState {
+    site_packages: String,
+}
+
+fn write_console_shims(
+    root: &Path,
+    metadata: &ToolMetadata,
+    scripts: &BTreeMap<String, String>,
+) -> Result<()> {
+    let bin_dir = root.join("bin");
+    if bin_dir.exists() {
+        for entry in fs::read_dir(&bin_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+    if scripts.is_empty() {
+        return Ok(());
+    }
+    fs::create_dir_all(&bin_dir)?;
+    for name in scripts.keys() {
+        let shim = bin_dir.join(name);
+        let contents = format!(
+            "#!/usr/bin/env sh\nexec px tool run {} --console {} \"$@\"\n",
+            metadata.name, name
+        );
+        fs::write(&shim, contents)?;
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&shim)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&shim, perms)?;
+        }
+        #[cfg(windows)]
+        {
+            let cmd = bin_dir.join(format!("{}.cmd", name));
+            let cmd_contents = format!(
+                "@echo off\r\npx tool run {} --console {} %*\r\n",
+                metadata.name, name
+            );
+            fs::write(cmd, cmd_contents)?;
+        }
+    }
+    Ok(())
 }
