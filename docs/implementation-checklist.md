@@ -16,7 +16,7 @@ Reminder: use [ ] for items that simply haven’t been built yet, and reserve [!
 - [x] **`px run` / `px test`** – Enforce dev vs `--frozen` semantics, auto-sync in dev, refuse in CI, and attach missing-import hints per spec 5.6/5.7 & 8.2 (`px-core/src/commands/workflow.rs`, `px-core/src/traceback.rs`).
 - [x] **`px fmt`/`px lint`** – Respect CI guard, read `[tool.px.fmt|lint]`, default to Ruff, and operate inside the px environment (`px-core/src/commands/quality.rs`).
 - [~] **Default script lookup** – `px run` infers entries from `[project].scripts`, but spec 5.6 also mentions `[tool.px.scripts]`; support for that section is missing (`px-core/src/commands/workflow.rs:443`).
-- [~] **`px fmt` / `px lint` tool installation UX** – Spec 5.8 says px should “suggest adding” missing tools, yet current behavior auto-runs `px add` to install them; also there is no `--frozen` flag mirroring `px run`.
+- [x] **`px fmt` / `px lint` tool installation UX** – Both commands now accept `--frozen`/`CI=1` guards and emit actionable `px add --group dev …` suggestions instead of mutating dependencies when tools are missing (`crates/px-core/src/commands/quality.rs:21-360`, `crates/px-cli/src/main.rs:660-969`, `docs/spec.md:472-485`).
 - [~] **`px status` output** – Lacks the active runtime version/path that spec 5.9 lists; it only reports pyproject/lock/env state (`px-core/src/commands/project.rs:262`).
 
 ## Tools & Runtimes

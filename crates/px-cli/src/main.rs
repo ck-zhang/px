@@ -524,6 +524,7 @@ fn project_init_request_from_args(args: &InitArgs) -> ProjectInitRequest {
 fn tool_command_request_from_args(args: &ToolArgs) -> ToolCommandRequest {
     ToolCommandRequest {
         args: args.args.clone(),
+        frozen: args.frozen,
     }
 }
 
@@ -947,6 +948,11 @@ struct TestArgs {
 struct ToolArgs {
     #[command(flatten)]
     common: CommonFlags,
+    #[arg(
+        long,
+        help = "Fail if px.lock is missing or the environment is out of sync"
+    )]
+    frozen: bool,
     #[arg(last = true, value_name = "ARG")]
     args: Vec<String>,
 }

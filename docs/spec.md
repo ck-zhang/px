@@ -490,6 +490,7 @@ Run configured formatters/linters/cleanup tools in the project env.
 **Preconditions & behavior**
 
 * Same env/lock consistency semantics as `px run`.
+* Accepts `--frozen` (or honors `CI=1`) to refuse env rebuilds and require a clean env.
 * If required tools are missing:
 
   * px suggests adding them (e.g. `px add --group dev ruff`).

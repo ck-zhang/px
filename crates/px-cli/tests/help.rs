@@ -75,3 +75,29 @@ fn build_help_mentions_skip_tests_example() {
         "build about missing: {output}"
     );
 }
+
+#[test]
+fn fmt_help_mentions_frozen_flag() {
+    let output = help_output(&["fmt", "--help"]);
+    assert!(
+        output.contains("--frozen"),
+        "fmt help should mention the --frozen guard: {output}"
+    );
+    assert!(
+        output.contains("px fmt [-- <ARG>...]") || output.contains("px fmt [-- <arg>...]"),
+        "fmt usage missing forwarded arg example: {output}"
+    );
+}
+
+#[test]
+fn lint_help_mentions_frozen_flag() {
+    let output = help_output(&["lint", "--help"]);
+    assert!(
+        output.contains("--frozen"),
+        "lint help should mention the --frozen guard: {output}"
+    );
+    assert!(
+        output.contains("px lint [-- <ARG>...]") || output.contains("px lint [-- <arg>...]"),
+        "lint usage missing forwarded arg example: {output}"
+    );
+}

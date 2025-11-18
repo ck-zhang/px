@@ -6,8 +6,7 @@ use toml_edit::{DocumentMut, InlineTable, Item, Table};
 
 use crate::{
     attach_autosync_details, detect_lock_drift, load_lockfile_optional, manifest_snapshot,
-    outcome_from_output, python_context_with_mode, CommandContext, CommandStatus, EnvGuard,
-    ExecutionOutcome, ProjectAddRequest,
+    outcome_from_output, python_context_with_mode, CommandContext, EnvGuard, ExecutionOutcome,
 };
 
 const DEFAULT_RUFF_REQUIREMENT: &str = "ruff==0.6.9";
@@ -18,6 +17,7 @@ pub struct QualityTidyRequest;
 #[derive(Clone, Debug)]
 pub struct ToolCommandRequest {
     pub args: Vec<String>,
+    pub frozen: bool,
 }
 
 pub fn quality_tidy(
@@ -78,13 +78,13 @@ fn run_quality_command(
     kind: QualityKind,
     request: &ToolCommandRequest,
 ) -> Result<ExecutionOutcome> {
-    let strict = ctx.env_flag_enabled("CI");
+    let strict = request.frozen || ctx.env_flag_enabled("CI");
     let guard = if strict {
         EnvGuard::Strict
     } else {
         EnvGuard::AutoSync
     };
-    let (mut py_ctx, mut sync_report) = match python_context_with_mode(ctx, guard) {
+    let (py_ctx, sync_report) = match python_context_with_mode(ctx, guard) {
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
     };
@@ -121,99 +121,85 @@ fn run_quality_command(
         "forwarded_args": &request.args,
         "config_source": config.source.as_str(),
     });
-    let mut installed_tools: Vec<String> = Vec::new();
     let mut runs = Vec::new();
     for tool in &config.tools {
         let python_args = tool.python_args(&request.args);
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            let envs = match py_ctx.base_env(&env_payload) {
-                Ok(envs) => envs,
-                Err(err) => {
-                    return Ok(ExecutionOutcome::failure(
-                        "failed to prepare environment for tool",
-                        json!({ "error": err.to_string() }),
-                    ))
-                }
-            };
-            let output = ctx.python_runtime().run_command(
-                &py_ctx.python,
-                &python_args,
-                &envs,
-                &py_ctx.project_root,
-            )?;
-            if output.code == 0 {
-                runs.push(QualityRunRecord::new(
-                    tool.display_name(),
-                    &tool.module,
-                    python_args.clone(),
-                    output,
-                ));
-                break;
+        let envs = match py_ctx.base_env(&env_payload) {
+            Ok(envs) => envs,
+            Err(err) => {
+                return Ok(ExecutionOutcome::failure(
+                    "failed to prepare environment for tool",
+                    json!({ "error": err.to_string() }),
+                ))
             }
-
-            let combined_output = format!("{}{}", output.stdout, output.stderr);
-            if attempts == 1 && missing_module_error(&combined_output, &tool.module) {
-                let Some(requirement) = tool.requirement_spec() else {
-                    let mut outcome = ExecutionOutcome::user_error(
-                        format!(
-                            "px {}: module `{}` is not installed",
-                            kind.section_name(),
-                            tool.module
-                        ),
-                        json!({
-                            "tool": tool.display_name(),
-                            "module": tool.module,
-                            "pyproject": pyproject.display().to_string(),
-                            "hint": format!(
-                                "Add `requirement = \"{module}==<version>\"` under [tool.px.{section}] so px can provision it automatically",
-                                module = tool.module,
-                                section = kind.section_name(),
-                            ),
-                        }),
-                    );
-                    attach_autosync_details(&mut outcome, sync_report);
-                    return Ok(outcome);
-                };
-                match ensure_tool_dependency(ctx, &requirement)? {
-                    ToolDependencyResult::Satisfied => {
-                        installed_tools.push(requirement);
-                        match python_context_with_mode(ctx, guard) {
-                            Ok((new_ctx, new_report)) => {
-                                if sync_report.is_none() {
-                                    sync_report = new_report;
-                                }
-                                py_ctx = new_ctx;
-                                continue;
-                            }
-                            Err(outcome) => return Ok(outcome),
-                        }
-                    }
-                    ToolDependencyResult::Outcome(mut outcome) => {
-                        attach_autosync_details(&mut outcome, sync_report);
-                        return Ok(outcome);
-                    }
-                }
-            }
-
-            let mut failure = outcome_from_output(
-                kind.section_name(),
+        };
+        let output = ctx.python_runtime().run_command(
+            &py_ctx.python,
+            &python_args,
+            &envs,
+            &py_ctx.project_root,
+        )?;
+        if output.code == 0 {
+            runs.push(QualityRunRecord::new(
                 tool.display_name(),
+                &tool.module,
+                python_args.clone(),
                 output,
-                &format!("px {}", kind.section_name()),
-                Some(json!({
-                    "tool": tool.display_name(),
-                    "module": tool.module,
-                    "python_args": python_args,
-                    "config_source": config.source.as_str(),
-                    "pyproject": pyproject.display().to_string(),
-                    "forwarded_args": &request.args,
-                })),
-            );
-            attach_autosync_details(&mut failure, sync_report);
-            return Ok(failure);
+            ));
+            continue;
         }
+
+        let combined_output = format!("{}{}", output.stdout, output.stderr);
+        if missing_module_error(&combined_output, &tool.module) {
+            let mut details = json!({
+                "tool": tool.display_name(),
+                "module": tool.module,
+                "python_args": python_args,
+                "config_source": config.source.as_str(),
+                "pyproject": pyproject.display().to_string(),
+                "forwarded_args": &request.args,
+            });
+            if let Some(requirement) = tool.requirement_spec() {
+                details["requirement"] = json!(requirement);
+                details["hint"] = json!(format!(
+                    "Run `px add --group dev {requirement}` to install {} in the project env.",
+                    tool.display_name()
+                ));
+            } else {
+                details["hint"] = json!(format!(
+                    "Add `requirement = \"{module}==<version>\"` under [tool.px.{section}] so px can suggest an install command.",
+                    module = tool.module,
+                    section = kind.section_name(),
+                ));
+            }
+            let mut outcome = ExecutionOutcome::user_error(
+                format!(
+                    "px {}: module `{}` is not installed",
+                    kind.section_name(),
+                    tool.module
+                ),
+                details,
+            );
+            attach_autosync_details(&mut outcome, sync_report);
+            return Ok(outcome);
+        }
+
+        let mut failure = outcome_from_output(
+            kind.section_name(),
+            tool.display_name(),
+            output,
+            &format!("px {}", kind.section_name()),
+            Some(json!({
+                "tool": tool.display_name(),
+                "module": tool.module,
+                "python_args": python_args,
+                "config_source": config.source.as_str(),
+                "pyproject": pyproject.display().to_string(),
+                "forwarded_args": &request.args,
+            })),
+        );
+        attach_autosync_details(&mut failure, sync_report);
+        return Ok(failure);
     }
 
     let mut details = json!({
@@ -223,9 +209,6 @@ fn run_quality_command(
     });
     if !request.args.is_empty() {
         details["forwarded_args"] = json!(&request.args);
-    }
-    if !installed_tools.is_empty() {
-        details["tools_installed"] = json!(installed_tools);
     }
     if config.source == QualityConfigSource::Default {
         details["hint"] = json!(
@@ -475,30 +458,6 @@ fn missing_module_error(output: &str, module: &str) -> bool {
     let needle = format!("No module named '{module}'");
     let needle_unquoted = format!("No module named {module}");
     output.contains(&needle) || output.contains(&needle_unquoted)
-}
-
-enum ToolDependencyResult {
-    Satisfied,
-    Outcome(ExecutionOutcome),
-}
-
-fn ensure_tool_dependency(ctx: &CommandContext, spec: &str) -> Result<ToolDependencyResult> {
-    if spec.trim().is_empty() {
-        return Ok(ToolDependencyResult::Satisfied);
-    }
-    let request = ProjectAddRequest {
-        specs: vec![spec.to_string()],
-    };
-    match super::project::project_add(ctx, request) {
-        Ok(outcome) => {
-            if matches!(outcome.status, CommandStatus::Ok) {
-                Ok(ToolDependencyResult::Satisfied)
-            } else {
-                Ok(ToolDependencyResult::Outcome(outcome))
-            }
-        }
-        Err(err) => Err(err),
-    }
 }
 
 impl QualityRunRecord {
