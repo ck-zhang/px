@@ -21,8 +21,9 @@ use crate::{
     InstallUserError, ManifestSnapshot, PythonContext,
 };
 use px_domain::{
-    detect_lock_drift, discover_project_root, infer_package_name, load_lockfile_optional,
-    project_name_from_pyproject, InstallOverride, ManifestEditor, ProjectInitializer,
+    collect_resolved_dependencies, detect_lock_drift, discover_project_root, infer_package_name,
+    load_lockfile_optional, project_name_from_pyproject, InstallOverride, ManifestEditor,
+    ProjectInitializer,
 };
 
 #[derive(Clone, Debug)]
@@ -1117,13 +1118,58 @@ fn collect_dependency_graph(
     let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
     for package in payload.packages {
         for dep in &package.requires {
-            reverse
-                .entry(dep.clone())
-                .or_default()
-                .push(package.normalized.clone());
+            let parents = reverse.entry(dep.clone()).or_default();
+            if !parents.iter().any(|p| p == &package.normalized) {
+                parents.push(package.normalized.clone());
+            }
         }
         packages.insert(package.normalized.clone(), package);
     }
+
+    let lock_path = py_ctx.project_root.join("px.lock");
+    if lock_path.exists() {
+        let lock = load_lockfile_optional(&lock_path).map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to read px.lock",
+                json!({ "error": err.to_string(), "lockfile": lock_path.display().to_string() }),
+            )
+        })?;
+        if let Some(lock) = lock {
+            for dep in collect_resolved_dependencies(&lock) {
+                let normalized = dependency_name(&dep.specifier);
+                if normalized.is_empty() {
+                    continue;
+                }
+                let version = version_from_spec(&dep.specifier);
+                packages
+                    .entry(normalized.clone())
+                    .or_insert_with(|| WhyPackage {
+                        name: dep.name.clone(),
+                        normalized: normalized.clone(),
+                        version: version.clone(),
+                        requires: dep.requires.clone(),
+                    });
+                if let Some(pkg) = packages.get_mut(&normalized) {
+                    if pkg.version.is_empty() {
+                        pkg.version = version.clone();
+                    }
+                    if pkg.requires.is_empty() && !dep.requires.is_empty() {
+                        pkg.requires = dep.requires.clone();
+                    }
+                }
+                for parent in dep.requires {
+                    if parent.is_empty() {
+                        continue;
+                    }
+                    let parents = reverse.entry(parent).or_default();
+                    if !parents.iter().any(|p| p == &normalized) {
+                        parents.push(normalized.clone());
+                    }
+                }
+            }
+        }
+    }
+
     Ok(WhyGraph { packages, reverse })
 }
 
@@ -1162,4 +1208,14 @@ fn find_dependency_chains(
         }
     }
     results
+}
+
+fn version_from_spec(spec: &str) -> String {
+    let trimmed = spec.trim();
+    let head = trimmed.split(';').next().unwrap_or(trimmed);
+    if let Some((_, rest)) = head.split_once("==") {
+        rest.trim().to_string()
+    } else {
+        String::new()
+    }
 }

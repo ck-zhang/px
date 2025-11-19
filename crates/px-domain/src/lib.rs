@@ -21,9 +21,9 @@ pub use autopin::{
 };
 pub use init::{infer_package_name, sanitize_package_candidate, ProjectInitializer};
 pub use lockfile::{
-    analyze_lock_diff, canonical_extras, detect_lock_drift, format_specifier,
-    load_lockfile_optional, render_lockfile, verify_locked_artifacts, LockSnapshot, LockedArtifact,
-    ResolvedDependency,
+    analyze_lock_diff, canonical_extras, collect_resolved_dependencies, detect_lock_drift,
+    format_specifier, load_lockfile_optional, render_lockfile, verify_locked_artifacts,
+    LockSnapshot, LockedArtifact, ResolvedDependency,
 };
 pub use manifest::{
     collect_pyproject_packages, collect_requirement_packages, read_requirements_file,

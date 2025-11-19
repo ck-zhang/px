@@ -1054,6 +1054,7 @@ fn resolve_dependencies_with_effects(
             extras: spec.extras,
             marker: spec.marker,
             direct: spec.direct,
+            requires: spec.requires,
         };
         autopin_lookup.insert(autopin_pin_key(&pin), formatted);
         if seen.insert(pin.normalized.clone()) {
@@ -1232,6 +1233,7 @@ fn parse_exact_pin(spec: &str) -> Result<PinSpec> {
         extras,
         marker,
         direct: true,
+        requires: Vec::new(),
     })
 }
 
@@ -1359,6 +1361,7 @@ fn download_artifact(
         marker: pin.marker,
         artifact,
         direct: pin.direct,
+        requires: pin.requires,
     })
 }
 
@@ -2452,6 +2455,7 @@ mod tests {
                     abi_tag: "none".into(),
                     platform_tag: "any".into(),
                 }),
+                requires: Vec::new(),
             }],
             graph: None,
         };
@@ -2512,6 +2516,7 @@ mod tests {
                     abi_tag: "none".into(),
                     platform_tag: "any".into(),
                 }),
+                requires: Vec::new(),
             }],
             graph: None,
         };

@@ -340,6 +340,7 @@ dependencies = ["demo"]
                 extras: Vec::new(),
                 marker: None,
                 direct: true,
+                requires: Vec::new(),
             }])
         };
 
@@ -388,6 +389,7 @@ dependencies = ["demo>=1.0", "helper==0.5"]
                 extras: Vec::new(),
                 marker: None,
                 direct: true,
+                requires: Vec::new(),
             }])
         };
 

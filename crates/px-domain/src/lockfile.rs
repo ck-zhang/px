@@ -44,6 +44,7 @@ pub struct LockedDependency {
     pub name: String,
     pub direct: bool,
     pub artifact: Option<LockedArtifact>,
+    pub requires: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -67,6 +68,7 @@ pub struct ResolvedDependency {
     pub marker: Option<String>,
     pub artifact: LockedArtifact,
     pub direct: bool,
+    pub requires: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -181,6 +183,13 @@ pub fn render_lockfile(
         }
         table.insert("artifact", Item::Table(render_artifact(&dep.artifact)));
         table.insert("direct", Item::Value(TomlValue::from(dep.direct)));
+        if !dep.requires.is_empty() {
+            let mut requires = Array::new();
+            for req in &dep.requires {
+                requires.push(TomlValue::from(req.as_str()));
+            }
+            table.insert("requires", Item::Value(TomlValue::Array(requires)));
+        }
         deps.push(table);
     }
     doc.insert("dependencies", Item::ArrayOfTables(deps));
@@ -201,6 +210,12 @@ fn compute_lock_identity(fingerprint: &str, deps: &[ResolvedDependency]) -> Stri
         extras.sort();
         for extra in extras {
             hasher.update(extra.as_bytes());
+            hasher.update([0]);
+        }
+        let mut requires = dep.requires.clone();
+        requires.sort();
+        for req in requires {
+            hasher.update(req.as_bytes());
             hasher.update([0]);
         }
         hash_artifact(&mut hasher, &dep.artifact);
@@ -272,6 +287,13 @@ pub fn render_lockfile_v2(
         );
         table.insert("artifact", Item::Table(render_artifact(&dep.artifact)));
         table.insert("direct", Item::Value(TomlValue::from(dep.direct)));
+        if !dep.requires.is_empty() {
+            let mut requires = Array::new();
+            for req in &dep.requires {
+                requires.push(TomlValue::from(req.as_str()));
+            }
+            table.insert("requires", Item::Value(TomlValue::Array(requires)));
+        }
         deps.push(table);
     }
     doc.insert("dependencies", Item::ArrayOfTables(deps));
@@ -407,6 +429,7 @@ pub fn collect_resolved_dependencies(lock: &LockSnapshot) -> Vec<ResolvedDepende
             marker,
             artifact,
             direct: entry.direct,
+            requires: entry.requires.clone(),
         });
     }
     deps.sort_by(|a, b| a.name.cmp(&b.name).then(a.specifier.cmp(&b.specifier)));
@@ -845,10 +868,21 @@ fn parse_lock_snapshot(doc: &DocumentMut) -> LockSnapshot {
                 .and_then(Item::as_table)
                 .and_then(parse_artifact_table);
             let direct = table.get("direct").and_then(Item::as_bool).unwrap_or(true);
+            let requires = table
+                .get("requires")
+                .and_then(Item::as_array)
+                .map(|array| {
+                    array
+                        .iter()
+                        .filter_map(|val| val.as_str().map(std::string::ToString::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             resolved.push(LockedDependency {
                 name,
                 direct,
                 artifact,
+                requires,
             });
         }
     } else if let Some(array) = doc.get("dependencies").and_then(Item::as_array) {
@@ -1033,6 +1067,7 @@ fn normalized_from_graph(graph: &LockGraphSnapshot) -> (Vec<String>, Vec<LockedD
             name: node.name,
             direct: true,
             artifact,
+            requires: Vec::new(),
         });
     }
     (dependencies, resolved)
@@ -1201,6 +1236,7 @@ mod tests {
                 platform_tag: "any".into(),
             },
             direct: true,
+            requires: Vec::new(),
         }]
     }
 
@@ -1232,6 +1268,7 @@ mod tests {
                 name: "demo".into(),
                 direct: true,
                 artifact: Some(LockedArtifact::default()),
+                requires: Vec::new(),
             }],
             graph: None,
         };
@@ -1266,6 +1303,7 @@ mod tests {
                     abi_tag: "none".into(),
                     platform_tag: "any".into(),
                 }),
+                requires: Vec::new(),
             }],
             graph: None,
         };
@@ -1296,6 +1334,7 @@ mod tests {
                     abi_tag: "none".into(),
                     platform_tag: "any".into(),
                 }),
+                requires: Vec::new(),
             }],
             graph: None,
         };
@@ -1332,6 +1371,7 @@ mod tests {
                     abi_tag: "abi3".into(),
                     platform_tag: "any".into(),
                 }),
+                requires: Vec::new(),
             }],
             graph: Some(LockGraphSnapshot {
                 nodes: vec![GraphNode {
@@ -1394,6 +1434,7 @@ mod tests {
                     abi_tag: "none".into(),
                     platform_tag: "any".into(),
                 }),
+                requires: Vec::new(),
             }],
             graph: None,
         };

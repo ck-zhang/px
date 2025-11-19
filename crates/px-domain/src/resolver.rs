@@ -14,6 +14,8 @@ use pep508_rs::{
 use reqwest::blocking::Client;
 use serde::Deserialize;
 
+use crate::manifest::dependency_name;
+
 const PYPI_BASE: &str = "https://pypi.org/pypi";
 
 #[derive(Debug, Clone)]
@@ -54,6 +56,7 @@ pub struct ResolvedSpecifier {
     pub selected_version: String,
     pub extras: Vec<String>,
     pub marker: Option<String>,
+    pub requires: Vec<String>,
     pub direct: bool,
 }
 
@@ -109,9 +112,15 @@ pub fn resolve(request: &ResolveRequest) -> Result<Vec<ResolvedSpecifier>> {
             &marker_env,
             &spec.extras,
         )?;
+        let mut required = Vec::new();
         for (child, extras) in downstream {
+            let name = dependency_name(&child);
+            if !name.is_empty() {
+                required.push(name);
+            }
             queue.push_back((child, extras, false));
         }
+        spec.requires = required;
         seen.insert(normalized.clone(), spec.selected_version.clone());
         resolved.push(spec);
     }
@@ -148,6 +157,7 @@ fn resolve_requirement(
             selected_version: version,
             extras,
             marker,
+            requires: Vec::new(),
             direct: false,
         }));
     }
@@ -176,6 +186,7 @@ fn resolve_requirement(
         selected_version: selected,
         extras,
         marker,
+        requires: Vec::new(),
         direct: false,
     }))
 }

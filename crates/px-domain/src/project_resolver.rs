@@ -13,6 +13,7 @@ pub struct PinSpec {
     pub extras: Vec<String>,
     pub marker: Option<String>,
     pub direct: bool,
+    pub requires: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
