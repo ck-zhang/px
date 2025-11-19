@@ -16,9 +16,9 @@ use toml_edit::{DocumentMut, Item};
 use crate::{
     compute_lock_hash, dependency_name, detect_runtime_metadata, ensure_env_matches_lock,
     install_snapshot, load_project_state, manifest_snapshot, manifest_snapshot_at,
-    python_context_with_mode, refresh_project_site, relative_path_str, CommandContext, EnvGuard,
-    ExecutionOutcome, InstallOutcome, InstallState, InstallUserError, ManifestSnapshot,
-    PythonContext,
+    project_state::evaluate_project_state, python_context_with_mode, refresh_project_site,
+    relative_path_str, CommandContext, EnvGuard, ExecutionOutcome, InstallOutcome, InstallState,
+    InstallUserError, ManifestSnapshot, PythonContext,
 };
 use px_domain::{
     detect_lock_drift, discover_project_root, infer_package_name, load_lockfile_optional,
@@ -296,6 +296,7 @@ pub fn project_remove(
 /// Returns an error if project metadata cannot be read or dependency verification fails.
 pub fn project_status(ctx: &CommandContext) -> Result<ExecutionOutcome> {
     let snapshot = manifest_snapshot()?;
+    let state_report = evaluate_project_state(ctx, &snapshot)?;
     let outcome = match install_snapshot(ctx, &snapshot, true, None) {
         Ok(outcome) => outcome,
         Err(err) => match err.downcast::<InstallUserError>() {
@@ -312,6 +313,20 @@ pub fn project_status(ctx: &CommandContext) -> Result<ExecutionOutcome> {
             "python_requirement": snapshot.python_requirement.clone(),
         },
     });
+    details["state"] = Value::String(state_report.canonical.as_str().to_string());
+    details["flags"] = state_report.flags_json();
+    if let Some(fp) = state_report.manifest_fingerprint.clone() {
+        details["manifest_fingerprint"] = Value::String(fp);
+    }
+    if let Some(fp) = state_report.lock_fingerprint.clone() {
+        details["lock_fingerprint"] = Value::String(fp);
+    }
+    if let Some(id) = state_report.lock_id.clone() {
+        details["lock_id"] = Value::String(id);
+    }
+    if let Some(issue) = state_report.env_issue.clone() {
+        details["environment_issue"] = issue;
+    }
     details["runtime"] = detect_runtime_details(ctx, &snapshot);
     details["environment"] =
         collect_environment_status(ctx, &snapshot, outcome.state != InstallState::MissingLock)?;
@@ -657,6 +672,16 @@ fn collect_environment_status(
             "hint": "Run `px sync` to create px.lock before checking the environment.",
         }));
     }
+    let lock = match load_lockfile_optional(&snapshot.lock_path)? {
+        Some(lock) => lock,
+        None => {
+            return Ok(json!({
+                "status": "unknown",
+                "reason": "missing-lock",
+                "hint": "Run `px sync` to create px.lock before checking the environment.",
+            }))
+        }
+    };
     let state = load_project_state(ctx.fs(), &snapshot.root);
     let Some(env) = state.current_env.clone() else {
         return Ok(json!({
@@ -665,7 +690,10 @@ fn collect_environment_status(
             "hint": "Run `px sync` to build the px environment.",
         }));
     };
-    let lock_hash = compute_lock_hash(&snapshot.lock_path)?;
+    let lock_hash = match lock.lock_id.clone() {
+        Some(value) => value,
+        None => compute_lock_hash(&snapshot.lock_path)?,
+    };
     let mut details = json!({
         "status": "in-sync",
         "env": {

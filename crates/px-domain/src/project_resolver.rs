@@ -12,6 +12,7 @@ pub struct PinSpec {
     pub normalized: String,
     pub extras: Vec<String>,
     pub marker: Option<String>,
+    pub direct: bool,
 }
 
 #[derive(Clone, Debug)]

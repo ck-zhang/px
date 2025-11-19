@@ -7,6 +7,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use pep508_rs::Requirement as PepRequirement;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::str::FromStr;
 use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 
@@ -371,6 +372,30 @@ pub(crate) fn project_identity(doc: &DocumentMut) -> Result<(String, String)> {
         .and_then(Item::as_str)
         .map_or_else(|| ">=3.12".to_string(), std::string::ToString::to_string);
     Ok((name, python_requirement))
+}
+
+pub(crate) fn manifest_fingerprint(doc: &DocumentMut) -> Result<String> {
+    let (name, python_requirement) = project_identity(doc)?;
+    let mut deps = read_dependencies_from_doc(doc);
+    sort_and_dedupe(&mut deps);
+    let mut hasher = Sha256::new();
+    hasher.update(name.trim().to_lowercase().as_bytes());
+    hasher.update(python_requirement.trim().as_bytes());
+    for dep in deps {
+        hasher.update(dep.trim().as_bytes());
+        hasher.update(b"\n");
+    }
+    if let Some(tool_python) = doc
+        .get("tool")
+        .and_then(Item::as_table)
+        .and_then(|tool| tool.get("px"))
+        .and_then(Item::as_table)
+        .and_then(|px| px.get("python"))
+        .and_then(Item::as_str)
+    {
+        hasher.update(tool_python.trim().as_bytes());
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 pub(crate) fn requirement_display_name(spec: &str) -> String {

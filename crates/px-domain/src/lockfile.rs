@@ -42,6 +42,7 @@ pub struct LockedArtifact {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct LockedDependency {
     pub name: String,
+    pub direct: bool,
     pub artifact: Option<LockedArtifact>,
 }
 
@@ -50,6 +51,8 @@ pub struct LockSnapshot {
     pub version: i64,
     pub project_name: Option<String>,
     pub python_requirement: Option<String>,
+    pub manifest_fingerprint: Option<String>,
+    pub lock_id: Option<String>,
     pub dependencies: Vec<String>,
     pub mode: Option<String>,
     pub resolved: Vec<LockedDependency>,
@@ -63,6 +66,7 @@ pub struct ResolvedDependency {
     pub extras: Vec<String>,
     pub marker: Option<String>,
     pub artifact: LockedArtifact,
+    pub direct: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -134,6 +138,10 @@ pub fn render_lockfile(
         Item::Value(TomlValue::from(current_timestamp()?)),
     );
     metadata.insert("mode", Item::Value(TomlValue::from(LOCK_MODE_PINNED)));
+    metadata.insert(
+        "manifest_fingerprint",
+        Item::Value(TomlValue::from(snapshot.manifest_fingerprint.clone())),
+    );
     doc.insert("metadata", Item::Table(metadata));
 
     let mut project = Table::new();
@@ -149,8 +157,12 @@ pub fn render_lockfile(
 
     let mut ordered = resolved.to_vec();
     ordered.sort_by(|a, b| a.name.cmp(&b.name).then(a.specifier.cmp(&b.specifier)));
+    let lock_id = compute_lock_identity(&snapshot.manifest_fingerprint, &ordered);
+    if let Some(metadata) = doc.get_mut("metadata").and_then(Item::as_table_mut) {
+        metadata.insert("lock_id", Item::Value(TomlValue::from(lock_id.clone())));
+    }
     let mut deps = ArrayOfTables::new();
-    for dep in ordered {
+    for dep in &ordered {
         let mut table = Table::new();
         table.insert("name", Item::Value(TomlValue::from(dep.name.clone())));
         table.insert(
@@ -168,11 +180,42 @@ pub fn render_lockfile(
             table.insert("marker", Item::Value(TomlValue::from(marker.clone())));
         }
         table.insert("artifact", Item::Table(render_artifact(&dep.artifact)));
+        table.insert("direct", Item::Value(TomlValue::from(dep.direct)));
         deps.push(table);
     }
     doc.insert("dependencies", Item::ArrayOfTables(deps));
 
     Ok(doc.to_string())
+}
+
+fn compute_lock_identity(fingerprint: &str, deps: &[ResolvedDependency]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(fingerprint.as_bytes());
+    for dep in deps {
+        hasher.update(dep.name.as_bytes());
+        hasher.update(dep.specifier.as_bytes());
+        if let Some(marker) = &dep.marker {
+            hasher.update(marker.as_bytes());
+        }
+        let mut extras = dep.extras.clone();
+        extras.sort();
+        for extra in extras {
+            hasher.update(extra.as_bytes());
+            hasher.update([0]);
+        }
+        hash_artifact(&mut hasher, &dep.artifact);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn hash_artifact(hasher: &mut Sha256, artifact: &LockedArtifact) {
+    hasher.update(artifact.filename.as_bytes());
+    hasher.update(artifact.url.as_bytes());
+    hasher.update(artifact.sha256.as_bytes());
+    hasher.update(artifact.size.to_le_bytes());
+    hasher.update(artifact.python_tag.as_bytes());
+    hasher.update(artifact.abi_tag.as_bytes());
+    hasher.update(artifact.platform_tag.as_bytes());
 }
 
 pub fn render_lockfile_v2(
@@ -190,6 +233,14 @@ pub fn render_lockfile_v2(
         Item::Value(TomlValue::from(current_timestamp()?)),
     );
     metadata.insert("mode", Item::Value(TomlValue::from(LOCK_MODE_PINNED)));
+    let manifest_fingerprint = lock
+        .manifest_fingerprint
+        .clone()
+        .unwrap_or_else(|| snapshot.manifest_fingerprint.clone());
+    metadata.insert(
+        "manifest_fingerprint",
+        Item::Value(TomlValue::from(manifest_fingerprint.clone())),
+    );
     doc.insert("metadata", Item::Table(metadata));
 
     let mut project = Table::new();
@@ -204,6 +255,13 @@ pub fn render_lockfile_v2(
     doc.insert("python", Item::Table(python));
 
     let resolved = collect_resolved_dependencies(lock);
+    let lock_id = lock
+        .lock_id
+        .clone()
+        .unwrap_or_else(|| compute_lock_identity(&manifest_fingerprint, &resolved));
+    if let Some(metadata) = doc.get_mut("metadata").and_then(Item::as_table_mut) {
+        metadata.insert("lock_id", Item::Value(TomlValue::from(lock_id)));
+    }
     let mut deps = ArrayOfTables::new();
     for dep in &resolved {
         let mut table = Table::new();
@@ -213,6 +271,7 @@ pub fn render_lockfile_v2(
             Item::Value(TomlValue::from(dep.specifier.clone())),
         );
         table.insert("artifact", Item::Table(render_artifact(&dep.artifact)));
+        table.insert("direct", Item::Value(TomlValue::from(dep.direct)));
         deps.push(table);
     }
     doc.insert("dependencies", Item::ArrayOfTables(deps));
@@ -347,6 +406,7 @@ pub fn collect_resolved_dependencies(lock: &LockSnapshot) -> Vec<ResolvedDepende
             extras,
             marker,
             artifact,
+            direct: entry.direct,
         });
     }
     deps.sort_by(|a, b| a.name.cmp(&b.name).then(a.specifier.cmp(&b.specifier)));
@@ -393,7 +453,14 @@ pub fn analyze_lock_diff(
 ) -> LockDiffReport {
     let mut report = LockDiffReport::default();
     let manifest_map = spec_map(&snapshot.dependencies, marker_env);
-    let lock_map = spec_map(&lock.dependencies, None);
+    let direct_specs: Vec<String> = lock
+        .resolved
+        .iter()
+        .zip(lock.dependencies.iter())
+        .filter(|(entry, _)| entry.direct)
+        .map(|(_, spec)| spec.clone())
+        .collect();
+    let lock_map = spec_map(&direct_specs, None);
 
     for (name, spec) in &manifest_map {
         match lock_map.get(name) {
@@ -726,10 +793,17 @@ fn parse_lock_snapshot(doc: &DocumentMut) -> LockSnapshot {
         .and_then(|table| table.get("requirement"))
         .and_then(Item::as_str)
         .map(std::string::ToString::to_string);
-    let mode = doc
-        .get("metadata")
-        .and_then(Item::as_table)
+    let metadata = doc.get("metadata").and_then(Item::as_table);
+    let mode = metadata
         .and_then(|table| table.get("mode"))
+        .and_then(Item::as_str)
+        .map(std::string::ToString::to_string);
+    let manifest_fingerprint = metadata
+        .and_then(|table| table.get("manifest_fingerprint"))
+        .and_then(Item::as_str)
+        .map(std::string::ToString::to_string);
+    let lock_id = metadata
+        .and_then(|table| table.get("lock_id"))
         .and_then(Item::as_str)
         .map(std::string::ToString::to_string);
 
@@ -740,6 +814,8 @@ fn parse_lock_snapshot(doc: &DocumentMut) -> LockSnapshot {
                 version,
                 project_name,
                 python_requirement,
+                manifest_fingerprint,
+                lock_id,
                 dependencies,
                 mode,
                 resolved,
@@ -768,7 +844,12 @@ fn parse_lock_snapshot(doc: &DocumentMut) -> LockSnapshot {
                 .get("artifact")
                 .and_then(Item::as_table)
                 .and_then(parse_artifact_table);
-            resolved.push(LockedDependency { name, artifact });
+            let direct = table.get("direct").and_then(Item::as_bool).unwrap_or(true);
+            resolved.push(LockedDependency {
+                name,
+                direct,
+                artifact,
+            });
         }
     } else if let Some(array) = doc.get("dependencies").and_then(Item::as_array) {
         dependencies = array
@@ -781,6 +862,8 @@ fn parse_lock_snapshot(doc: &DocumentMut) -> LockSnapshot {
         version,
         project_name,
         python_requirement,
+        manifest_fingerprint,
+        lock_id,
         dependencies,
         mode,
         resolved,
@@ -948,6 +1031,7 @@ fn normalized_from_graph(graph: &LockGraphSnapshot) -> (Vec<String>, Vec<LockedD
             .map(|entry| entry.artifact.clone());
         resolved.push(LockedDependency {
             name: node.name,
+            direct: true,
             artifact,
         });
     }
@@ -1096,6 +1180,7 @@ mod tests {
             python_requirement: ">=3.12".into(),
             dependencies: vec!["demo==1.0.0".into()],
             python_override: None,
+            manifest_fingerprint: "demo-fingerprint".into(),
         }
     }
 
@@ -1115,6 +1200,7 @@ mod tests {
                 abi_tag: "none".into(),
                 platform_tag: "any".into(),
             },
+            direct: true,
         }]
     }
 
@@ -1138,10 +1224,13 @@ mod tests {
             version: LOCK_VERSION,
             project_name: Some("demo".into()),
             python_requirement: Some(">=3.12".into()),
+            manifest_fingerprint: Some("demo-fingerprint".into()),
+            lock_id: Some("lock-demo".into()),
             dependencies: vec!["demo==1.0.0".into()],
             mode: Some(LOCK_MODE_PINNED.into()),
             resolved: vec![LockedDependency {
                 name: "demo".into(),
+                direct: true,
                 artifact: Some(LockedArtifact::default()),
             }],
             graph: None,
@@ -1160,10 +1249,13 @@ mod tests {
             version: LOCK_VERSION,
             project_name: Some("demo".into()),
             python_requirement: Some(">=3.12".into()),
+            manifest_fingerprint: Some("demo-fingerprint".into()),
+            lock_id: Some("lock-demo".into()),
             dependencies: vec!["demo==1.0.0".into()],
             mode: Some(LOCK_MODE_PINNED.into()),
             resolved: vec![LockedDependency {
                 name: "demo".into(),
+                direct: true,
                 artifact: Some(LockedArtifact {
                     filename: "demo.whl".into(),
                     url: "https://example.invalid/demo.whl".into(),
@@ -1187,10 +1279,13 @@ mod tests {
             version: LOCK_VERSION,
             project_name: Some("demo".into()),
             python_requirement: Some(">=3.12".into()),
+            manifest_fingerprint: Some("demo-fingerprint".into()),
+            lock_id: Some("lock-demo".into()),
             dependencies: vec!["Demo[Extra]==1.0.0 ; python_version >= '3.12'".into()],
             mode: Some(LOCK_MODE_PINNED.into()),
             resolved: vec![LockedDependency {
                 name: "demo".into(),
+                direct: true,
                 artifact: Some(LockedArtifact {
                     filename: "demo.whl".into(),
                     url: "https://example.invalid/demo.whl".into(),
@@ -1220,10 +1315,13 @@ mod tests {
             version: LOCK_VERSION,
             project_name: Some(snapshot.name.clone()),
             python_requirement: Some(snapshot.python_requirement.clone()),
+            manifest_fingerprint: Some(snapshot.manifest_fingerprint.clone()),
+            lock_id: Some("lock-demo".into()),
             dependencies: snapshot.dependencies.clone(),
             mode: Some(LOCK_MODE_PINNED.into()),
             resolved: vec![LockedDependency {
                 name: "demo".into(),
+                direct: true,
                 artifact: Some(LockedArtifact {
                     filename: "demo.whl".into(),
                     url: "https://example.invalid/demo.whl".into(),
@@ -1279,10 +1377,13 @@ mod tests {
             version: LOCK_VERSION,
             project_name: Some("demo".into()),
             python_requirement: Some(">=3.12".into()),
+            manifest_fingerprint: Some("demo-fingerprint".into()),
+            lock_id: Some("lock-demo".into()),
             dependencies: vec!["demo==1.0.0".into()],
             mode: Some(LOCK_MODE_PINNED.into()),
             resolved: vec![LockedDependency {
                 name: "demo".into(),
+                direct: true,
                 artifact: Some(LockedArtifact {
                     filename: "demo-1.0.0.whl".into(),
                     url: "https://example.invalid/demo.whl".into(),

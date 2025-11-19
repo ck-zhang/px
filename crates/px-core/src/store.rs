@@ -997,7 +997,7 @@ mod tests {
             sha256: sha.as_str(),
         }];
 
-        let summary = prefetch_artifacts(cache_root, &specs, PrefetchOptions::default())?;
+        let summary = prefetch_artifacts(cache_root, &specs, PrefetchOptions::default());
         assert_eq!(summary.requested, 1);
         assert_eq!(summary.hit, 1);
         assert_eq!(summary.fetched, 0);

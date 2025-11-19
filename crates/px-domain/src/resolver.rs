@@ -1,10 +1,16 @@
 #![deny(clippy::all, warnings)]
 
-use std::{collections::BTreeMap, path::Path, str::FromStr};
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    path::Path,
+    str::FromStr,
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 use pep440_rs::{Operator, Version, VersionSpecifiers};
-use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement, StringVersion, VersionOrUrl};
+use pep508_rs::{
+    ExtraName, MarkerEnvironment, Requirement as PepRequirement, StringVersion, VersionOrUrl,
+};
 use reqwest::blocking::Client;
 use serde::Deserialize;
 
@@ -48,6 +54,7 @@ pub struct ResolvedSpecifier {
     pub selected_version: String,
     pub extras: Vec<String>,
     pub marker: Option<String>,
+    pub direct: bool,
 }
 
 /// Resolve every requirement in the request against `PyPI` metadata.
@@ -63,17 +70,53 @@ pub fn resolve(request: &ResolveRequest) -> Result<Vec<ResolvedSpecifier>> {
 
     let client = build_http_client()?;
     let marker_env = request.env.to_marker_environment()?;
-    request
+    let mut queue: VecDeque<(String, Vec<ExtraName>, bool)> = request
         .requirements
         .iter()
-        .filter_map(
-            |req| match resolve_requirement(&client, req, &request.tags, &marker_env) {
-                Ok(Some(spec)) => Some(Ok(spec)),
-                Ok(None) => None,
-                Err(err) => Some(Err(err)),
-            },
-        )
-        .collect()
+        .map(|req| (req.clone(), Vec::new(), true))
+        .collect();
+    let mut resolved = Vec::new();
+    let mut seen: HashMap<String, String> = HashMap::new();
+
+    while let Some((requirement, parent_extras, is_direct)) = queue.pop_front() {
+        let Some(spec) = resolve_requirement(
+            &client,
+            &requirement,
+            &request.tags,
+            &marker_env,
+            &parent_extras,
+        )?
+        else {
+            continue;
+        };
+        let mut spec = spec;
+        spec.direct = is_direct;
+        let normalized = spec.normalized.clone();
+        if let Some(existing) = seen.get(&normalized) {
+            if existing != &spec.selected_version {
+                bail!(
+                    "dependency `{}` resolved to conflicting versions ({existing} vs {})",
+                    spec.name,
+                    spec.selected_version
+                );
+            }
+            continue;
+        }
+        let downstream = fetch_required_dependencies(
+            &client,
+            &normalized,
+            &spec.selected_version,
+            &marker_env,
+            &spec.extras,
+        )?;
+        for (child, extras) in downstream {
+            queue.push_back((child, extras, false));
+        }
+        seen.insert(normalized.clone(), spec.selected_version.clone());
+        resolved.push(spec);
+    }
+
+    Ok(resolved)
 }
 
 fn resolve_requirement(
@@ -81,11 +124,12 @@ fn resolve_requirement(
     requirement_str: &str,
     tags: &ResolverTags,
     marker_env: &MarkerEnvironment,
+    parent_extras: &[ExtraName],
 ) -> Result<Option<ResolvedSpecifier>> {
     let requirement = PepRequirement::from_str(requirement_str)
         .map_err(|err| anyhow!("failed to parse requirement `{requirement_str}`: {err}"))?;
 
-    if !requirement.evaluate_markers(marker_env, &[]) {
+    if !requirement.evaluate_markers(marker_env, parent_extras) {
         return Ok(None);
     }
 
@@ -104,6 +148,7 @@ fn resolve_requirement(
             selected_version: version,
             extras,
             marker,
+            direct: false,
         }));
     }
 
@@ -131,7 +176,52 @@ fn resolve_requirement(
         selected_version: selected,
         extras,
         marker,
+        direct: false,
     }))
+}
+
+fn fetch_required_dependencies(
+    client: &Client,
+    normalized: &str,
+    version: &str,
+    marker_env: &MarkerEnvironment,
+    active_extras: &[String],
+) -> Result<Vec<(String, Vec<ExtraName>)>> {
+    let url = format!("{PYPI_BASE}/{normalized}/{version}/json");
+    let response = client
+        .get(&url)
+        .send()
+        .map_err(|err| anyhow!("failed to query PyPI for {normalized} {version}: {err}"))?
+        .error_for_status()
+        .map_err(|err| anyhow!("PyPI error for {normalized} {version}: {err}"))?
+        .json::<VersionResponse>()
+        .map_err(|err| anyhow!("invalid JSON from PyPI for {normalized} {version}: {err}"))?;
+
+    let mut requirements = Vec::new();
+    for entry in response.info.requires_dist.unwrap_or_default() {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let requirement = match PepRequirement::from_str(trimmed) {
+            Ok(req) => req,
+            Err(_) => continue,
+        };
+        if !requirement.evaluate_markers(marker_env, to_extra_names(active_extras).as_slice()) {
+            continue;
+        }
+        let extras = requirement.extras.clone();
+        requirements.push((requirement.to_string(), extras));
+    }
+
+    Ok(requirements)
+}
+
+fn to_extra_names(values: &[String]) -> Vec<ExtraName> {
+    values
+        .iter()
+        .filter_map(|value| ExtraName::from_str(value).ok())
+        .collect()
 }
 
 fn build_http_client() -> Result<Client> {
@@ -157,6 +247,17 @@ fn fetch_project(client: &Client, name: &str) -> Result<ProjectResponse> {
 #[derive(Debug, Deserialize)]
 struct ProjectResponse {
     releases: BTreeMap<String, Vec<ReleaseFile>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VersionResponse {
+    info: VersionInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct VersionInfo {
+    #[serde(default)]
+    requires_dist: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -368,6 +469,29 @@ mod tests {
         let spec = &resolved[0];
         assert_eq!(spec.normalized, "packaging");
         assert!(spec.selected_version.starts_with("24."));
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_requests_transitives() -> Result<()> {
+        if std::env::var("PX_ONLINE").ok().as_deref() != Some("1") {
+            eprintln!("skipping resolves_requests_transitives (PX_ONLINE!=1)");
+            return Ok(());
+        }
+
+        let request = ResolveRequest {
+            project: "demo".into(),
+            requirements: vec!["requests>=2.32,<2.33".into()],
+            tags: ResolverTags::default(),
+            env: sample_env(),
+        };
+        let resolved = resolve(&request)?;
+        let names: Vec<String> = resolved
+            .iter()
+            .map(|spec| spec.normalized.clone())
+            .collect();
+        assert!(names.contains(&"requests".to_string()));
+        assert!(names.contains(&"urllib3".to_string()));
         Ok(())
     }
 

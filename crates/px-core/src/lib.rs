@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 use std::{
     cmp::Ordering,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     env, fmt, fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -29,8 +29,8 @@ use px_domain::{
     analyze_lock_diff, autopin_pin_key, autopin_spec_key, canonical_extras, current_project_root,
     detect_lock_drift, discover_project_root, format_specifier, load_lockfile_optional,
     marker_applies, merge_resolved_dependencies, normalize_dist_name, render_lockfile, resolve,
-    verify_locked_artifacts, AutopinEntry, InstallOverride, LockSnapshot, LockedArtifact, PinSpec,
-    ProjectSnapshot, ResolvedDependency, ResolverRequest, ResolverTags,
+    spec_requires_pin, verify_locked_artifacts, AutopinEntry, InstallOverride, LockSnapshot,
+    LockedArtifact, PinSpec, ProjectSnapshot, ResolvedDependency, ResolverRequest, ResolverTags,
 };
 use reqwest::{blocking::Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,7 @@ mod effects;
 mod fmt_runner;
 mod migration;
 mod project;
+mod project_state;
 mod pypi;
 mod python_cli;
 mod run;
@@ -634,7 +635,13 @@ pub(crate) enum InstallState {
 
 pub(crate) fn lock_is_fresh(snapshot: &ManifestSnapshot) -> Result<bool> {
     match load_lockfile_optional(&snapshot.lock_path)? {
-        Some(lock) => Ok(detect_lock_drift(snapshot, &lock, None).is_empty()),
+        Some(lock) => {
+            if let Some(fingerprint) = &lock.manifest_fingerprint {
+                Ok(fingerprint == &snapshot.manifest_fingerprint)
+            } else {
+                Ok(detect_lock_drift(snapshot, &lock, None).is_empty())
+            }
+        }
         None => Ok(false),
     }
 }
@@ -685,14 +692,14 @@ pub(crate) fn install_snapshot(
         };
         let marker_env = ctx.marker_environment()?;
         let mut resolved_override = None;
-        if override_pins.is_none()
-            && dependencies_require_resolution(&dependencies)
-            && ctx.config().resolver.enabled
-        {
+        if override_pins.is_none() && ctx.config().resolver.enabled {
             let resolved = resolve_dependencies(ctx, snapshot)?;
-            dependencies = merge_resolved_dependencies(&dependencies, &resolved.specs, &marker_env);
+            if !resolved.specs.is_empty() {
+                dependencies =
+                    merge_resolved_dependencies(&dependencies, &resolved.specs, &marker_env);
+                persist_resolved_dependencies(snapshot, &dependencies)?;
+            }
             resolved_override = Some(resolved.pins);
-            persist_resolved_dependencies(snapshot, &dependencies)?;
         }
         let pins = if let Some(override_data) = override_pins {
             pins_with_override(&marker_env, &dependencies, override_data)?
@@ -726,7 +733,10 @@ pub(crate) fn refresh_project_site(
         )
     })?;
     let runtime = detect_runtime_metadata(ctx, snapshot)?;
-    let lock_hash = compute_lock_hash(&snapshot.lock_path)?;
+    let lock_hash = match lock.lock_id.clone() {
+        Some(value) => value,
+        None => compute_lock_hash(&snapshot.lock_path)?,
+    };
     let env_id = compute_environment_id(&lock_hash, &runtime);
     let env_root = snapshot.root.join(".px").join("envs").join(&env_id);
     ctx.fs().create_dir_all(&env_root)?;
@@ -987,10 +997,6 @@ fn verify_lock(snapshot: &ManifestSnapshot) -> Result<InstallOutcome> {
     }
 }
 
-fn dependencies_require_resolution(specs: &[String]) -> bool {
-    specs.iter().any(|spec| !spec.trim().contains("=="))
-}
-
 struct ResolvedSpecOutput {
     specs: Vec<String>,
     pins: Vec<PinSpec>,
@@ -1010,7 +1016,10 @@ fn resolve_dependencies_with_effects(
     let spinner = ProgressReporter::spinner("Resolving dependencies");
     let python = effects.python().detect_interpreter()?;
     let tags = detect_interpreter_tags(&python)?;
-    let marker_env = detect_marker_environment(&python)?;
+    let resolver_env = detect_marker_environment(&python)?;
+    let marker_env = resolver_env
+        .to_marker_environment()
+        .map_err(|err| anyhow!("invalid marker environment: {err}"))?;
     let request = ResolverRequest {
         project: snapshot.name.clone(),
         requirements: snapshot.dependencies.clone(),
@@ -1019,7 +1028,7 @@ fn resolve_dependencies_with_effects(
             abi: tags.abi.clone(),
             platform: tags.platform.clone(),
         },
-        env: marker_env,
+        env: resolver_env.clone(),
     };
     let resolved = resolve(&request).map_err(|err| {
         InstallUserError::new(
@@ -1027,8 +1036,9 @@ fn resolve_dependencies_with_effects(
             resolver_failure_details(&err),
         )
     })?;
-    let mut specs = Vec::new();
     let mut pins = Vec::new();
+    let mut autopin_lookup = HashMap::new();
+    let mut seen = HashSet::new();
     for spec in resolved {
         let formatted = format_specifier(
             &spec.normalized,
@@ -1036,18 +1046,37 @@ fn resolve_dependencies_with_effects(
             &spec.selected_version,
             spec.marker.as_deref(),
         );
-        specs.push(formatted.clone());
-        pins.push(PinSpec {
+        let pin = PinSpec {
             name: spec.name,
-            specifier: formatted,
+            specifier: formatted.clone(),
             version: spec.selected_version,
             normalized: spec.normalized,
             extras: spec.extras,
             marker: spec.marker,
-        });
+            direct: spec.direct,
+        };
+        autopin_lookup.insert(autopin_pin_key(&pin), formatted);
+        if seen.insert(pin.normalized.clone()) {
+            pins.push(pin);
+        }
     }
-    spinner.finish(format!("Resolved {} dependencies", specs.len()));
-    Ok(ResolvedSpecOutput { specs, pins })
+
+    let mut autopin_specs = Vec::new();
+    for spec in &snapshot.dependencies {
+        if spec_requires_pin(spec) && marker_applies(spec, &marker_env) {
+            let key = autopin_spec_key(spec);
+            if let Some(pinned) = autopin_lookup.get(&key) {
+                autopin_specs.push(pinned.clone());
+            } else {
+                autopin_specs.push(spec.clone());
+            }
+        }
+    }
+    spinner.finish(format!("Resolved {} dependencies", pins.len()));
+    Ok(ResolvedSpecOutput {
+        specs: autopin_specs,
+        pins,
+    })
 }
 
 fn resolver_failure_details(err: &anyhow::Error) -> Value {
@@ -1202,6 +1231,7 @@ fn parse_exact_pin(spec: &str) -> Result<PinSpec> {
         normalized,
         extras,
         marker,
+        direct: true,
     })
 }
 
@@ -1328,6 +1358,7 @@ fn download_artifact(
         extras: pin.extras,
         marker: pin.marker,
         artifact,
+        direct: pin.direct,
     })
 }
 
@@ -1409,7 +1440,7 @@ pub(crate) fn fetch_release(
         .map_err(|err| anyhow!("invalid JSON for {specifier}: {err}"))
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct WheelCandidate {
     filename: String,
     url: String,
@@ -1926,6 +1957,16 @@ impl EnvironmentIssue {
             EnvironmentIssue::RuntimeMismatch => "env-runtime",
         }
     }
+
+    fn auto_fixable(self) -> bool {
+        matches!(
+            self,
+            EnvironmentIssue::MissingArtifacts
+                | EnvironmentIssue::MissingEnv
+                | EnvironmentIssue::EnvOutdated
+                | EnvironmentIssue::RuntimeMismatch
+        )
+    }
 }
 
 impl PythonContext {
@@ -2081,7 +2122,10 @@ pub(crate) fn ensure_project_environment_synced(
         .into());
     }
 
-    let lock_hash = compute_lock_hash(&lock_path)?;
+    let lock_hash = match lock.lock_id.clone() {
+        Some(value) => value,
+        None => compute_lock_hash(&lock_path)?,
+    };
     let _ = prepare_project_runtime(snapshot)?;
     ensure_env_matches_lock(ctx, snapshot, &lock_hash)
 }
@@ -2161,7 +2205,11 @@ fn ensure_environment_with_guard(
                 EnvGuard::Strict => Err(user.into()),
                 EnvGuard::AutoSync => {
                     if let Some(issue) = EnvironmentIssue::from_details(&user.details) {
-                        auto_sync_environment(ctx, snapshot, issue)
+                        if issue.auto_fixable() {
+                            auto_sync_environment(ctx, snapshot, issue)
+                        } else {
+                            Err(user.into())
+                        }
                     } else {
                         Err(user.into())
                     }
@@ -2267,9 +2315,9 @@ pub fn format_status_message(info: CommandInfo, message: &str) -> String {
 mod tests {
     use super::*;
     use crate::pypi::{PypiDigests, PypiFile};
-    use crate::python_sys::current_marker_environment;
+    use crate::python_sys::{current_marker_environment, InterpreterSupportedTag};
     use crate::run::python_script_target;
-    use px_domain::LockedDependency;
+    use px_domain::lockfile::LockedDependency;
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -2381,15 +2429,19 @@ mod tests {
             python_requirement: ">=3.11".into(),
             dependencies: Vec::new(),
             python_override: None,
+            manifest_fingerprint: "demo-fingerprint".into(),
         };
         let lock = LockSnapshot {
             version: 1,
             project_name: Some("demo".into()),
             python_requirement: Some(">=3.11".into()),
+            manifest_fingerprint: Some("demo-fingerprint".into()),
+            lock_id: Some("lock-demo".into()),
             dependencies: Vec::new(),
             mode: Some("p0-pinned".into()),
             resolved: vec![LockedDependency {
                 name: "demo".into(),
+                direct: true,
                 artifact: Some(LockedArtifact {
                     filename: "demo.whl".into(),
                     url: "https://example.invalid/demo.whl".into(),
@@ -2437,15 +2489,19 @@ mod tests {
             python_requirement: ">=3.11".into(),
             dependencies: Vec::new(),
             python_override: None,
+            manifest_fingerprint: "demo-fingerprint".into(),
         };
         let lock = LockSnapshot {
             version: 1,
             project_name: Some("demo".into()),
             python_requirement: Some(">=3.11".into()),
+            manifest_fingerprint: Some("demo-fingerprint".into()),
+            lock_id: Some("lock-demo".into()),
             dependencies: Vec::new(),
             mode: Some("p0-pinned".into()),
             resolved: vec![LockedDependency {
                 name: "missing".into(),
+                direct: true,
                 artifact: Some(LockedArtifact {
                     filename: "missing.whl".into(),
                     url: "https://example.invalid/missing.whl".into(),

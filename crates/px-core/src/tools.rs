@@ -19,7 +19,7 @@ use crate::{
     outcome_from_output, refresh_project_site, runtime, CommandContext, ExecutionOutcome,
     InstallUserError,
 };
-use px_domain::ManifestEditor;
+use px_domain::{load_lockfile_optional, ManifestEditor};
 
 const TOOLS_DIR_ENV: &str = "PX_TOOLS_DIR";
 const TOOL_STORE_ENV: &str = "PX_TOOL_STORE";
@@ -431,7 +431,16 @@ fn finalize_tool_environment(
     snapshot: &px_domain::ProjectSnapshot,
     runtime: &runtime::RuntimeSelection,
 ) -> Result<PathBuf> {
-    let lock_hash = compute_lock_hash(&snapshot.lock_path)?;
+    let lock = load_lockfile_optional(&snapshot.lock_path)?.ok_or_else(|| {
+        anyhow!(
+            "px sync: lockfile missing at {}",
+            snapshot.lock_path.display()
+        )
+    })?;
+    let lock_hash = match lock.lock_id.clone() {
+        Some(value) => value,
+        None => compute_lock_hash(&snapshot.lock_path)?,
+    };
     let env_id = format!(
         "tool-{}-{}-{}",
         normalize_tool_name(&snapshot.name),

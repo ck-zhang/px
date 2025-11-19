@@ -6,7 +6,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use toml_edit::{DocumentMut, Item};
 
-use crate::manifest::{project_table, read_dependencies_from_doc};
+use crate::manifest::{manifest_fingerprint, project_table, read_dependencies_from_doc};
 
 #[derive(Clone, Debug)]
 pub struct ProjectSnapshot {
@@ -17,6 +17,7 @@ pub struct ProjectSnapshot {
     pub python_requirement: String,
     pub dependencies: Vec<String>,
     pub python_override: Option<String>,
+    pub manifest_fingerprint: String,
 }
 
 impl ProjectSnapshot {
@@ -50,6 +51,7 @@ impl ProjectSnapshot {
             .and_then(|px| px.get("python"))
             .and_then(Item::as_str)
             .map(std::string::ToString::to_string);
+        let manifest_fingerprint = manifest_fingerprint(&doc)?;
         Ok(Self {
             root: root.to_path_buf(),
             manifest_path,
@@ -58,6 +60,7 @@ impl ProjectSnapshot {
             python_requirement,
             dependencies,
             python_override,
+            manifest_fingerprint,
         })
     }
 }

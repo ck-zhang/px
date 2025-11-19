@@ -293,20 +293,22 @@ fn extract_version_label(spec: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pep508_rs::StringVersion;
+    use std::str::FromStr;
     use tempfile::tempdir;
 
     fn marker_env() -> MarkerEnvironment {
         MarkerEnvironment {
             implementation_name: "cpython".into(),
-            implementation_version: "3.12.0".into(),
+            implementation_version: StringVersion::from_str("3.12.0").expect("impl version"),
             os_name: "posix".into(),
             platform_machine: "x86_64".into(),
             platform_python_implementation: "CPython".into(),
             platform_release: "6.0".into(),
             platform_system: "Linux".into(),
             platform_version: "6.0".into(),
-            python_full_version: "3.12.0".into(),
-            python_version: "3.12".into(),
+            python_full_version: StringVersion::from_str("3.12.0").expect("full version"),
+            python_version: StringVersion::from_str("3.12").expect("python version"),
             sys_platform: "linux".into(),
         }
     }
@@ -337,6 +339,7 @@ dependencies = ["demo"]
                 normalized: "demo".into(),
                 extras: Vec::new(),
                 marker: None,
+                direct: true,
             }])
         };
 
@@ -384,6 +387,7 @@ dependencies = ["demo>=1.0", "helper==0.5"]
                 normalized: "demo".into(),
                 extras: Vec::new(),
                 marker: None,
+                direct: true,
             }])
         };
 

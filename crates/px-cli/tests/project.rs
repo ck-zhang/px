@@ -359,6 +359,7 @@ fn project_status_reports_missing_lock() {
     let payload = parse_json(&assert);
     assert_eq!(payload["status"], "user-error");
     assert_eq!(payload["details"]["status"], "missing-lock");
+    assert_eq!(payload["details"]["state"], "needs-lock");
     let hint = payload["details"]["hint"].as_str().expect("hint string");
     assert!(
         hint.contains("px sync"),
@@ -387,6 +388,7 @@ fn project_status_detects_manifest_drift() {
     let payload = parse_json(&assert);
     assert_eq!(payload["status"], "user-error");
     assert_eq!(payload["details"]["status"], "drift");
+    assert_eq!(payload["details"]["state"], "needs-lock");
     let issues = payload["details"]["issues"]
         .as_array()
         .expect("issues array");
