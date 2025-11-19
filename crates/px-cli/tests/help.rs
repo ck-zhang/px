@@ -36,38 +36,6 @@ fn init_help_lists_examples() {
 }
 
 #[test]
-fn env_help_highlights_modes() {
-    let output = help_output(&["debug", "env", "--help"]);
-    assert!(
-        output.contains("px debug env [python|info|paths]")
-            || output.contains("px debug env [python|info|paths"),
-        "env usage missing modes: {output}"
-    );
-    assert!(
-        output.contains("Output mode: info, paths, or python"),
-        "env flag description missing: {output}"
-    );
-}
-
-#[test]
-fn cache_prune_help_mentions_dry_run_example() {
-    let output = help_output(&["debug", "cache", "prune", "--help"]);
-    assert!(
-        output.contains("Prune cache files (pair with --dry-run to preview)."),
-        "cache prune about missing: {output}"
-    );
-}
-
-#[test]
-fn cache_prefetch_help_mentions_description() {
-    let output = help_output(&["debug", "cache", "prefetch", "--help"]);
-    assert!(
-        output.contains("Prefetch and cache artifacts for offline use."),
-        "cache prefetch about missing: {output}"
-    );
-}
-
-#[test]
 fn build_help_mentions_skip_tests_example() {
     let output = help_output(&["build", "--help"]);
     assert!(

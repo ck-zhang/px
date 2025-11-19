@@ -121,6 +121,7 @@ impl Style {
     }
 }
 
+#[derive(Clone, Copy)]
 enum Tone {
     Green,
     Yellow,

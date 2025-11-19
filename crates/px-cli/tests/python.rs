@@ -71,7 +71,9 @@ fn detect_host_python() -> (PathBuf, String) {
                     .to_string();
                 let version = payload["version"].as_str().expect("version").to_string();
                 let parts: Vec<_> = version.split('.').collect();
-                let channel = format!("{}.{}", parts.get(0).unwrap(), parts.get(1).unwrap());
+                let major = parts.first().unwrap_or(&"0");
+                let minor = parts.get(1).unwrap_or(&"0");
+                let channel = format!("{major}.{minor}");
                 return (PathBuf::from(path), channel);
             }
         }

@@ -12,12 +12,11 @@ mod common;
 use common::{artifact_from_lock, parse_json, prepare_fixture};
 
 fn require_online() -> bool {
-    match env::var("PX_ONLINE").ok().as_deref() {
-        Some("1") => true,
-        _ => {
-            eprintln!("skipping sdist tests (PX_ONLINE!=1)");
-            false
-        }
+    if let Some("1") = env::var("PX_ONLINE").ok().as_deref() {
+        true
+    } else {
+        eprintln!("skipping sdist tests (PX_ONLINE!=1)");
+        false
     }
 }
 
@@ -36,8 +35,7 @@ fn force_sdist_build_writes_cache_and_lock() {
     let artifact_path = artifact_from_lock(&project, "packaging");
     assert!(
         artifact_path.exists(),
-        "cached artifact should exist at {:?}",
-        artifact_path
+        "cached artifact should exist at {artifact_path:?}"
     );
 
     let lock_contents = fs::read_to_string(project.join("px.lock")).expect("read lock");
@@ -65,7 +63,9 @@ fn force_sdist_build_writes_cache_and_lock() {
         .get("filename")
         .and_then(Item::as_str)
         .unwrap_or_default();
-    assert!(filename.ends_with(".whl"));
+    assert!(std::path::Path::new(filename)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("whl")));
 }
 
 #[test]
@@ -124,9 +124,10 @@ fn require_python_build() -> bool {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        match status {
-            Ok(result) if result.success() => return true,
-            Ok(_) | Err(_) => continue,
+        if let Ok(result) = status {
+            if result.success() {
+                return true;
+            }
         }
     }
     eprintln!("skipping sdist tests (python -m build not installed)");

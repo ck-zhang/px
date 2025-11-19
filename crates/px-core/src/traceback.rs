@@ -49,11 +49,11 @@ impl TracebackContext {
             entry: extra
                 .and_then(|value| value.get("entry"))
                 .and_then(Value::as_str)
-                .map(|s| s.to_string()),
+                .map(str::to_string),
             mode: extra
                 .and_then(|value| value.get("mode"))
                 .and_then(Value::as_str)
-                .map(|s| s.to_string()),
+                .map(str::to_string),
         }
     }
 }
@@ -89,8 +89,8 @@ fn missing_import(
     summary: &TracebackSummary,
     ctx: &TracebackContext,
 ) -> Option<TracebackRecommendation> {
-    if !summary.error_type.contains("ModuleNotFoundError")
-        && !(summary.error_type.contains("ImportError")
+    if !(summary.error_type.contains("ModuleNotFoundError")
+        || summary.error_type.contains("ImportError")
             && summary.error_message.contains("No module named"))
     {
         return None;
@@ -107,7 +107,7 @@ fn missing_import(
         format!("px add {package}")
     };
     let hint = if dev_tool {
-        format!("add the dev tool with `{}` and rerun the command", command)
+        format!("add the dev tool with `{command}` and rerun the command")
     } else {
         format!("add '{package}' with `{command}` and rerun the command")
     };
@@ -145,16 +145,15 @@ impl TracebackSummary {
                     latest = Some(summary);
                     idx = next_idx;
                     continue;
-                } else {
-                    break;
                 }
+                break;
             }
             idx += 1;
         }
         latest
     }
 
-    fn parse_block<'a>(lines: &[&'a str], mut idx: usize) -> Option<(Self, usize)> {
+    fn parse_block(lines: &[&str], mut idx: usize) -> Option<(Self, usize)> {
         let mut frames = Vec::new();
         while idx < lines.len() {
             let line = lines[idx];
@@ -245,9 +244,9 @@ fn extract_missing_module(message: &str) -> Option<String> {
     let offset = message.find("No module named")?;
     let mut token = message[offset + "No module named".len()..].trim();
     token = token.trim_start_matches(':').trim();
-    token = token.trim_start_matches("'").trim_start_matches('"');
+    token = token.trim_start_matches('\'').trim_start_matches('"');
     let mut end = token
-        .find(|c: char| c == ' ' || c == '"' || c == '\'' || c == ':' || c == ')')
+        .find(|c| [' ', '"', '\'', ':', ')'].contains(&c))
         .unwrap_or(token.len());
     while end > 0
         && matches!(

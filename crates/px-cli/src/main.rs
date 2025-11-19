@@ -1,19 +1,20 @@
+#![deny(clippy::all, warnings)]
+
 use std::{path::PathBuf, sync::Arc};
 
 use atty::Stream;
 use clap::{value_parser, ArgAction, Args, Parser, Subcommand, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
 use px_core::{
-    self, CachePathRequest, CachePruneRequest, CacheStatsRequest, CommandContext, CommandGroup,
-    CommandInfo, CommandStatus, EnvMode as CoreEnvMode, EnvRequest, GlobalOptions, MigrateRequest,
-    OutputBuildRequest, OutputPublishRequest, ProjectAddRequest, ProjectInitRequest,
-    ProjectInstallRequest, ProjectRemoveRequest, ProjectUpdateRequest, ProjectWhyRequest,
-    QualityTidyRequest, StorePrefetchRequest, SystemEffects, ToolCommandRequest,
-    ToolInstallRequest, ToolListRequest, ToolRemoveRequest, ToolRunRequest, ToolUpgradeRequest,
-    WorkflowRunRequest, WorkflowTestRequest,
+    self, diag_commands, AutopinPreference, BuildRequest, CommandContext, CommandGroup,
+    CommandInfo, CommandStatus, FmtRequest, GlobalOptions, LockBehavior, MigrateRequest,
+    MigrationMode, ProjectAddRequest, ProjectInitRequest, ProjectRemoveRequest, ProjectSyncRequest,
+    ProjectUpdateRequest, ProjectWhyRequest, PublishRequest, RunRequest, SystemEffects,
+    TestRequest, ToolInstallRequest, ToolListRequest, ToolRemoveRequest, ToolRunRequest,
+    ToolUpgradeRequest, WorkspacePolicy,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 mod style;
 mod traceback;
@@ -36,17 +37,13 @@ const PX_BEFORE_HELP: &str = concat!(
     "\x1b[1;36mEssentials\x1b[0m\n",
     "  status           Check whether pyproject, px.lock, and the env still agree.\n",
     "  why              Explain why a dependency is present.\n",
-    "  fmt | lint       Run configured formatters/linters inside the px environment.\n",
+    "  fmt              Run formatters/linters/cleanup tools inside the px environment.\n",
     "  build            Produce sdists/wheels from the px-managed environment.\n",
     "  publish          Upload previously built artifacts (dry-run by default).\n",
     "  migrate          Create px metadata for an existing project.\n\n",
     "\x1b[1;36mAdvanced\x1b[0m\n",
     "  tool             Install and run px-managed global tools.\n",
-    "  debug env        Show interpreter info or pythonpath.\n",
-    "  debug cache      Inspect cached artifacts (path, stats, prune, prefetch).\n",
-    "  debug tidy       Clean cached metadata and stray files.\n",
     "  python           Manage px Python runtimes (list/install/use/info).\n",
-    "  debug why        Alias for `px why` (deprecated).\n",
 );
 
 fn main() -> Result<()> {
@@ -114,56 +111,53 @@ fn emit_output(cli: &PxCli, info: CommandInfo, outcome: &px_core::ExecutionOutco
             println!("{}", style.info(&line));
         }
         let migrate_table = render_migrate_table(&style, info, &outcome.details);
-        match outcome.status {
-            CommandStatus::Ok => {
-                if is_passthrough(&outcome.details) {
-                    println!("{}", outcome.message);
-                } else {
-                    let message = px_core::format_status_message(info, &outcome.message);
-                    println!("{}", style.status(&outcome.status, &message));
-                    let mut hint_emitted = false;
-                    if let Some(trace) = traceback_from_details(&style, &outcome.details) {
-                        println!("{}", trace.body);
-                        if let Some(line) = trace.hint_line {
-                            println!("{}", line);
-                            hint_emitted = true;
-                        }
+        if let CommandStatus::Ok = outcome.status {
+            if is_passthrough(&outcome.details) {
+                println!("{}", outcome.message);
+            } else {
+                let message = px_core::format_status_message(info, &outcome.message);
+                println!("{}", style.status(&outcome.status, &message));
+                let mut hint_emitted = false;
+                if let Some(trace) = traceback_from_details(&style, &outcome.details) {
+                    println!("{}", trace.body);
+                    if let Some(line) = trace.hint_line {
+                        println!("{line}");
+                        hint_emitted = true;
                     }
-                    if !hint_emitted {
-                        if let Some(hint) = hint_from_details(&outcome.details) {
-                            let hint_line = format!("Tip: {hint}");
-                            println!("{}", style.info(&hint_line));
-                        }
+                }
+                if !hint_emitted {
+                    if let Some(hint) = hint_from_details(&outcome.details) {
+                        let hint_line = format!("Tip: {hint}");
+                        println!("{}", style.info(&hint_line));
                     }
                 }
             }
-            _ => {
-                let header = format!("{}  {}", error_code(info), outcome.message);
-                println!("{}", style.error_header(&header));
+        } else {
+            let header = format!("{}  {}", error_code(info), outcome.message);
+            println!("{}", style.error_header(&header));
+            println!();
+            println!("Why:");
+            for reason in collect_why_bullets(&outcome.details, &outcome.message) {
+                println!("  • {reason}");
+            }
+            let fixes = collect_fix_bullets(&outcome.details);
+            if !fixes.is_empty() {
                 println!();
-                println!("Why:");
-                for reason in collect_why_bullets(&outcome.details, &outcome.message) {
-                    println!("  • {}", reason);
+                println!("Fix:");
+                for fix in fixes {
+                    println!("{}", style.fix_bullet(&format!("  • {fix}")));
                 }
-                let fixes = collect_fix_bullets(&outcome.details);
-                if !fixes.is_empty() {
-                    println!();
-                    println!("Fix:");
-                    for fix in fixes {
-                        println!("{}", style.fix_bullet(&format!("  • {fix}")));
-                    }
-                }
-                if let Some(trace) = traceback_from_details(&style, &outcome.details) {
-                    println!();
-                    println!("{}", trace.body);
-                    if let Some(line) = trace.hint_line {
-                        println!("{}", line);
-                    }
+            }
+            if let Some(trace) = traceback_from_details(&style, &outcome.details) {
+                println!();
+                println!("{}", trace.body);
+                if let Some(line) = trace.hint_line {
+                    println!("{line}");
                 }
             }
         }
         if let Some(table) = migrate_table {
-            println!("{}", table);
+            println!("{table}");
         }
     }
 
@@ -291,27 +285,21 @@ fn format_package_table(style: &Style, rows: &[PackageRow]) -> String {
 
 fn error_code(info: CommandInfo) -> &'static str {
     match info.group {
-        CommandGroup::Init => "PX101",
-        CommandGroup::Add => "PX110",
-        CommandGroup::Remove => "PX111",
-        CommandGroup::Sync => "PX120",
-        CommandGroup::Update => "PX130",
-        CommandGroup::Status => "PX140",
-        CommandGroup::Run => "PX201",
-        CommandGroup::Test => "PX202",
-        CommandGroup::Fmt => "PX301",
-        CommandGroup::Lint => "PX302",
-        CommandGroup::Tidy => "PX303",
-        CommandGroup::Build => "PX401",
-        CommandGroup::Publish => "PX402",
-        CommandGroup::Migrate => "PX501",
-        CommandGroup::Env => "PX601",
-        CommandGroup::Cache => "PX602",
-        CommandGroup::Lock => "PX610",
-        CommandGroup::Explain => "PX701",
-        CommandGroup::Why => "PX702",
-        CommandGroup::Tool => "PX640",
-        CommandGroup::Python => "PX650",
+        CommandGroup::Init => diag_commands::INIT,
+        CommandGroup::Add => diag_commands::ADD,
+        CommandGroup::Remove => diag_commands::REMOVE,
+        CommandGroup::Sync => diag_commands::SYNC,
+        CommandGroup::Update => diag_commands::UPDATE,
+        CommandGroup::Status => diag_commands::STATUS,
+        CommandGroup::Run => diag_commands::RUN,
+        CommandGroup::Test => diag_commands::TEST,
+        CommandGroup::Fmt => diag_commands::FMT,
+        CommandGroup::Build => diag_commands::BUILD,
+        CommandGroup::Publish => diag_commands::PUBLISH,
+        CommandGroup::Migrate => diag_commands::MIGRATE,
+        CommandGroup::Why => diag_commands::WHY,
+        CommandGroup::Tool => diag_commands::TOOL,
+        CommandGroup::Python => diag_commands::PYTHON,
     }
 }
 
@@ -339,7 +327,7 @@ fn collect_why_bullets(details: &Value, fallback: &str) -> Vec<String> {
                         continue;
                     }
                     if let Some(id) = map.get("id").and_then(Value::as_str) {
-                        push_unique(&mut bullets, format!("{}: {}", id, message));
+                        push_unique(&mut bullets, format!("{id}: {message}"));
                     } else {
                         push_unique(&mut bullets, message.to_string());
                     }
@@ -413,64 +401,7 @@ fn core_call(
     Ok((info, result))
 }
 
-fn upcoming_command(
-    info: CommandInfo,
-    summary: &str,
-    hint: &str,
-) -> Result<(CommandInfo, px_core::ExecutionOutcome)> {
-    Ok((
-        info,
-        px_core::ExecutionOutcome::user_error(summary.to_string(), json!({ "hint": hint })),
-    ))
-}
-
-fn handle_env_command(
-    ctx: &CommandContext,
-    args: &EnvArgs,
-) -> Result<(CommandInfo, px_core::ExecutionOutcome)> {
-    let info = CommandInfo::new(CommandGroup::Env, args.mode.label());
-    let request = env_request_from_args(args);
-    core_call(info, px_core::env(ctx, request))
-}
-
-fn handle_cache_command(
-    ctx: &CommandContext,
-    subcommand: &CacheSubcommand,
-) -> Result<(CommandInfo, px_core::ExecutionOutcome)> {
-    match subcommand {
-        CacheSubcommand::Path => {
-            let info = CommandInfo::new(CommandGroup::Cache, "path");
-            core_call(info, px_core::cache_path(ctx, CachePathRequest))
-        }
-        CacheSubcommand::Stats => {
-            let info = CommandInfo::new(CommandGroup::Cache, "stats");
-            core_call(info, px_core::cache_stats(ctx, CacheStatsRequest))
-        }
-        CacheSubcommand::Prune(prune_args) => {
-            let info = CommandInfo::new(CommandGroup::Cache, "prune");
-            let request = CachePruneRequest {
-                all: prune_args.all,
-                dry_run: prune_args.dry_run,
-            };
-            core_call(info, px_core::cache_prune(ctx, request))
-        }
-        CacheSubcommand::Prefetch(prefetch_args) => {
-            let info = CommandInfo::new(CommandGroup::Cache, "prefetch");
-            let request = store_prefetch_request_from_args(prefetch_args);
-            core_call(info, px_core::store_prefetch(ctx, request))
-        }
-    }
-}
-
-fn handle_why_command(
-    ctx: &CommandContext,
-    args: &WhyArgs,
-) -> Result<(CommandInfo, px_core::ExecutionOutcome)> {
-    let info = CommandInfo::new(CommandGroup::Why, "why");
-    let request = project_why_request_from_args(args);
-    core_call(info, px_core::project_why(ctx, request))
-}
-
+#[allow(clippy::too_many_lines)]
 fn dispatch_command(
     ctx: &CommandContext,
     group: &CommandGroupCli,
@@ -479,228 +410,132 @@ fn dispatch_command(
         CommandGroupCli::Init(args) => {
             let info = CommandInfo::new(CommandGroup::Init, "init");
             let request = project_init_request_from_args(args);
-            core_call(info, px_core::project_init(ctx, request))
+            core_call(info, px_core::project_init(ctx, &request))
         }
         CommandGroupCli::Add(args) => {
             let info = CommandInfo::new(CommandGroup::Add, "add");
             let request = ProjectAddRequest {
                 specs: args.specs.clone(),
             };
-            core_call(info, px_core::project_add(ctx, request))
+            core_call(info, px_core::project_add(ctx, &request))
         }
         CommandGroupCli::Remove(args) => {
             let info = CommandInfo::new(CommandGroup::Remove, "remove");
             let request = ProjectRemoveRequest {
                 specs: args.specs.clone(),
             };
-            core_call(info, px_core::project_remove(ctx, request))
+            core_call(info, px_core::project_remove(ctx, &request))
         }
         CommandGroupCli::Sync(args) => {
             let info = CommandInfo::new(CommandGroup::Sync, "sync");
             let request = project_sync_request_from_args(args);
-            core_call(info, px_core::project_install(ctx, request))
+            core_call(info, px_core::project_sync(ctx, &request))
         }
         CommandGroupCli::Update(args) => {
             let info = CommandInfo::new(CommandGroup::Update, "update");
             let request = ProjectUpdateRequest {
                 specs: args.specs.clone(),
             };
-            core_call(info, px_core::project_update(ctx, request))
+            core_call(info, px_core::project_update(ctx, &request))
         }
         CommandGroupCli::Run(args) => {
             let info = CommandInfo::new(CommandGroup::Run, "run");
-            let request = workflow_run_request_from_args(args);
-            core_call(info, px_core::workflow_run(ctx, request))
+            let request = run_request_from_args(args);
+            core_call(info, px_core::run_project(ctx, &request))
         }
         CommandGroupCli::Test(args) => {
             let info = CommandInfo::new(CommandGroup::Test, "test");
-            let request = workflow_test_request_from_args(args);
-            core_call(info, px_core::workflow_test(ctx, request))
+            let request = test_request_from_args(args);
+            core_call(info, px_core::test_project(ctx, &request))
         }
         CommandGroupCli::Fmt(args) => {
             let info = CommandInfo::new(CommandGroup::Fmt, "fmt");
-            let request = tool_command_request_from_args(args);
-            core_call(info, px_core::quality_fmt(ctx, request))
+            let request = fmt_request_from_args(args);
+            core_call(info, px_core::run_fmt(ctx, &request))
         }
-        CommandGroupCli::Lint(args) => {
-            let info = CommandInfo::new(CommandGroup::Lint, "lint");
-            let request = tool_command_request_from_args(args);
-            core_call(info, px_core::quality_lint(ctx, request))
+        CommandGroupCli::Status => {
+            let info = CommandInfo::new(CommandGroup::Status, "status");
+            core_call(info, px_core::project_status(ctx))
         }
         CommandGroupCli::Build(args) => {
             let info = CommandInfo::new(CommandGroup::Build, "build");
-            let request = output_build_request_from_args(args);
-            core_call(info, px_core::output_build(ctx, request))
+            let request = build_request_from_args(args);
+            core_call(info, px_core::build_project(ctx, &request))
         }
         CommandGroupCli::Publish(args) => {
             let info = CommandInfo::new(CommandGroup::Publish, "publish");
-            let request = output_publish_request_from_args(args);
-            core_call(info, px_core::output_publish(ctx, request))
+            let request = publish_request_from_args(args);
+            core_call(info, px_core::publish_project(ctx, &request))
         }
         CommandGroupCli::Migrate(args) => {
             let info = CommandInfo::new(CommandGroup::Migrate, "migrate");
             let request = migrate_request_from_args(args);
-            core_call(info, px_core::migrate(ctx, request))
+            core_call(info, px_core::migrate(ctx, &request))
         }
-        CommandGroupCli::Why(args) => handle_why_command(ctx, args),
-        CommandGroupCli::Status => {
-            let info = CommandInfo::new(CommandGroup::Status, "status");
-            core_call(info, px_core::project_status(ctx))
+        CommandGroupCli::Why(args) => {
+            let info = CommandInfo::new(CommandGroup::Why, "why");
+            let request = project_why_request_from_args(args);
+            core_call(info, px_core::project_why(ctx, &request))
         }
         CommandGroupCli::Tool(cmd) => match cmd {
             ToolCommand::Install(args) => {
                 let info = CommandInfo::new(CommandGroup::Tool, "install");
                 let request = tool_install_request_from_args(args);
-                core_call(info, px_core::tool_install(ctx, request))
+                core_call(info, px_core::tool_install(ctx, &request))
             }
             ToolCommand::Run(args) => {
                 let info = CommandInfo::new(CommandGroup::Tool, "run");
                 let request = tool_run_request_from_args(args);
-                core_call(info, px_core::tool_run(ctx, request))
+                core_call(info, px_core::tool_run(ctx, &request))
             }
             ToolCommand::List => {
                 let info = CommandInfo::new(CommandGroup::Tool, "list");
-                core_call(info, px_core::tool_list(ctx, ToolListRequest::default()))
+                core_call(info, px_core::tool_list(ctx, ToolListRequest))
             }
             ToolCommand::Remove(args) => {
                 let info = CommandInfo::new(CommandGroup::Tool, "remove");
                 let request = tool_remove_request_from_args(args);
-                core_call(info, px_core::tool_remove(ctx, request))
+                core_call(info, px_core::tool_remove(ctx, &request))
             }
             ToolCommand::Upgrade(args) => {
                 let info = CommandInfo::new(CommandGroup::Tool, "upgrade");
                 let request = tool_upgrade_request_from_args(args);
-                core_call(info, px_core::tool_upgrade(ctx, request))
+                core_call(info, px_core::tool_upgrade(ctx, &request))
             }
         },
         CommandGroupCli::Python(cmd) => match cmd {
             PythonCommand::List => {
                 let info = CommandInfo::new(CommandGroup::Python, "list");
-                core_call(info, px_core::python_list(ctx, px_core::PythonListRequest))
+                core_call(info, px_core::python_list(ctx, &px_core::PythonListRequest))
             }
             PythonCommand::Info => {
                 let info = CommandInfo::new(CommandGroup::Python, "info");
-                core_call(info, px_core::python_info(ctx, px_core::PythonInfoRequest))
+                core_call(info, px_core::python_info(ctx, &px_core::PythonInfoRequest))
             }
             PythonCommand::Install(args) => {
                 let info = CommandInfo::new(CommandGroup::Python, "install");
                 let request = python_install_request_from_args(args);
-                core_call(info, px_core::python_install(ctx, request))
+                core_call(info, px_core::python_install(ctx, &request))
             }
             PythonCommand::Use(args) => {
                 let info = CommandInfo::new(CommandGroup::Python, "use");
                 let request = python_use_request_from_args(args);
-                core_call(info, px_core::python_use(ctx, request))
+                core_call(info, px_core::python_use(ctx, &request))
             }
         },
-        CommandGroupCli::Debug(cmd) => match cmd {
-            DebugCommand::Env(args) => handle_env_command(ctx, args),
-            DebugCommand::Cache(args) => handle_cache_command(ctx, &args.command),
-            DebugCommand::Tidy(args) => {
-                let info = CommandInfo::new(CommandGroup::Tidy, "tidy");
-                let request = quality_tidy_request_from_args(args);
-                core_call(info, px_core::quality_tidy(ctx, request))
-            }
-            DebugCommand::Why(args) => handle_why_command(ctx, args),
-            DebugCommand::Explain(_args) => upcoming_command(
-                CommandInfo::new(CommandGroup::Explain, "explain"),
-                "issue explanations are not available yet",
-                "Capture the issue id and check docs/design.md for roadmap updates.",
-            ),
-        },
-        CommandGroupCli::Project(cmd) => match cmd {
-            ProjectCommand::Init(args) => {
-                let info = CommandInfo::new(CommandGroup::Init, "init");
-                let request = project_init_request_from_args(args);
-                core_call(info, px_core::project_init(ctx, request))
-            }
-            ProjectCommand::Add(args) => {
-                let info = CommandInfo::new(CommandGroup::Add, "add");
-                let request = ProjectAddRequest {
-                    specs: args.specs.clone(),
-                };
-                core_call(info, px_core::project_add(ctx, request))
-            }
-            ProjectCommand::Remove(args) => {
-                let info = CommandInfo::new(CommandGroup::Remove, "remove");
-                let request = ProjectRemoveRequest {
-                    specs: args.specs.clone(),
-                };
-                core_call(info, px_core::project_remove(ctx, request))
-            }
-            ProjectCommand::Sync(args) => {
-                let info = CommandInfo::new(CommandGroup::Sync, "sync");
-                let request = project_sync_request_from_args(args);
-                core_call(info, px_core::project_install(ctx, request))
-            }
-            ProjectCommand::Update(args) => {
-                let info = CommandInfo::new(CommandGroup::Update, "update");
-                let request = ProjectUpdateRequest {
-                    specs: args.specs.clone(),
-                };
-                core_call(info, px_core::project_update(ctx, request))
-            }
-        },
-        CommandGroupCli::Workflow(cmd) => match cmd {
-            WorkflowCommand::Run(args) => {
-                let info = CommandInfo::new(CommandGroup::Run, "run");
-                let request = workflow_run_request_from_args(args);
-                core_call(info, px_core::workflow_run(ctx, request))
-            }
-            WorkflowCommand::Test(args) => {
-                let info = CommandInfo::new(CommandGroup::Test, "test");
-                let request = workflow_test_request_from_args(args);
-                core_call(info, px_core::workflow_test(ctx, request))
-            }
-        },
-        CommandGroupCli::Quality(cmd) => match cmd {
-            QualityCommand::Fmt(args) => {
-                let info = CommandInfo::new(CommandGroup::Fmt, "fmt");
-                let request = tool_command_request_from_args(args);
-                core_call(info, px_core::quality_fmt(ctx, request))
-            }
-            QualityCommand::Lint(args) => {
-                let info = CommandInfo::new(CommandGroup::Lint, "lint");
-                let request = tool_command_request_from_args(args);
-                core_call(info, px_core::quality_lint(ctx, request))
-            }
-            QualityCommand::Tidy(args) => {
-                let info = CommandInfo::new(CommandGroup::Tidy, "tidy");
-                let request = quality_tidy_request_from_args(args);
-                core_call(info, px_core::quality_tidy(ctx, request))
-            }
-        },
-        CommandGroupCli::Output(cmd) => match cmd {
-            OutputCommand::Build(args) => {
-                let info = CommandInfo::new(CommandGroup::Build, "build");
-                let request = output_build_request_from_args(args);
-                core_call(info, px_core::output_build(ctx, request))
-            }
-            OutputCommand::Publish(args) => {
-                let info = CommandInfo::new(CommandGroup::Publish, "publish");
-                let request = output_publish_request_from_args(args);
-                core_call(info, px_core::output_publish(ctx, request))
-            }
-        },
-        CommandGroupCli::Onboard(args) => {
-            eprintln!("`px onboard` is deprecated; use `px migrate`.");
-            let info = CommandInfo::new(CommandGroup::Migrate, "migrate");
-            let request = migrate_request_from_args(args);
-            core_call(info, px_core::migrate(ctx, request))
-        }
     }
 }
 
-fn workflow_test_request_from_args(args: &TestArgs) -> WorkflowTestRequest {
-    WorkflowTestRequest {
+fn test_request_from_args(args: &TestArgs) -> TestRequest {
+    TestRequest {
         pytest_args: args.args.clone(),
         frozen: args.frozen,
     }
 }
 
-fn workflow_run_request_from_args(args: &RunArgs) -> WorkflowRunRequest {
+fn run_request_from_args(args: &RunArgs) -> RunRequest {
     let (entry, forwarded_args) = normalize_run_invocation(args);
-    WorkflowRunRequest {
+    RunRequest {
         entry,
         target: args.target.clone(),
         args: forwarded_args,
@@ -717,8 +552,8 @@ fn project_init_request_from_args(args: &InitArgs) -> ProjectInitRequest {
     }
 }
 
-fn tool_command_request_from_args(args: &ToolArgs) -> ToolCommandRequest {
-    ToolCommandRequest {
+fn fmt_request_from_args(args: &FmtArgs) -> FmtRequest {
+    FmtRequest {
         args: args.args.clone(),
         frozen: args.frozen,
     }
@@ -764,20 +599,36 @@ fn migrate_request_from_args(args: &MigrateArgs) -> MigrateRequest {
             .dev_source
             .as_ref()
             .map(|p| p.to_string_lossy().to_string()),
-        write: args.write,
-        allow_dirty: args.allow_dirty,
-        lock_only: args.lock_only,
-        no_autopin: args.no_autopin,
+        mode: if args.write {
+            MigrationMode::Apply
+        } else {
+            MigrationMode::Preview
+        },
+        workspace: if args.allow_dirty {
+            WorkspacePolicy::AllowDirty
+        } else {
+            WorkspacePolicy::CleanOnly
+        },
+        lock_behavior: if args.lock_only {
+            LockBehavior::LockOnly
+        } else {
+            LockBehavior::Full
+        },
+        autopin: if args.no_autopin {
+            AutopinPreference::Disabled
+        } else {
+            AutopinPreference::Enabled
+        },
     }
 }
 
-fn output_build_request_from_args(args: &BuildArgs) -> OutputBuildRequest {
+fn build_request_from_args(args: &BuildArgs) -> BuildRequest {
     let (include_sdist, include_wheel) = match args.format {
         BuildFormat::Sdist => (true, false),
         BuildFormat::Wheel => (false, true),
         BuildFormat::Both => (true, true),
     };
-    OutputBuildRequest {
+    BuildRequest {
         include_sdist,
         include_wheel,
         out: args.out.clone(),
@@ -785,16 +636,16 @@ fn output_build_request_from_args(args: &BuildArgs) -> OutputBuildRequest {
     }
 }
 
-fn output_publish_request_from_args(args: &PublishArgs) -> OutputPublishRequest {
-    OutputPublishRequest {
+fn publish_request_from_args(args: &PublishArgs) -> PublishRequest {
+    PublishRequest {
         registry: args.registry.clone(),
         token_env: args.token_env.clone(),
         dry_run: args.common.dry_run,
     }
 }
 
-fn project_sync_request_from_args(args: &SyncArgs) -> ProjectInstallRequest {
-    ProjectInstallRequest {
+fn project_sync_request_from_args(args: &SyncArgs) -> ProjectSyncRequest {
+    ProjectSyncRequest {
         frozen: args.frozen,
     }
 }
@@ -823,25 +674,6 @@ fn python_use_request_from_args(args: &PythonUseArgs) -> px_core::PythonUseReque
     }
 }
 
-fn env_request_from_args(args: &EnvArgs) -> EnvRequest {
-    let mode = match args.mode {
-        EnvMode::Info => CoreEnvMode::Info,
-        EnvMode::Paths => CoreEnvMode::Paths,
-        EnvMode::Python => CoreEnvMode::Python,
-    };
-    EnvRequest { mode }
-}
-
-fn store_prefetch_request_from_args(args: &StorePrefetchArgs) -> StorePrefetchRequest {
-    StorePrefetchRequest {
-        dry_run: args.common.dry_run,
-    }
-}
-
-fn quality_tidy_request_from_args(_args: &TidyArgs) -> QualityTidyRequest {
-    QualityTidyRequest
-}
-
 fn normalize_run_invocation(args: &RunArgs) -> (Option<String>, Vec<String>) {
     let mut forwarded = args.args.clone();
     match &args.entry {
@@ -861,6 +693,7 @@ fn normalize_run_invocation(args: &RunArgs) -> (Option<String>, Vec<String>) {
     before_help = PX_BEFORE_HELP,
     help_template = PX_HELP_TEMPLATE
 )]
+#[allow(clippy::struct_excessive_bools)]
 struct PxCli {
     #[arg(
         short,
@@ -923,12 +756,7 @@ enum CommandGroupCli {
         about = "Run configured formatters inside the px environment.",
         override_usage = "px fmt [-- <ARG>...]"
     )]
-    Fmt(ToolArgs),
-    #[command(
-        about = "Run configured linters inside the px environment.",
-        override_usage = "px lint [-- <ARG>...]"
-    )]
-    Lint(ToolArgs),
+    Fmt(FmtArgs),
     #[command(about = "Report whether pyproject, px.lock, and the env are in sync (read-only).")]
     Status,
     #[command(
@@ -960,67 +788,6 @@ enum CommandGroupCli {
         subcommand
     )]
     Python(PythonCommand),
-    #[command(
-        about = "Advanced utilities (env, cache, fmt, lint, tidy, why).",
-        subcommand
-    )]
-    Debug(DebugCommand),
-    #[command(subcommand, hide = true)]
-    Project(ProjectCommand),
-    #[command(subcommand, hide = true)]
-    Workflow(WorkflowCommand),
-    #[command(subcommand, hide = true)]
-    Quality(QualityCommand),
-    #[command(subcommand, hide = true)]
-    Output(OutputCommand),
-    #[command(name = "onboard", hide = true)]
-    Onboard(MigrateArgs),
-}
-
-#[derive(Subcommand, Debug)]
-enum ProjectCommand {
-    #[command(
-        about = "Scaffold pyproject, src/, and tests using the current folder.",
-        override_usage = "px project init [--package NAME] [--py VERSION]"
-    )]
-    Init(InitArgs),
-    #[command(
-        about = "Add or update pinned dependencies in pyproject.toml.",
-        override_usage = "px project add <SPEC> [SPEC ...]"
-    )]
-    Add(SpecArgs),
-    #[command(
-        about = "Remove dependencies by name across prod and dev scopes.",
-        override_usage = "px project remove <NAME> [NAME ...]"
-    )]
-    Remove(SpecArgs),
-    Sync(SyncArgs),
-    #[command(
-        about = "Update named dependencies to the newest allowed versions.",
-        override_usage = "px project update <SPEC> [SPEC ...]"
-    )]
-    Update(SpecArgs),
-}
-
-#[derive(Subcommand, Debug)]
-enum WorkflowCommand {
-    #[command(
-        about = "Run the inferred entry or a named module inside px.",
-        override_usage = "px workflow run [ENTRY] [-- <ARG>...]"
-    )]
-    Run(RunArgs),
-    #[command(
-        about = "Run pytest (or px's fallback) with cached dependencies.",
-        override_usage = "px workflow test [-- <PYTEST_ARG>...]"
-    )]
-    Test(TestArgs),
-}
-
-#[derive(Subcommand, Debug)]
-enum QualityCommand {
-    Fmt(ToolArgs),
-    Lint(ToolArgs),
-    Tidy(TidyArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -1052,40 +819,6 @@ struct PythonUseArgs {
 }
 
 #[derive(Subcommand, Debug)]
-enum OutputCommand {
-    #[command(
-        about = "Build sdists and wheels into the project dist/ folder.",
-        override_usage = "px output build [sdist|wheel|both] [--out DIR]"
-    )]
-    Build(BuildArgs),
-    #[command(
-        about = "Publish dist/ artifacts (dry-run by default).",
-        override_usage = "px output publish [--dry-run] [--registry NAME] [--token-env VAR]"
-    )]
-    Publish(PublishArgs),
-}
-
-#[derive(Subcommand, Debug)]
-enum DebugCommand {
-    #[command(
-        about = "Show interpreter info or pythonpath.",
-        override_usage = "px debug env [python|info|paths]"
-    )]
-    Env(EnvArgs),
-    #[command(
-        about = "Inspect or manage cached artifacts (path, stats, prune, prefetch).",
-        override_usage = "px debug cache <SUBCOMMAND>"
-    )]
-    Cache(CacheArgs),
-    #[command(about = "Clean cached metadata and stray files.")]
-    Tidy(TidyArgs),
-    #[command(about = "Explain why a dependency is present (advanced).")]
-    Why(WhyArgs),
-    #[command(name = "explain", hide = true)]
-    Explain(ExplainArgs),
-}
-
-#[derive(Subcommand, Debug)]
 enum ToolCommand {
     #[command(
         about = "Install a px-managed CLI tool.",
@@ -1109,6 +842,7 @@ enum ToolCommand {
 }
 
 #[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 struct MigrateArgs {
     #[arg(
         long,
@@ -1165,12 +899,6 @@ struct MigrateArgs {
     no_autopin: bool,
 }
 
-#[derive(Args, Debug)]
-struct StorePrefetchArgs {
-    #[command(flatten)]
-    common: CommonFlags,
-}
-
 #[derive(Args, Debug, Clone, Default)]
 struct CommonFlags {
     #[arg(long)]
@@ -1199,12 +927,6 @@ struct SpecArgs {
     common: CommonFlags,
     #[arg(value_name = "SPEC")]
     specs: Vec<String>,
-}
-
-#[derive(Args, Debug)]
-struct ExplainArgs {
-    #[arg(value_name = "ISSUE-ID")]
-    issue: String,
 }
 
 #[derive(Args, Debug)]
@@ -1262,7 +984,7 @@ struct TestArgs {
 }
 
 #[derive(Args, Debug)]
-struct ToolArgs {
+struct FmtArgs {
     #[command(flatten)]
     common: CommonFlags,
     #[arg(
@@ -1335,12 +1057,6 @@ struct ToolUpgradeArgs {
 }
 
 #[derive(Args, Debug)]
-struct TidyArgs {
-    #[command(flatten)]
-    common: CommonFlags,
-}
-
-#[derive(Args, Debug)]
 struct BuildArgs {
     #[command(flatten)]
     common: CommonFlags,
@@ -1365,57 +1081,4 @@ struct PublishArgs {
     registry: Option<String>,
     #[arg(long = "token-env")]
     token_env: Option<String>,
-}
-
-#[derive(Args, Debug)]
-struct CacheArgs {
-    #[command(subcommand)]
-    command: CacheSubcommand,
-}
-
-#[derive(Subcommand, Debug)]
-enum CacheSubcommand {
-    #[command(about = "Print the resolved px cache directory.")]
-    Path,
-    #[command(about = "Report cache entry counts and total bytes.")]
-    Stats,
-    #[command(about = "Prune cache files (pair with --dry-run to preview).")]
-    Prune(PruneArgs),
-    #[command(about = "Prefetch and cache artifacts for offline use.")]
-    Prefetch(StorePrefetchArgs),
-}
-
-#[derive(Args, Debug)]
-struct PruneArgs {
-    #[arg(long, help = "Confirm pruning the entire cache directory")]
-    all: bool,
-    #[arg(long, help = "Show what would be removed without deleting files")]
-    dry_run: bool,
-}
-
-#[derive(Args, Debug)]
-struct EnvArgs {
-    #[arg(
-        value_enum,
-        default_value_t = EnvMode::Info,
-        help = "Output mode: info, paths, or python (defaults to info)"
-    )]
-    mode: EnvMode,
-}
-
-#[derive(ValueEnum, Debug, Clone, Serialize, Deserialize)]
-enum EnvMode {
-    Info,
-    Paths,
-    Python,
-}
-
-impl EnvMode {
-    fn label(&self) -> &'static str {
-        match self {
-            EnvMode::Info => "info",
-            EnvMode::Paths => "paths",
-            EnvMode::Python => "python",
-        }
-    }
 }

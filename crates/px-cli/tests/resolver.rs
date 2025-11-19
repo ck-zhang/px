@@ -8,12 +8,11 @@ use tempfile::TempDir;
 use toml_edit::DocumentMut;
 
 fn require_online() -> bool {
-    match std::env::var("PX_ONLINE").ok().as_deref() {
-        Some("1") => true,
-        _ => {
-            eprintln!("skipping resolver tests (PX_ONLINE!=1)");
-            false
-        }
+    if let Some("1") = std::env::var("PX_ONLINE").ok().as_deref() {
+        true
+    } else {
+        eprintln!("skipping resolver tests (PX_ONLINE!=1)");
+        false
     }
 }
 

@@ -6,12 +6,11 @@ use tempfile::TempDir;
 use toml_edit::DocumentMut;
 
 fn require_online() -> bool {
-    match env::var("PX_ONLINE").ok().as_deref() {
-        Some("1") => true,
-        _ => {
-            eprintln!("skipping migrate autopin test (PX_ONLINE!=1)");
-            false
-        }
+    if let Some("1") = env::var("PX_ONLINE").ok().as_deref() {
+        true
+    } else {
+        eprintln!("skipping migrate autopin test (PX_ONLINE!=1)");
+        false
     }
 }
 

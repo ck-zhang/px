@@ -11,15 +11,11 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-px-python = { path = "../px-python" }
-px-runtime = { path = "../px-runtime" }
-px-resolver = { path = "../px-resolver" }
-px-project = { path = "../px-project" }
-px-lockfile = { path = "../px-lockfile" }
+px-domain = { path = "../px-domain" }
+hex.workspace = true
 dirs-next.workspace = true
 toml_edit = "0.22"
 pep440_rs.workspace = true
-px-store = { path = "../px-store" }
 reqwest.workspace = true
 sha2.workspace = true
 pep508_rs = "0.5"
@@ -28,8 +24,7 @@ tar = "0.4"
 zip.workspace = true
 time.workspace = true
 which = "6"
-
-[dev-dependencies]
 tempfile.workspace = true
+
 [features]
 default = []

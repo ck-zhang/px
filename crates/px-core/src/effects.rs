@@ -1,14 +1,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use px_runtime::RunOutput;
-use px_store::{
+use crate::python_sys::detect_interpreter;
+use crate::store::{
     cache_wheel, collect_cache_walk, compute_cache_usage, ensure_sdist_build, prefetch_artifacts,
     prune_cache_entries, resolve_cache_store_path, ArtifactRequest, BuiltWheel, CacheLocation,
-    CacheUsage, CacheWalk, CachedArtifact, PrefetchOptions as StorePrefetchOptions,
-    PrefetchSummary as StorePrefetchSummary, SdistRequest,
+    CachePruneResult, CacheUsage, CacheWalk, CachedArtifact,
+    PrefetchOptions as StorePrefetchOptions, PrefetchSpec, PrefetchSummary as StorePrefetchSummary,
+    SdistRequest,
 };
+use anyhow::{Context, Result};
+use px_domain::{run_command, RunOutput};
 
 use crate::pypi::PypiReleaseResponse;
 
@@ -43,11 +45,11 @@ pub trait CacheStore: Send + Sync {
     fn resolve_store_path(&self) -> Result<CacheLocation>;
     fn compute_usage(&self, path: &Path) -> Result<CacheUsage>;
     fn collect_walk(&self, path: &Path) -> Result<CacheWalk>;
-    fn prune(&self, walk: &CacheWalk) -> px_store::CachePruneResult;
+    fn prune(&self, walk: &CacheWalk) -> CachePruneResult;
     fn prefetch(
         &self,
         cache: &Path,
-        specs: &[px_store::PrefetchSpec<'_>],
+        specs: &[PrefetchSpec<'_>],
         options: StorePrefetchOptions,
     ) -> Result<StorePrefetchSummary>;
     fn cache_wheel(&self, cache: &Path, request: &ArtifactRequest) -> Result<CachedArtifact>;
@@ -80,6 +82,7 @@ pub struct SystemEffects {
 }
 
 impl SystemEffects {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             python: Arc::new(SystemPythonRuntime),
@@ -123,7 +126,7 @@ struct SystemPythonRuntime;
 
 impl PythonRuntime for SystemPythonRuntime {
     fn detect_interpreter(&self) -> Result<String> {
-        px_python::detect_interpreter()
+        detect_interpreter()
     }
 
     fn run_command(
@@ -133,7 +136,7 @@ impl PythonRuntime for SystemPythonRuntime {
         env: &[(String, String)],
         cwd: &Path,
     ) -> Result<RunOutput> {
-        px_runtime::run_command(python, args, env, cwd)
+        run_command(python, args, env, cwd)
     }
 }
 
@@ -150,12 +153,11 @@ impl GitClient for SystemGit {
                 let lines = String::from_utf8_lossy(&out.stdout)
                     .lines()
                     .filter(|line| !line.trim().is_empty())
-                    .map(|line| line.to_string())
+                    .map(ToString::to_string)
                     .collect::<Vec<_>>();
                 Ok(Some(lines))
             }
-            Ok(_) => Ok(None),
-            Err(_) => Ok(None),
+            Ok(_) | Err(_) => Ok(None),
         }
     }
 }
@@ -217,17 +219,17 @@ impl CacheStore for SystemCacheStore {
         collect_cache_walk(path)
     }
 
-    fn prune(&self, walk: &CacheWalk) -> px_store::CachePruneResult {
+    fn prune(&self, walk: &CacheWalk) -> CachePruneResult {
         prune_cache_entries(walk)
     }
 
     fn prefetch(
         &self,
         cache: &Path,
-        specs: &[px_store::PrefetchSpec<'_>],
+        specs: &[PrefetchSpec<'_>],
         options: StorePrefetchOptions,
     ) -> Result<StorePrefetchSummary> {
-        prefetch_artifacts(cache, specs, options)
+        Ok(prefetch_artifacts(cache, specs, options))
     }
 
     fn cache_wheel(&self, cache: &Path, request: &ArtifactRequest) -> Result<CachedArtifact> {

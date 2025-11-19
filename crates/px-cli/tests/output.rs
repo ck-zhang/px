@@ -14,7 +14,7 @@ fn output_build_produces_wheel_and_sdist() {
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
-        .args(["--json", "output", "build", "both", "--out", &dist_arg])
+        .args(["--json", "build", "both", "--out", &dist_arg])
         .assert()
         .success();
 
@@ -31,7 +31,7 @@ fn output_build_produces_wheel_and_sdist() {
                 .as_object()
                 .and_then(|map| map.get("path"))
                 .and_then(Value::as_str)
-                .map(|s| s.to_string())
+                .map(str::to_string)
         })
         .collect();
     let expected_files = [
@@ -41,8 +41,7 @@ fn output_build_produces_wheel_and_sdist() {
     for rel in &expected_files {
         assert!(
             paths.iter().any(|entry| entry == rel),
-            "artifacts should include {rel}, got {paths:?}",
-            rel = rel
+            "artifacts should include {rel}, got {paths:?}"
         );
         assert!(
             project.join(rel).exists(),
@@ -56,7 +55,7 @@ fn publish_dry_run_reports_registry_and_artifacts() {
     let (_tmp, project) = init_empty_project("output-publish-dry-run");
     cargo_bin_cmd!("px")
         .current_dir(&project)
-        .args(["output", "build"])
+        .args(["build"])
         .assert()
         .success();
 
@@ -64,7 +63,6 @@ fn publish_dry_run_reports_registry_and_artifacts() {
         .current_dir(&project)
         .args([
             "--json",
-            "output",
             "publish",
             "--dry-run",
             "--registry",
@@ -93,14 +91,14 @@ fn publish_requires_token_when_online() {
     let (_tmp, project) = init_empty_project("output-publish-token");
     cargo_bin_cmd!("px")
         .current_dir(&project)
-        .args(["output", "build"])
+        .args(["build"])
         .assert()
         .success();
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_ONLINE", "1")
-        .args(["--json", "output", "publish"])
+        .args(["--json", "publish"])
         .assert()
         .failure();
 

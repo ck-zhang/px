@@ -58,7 +58,7 @@ fn project_init_creates_minimal_shape() {
     let site_path = Path::new(site);
     assert!(site_path.join("px.pth").exists(), "env px.pth should exist");
     assert!(
-        site_path.starts_with(&px_dir.join("envs")),
+        site_path.starts_with(px_dir.join("envs")),
         "site should live under .px/envs"
     );
 
@@ -68,8 +68,7 @@ fn project_init_creates_minimal_shape() {
     let deps = project
         .get("dependencies")
         .and_then(|item| item.as_array())
-        .map(|array| array.len())
-        .unwrap_or(0);
+        .map_or(0, toml_edit::Array::len);
     assert_eq!(deps, 0, "dependencies should start empty");
     assert!(
         doc.get("tool")
@@ -418,7 +417,7 @@ fn read_dependencies(path: impl AsRef<Path>) -> Vec<String> {
         .map(|array| {
             array
                 .iter()
-                .filter_map(|val| val.as_str().map(|s| s.to_string()))
+                .filter_map(|val| val.as_str().map(str::to_string))
                 .collect()
         })
         .unwrap_or_default()

@@ -7,12 +7,11 @@ use assert_cmd::cargo::cargo_bin_cmd;
 use toml_edit::DocumentMut;
 
 fn require_online() -> bool {
-    match env::var("PX_ONLINE").ok().as_deref() {
-        Some("1") => true,
-        _ => {
-            eprintln!("skipping online test (set PX_ONLINE=1)");
-            false
-        }
+    if let Some("1") = env::var("PX_ONLINE").ok().as_deref() {
+        true
+    } else {
+        eprintln!("skipping online test (set PX_ONLINE=1)");
+        false
     }
 }
 
@@ -84,7 +83,9 @@ fn install_pinned_fetches_artifact() {
     let cached_path = artifact["cached_path"].as_str().expect("cached path");
     assert!(PathBuf::from(cached_path).exists());
     assert!(artifact["sha256"].as_str().is_some());
-    assert!(artifact["filename"].as_str().unwrap().ends_with(".whl"));
+    assert!(std::path::Path::new(artifact["filename"].as_str().unwrap())
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("whl")));
 
     cargo_bin_cmd!("px")
         .current_dir(&project_root)
@@ -160,8 +161,7 @@ fn install_skips_nonmatching_marker_specs() {
     let deps_empty = lock_doc
         .get("dependencies")
         .and_then(|item| item.as_array_of_tables())
-        .map(|deps| deps.is_empty())
-        .unwrap_or(true);
+        .is_none_or(toml_edit::ArrayOfTables::is_empty);
     assert!(deps_empty, "non-matching marker should be skipped");
 }
 

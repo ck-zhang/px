@@ -9,7 +9,6 @@ use anyhow::{anyhow, bail, Context, Result};
 use dirs_next::home_dir;
 use pep440_rs::{Version, VersionSpecifiers};
 use serde::{Deserialize, Serialize};
-use serde_json;
 use which::which;
 
 const REGISTRY_ENV: &str = "PX_RUNTIME_REGISTRY";
@@ -197,7 +196,7 @@ pub fn resolve_runtime(
         });
     }
 
-    bail!("no python runtime satisfies `{}`", requirement);
+    bail!("no python runtime satisfies `{requirement}`");
 }
 
 fn requirement_allows(requirement: &str, version: &str) -> bool {

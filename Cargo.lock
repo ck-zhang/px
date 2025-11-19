@@ -1128,14 +1128,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "px-cache"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
-]
-
-[[package]]
 name = "px-cli"
 version = "0.1.0"
 dependencies = [
@@ -1161,14 +1153,10 @@ dependencies = [
  "camino",
  "dirs-next",
  "flate2",
+ "hex",
  "pep440_rs 0.5.0",
  "pep508_rs",
- "px-lockfile",
- "px-project",
- "px-python",
- "px-resolver",
- "px-runtime",
- "px-store",
+ "px-domain",
  "reqwest",
  "serde",
  "serde_json",
@@ -1184,80 +1172,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "px-lockfile"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "pep440_rs 0.5.0",
- "pep508_rs",
- "px-project",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "time",
- "toml_edit",
-]
-
-[[package]]
-name = "px-project"
+name = "px-domain"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
  "dirs-next",
- "pep440_rs 0.5.0",
- "pep508_rs",
- "px-python",
- "px-resolver",
- "serde",
- "serde_json",
- "tempfile",
- "time",
- "toml_edit",
-]
-
-[[package]]
-name = "px-python"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "which",
-]
-
-[[package]]
-name = "px-resolver"
-version = "0.1.0"
-dependencies = [
- "anyhow",
  "indexmap",
  "pep440_rs 0.5.0",
  "pep508_rs",
  "reqwest",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "px-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
-]
-
-[[package]]
-name = "px-store"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs-next",
- "hex",
- "reqwest",
- "serde",
- "serde_json",
  "sha2",
  "tempfile",
- "zip",
+ "time",
+ "toml_edit",
 ]
 
 [[package]]

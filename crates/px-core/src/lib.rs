@@ -1,10 +1,12 @@
+#![deny(clippy::all, warnings)]
+
+use std::fmt::Write as _;
 use std::{
     cmp::Ordering,
     collections::{HashMap, VecDeque},
     env, fmt, fs,
     io::{self, Write},
     path::{Path, PathBuf},
-    process::Command,
     str::FromStr,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
@@ -15,22 +17,21 @@ use std::{
 };
 
 use self::effects::{Effects, SharedEffects};
-use anyhow::{anyhow, bail, Context, Result};
+use crate::python_sys::{
+    detect_interpreter, detect_interpreter_tags, detect_marker_environment, InterpreterTags,
+};
+use crate::store::{ArtifactRequest, CacheLocation, SdistRequest};
+use anyhow::{anyhow, Context, Result};
 use pep440_rs::{Operator, VersionSpecifiers};
 use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement, VersionOrUrl};
-use px_lockfile::{
-    analyze_lock_diff, detect_lock_drift, load_lockfile_optional, render_lockfile,
-    render_lockfile_v2, verify_locked_artifacts, LockPrefetchSpec, LockSnapshot, LockedArtifact,
-    ResolvedDependency,
+use px_domain::RunOutput;
+use px_domain::{
+    analyze_lock_diff, autopin_pin_key, autopin_spec_key, canonical_extras, current_project_root,
+    detect_lock_drift, discover_project_root, format_specifier, load_lockfile_optional,
+    marker_applies, merge_resolved_dependencies, normalize_dist_name, render_lockfile, resolve,
+    verify_locked_artifacts, AutopinEntry, InstallOverride, LockSnapshot, LockedArtifact, PinSpec,
+    ProjectSnapshot, ResolvedDependency, ResolverRequest, ResolverTags,
 };
-use px_project::resolver::{
-    autopin_pin_key, autopin_spec_key, marker_applies, merge_resolved_dependencies,
-};
-use px_project::{discover_project_root, AutopinEntry, InstallOverride, PinSpec};
-use px_python;
-use px_resolver::{ResolveRequest as ResolverRequest, ResolverEnv, ResolverTags};
-use px_runtime::{self, RunOutput};
-use px_store::{ArtifactRequest, CacheLocation, PrefetchSpec as StorePrefetchSpec, SdistRequest};
 use reqwest::{blocking::Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -40,12 +41,23 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 use crate::pypi::{PypiFile, PypiReleaseResponse};
 use crate::traceback::{analyze_python_traceback, TracebackContext};
 
-mod commands;
+mod diagnostics;
+mod python_sys;
+mod store;
+
+mod distribution;
 mod effects;
+mod fmt_runner;
+mod migration;
+mod project;
 mod pypi;
+mod python_cli;
+mod run;
 mod runtime;
+mod tools;
 mod traceback;
 
+pub use diagnostics::commands as diag_commands;
 pub use effects::SystemEffects;
 
 const PYPI_BASE_URL: &str = "https://pypi.org/pypi";
@@ -103,7 +115,7 @@ for path in sys.path:
 sys.path[:] = _new_path
 "#;
 
-type ManifestSnapshot = px_project::ProjectSnapshot;
+type ManifestSnapshot = ProjectSnapshot;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GlobalOptions {
@@ -125,16 +137,10 @@ pub enum CommandGroup {
     Run,
     Test,
     Fmt,
-    Lint,
-    Tidy,
     Build,
     Publish,
     Migrate,
     Status,
-    Env,
-    Cache,
-    Lock,
-    Explain,
     Why,
     Tool,
     Python,
@@ -151,16 +157,10 @@ impl fmt::Display for CommandGroup {
             CommandGroup::Run => "run",
             CommandGroup::Test => "test",
             CommandGroup::Fmt => "fmt",
-            CommandGroup::Lint => "lint",
-            CommandGroup::Tidy => "tidy",
             CommandGroup::Build => "build",
             CommandGroup::Publish => "publish",
             CommandGroup::Migrate => "migrate",
             CommandGroup::Status => "status",
-            CommandGroup::Env => "env",
-            CommandGroup::Cache => "cache",
-            CommandGroup::Lock => "lock",
-            CommandGroup::Explain => "explain",
             CommandGroup::Why => "why",
             CommandGroup::Tool => "tool",
             CommandGroup::Python => "python",
@@ -176,6 +176,7 @@ pub struct CommandInfo {
 }
 
 impl CommandInfo {
+    #[must_use]
     pub const fn new(group: CommandGroup, name: &'static str) -> Self {
         Self { group, name }
     }
@@ -209,7 +210,7 @@ impl EnvSnapshot {
     fn testing(pairs: &[(&str, &str)]) -> Self {
         let vars = pairs
             .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect();
         Self { vars }
     }
@@ -225,6 +226,10 @@ pub struct Config {
 }
 
 impl Config {
+    /// Builds a configuration snapshot from the current process environment.
+    ///
+    /// # Errors
+    /// Returns an error if cache paths cannot be resolved or inspected.
     pub fn from_env(effects: &dyn Effects) -> Result<Self> {
         let snapshot = EnvSnapshot::capture();
         Self::from_snapshot(&snapshot, effects.cache())
@@ -258,22 +263,27 @@ impl Config {
         })
     }
 
+    #[must_use]
     pub fn cache(&self) -> &CacheConfig {
         &self.cache
     }
 
+    #[must_use]
     pub fn network(&self) -> &NetworkConfig {
         &self.network
     }
 
+    #[must_use]
     pub fn resolver(&self) -> &ResolverConfig {
         &self.resolver
     }
 
+    #[must_use]
     pub fn test(&self) -> &TestConfig {
         &self.test
     }
 
+    #[must_use]
     pub fn publish(&self) -> &PublishConfig {
         &self.publish
     }
@@ -315,6 +325,10 @@ pub struct CommandContext<'a> {
 }
 
 impl<'a> CommandContext<'a> {
+    /// Creates a new command context with the provided global options.
+    ///
+    /// # Errors
+    /// Returns an error if the environment snapshot or configuration cannot be prepared.
     pub fn new(global: &'a GlobalOptions, effects: SharedEffects) -> Result<Self> {
         let env = EnvSnapshot::capture();
         let config = Config::from_snapshot(&env, effects.cache())?;
@@ -363,12 +377,20 @@ impl<'a> CommandContext<'a> {
         self.effects.pypi()
     }
 
+    /// Detects the marker environment for PEP 508 resolution.
+    ///
+    /// # Errors
+    /// Returns an error if interpreter detection fails.
     pub fn marker_environment(&self) -> Result<MarkerEnvironment> {
         let python = self.python_runtime().detect_interpreter()?;
-        let resolver_env = detect_marker_environment_with(&python)?;
+        let resolver_env = detect_marker_environment(&python)?;
         resolver_env.to_marker_environment()
     }
 
+    /// Resolves the current project's root directory.
+    ///
+    /// # Errors
+    /// Returns an error if the working directory cannot be inspected.
     pub fn project_root(&self) -> Result<PathBuf> {
         if let Some(path) = self.project_root.get() {
             Ok(path.clone())
@@ -393,6 +415,10 @@ impl<'a> CommandContext<'a> {
 }
 
 pub trait CommandHandler<R> {
+    /// Executes a command handler within the provided context.
+    ///
+    /// # Errors
+    /// Returns an error if command execution fails unexpectedly.
     fn handle(&self, ctx: &CommandContext, request: R) -> Result<ExecutionOutcome>;
 }
 
@@ -466,17 +492,18 @@ struct ProgressReporter {
 
 impl ProgressReporter {
     fn spinner(label: impl Into<String>) -> Self {
-        Self::start(label.into(), None)
+        Self::start(label, None)
     }
 
     fn bar(label: impl Into<String>, total: usize) -> Self {
         if total == 0 {
             return Self::spinner(label);
         }
-        Self::start(label.into(), Some(total))
+        Self::start(label, Some(total))
     }
 
-    fn start(label: String, total: Option<usize>) -> Self {
+    fn start(label: impl Into<String>, total: Option<usize>) -> Self {
+        let label = label.into();
         if !progress_enabled() {
             return Self {
                 current: Arc::new(AtomicUsize::new(0)),
@@ -493,7 +520,7 @@ impl ProgressReporter {
         let thread_stop = Arc::clone(&stop);
         let thread_current = Arc::clone(&current);
         let handle = thread::spawn(move || {
-            ProgressReporter::run(thread_label, thread_total, thread_current, thread_stop)
+            ProgressReporter::run(&thread_label, thread_total, &thread_current, &thread_stop);
         });
 
         Self {
@@ -524,7 +551,7 @@ impl ProgressReporter {
         eprintln!("px ▸ {}", message.into());
     }
 
-    fn run(label: String, total: Option<usize>, current: Arc<AtomicUsize>, stop: Arc<AtomicBool>) {
+    fn run(label: &str, total: Option<usize>, current: &Arc<AtomicUsize>, stop: &Arc<AtomicBool>) {
         const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let mut idx = 0;
         while !stop.load(AtomicOrdering::Relaxed) {
@@ -532,9 +559,9 @@ impl ProgressReporter {
             idx += 1;
             let line = if let Some(total) = total {
                 let current = current.load(AtomicOrdering::Relaxed).min(total);
-                format!("\r\x1b[2Kpx ▸ {} [{}/{}] {}", label, current, total, frame)
+                format!("\r\x1b[2Kpx ▸ {label} [{current}/{total}] {frame}")
             } else {
-                format!("\r\x1b[2Kpx ▸ {} {}", label, frame)
+                format!("\r\x1b[2Kpx ▸ {label} {frame}")
             };
             let _ = io::stderr().write_all(line.as_bytes());
             let _ = io::stderr().flush();
@@ -548,7 +575,7 @@ fn download_concurrency(total: usize) -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok());
     let available = thread::available_parallelism()
-        .map(|n| n.get())
+        .map(std::num::NonZeroUsize::get)
         .unwrap_or(4)
         .max(1);
     let max_workers = requested.unwrap_or(available).clamp(1, 16);
@@ -570,34 +597,24 @@ impl Drop for ProgressReporter {
     }
 }
 
-pub use commands::cache::{
-    cache_path, cache_prune, cache_stats, CachePathRequest, CachePruneRequest, CacheStatsRequest,
+pub use distribution::{build_project, publish_project, BuildRequest, PublishRequest};
+pub use fmt_runner::{run_fmt, FmtRequest};
+pub use migration::{
+    migrate, AutopinPreference, LockBehavior, MigrateRequest, MigrationMode, WorkspacePolicy,
 };
-pub use commands::env::{env, EnvMode, EnvRequest};
-pub use commands::lock::{lock_diff, lock_upgrade, LockDiffRequest, LockUpgradeRequest};
-pub use commands::migrate::{migrate, MigrateRequest};
-pub use commands::output::{
-    output_build, output_publish, OutputBuildRequest, OutputPublishRequest,
+pub use project::{
+    project_add, project_init, project_remove, project_status, project_sync, project_update,
+    project_why, ProjectAddRequest, ProjectInitRequest, ProjectRemoveRequest, ProjectSyncRequest,
+    ProjectUpdateRequest, ProjectWhyRequest,
 };
-pub use commands::project::{
-    project_add, project_init, project_install, project_remove, project_status, project_update,
-    project_why, ProjectAddRequest, ProjectInitRequest, ProjectInstallRequest,
-    ProjectRemoveRequest, ProjectUpdateRequest, ProjectWhyRequest,
-};
-pub use commands::python::{
+pub use python_cli::{
     python_info, python_install, python_list, python_use, PythonInfoRequest, PythonInstallRequest,
     PythonListRequest, PythonUseRequest,
 };
-pub use commands::quality::{
-    quality_fmt, quality_lint, quality_tidy, QualityTidyRequest, ToolCommandRequest,
-};
-pub use commands::store::{store_prefetch, StorePrefetchRequest};
-pub use commands::tool::{
+pub use run::{run_project, test_project, RunRequest, TestRequest};
+pub use tools::{
     tool_install, tool_list, tool_remove, tool_run, tool_upgrade, ToolInstallRequest,
     ToolListRequest, ToolRemoveRequest, ToolRunRequest, ToolUpgradeRequest,
-};
-pub use commands::workflow::{
-    workflow_run, workflow_test, WorkflowRunRequest, WorkflowTestRequest,
 };
 
 pub(crate) struct InstallOutcome {
@@ -630,11 +647,11 @@ pub(crate) fn relative_path_str(path: &Path, root: &Path) -> String {
 }
 
 pub(crate) fn manifest_snapshot() -> Result<ManifestSnapshot> {
-    Ok(px_project::ProjectSnapshot::read_current()?)
+    ProjectSnapshot::read_current()
 }
 
 pub(crate) fn manifest_snapshot_at(root: &Path) -> Result<ManifestSnapshot> {
-    Ok(px_project::ProjectSnapshot::read_from(root)?)
+    ProjectSnapshot::read_from(root)
 }
 
 pub(crate) fn install_snapshot(
@@ -881,7 +898,7 @@ fn detect_runtime_metadata(
 ) -> Result<RuntimeMetadata> {
     let path = ctx.python_runtime().detect_interpreter()?;
     let version = probe_python_version(ctx, snapshot, &path)?;
-    let tags = detect_interpreter_tags_with(&path)?;
+    let tags = detect_interpreter_tags(&path)?;
     let platform = tags
         .platform
         .first()
@@ -992,8 +1009,8 @@ fn resolve_dependencies_with_effects(
 ) -> Result<ResolvedSpecOutput> {
     let spinner = ProgressReporter::spinner("Resolving dependencies");
     let python = effects.python().detect_interpreter()?;
-    let tags = detect_interpreter_tags_with(&python)?;
-    let marker_env = detect_marker_environment_with(&python)?;
+    let tags = detect_interpreter_tags(&python)?;
+    let marker_env = detect_marker_environment(&python)?;
     let request = ResolverRequest {
         project: snapshot.name.clone(),
         requirements: snapshot.dependencies.clone(),
@@ -1004,7 +1021,7 @@ fn resolve_dependencies_with_effects(
         },
         env: marker_env,
     };
-    let resolved = px_resolver::resolve(request).map_err(|err| {
+    let resolved = resolve(&request).map_err(|err| {
         InstallUserError::new(
             "dependency resolution failed",
             resolver_failure_details(&err),
@@ -1036,6 +1053,12 @@ fn resolve_dependencies_with_effects(
 fn resolver_failure_details(err: &anyhow::Error) -> Value {
     let message = err.to_string();
     let issue = message.clone();
+    let details = json!({
+        "reason": "resolve_failed",
+        "issues": [issue],
+        "hint": "Inspect dependency constraints and rerun `px sync`.",
+        "code": diag_commands::SYNC,
+    });
     if let Some(req) = extract_quoted_requirement(&message) {
         if message.contains("unable to resolve") {
             return json!({
@@ -1043,6 +1066,7 @@ fn resolver_failure_details(err: &anyhow::Error) -> Value {
                 "issues": [issue],
                 "requirement": req,
                 "hint": format!("Relax or remove `{}` in pyproject.toml, then rerun `px sync`.", req),
+                "code": diag_commands::SYNC,
             });
         }
         if message.contains("failed to parse requirement")
@@ -1053,6 +1077,7 @@ fn resolver_failure_details(err: &anyhow::Error) -> Value {
                 "issues": [issue],
                 "requirement": req,
                 "hint": format!("Fix `{}` to a valid PEP 508 requirement, then rerun `px sync`.", req),
+                "code": diag_commands::SYNC,
             });
         }
     }
@@ -1061,13 +1086,10 @@ fn resolver_failure_details(err: &anyhow::Error) -> Value {
             "reason": "pypi_unreachable",
             "issues": [issue],
             "hint": "Check your network connection (PX_ONLINE=1) and rerun `px sync`.",
+            "code": diag_commands::SYNC,
         });
     }
-    json!({
-        "reason": "resolve_failed",
-        "issues": [issue],
-        "hint": "Inspect dependency constraints and rerun `px sync`.",
-    })
+    details
 }
 
 fn extract_quoted_requirement(message: &str) -> Option<String> {
@@ -1085,25 +1107,10 @@ fn persist_resolved_dependencies(snapshot: &ManifestSnapshot, specs: &[String]) 
     Ok(())
 }
 
-pub(crate) fn store_prefetch_specs<'a>(
-    entries: &'a [LockPrefetchSpec],
-) -> Vec<StorePrefetchSpec<'a>> {
-    entries
-        .iter()
-        .map(|entry| StorePrefetchSpec {
-            name: entry.name.as_str(),
-            version: entry.version.as_str(),
-            filename: entry.filename.as_str(),
-            url: entry.url.as_str(),
-            sha256: entry.sha256.as_str(),
-        })
-        .collect()
-}
-
 fn ensure_exact_pins(marker_env: &MarkerEnvironment, specs: &[String]) -> Result<Vec<PinSpec>> {
     let mut pins = Vec::new();
     for spec in specs {
-        if !marker_applies(spec, &marker_env) {
+        if !marker_applies(spec, marker_env) {
             continue;
         }
         pins.push(parse_exact_pin(spec)?);
@@ -1183,10 +1190,10 @@ fn parse_exact_pin(spec: &str) -> Result<PinSpec> {
         &requirement
             .extras
             .iter()
-            .map(|extra| extra.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>(),
     );
-    let marker = requirement.marker.as_ref().map(|m| m.to_string());
+    let marker = requirement.marker.as_ref().map(ToString::to_string);
     let normalized = normalize_dist_name(&name);
     Ok(PinSpec {
         name,
@@ -1207,8 +1214,8 @@ fn resolve_pins(
         return Ok(Vec::new());
     }
 
-    let python = px_python::detect_interpreter()?;
-    let tags = Arc::new(detect_interpreter_tags_with(&python)?);
+    let python = detect_interpreter()?;
+    let tags = Arc::new(detect_interpreter_tags(&python)?);
     let cache = ctx.cache().clone();
     let effects = ctx.shared_effects();
 
@@ -1402,6 +1409,16 @@ pub(crate) fn fetch_release(
         .map_err(|err| anyhow!("invalid JSON for {specifier}: {err}"))
 }
 
+#[derive(Clone)]
+struct WheelCandidate {
+    filename: String,
+    url: String,
+    sha256: String,
+    python_tag: String,
+    abi_tag: String,
+    platform_tag: String,
+}
+
 fn select_wheel(
     files: &[PypiFile],
     tags: &InterpreterTags,
@@ -1576,10 +1593,8 @@ fn normalize_platform_value(value: &str) -> String {
 }
 
 fn same_platform_family(interpreter: &str, candidate: &str) -> bool {
-    if interpreter.starts_with("linux") {
-        if candidate.contains("linux") {
-            return arch_overlap(interpreter, candidate);
-        }
+    if interpreter.starts_with("linux") && candidate.contains("linux") {
+        return arch_overlap(interpreter, candidate);
     }
     if interpreter.starts_with("macosx") && candidate.starts_with("macosx") {
         return arch_overlap(interpreter, candidate);
@@ -1622,10 +1637,14 @@ fn arch_hint(value: &str) -> Option<&'static str> {
 }
 
 fn parse_wheel_tags(filename: &str) -> Option<(String, String, String)> {
-    if !filename.ends_with(".whl") {
+    let path = std::path::Path::new(filename);
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("whl"))
+    {
         return None;
     }
-    let trimmed = filename.trim_end_matches(".whl");
+    let trimmed = path.file_stem()?.to_str()?;
     let parts: Vec<&str> = trimmed.split('-').collect();
     if parts.len() < 5 {
         return None;
@@ -1634,240 +1653,6 @@ fn parse_wheel_tags(filename: &str) -> Option<(String, String, String)> {
     let abi_tag = parts[parts.len() - 2].to_string();
     let platform_tag = parts[parts.len() - 1].to_string();
     Some((python_tag, abi_tag, platform_tag))
-}
-
-fn detect_interpreter_tags_with(python: &str) -> Result<InterpreterTags> {
-    let script = r#"import json, sys, sysconfig
-major = sys.version_info[0]
-minor = sys.version_info[1]
-py = [f"cp{major}{minor}", f"py{major}{minor}", f"py{major}", "py3"]
-abi = [f"cp{major}{minor}", "abi3", "none"]
-plat = sysconfig.get_platform().lower().replace("-", "_").replace(".", "_")
-data = {"python": py, "abi": abi, "platform": [plat, "any"], "tags": []}
-
-def collect_tags():
-    try:
-        from pip._internal.utils.compatibility_tags import get_supported
-        return list(get_supported())
-    except Exception:
-        try:
-            from packaging import tags as packaging_tags
-        except Exception:
-            return []
-        else:
-            return list(packaging_tags.sys_tags())
-
-tags = collect_tags()
-if tags:
-    data["tags"] = [
-        {
-            "python": str(tag.interpreter).lower(),
-            "abi": str(tag.abi).lower(),
-            "platform": str(tag.platform).lower(),
-        }
-        for tag in tags
-    ]
-
-print(json.dumps(data))
-"#;
-    let cmd = Command::new(python)
-        .arg("-c")
-        .arg(script)
-        .output()
-        .with_context(|| format!("failed to interrogate interpreter tags via {python}"))?;
-    if !cmd.status.success() {
-        let stderr = String::from_utf8_lossy(&cmd.stderr);
-        bail!("python tag probe failed: {stderr}");
-    }
-    let payload: InterpreterTagsPayload =
-        serde_json::from_slice(&cmd.stdout).context("invalid interpreter tag payload")?;
-    Ok(InterpreterTags {
-        python: payload
-            .python
-            .into_iter()
-            .map(|value| value.to_ascii_lowercase())
-            .collect(),
-        abi: payload
-            .abi
-            .into_iter()
-            .map(|value| value.to_ascii_lowercase())
-            .collect(),
-        platform: payload
-            .platform
-            .into_iter()
-            .map(|value| value.to_ascii_lowercase())
-            .collect(),
-        supported: payload
-            .tags
-            .into_iter()
-            .map(|tag| InterpreterSupportedTag {
-                python: tag.python.to_ascii_lowercase(),
-                abi: tag.abi.to_ascii_lowercase(),
-                platform: tag.platform.to_ascii_lowercase(),
-            })
-            .collect(),
-    })
-}
-
-fn detect_marker_environment_with(python: &str) -> Result<ResolverEnv> {
-    let script = r#"import json, os, platform, sys
-impl_name = getattr(sys.implementation, "name", "cpython")
-impl_version = platform.python_version()
-python_full = platform.python_version()
-python_short = f"{sys.version_info[0]}.{sys.version_info[1]}"
-data = {
-    "implementation_name": impl_name,
-    "implementation_version": impl_version,
-    "os_name": os.name,
-    "platform_machine": platform.machine(),
-    "platform_python_implementation": platform.python_implementation(),
-    "platform_release": platform.release(),
-    "platform_system": platform.system(),
-    "platform_version": platform.version(),
-    "python_full_version": python_full,
-    "python_version": python_short,
-    "sys_platform": sys.platform,
-}
-print(json.dumps(data))
-"#;
-    let cmd = Command::new(python)
-        .arg("-c")
-        .arg(script)
-        .output()
-        .with_context(|| format!("failed to probe marker environment via {python}"))?;
-    if !cmd.status.success() {
-        let stderr = String::from_utf8_lossy(&cmd.stderr);
-        bail!("python marker probe failed: {stderr}");
-    }
-    let payload: MarkerEnvPayload =
-        serde_json::from_slice(&cmd.stdout).context("invalid marker env payload")?;
-    Ok(ResolverEnv {
-        implementation_name: payload.implementation_name,
-        implementation_version: payload.implementation_version,
-        os_name: payload.os_name,
-        platform_machine: payload.platform_machine,
-        platform_python_implementation: payload.platform_python_implementation,
-        platform_release: payload.platform_release,
-        platform_system: payload.platform_system,
-        platform_version: payload.platform_version,
-        python_full_version: payload.python_full_version,
-        python_version: payload.python_version,
-        sys_platform: payload.sys_platform,
-    })
-}
-
-#[derive(Deserialize)]
-struct MarkerEnvPayload {
-    implementation_name: String,
-    implementation_version: String,
-    os_name: String,
-    platform_machine: String,
-    platform_python_implementation: String,
-    platform_release: String,
-    platform_system: String,
-    platform_version: String,
-    python_full_version: String,
-    python_version: String,
-    sys_platform: String,
-}
-
-fn normalize_dist_name(name: &str) -> String {
-    name.to_ascii_lowercase().replace(['_', '.'], "-")
-}
-
-fn format_specifier(
-    normalized: &str,
-    extras: &[String],
-    version: &str,
-    marker: Option<&str>,
-) -> String {
-    let mut spec = normalized.to_string();
-    let extras = canonical_extras(extras);
-    if !extras.is_empty() {
-        spec.push('[');
-        spec.push_str(&extras.join(","));
-        spec.push(']');
-    }
-    spec.push_str("==");
-    spec.push_str(version);
-    if let Some(marker) = marker.and_then(|m| {
-        let trimmed = m.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    }) {
-        spec.push_str(" ; ");
-        spec.push_str(marker);
-    }
-    spec
-}
-
-fn canonical_extras(extras: &[String]) -> Vec<String> {
-    let mut values = extras
-        .iter()
-        .map(|extra| extra.to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    values.sort();
-    values.dedup();
-    values
-}
-
-#[derive(Clone, Debug)]
-struct WheelCandidate {
-    filename: String,
-    url: String,
-    sha256: String,
-    python_tag: String,
-    abi_tag: String,
-    platform_tag: String,
-}
-
-#[derive(Clone)]
-struct InterpreterTags {
-    python: Vec<String>,
-    abi: Vec<String>,
-    platform: Vec<String>,
-    supported: Vec<InterpreterSupportedTag>,
-}
-
-impl InterpreterTags {
-    fn supports_triple(&self, py: &str, abi: &str, platform: &str) -> bool {
-        if self.supported.is_empty() {
-            return false;
-        }
-        self.supported
-            .iter()
-            .any(|tag| tag.python == py && tag.abi == abi && tag.platform == platform)
-    }
-}
-
-#[derive(Deserialize)]
-struct InterpreterTagsPayload {
-    python: Vec<String>,
-    abi: Vec<String>,
-    platform: Vec<String>,
-    #[serde(default)]
-    tags: Vec<InterpreterTagPayload>,
-}
-
-#[derive(Deserialize)]
-struct InterpreterTagPayload {
-    python: String,
-    abi: String,
-    platform: String,
-}
-
-#[derive(Clone)]
-struct InterpreterSupportedTag {
-    python: String,
-    abi: String,
-    platform: String,
-}
-
-fn current_project_root() -> Result<PathBuf> {
-    Ok(px_project::current_project_root()?)
 }
 
 pub(crate) fn summarize_autopins(entries: &[AutopinEntry]) -> Option<String> {
@@ -1887,7 +1672,7 @@ pub(crate) fn summarize_autopins(entries: &[AutopinEntry]) -> Option<String> {
         summary.push_str(" (");
         summary.push_str(&labels.join(", "));
         if entries.len() > 3 {
-            summary.push_str(&format!(", +{} more", entries.len() - 3));
+            let _ = write!(&mut summary, ", +{} more", entries.len() - 3);
         }
         summary.push(')');
     }
@@ -1903,12 +1688,12 @@ fn pins_with_override(
     for pin in &override_pins.pins {
         lookup
             .entry(autopin_pin_key(pin))
-            .or_insert_with(VecDeque::new)
+            .or_default()
             .push_back(pin.clone());
     }
     let mut pins = Vec::new();
     for spec in dependencies {
-        if !marker_applies(spec, &marker_env) {
+        if !marker_applies(spec, marker_env) {
             continue;
         }
         let key = autopin_spec_key(spec);
@@ -1975,15 +1760,15 @@ fn strip_wrapping_quotes(input: &str) -> &str {
 pub(crate) fn outcome_from_output(
     command_name: &str,
     target: &str,
-    output: RunOutput,
+    output: &RunOutput,
     prefix: &str,
     extra: Option<Value>,
 ) -> ExecutionOutcome {
     let mut extra_details = extra;
     let context = TracebackContext::new(command_name, target, extra_details.as_ref());
     let mut details = json!({
-        "stdout": output.stdout,
-        "stderr": output.stderr,
+        "stdout": output.stdout.clone(),
+        "stderr": output.stderr.clone(),
         "code": output.code,
         "target": target,
     });
@@ -2112,7 +1897,7 @@ impl EnvironmentIssue {
         }
     }
 
-    fn note(&self) -> &'static str {
+    fn note(self) -> &'static str {
         match self {
             EnvironmentIssue::MissingLock => "No px.lock found, resolving dependencies…",
             EnvironmentIssue::LockDrift => {
@@ -2131,7 +1916,7 @@ impl EnvironmentIssue {
         }
     }
 
-    fn action_key(&self) -> &'static str {
+    fn action_key(self) -> &'static str {
         match self {
             EnvironmentIssue::MissingLock => "lock-bootstrap",
             EnvironmentIssue::LockDrift => "lock-sync",
@@ -2218,9 +2003,9 @@ pub(crate) fn build_pythonpath(
                     if trimmed.is_empty() {
                         continue;
                     }
-                    let path = PathBuf::from(trimmed);
-                    if path.exists() {
-                        paths.push(path);
+                    let entry_path = PathBuf::from(trimmed);
+                    if entry_path.exists() {
+                        paths.push(entry_path);
                     }
                 }
             }
@@ -2256,22 +2041,19 @@ pub(crate) fn ensure_project_environment_synced(
         .into());
     }
     let lock_path = snapshot.lock_path.clone();
-    let lock = match load_lockfile_optional(&lock_path)? {
-        Some(lock) => lock,
-        None => {
-            return Err(InstallUserError::new(
-                "missing px.lock (run `px sync`)",
-                json!({
-                    "lockfile": lock_path.display().to_string(),
-                    "hint": "run `px sync` to generate px.lock before running this command",
-                    "reason": "missing_lock",
-                }),
-            )
-            .into())
-        }
+    let Some(lock) = load_lockfile_optional(&lock_path)? else {
+        return Err(InstallUserError::new(
+            "missing px.lock (run `px sync`)",
+            json!({
+                "lockfile": lock_path.display().to_string(),
+                "hint": "run `px sync` to generate px.lock before running this command",
+                "reason": "missing_lock",
+            }),
+        )
+        .into());
     };
 
-    let drift = detect_lock_drift(&snapshot, &lock, None);
+    let drift = detect_lock_drift(snapshot, &lock, None);
     if !drift.is_empty() {
         return Err(InstallUserError::new(
             "px.lock is out of date",
@@ -2445,6 +2227,7 @@ pub(crate) fn python_context_with_mode(
     }
 }
 
+#[must_use]
 pub fn to_json_response(info: CommandInfo, outcome: &ExecutionOutcome, _code: i32) -> Value {
     let status = match outcome.status {
         CommandStatus::Ok => "ok",
@@ -2463,6 +2246,7 @@ pub fn to_json_response(info: CommandInfo, outcome: &ExecutionOutcome, _code: i3
     })
 }
 
+#[must_use]
 pub fn format_status_message(info: CommandInfo, message: &str) -> String {
     let group_name = info.group.to_string();
     let prefix = if group_name == info.name {
@@ -2482,9 +2266,10 @@ pub fn format_status_message(info: CommandInfo, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::workflow::python_script_target;
     use crate::pypi::{PypiDigests, PypiFile};
-    use px_lockfile::LockedDependency;
+    use crate::python_sys::current_marker_environment;
+    use crate::run::python_script_target;
+    use px_domain::LockedDependency;
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -2526,7 +2311,7 @@ mod tests {
 
     #[test]
     fn marker_applies_respects_python_version() {
-        let env = px_project::resolver::current_marker_environment().expect("marker env");
+        let env = current_marker_environment().expect("marker env");
         assert!(
             !marker_applies("tomli>=1.1.0; python_version < '3.11'", &env),
             "non-matching marker should be skipped"
@@ -2547,8 +2332,7 @@ mod tests {
         assert!(
             pin.marker
                 .as_deref()
-                .map(|m| m.contains("python_version"))
-                .unwrap_or(false),
+                .is_some_and(|m| m.contains("python_version")),
             "marker should be preserved"
         );
     }
