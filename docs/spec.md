@@ -761,3 +761,376 @@ px does **not**:
 * Expose `cache`, `env`, `lock`, or `workspace` as primary user concepts.
 
 If any future changes violate these, they’re design regressions, not “nice additions”.
+
+---
+
+## 10. Project state machine
+
+### 10.1 Core entities
+
+For each px project we define three artifacts:
+
+* **M (Manifest)**
+  Parsed `pyproject.toml`:
+
+  * `[project].dependencies`
+  * `[tool.px]` (including any px-specific dep config)
+  * project-level Python constraints
+
+* **L (Lock)**
+  Parsed `px.lock`:
+
+  * full resolved dependency graph
+  * runtime (python version/tag)
+  * platform tags
+  * artifact/hashes
+  * **manifest fingerprint** (see below)
+
+* **E (Env)**
+  The current project environment under `.px/envs/...`:
+
+  * pointer to `L` it was built from (lock hash / ID)
+  * actual installed packages (by px’s record, not by re-scanning site-packages)
+  * runtime used
+
+You never introspect raw venv content to define state; you trust px’s own metadata.
+
+---
+
+### 10.2 Identity & fingerprints
+
+#### 10.2.1 Manifest fingerprint (`mfingerprint`)
+
+From M, you compute a deterministic **manifest fingerprint**:
+
+* Inputs:
+
+  * `[project].dependencies`
+  * any `[tool.px].dependencies` extensions/groups
+  * relevant Python/version markers
+* Output:
+
+  * opaque hash, e.g. `sha256(hex-encoded)`.
+
+Call this `mfingerprint(M)`.
+
+#### 10.2.2 Lock identity
+
+`px.lock` must store:
+
+* `mfingerprint` it was computed from.
+* A lock ID (e.g. hash of the full lock content): `l_id`.
+* runtime & platform info.
+
+So L is valid for exactly one `mfingerprint`.
+
+#### 10.2.3 Env identity
+
+Each environment E stores:
+
+* `l_id` it was built from.
+* runtime version & ABI.
+* platform.
+
+So we can answer “is E built from this L?” without scraping site-packages.
+
+---
+
+### 10.3 Derived state flags
+
+For a given project, define these booleans:
+
+* `manifest_exists` := `pyproject.toml` present and parseable with `[project]`.
+* `lock_exists` := `px.lock` present and parseable.
+* `env_exists` := px metadata shows at least one env for this project.
+
+Assuming all three parse cleanly, define:
+
+* `manifest_clean` := `lock_exists` and `L.mfingerprint == mfingerprint(M)`.
+* `env_clean` := `env_exists` and `E.l_id == L.l_id`.
+
+Then the **core invariant**:
+
+```text
+project_consistent := manifest_clean && env_clean
+```
+
+That’s the single boolean everything else should talk about.
+
+---
+
+### 10.4 Canonical project states
+
+You can classify a project into a small set of states:
+
+#### 10.4.1 `Uninitialized`
+
+* `manifest_exists == false`
+* No lock, no env.
+
+px commands:
+
+* Only `px init` allowed here; everything else errors “no px project found”.
+
+#### 10.4.2 `InitializedEmpty`
+
+Fresh project with no deps:
+
+* `manifest_exists == true`
+* `[project].dependencies` is empty
+* `lock_exists == true`, with empty graph and correct `mfingerprint`
+* `env_exists == true`, `env_clean == true`
+* So `project_consistent == true`
+
+This is the state after a successful `px init` in your current design.
+
+#### 10.4.3 `NeedsLock`
+
+Manifest exists, no valid lock yet:
+
+* `manifest_exists == true`
+* (`lock_exists == false`) **or**
+* (`lock_exists == true` but `manifest_clean == false`)
+* `env_clean` is irrelevant here (env is defined *against* L).
+
+Typical cause: user edited `pyproject.toml` manually or deleted `px.lock`.
+
+#### 10.4.4 `NeedsEnv`
+
+Manifest & lock agree, env out of date or missing:
+
+* `manifest_clean == true`
+* (`env_exists == false`) **or** (`env_clean == false`)
+
+Typical cause: first install on a machine, or user wiped `.px/envs`.
+
+#### 10.4.5 `Consistent`
+
+Fully good state:
+
+* `manifest_clean == true`
+* `env_clean == true`
+* i.e. `project_consistent == true`.
+
+This is what you want after `init`, `add`, `remove`, `sync`, `update`, `migrate --apply`.
+
+---
+
+### 10.5 Command pre/post in terms of states
+
+Now define commands *only* as transitions between these canonical states.
+
+#### 10.5.1 `px init`
+
+**Allowed start states**
+
+* `Uninitialized`
+
+**Behavior (success)**
+
+* Create minimal M (manifest).
+* Create empty L for chosen runtime (empty dep graph, correct `mfingerprint`).
+* Create empty E matching L.
+
+**End state**
+
+* `InitializedEmpty` (which is also `Consistent` in this model).
+
+---
+
+#### 10.5.2 `px add` / `px remove`
+
+They’re both “mutable ops” over deps, then re-lock & rebuild:
+
+**Allowed start states**
+
+* Any state where `manifest_exists == true`:
+
+  * `InitializedEmpty`, `Consistent`, `NeedsLock`, `NeedsEnv`.
+
+**Required behavior**
+
+* Modify M (add/remove deps).
+* Resolve deps from new M, creating a new L:
+
+  * `L'.mfingerprint == mfingerprint(M')`.
+* Build E from L'.
+
+**End state**
+
+* Always `Consistent` (new `manifest_clean`, new `env_clean`).
+* No matter what state you started from, a successful add/remove ends with `project_consistent == true`.
+
+---
+
+#### 10.5.3 `px sync [--frozen]`
+
+**Purpose**
+Reconcile M → L and then L → E.
+
+**Allowed start states**
+
+* Any state with `manifest_exists == true`.
+
+**Behavior (dev)**
+
+* If `lock_exists == false` or `manifest_clean == false`:
+
+  * Resolve deps from M → new L.
+* Ensure E built from current L (create/replace env if needed).
+
+**End state**
+
+* `Consistent`.
+
+**Behavior (`--frozen` / CI)**
+
+* If `lock_exists == false` or `manifest_clean == false`:
+
+  * Fail. Do **not** resolve.
+* Else:
+
+  * Only fix env (if `env_clean == false`).
+
+**End state (`--frozen`)**
+
+* On success: `Consistent`.
+* On failure: project state unchanged.
+
+---
+
+#### 10.5.4 `px update [<pkg>…]`
+
+**Allowed start states**
+
+* `Consistent` (strictest) or more broadly: `manifest_exists == true` and `lock_exists == true`.
+
+**Behavior**
+
+* Take current M + L as input.
+* Compute new L' with newer versions (bounded by constraints).
+* Build E from L'.
+
+**End state**
+
+* `Consistent`.
+
+**On resolution failure**
+
+* No changes; state stays whatever it was before.
+
+---
+
+#### 10.5.5 `px run` / `px test` / `px fmt`
+
+Treat these as **readers** with *optional env repair* – never M/L authors.
+
+**Allowed start states (dev)**
+
+* `Consistent` → run immediately.
+* `NeedsEnv` → rebuild E from existing L, then run.
+
+**Forbidden start states (dev)**
+
+* `NeedsLock` (`manifest_clean == false`):
+
+  * Do **not** create/update L.
+  * Fail with:
+
+    * “Manifest has changed; run `px sync` to update the lock.”
+
+**Allowed start states (CI/`--frozen`)**
+
+* Only `Consistent`. Anything else is a hard failure.
+
+**Behavior (dev)**
+
+* If `NeedsEnv`:
+
+  * Rebuild E from L.
+* Run target via E.
+
+**Behavior (CI/`--frozen`)**
+
+* If not `Consistent`, fail.
+* Never fix things; CI is a *check*, not a mutator.
+
+**End state**
+
+* `M` & `L` unchanged.
+* E may be rehydrated → at end you’re either `Consistent` or unchanged.
+
+---
+
+### 10.6 Error & hint logic based on state
+
+Now your missing-dep hints and drift messages can be defined purely in terms of this model.
+
+#### 10.6.1 Manifest drift
+
+You *only* ever say “Manifest drift detected” when:
+
+* `manifest_exists == true`
+* `lock_exists == true`
+* `manifest_clean == false`
+
+And **only** from commands that:
+
+* Inspect state but don’t fix M/L (`run`, `test`, `fmt`, `status`).
+
+Example behavior:
+
+* `px run` sees `NeedsLock`:
+
+  * Error:
+
+    ```text
+    PX120  Project manifest has changed since px.lock was created.
+
+    Why:
+      • pyproject.toml dependencies differ from px.lock.
+
+    Fix:
+      • Run `px sync` to update px.lock and the environment.
+    ```
+
+  * Do **not** attempt to fix L/E from `run`.
+
+#### 10.6.2 Missing-import hint
+
+On `ModuleNotFoundError: No module named 'pandas'` in `px run`:
+
+1. Look at M:
+
+   * If `pandas` is a direct dependency in M:
+
+     * This is **env drift** (`env_clean == false` or broken E), not a missing add.
+     * Suggest `px sync`, not `px add pandas`.
+   * Else if `pandas` appears only as transitive in L:
+
+     * Maybe `px why pandas` or no hint.
+   * Else (not in M or L):
+
+     * Suggest `px add pandas`.
+
+This aligns hinting with the actual state machine.
+
+---
+
+### 10.7 Why this is enough
+
+With:
+
+* Entities: M, L, E
+* Fingerprints/IDs: `mfingerprint`, `l_id`
+* Flags: `manifest_clean`, `env_clean`, `project_consistent`
+* Canonical states: `Uninitialized`, `InitializedEmpty`, `NeedsLock`, `NeedsEnv`, `Consistent`
+* Per-command “allowed writes” and allowed start/end states,
+
+you can:
+
+* enforce command contracts with simple checks,
+* write tests like “starting from NeedsEnv, `px run` must end in Consistent or fail”,
+* and make hinting logic deterministic instead of heuristic.
+
+No extra abstraction is needed; just wire all your commands and error paths to this model and stop letting them improvise.
