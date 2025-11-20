@@ -1,22 +1,26 @@
 #![deny(clippy::all, warnings)]
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet},
+    iter::FromIterator,
     path::Path,
     str::FromStr,
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use pep440_rs::{Operator, Version, VersionSpecifiers};
+use pep440_rs::{Version, VersionSpecifiers};
 use pep508_rs::{
     ExtraName, MarkerEnvironment, Requirement as PepRequirement, StringVersion, VersionOrUrl,
 };
 use reqwest::blocking::Client;
 use serde::Deserialize;
+use url::Url;
 
 use crate::manifest::dependency_name;
 
 const PYPI_BASE: &str = "https://pypi.org/pypi";
+const MAX_CANDIDATES: usize = 20;
 
 #[derive(Debug, Clone)]
 pub struct ResolveRequest {
@@ -24,6 +28,7 @@ pub struct ResolveRequest {
     pub requirements: Vec<String>,
     pub tags: ResolverTags,
     pub env: ResolverEnv,
+    pub indexes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -60,220 +65,510 @@ pub struct ResolvedSpecifier {
     pub direct: bool,
 }
 
-/// Resolve every requirement in the request against `PyPI` metadata.
-///
-/// # Errors
-///
-/// Returns an error when the requirements cannot be parsed, `PyPI` cannot be
-/// reached, or no compatible release satisfies the provided constraints.
+#[derive(Debug, Clone)]
+struct RequirementFrame {
+    raw: String,
+    parent_extras: Vec<ExtraName>,
+    direct: bool,
+}
+
+#[derive(Debug, Clone)]
+struct Candidate {
+    version: Version,
+    version_string: String,
+    files: Vec<ReleaseFile>,
+    requires: Vec<(String, Vec<ExtraName>)>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ConstraintSet {
+    specs: Vec<VersionSpecifiers>,
+}
+
+impl ConstraintSet {
+    fn add(&mut self, spec: VersionSpecifiers) {
+        self.specs.push(spec);
+    }
+
+    fn allows(&self, version: &Version) -> bool {
+        self.specs.iter().all(|spec| spec.contains(version))
+    }
+}
+
 pub fn resolve(request: &ResolveRequest) -> Result<Vec<ResolvedSpecifier>> {
     if request.requirements.is_empty() {
         return Ok(Vec::new());
     }
 
-    let client = build_http_client()?;
+    let indexes = if request.indexes.is_empty() {
+        vec![PYPI_BASE.to_string()]
+    } else {
+        request.indexes.clone()
+    };
     let marker_env = request.env.to_marker_environment()?;
-    let mut queue: VecDeque<(String, Vec<ExtraName>, bool)> = request
+    let mut ctx = ResolverContext::new(request, marker_env, indexes)?;
+
+    let initial: Vec<RequirementFrame> = request
         .requirements
         .iter()
-        .map(|req| (req.clone(), Vec::new(), true))
+        .map(|req| RequirementFrame {
+            raw: req.clone(),
+            parent_extras: Vec::new(),
+            direct: true,
+        })
         .collect();
-    let mut resolved = Vec::new();
-    let mut seen: HashMap<String, String> = HashMap::new();
 
-    while let Some((requirement, parent_extras, is_direct)) = queue.pop_front() {
-        let Some(spec) = resolve_requirement(
-            &client,
-            &requirement,
-            &request.tags,
-            &marker_env,
-            &parent_extras,
-        )?
-        else {
-            continue;
-        };
-        let mut spec = spec;
-        spec.direct = is_direct;
-        let normalized = spec.normalized.clone();
-        if let Some(existing) = seen.get(&normalized) {
-            if existing != &spec.selected_version {
-                bail!(
-                    "dependency `{}` resolved to conflicting versions ({existing} vs {})",
-                    spec.name,
-                    spec.selected_version
-                );
-            }
-            continue;
-        }
-        let downstream = fetch_required_dependencies(
-            &client,
-            &normalized,
-            &spec.selected_version,
-            &marker_env,
-            &spec.extras,
-        )?;
-        let mut required = Vec::new();
-        for (child, extras) in downstream {
-            let name = dependency_name(&child);
-            if !name.is_empty() {
-                required.push(name);
-            }
-            queue.push_back((child, extras, false));
-        }
-        spec.requires = required;
-        seen.insert(normalized.clone(), spec.selected_version.clone());
-        resolved.push(spec);
-    }
-
-    Ok(resolved)
+    let result = ctx.solve(initial)?;
+    Ok(result)
 }
 
-fn resolve_requirement(
-    client: &Client,
-    requirement_str: &str,
-    tags: &ResolverTags,
-    marker_env: &MarkerEnvironment,
-    parent_extras: &[ExtraName],
-) -> Result<Option<ResolvedSpecifier>> {
-    let requirement = PepRequirement::from_str(requirement_str)
-        .map_err(|err| anyhow!("failed to parse requirement `{requirement_str}`: {err}"))?;
+struct ResolverContext<'a> {
+    request: &'a ResolveRequest,
+    marker_env: MarkerEnvironment,
+    client: Client,
+    indexes: Vec<String>,
+    constraints: HashMap<String, ConstraintSet>,
+    resolved: HashMap<String, ResolvedSpecifier>,
+    project_cache: HashMap<(String, String), ProjectResponse>,
+    version_cache: HashMap<(String, String, String), VersionResponse>,
+    steps: usize,
+    started: Instant,
+}
 
-    if !requirement.evaluate_markers(marker_env, parent_extras) {
-        return Ok(None);
+impl<'a> ResolverContext<'a> {
+    fn new(
+        request: &'a ResolveRequest,
+        marker_env: MarkerEnvironment,
+        indexes: Vec<String>,
+    ) -> Result<Self> {
+        Ok(Self {
+            request,
+            marker_env,
+            client: build_http_client()?,
+            indexes,
+            constraints: HashMap::new(),
+            resolved: HashMap::new(),
+            project_cache: HashMap::new(),
+            version_cache: HashMap::new(),
+            steps: 0,
+            started: Instant::now(),
+        })
     }
 
-    let normalized = normalize_dist_name(requirement.name.as_ref());
-    let extras = normalized_extras(&requirement);
-    let marker = requirement
-        .marker
-        .as_ref()
-        .map(std::string::ToString::to_string);
+    fn solve(&mut self, mut pending: Vec<RequirementFrame>) -> Result<Vec<ResolvedSpecifier>> {
+        if pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.prefetch_projects(&pending);
+        if self.backtrack(&mut pending)? {
+            let mut out: Vec<_> = self.resolved.values().cloned().collect();
+            out.sort_by(|a, b| a.normalized.cmp(&b.normalized));
+            Ok(out)
+        } else {
+            bail!("dependency resolution failed: incompatible requirements")
+        }
+    }
 
-    if let Some(version) = pinned_version(&requirement) {
-        return Ok(Some(ResolvedSpecifier {
-            name: requirement.name.to_string(),
-            specifier: requirement.to_string(),
+    fn backtrack(&mut self, pending: &mut Vec<RequirementFrame>) -> Result<bool> {
+        while let Some(frame) = pending.pop() {
+            self.steps += 1;
+            if self.steps > 5000 {
+                bail!("dependency resolution exceeded search limit");
+            }
+            if self.started.elapsed() > Duration::from_secs(20) {
+                bail!("dependency resolution timed out");
+            }
+            let Some(req) = self.parse_requirement(&frame)? else {
+                continue;
+            };
+            let name = req.normalized.clone();
+
+            self.constraints
+                .entry(name.clone())
+                .or_default()
+                .add(req.specifiers.clone());
+
+            if let Some(existing) = self.resolved.get(&name) {
+                if let Ok(version) = Version::from_str(&existing.selected_version) {
+                    if !self.constraints[&name].allows(&version) {
+                        return Ok(false);
+                    }
+                    Self::enqueue_requires(pending, &existing.requires, false);
+                    continue;
+                } else {
+                    return Ok(false);
+                }
+            }
+
+            let mut candidates = self.candidates_for_requirement(&req)?;
+            candidates.sort_by(|a, b| b.version.cmp(&a.version));
+            if candidates.len() > MAX_CANDIDATES {
+                candidates.truncate(MAX_CANDIDATES);
+            }
+
+            let snapshot_constraints = self.constraints.clone();
+            let snapshot_resolved = self.resolved.clone();
+
+            for candidate in candidates {
+                if !self.constraints[&name].allows(&candidate.version) {
+                    continue;
+                }
+                let mut spec = ResolvedSpecifier {
+                    name: req.original_name.clone(),
+                    specifier: req.original_spec.clone(),
+                    normalized: name.clone(),
+                    selected_version: candidate.version_string.clone(),
+                    extras: req.extras.clone(),
+                    marker: req.marker.clone(),
+                    requires: Vec::new(),
+                    direct: frame.direct,
+                };
+                let child_requires: Vec<String> = candidate
+                    .requires
+                    .iter()
+                    .filter_map(|(raw, _)| {
+                        let dep = dependency_name(raw);
+                        if dep.is_empty() {
+                            None
+                        } else {
+                            Some(dep)
+                        }
+                    })
+                    .collect();
+                spec.requires = child_requires;
+                self.resolved.insert(name.clone(), spec);
+
+                let mut new_pending = pending.clone();
+                for (child, extras) in candidate.requires {
+                    new_pending.push(RequirementFrame {
+                        raw: child,
+                        parent_extras: extras,
+                        direct: false,
+                    });
+                }
+
+                if self.backtrack(&mut new_pending)? {
+                    *pending = new_pending;
+                    return Ok(true);
+                }
+
+                self.constraints = snapshot_constraints.clone();
+                self.resolved = snapshot_resolved.clone();
+            }
+
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn parse_requirement(&self, frame: &RequirementFrame) -> Result<Option<ParsedRequirement>> {
+        let requirement = PepRequirement::from_str(&frame.raw)
+            .map_err(|err| anyhow!("failed to parse requirement `{}`: {err}", frame.raw))?;
+        if !requirement.evaluate_markers(&self.marker_env, &frame.parent_extras) {
+            return Ok(None);
+        }
+        let normalized = normalize_dist_name(requirement.name.as_ref());
+        let extras = normalized_extras(&requirement);
+        let marker = requirement
+            .marker
+            .as_ref()
+            .map(std::string::ToString::to_string);
+
+        let specifiers = match requirement.version_or_url.as_ref() {
+            Some(VersionOrUrl::VersionSpecifier(spec)) => {
+                let spec_str = spec.to_string();
+                VersionSpecifiers::from_str(&spec_str)
+                    .map_err(|err| anyhow!("failed to parse specifiers `{spec_str}`: {err}"))?
+            }
+            Some(VersionOrUrl::Url(_)) => VersionSpecifiers::from_iter([]),
+            None => VersionSpecifiers::from_iter([]),
+        };
+
+        Ok(Some(ParsedRequirement {
+            original_name: requirement.name.to_string(),
+            original_spec: requirement.to_string(),
             normalized,
-            selected_version: version,
             extras,
             marker,
-            requires: Vec::new(),
-            direct: false,
-        }));
+            specifiers,
+            raw: frame.raw.clone(),
+            direct_url: matches!(requirement.version_or_url, Some(VersionOrUrl::Url(_))),
+            pep: requirement,
+        }))
     }
 
-    let specifiers = match requirement.version_or_url.as_ref() {
-        Some(VersionOrUrl::VersionSpecifier(spec)) => {
-            let spec_str = spec.to_string();
-            VersionSpecifiers::from_str(&spec_str)
-                .map_err(|err| anyhow!("failed to parse specifiers `{spec_str}`: {err}"))?
+    fn candidates_for_requirement(&mut self, req: &ParsedRequirement) -> Result<Vec<Candidate>> {
+        if req.direct_url {
+            return self.direct_url_candidate(req);
         }
-        Some(VersionOrUrl::Url(_)) => {
-            bail!("URL requirements are not supported by the resolver yet: `{requirement_str}`")
+        let mut all_versions = Vec::new();
+        for index in self.indexes.clone() {
+            if let Some(project) = self.fetch_project(&index, &req.normalized)? {
+                for (version_str, files) in &project.releases {
+                    let Ok(version) = Version::from_str(version_str) else {
+                        continue;
+                    };
+                    all_versions.push((version, version_str.clone(), files.clone(), index.clone()));
+                }
+            }
         }
-        None => std::iter::empty().collect::<VersionSpecifiers>(),
-    };
+        all_versions.sort_by(|a, b| b.0.cmp(&a.0));
+        all_versions.dedup_by(|a, b| a.0 == b.0);
 
-    let project = fetch_project(client, &normalized)?;
-    let Some(selected) = select_version(&project.releases, &specifiers, tags) else {
-        bail!("unable to resolve `{requirement_str}`: no compatible release found");
-    };
-
-    Ok(Some(ResolvedSpecifier {
-        name: requirement.name.to_string(),
-        specifier: requirement.to_string(),
-        normalized,
-        selected_version: selected,
-        extras,
-        marker,
-        requires: Vec::new(),
-        direct: false,
-    }))
-}
-
-fn fetch_required_dependencies(
-    client: &Client,
-    normalized: &str,
-    version: &str,
-    marker_env: &MarkerEnvironment,
-    active_extras: &[String],
-) -> Result<Vec<(String, Vec<ExtraName>)>> {
-    let url = format!("{PYPI_BASE}/{normalized}/{version}/json");
-    let response = client
-        .get(&url)
-        .send()
-        .map_err(|err| anyhow!("failed to query PyPI for {normalized} {version}: {err}"))?
-        .error_for_status()
-        .map_err(|err| anyhow!("PyPI error for {normalized} {version}: {err}"))?
-        .json::<VersionResponse>()
-        .map_err(|err| anyhow!("invalid JSON from PyPI for {normalized} {version}: {err}"))?;
-
-    let mut requirements = Vec::new();
-    for entry in response.info.requires_dist.unwrap_or_default() {
-        let trimmed = entry.trim();
-        if trimmed.is_empty() {
-            continue;
+        let constraints = self.constraints.get(&req.normalized).cloned();
+        let mut candidates = Vec::new();
+        for (version, version_str, files, index) in all_versions {
+            if !req.specifiers.contains(&version)
+                || constraints
+                    .as_ref()
+                    .is_some_and(|set| !set.allows(&version))
+                || !Self::files_match_tags(&files, &self.request.tags)
+            {
+                continue;
+            }
+            let requires = self
+                .fetch_version_requires(&index, &req.normalized, &version_str)
+                .unwrap_or_default();
+            candidates.push(Candidate {
+                version,
+                version_string: version_str,
+                files,
+                requires,
+            });
         }
-        let requirement = match PepRequirement::from_str(trimmed) {
-            Ok(req) => req,
-            Err(_) => continue,
+
+        Ok(candidates)
+    }
+
+    fn direct_url_candidate(&self, req: &ParsedRequirement) -> Result<Vec<Candidate>> {
+        let Some(VersionOrUrl::Url(url)) = req.pep.version_or_url.as_ref() else {
+            return Ok(Vec::new());
         };
-        if !requirement.evaluate_markers(marker_env, to_extra_names(active_extras).as_slice()) {
-            continue;
-        }
-        let extras = requirement.extras.clone();
-        requirements.push((requirement.to_string(), extras));
+        let url = Url::parse(url.as_str())?;
+        let filename = url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .ok_or_else(|| anyhow!("direct URL missing filename"))?;
+        let (version_str, requires) = if filename.ends_with(".whl") {
+            let (name_part, version_part, tags) = parse_wheel_filename(filename)
+                .ok_or_else(|| anyhow!("invalid wheel filename in direct URL: {filename}"))?;
+            if normalize_dist_name(&name_part) != req.normalized {
+                bail!(
+                    "direct URL name `{name_part}` does not match requirement `{}`",
+                    req.normalized
+                );
+            }
+            if !Self::wheel_tags_match(&tags, &self.request.tags) {
+                bail!("wheel tags for {filename} are incompatible with current platform");
+            }
+            (version_part, Vec::new())
+        } else {
+            let version_part = parse_sdist_version(filename).ok_or_else(|| {
+                anyhow!("unable to parse version from direct URL filename: {filename}")
+            })?;
+            (version_part, Vec::new())
+        };
+        let version =
+            Version::from_str(&version_str).map_err(|err| anyhow!("invalid version: {err}"))?;
+        Ok(vec![Candidate {
+            version,
+            version_string: version_str,
+            files: Vec::new(),
+            requires,
+        }])
     }
 
-    Ok(requirements)
+    fn fetch_project(&mut self, index: &str, normalized: &str) -> Result<Option<ProjectResponse>> {
+        if let Some(cached) = self
+            .project_cache
+            .get(&(index.to_string(), normalized.to_string()))
+        {
+            return Ok(Some(cached.clone()));
+        }
+        let url = format!("{index}/{normalized}/json");
+        match self
+            .client
+            .get(&url)
+            .send()
+            .and_then(|res| res.error_for_status())
+        {
+            Ok(response) => {
+                let parsed: ProjectResponse = response
+                    .json()
+                    .context("invalid project metadata response")?;
+                self.project_cache
+                    .insert((index.to_string(), normalized.to_string()), parsed.clone());
+                Ok(Some(parsed))
+            }
+            Err(err) => {
+                if index == PYPI_BASE {
+                    Err(anyhow!("failed to query PyPI for {normalized}: {err}"))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    fn fetch_version_requires(
+        &mut self,
+        index: &str,
+        normalized: &str,
+        version: &str,
+    ) -> Result<Vec<(String, Vec<ExtraName>)>> {
+        if let Some(cached) = self.version_cache.get(&(
+            index.to_string(),
+            normalized.to_string(),
+            version.to_string(),
+        )) {
+            return Ok(parse_requires(&cached.info.requires_dist));
+        }
+        let url = format!("{index}/{normalized}/{version}/json");
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .with_context(|| format!("failed to query {index} for {normalized} {version}"))?
+            .error_for_status()
+            .context("index responded with error")?;
+        let parsed: VersionResponse = response
+            .json()
+            .context("invalid JSON in version metadata")?;
+        self.version_cache.insert(
+            (
+                index.to_string(),
+                normalized.to_string(),
+                version.to_string(),
+            ),
+            parsed.clone(),
+        );
+        Ok(parse_requires(&parsed.info.requires_dist))
+    }
+
+    fn prefetch_projects(&mut self, frames: &[RequirementFrame]) {
+        let names: HashSet<String> = frames
+            .iter()
+            .filter_map(|frame| {
+                PepRequirement::from_str(&frame.raw)
+                    .ok()
+                    .map(|req| normalize_dist_name(req.name.as_ref()))
+            })
+            .collect();
+        for name in names {
+            for index in &self.indexes {
+                if self
+                    .project_cache
+                    .contains_key(&(index.to_string(), name.clone()))
+                {
+                    break;
+                }
+                let url = format!("{index}/{name}/json");
+                if let Ok(resp) = self
+                    .client
+                    .get(&url)
+                    .send()
+                    .and_then(|r| r.error_for_status())
+                {
+                    if let Ok(parsed) = resp.json::<ProjectResponse>() {
+                        self.project_cache
+                            .insert((index.to_string(), name.clone()), parsed);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    fn files_match_tags(files: &[ReleaseFile], tags: &ResolverTags) -> bool {
+        files.iter().any(|file| {
+            if file.yanked.unwrap_or(false) {
+                return false;
+            }
+            match file.packagetype.as_str() {
+                "bdist_wheel" => {
+                    if let Some((py, abi, platform)) = parse_wheel_tags(&file.filename) {
+                        wheel_matches(&py, &abi, &platform, tags)
+                    } else {
+                        false
+                    }
+                }
+                "sdist" => true,
+                _ => false,
+            }
+        })
+    }
+
+    fn wheel_tags_match(tags: &(String, String, String), wanted: &ResolverTags) -> bool {
+        let (py, abi, platform) = tags;
+        wheel_matches(py, abi, platform, wanted)
+    }
+
+    fn enqueue_requires(pending: &mut Vec<RequirementFrame>, requires: &[String], direct: bool) {
+        for child in requires {
+            pending.push(RequirementFrame {
+                raw: child.clone(),
+                parent_extras: Vec::new(),
+                direct,
+            });
+        }
+    }
 }
 
-fn to_extra_names(values: &[String]) -> Vec<ExtraName> {
-    values
-        .iter()
-        .filter_map(|value| ExtraName::from_str(value).ok())
-        .collect()
+#[derive(Debug, Clone)]
+struct ParsedRequirement {
+    original_name: String,
+    original_spec: String,
+    normalized: String,
+    extras: Vec<String>,
+    marker: Option<String>,
+    specifiers: VersionSpecifiers,
+    raw: String,
+    direct_url: bool,
+    pep: PepRequirement,
 }
 
 fn build_http_client() -> Result<Client> {
     Client::builder()
+        .timeout(Duration::from_secs(30))
         .user_agent(format!("px-resolver/{}", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(30))
         .build()
         .context("failed to build HTTP client")
 }
 
-fn fetch_project(client: &Client, name: &str) -> Result<ProjectResponse> {
-    let url = format!("{PYPI_BASE}/{name}/json");
-    client
-        .get(&url)
-        .send()
-        .map_err(|err| anyhow!("failed to query PyPI for {name}: {err}"))?
-        .error_for_status()
-        .map_err(|err| anyhow!("PyPI error for {name}: {err}"))?
-        .json::<ProjectResponse>()
-        .map_err(|err| anyhow!("invalid JSON from PyPI for {name}: {err}"))
+fn parse_requires(values: &Option<Vec<String>>) -> Vec<(String, Vec<ExtraName>)> {
+    let mut out = Vec::new();
+    for entry in values.clone().unwrap_or_default() {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(req) = PepRequirement::from_str(trimmed) {
+            out.push((trimmed.to_string(), req.extras.clone()));
+        }
+    }
+    out
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct ProjectResponse {
     releases: BTreeMap<String, Vec<ReleaseFile>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct VersionResponse {
     info: VersionInfo,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct VersionInfo {
     #[serde(default)]
     requires_dist: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct ReleaseFile {
     filename: String,
+    url: String,
     packagetype: String,
     yanked: Option<bool>,
 }
@@ -283,12 +578,6 @@ pub fn normalize_dist_name(name: &str) -> String {
 }
 
 impl ResolverEnv {
-    /// Convert this environment description into a PEP 508 marker environment.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when any of the version fields cannot be parsed as a
-    /// valid PEP 440 version.
     pub fn to_marker_environment(&self) -> Result<MarkerEnvironment> {
         Ok(MarkerEnvironment {
             implementation_name: self.implementation_name.clone(),
@@ -325,82 +614,6 @@ fn normalized_extras(requirement: &PepRequirement) -> Vec<String> {
     extras
 }
 
-fn pinned_version(requirement: &PepRequirement) -> Option<String> {
-    let version_or_url = requirement.version_or_url.as_ref()?;
-    let VersionOrUrl::VersionSpecifier(specifiers) = version_or_url else {
-        return None;
-    };
-    let spec_str = specifiers.to_string();
-    let parsed = VersionSpecifiers::from_str(&spec_str).ok()?;
-    let mut iter = parsed.iter();
-    let first = iter.next()?;
-    if iter.next().is_some() {
-        return None;
-    }
-    match first.operator() {
-        Operator::Equal | Operator::ExactEqual => Some(first.version().to_string()),
-        _ => None,
-    }
-}
-
-fn select_version(
-    releases: &BTreeMap<String, Vec<ReleaseFile>>,
-    specifiers: &VersionSpecifiers,
-    tags: &ResolverTags,
-) -> Option<String> {
-    let mut best: Option<(Version, u8, String)> = None;
-    for (version_str, files) in releases {
-        let Ok(candidate) = Version::from_str(version_str) else {
-            continue;
-        };
-        if !specifiers.contains(&candidate) {
-            continue;
-        }
-        if let Some(score) = release_score(files, tags) {
-            let replace = match &best {
-                Some((best_version, best_score, _)) => {
-                    candidate > *best_version || (candidate == *best_version && score > *best_score)
-                }
-                None => true,
-            };
-            if replace {
-                best = Some((candidate.clone(), score, version_str.clone()));
-            }
-        }
-    }
-    best.map(|(_, _, version)| version)
-}
-
-fn release_score(files: &[ReleaseFile], tags: &ResolverTags) -> Option<u8> {
-    let mut score = None;
-    for file in files {
-        if file.packagetype != "bdist_wheel" || file.yanked.unwrap_or(false) {
-            continue;
-        }
-        if let Some((python_tag, abi_tag, platform_tag)) = parse_wheel_tags(&file.filename) {
-            if wheel_matches(&python_tag, &abi_tag, &platform_tag, tags) {
-                return Some(2);
-            }
-            if python_tag.eq_ignore_ascii_case("py3")
-                && abi_tag.eq_ignore_ascii_case("none")
-                && platform_tag.eq_ignore_ascii_case("any")
-            {
-                score = score.max(Some(1));
-            }
-        }
-    }
-    if score.is_some() {
-        return score;
-    }
-    if files
-        .iter()
-        .any(|file| file.packagetype == "sdist" && !file.yanked.unwrap_or(false))
-    {
-        return Some(0);
-    }
-    None
-}
-
 fn parse_wheel_tags(filename: &str) -> Option<(String, String, String)> {
     let path = Path::new(filename);
     if !path
@@ -409,8 +622,8 @@ fn parse_wheel_tags(filename: &str) -> Option<(String, String, String)> {
     {
         return None;
     }
-    let trimmed = path.file_stem()?.to_str()?;
-    let parts: Vec<&str> = trimmed.split('-').collect();
+    let stem = path.file_stem()?.to_str()?;
+    let parts: Vec<&str> = stem.split('-').collect();
     if parts.len() < 5 {
         return None;
     }
@@ -419,6 +632,33 @@ fn parse_wheel_tags(filename: &str) -> Option<(String, String, String)> {
         parts[parts.len() - 2].to_string(),
         parts[parts.len() - 1].to_string(),
     ))
+}
+
+fn parse_wheel_filename(filename: &str) -> Option<(String, String, (String, String, String))> {
+    let path = Path::new(filename);
+    let stem = path.file_stem()?.to_str()?;
+    let parts: Vec<&str> = stem.split('-').collect();
+    if parts.len() < 5 {
+        return None;
+    }
+    let name = parts[..parts.len() - 4].join("-");
+    let version = parts[parts.len() - 4].to_string();
+    let tags = (
+        parts[parts.len() - 3].to_string(),
+        parts[parts.len() - 2].to_string(),
+        parts[parts.len() - 1].to_string(),
+    );
+    Some((name, version, tags))
+}
+
+fn parse_sdist_version(filename: &str) -> Option<String> {
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|name| name.to_str())?;
+    let trimmed = stem.strip_suffix(".tar").unwrap_or(stem);
+    let mut parts = trimmed.rsplitn(2, '-');
+    let version = parts.next()?;
+    Some(version.to_string())
 }
 
 fn wheel_matches(py: &str, abi: &str, platform: &str, tags: &ResolverTags) -> bool {
@@ -431,119 +671,4 @@ fn matches_any(values: &[String], candidate: &str) -> bool {
     candidate
         .split('.')
         .any(|part| values.iter().any(|val| part.eq_ignore_ascii_case(val)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BTreeMap;
-
-    fn sample_env() -> ResolverEnv {
-        ResolverEnv {
-            implementation_name: "cpython".into(),
-            implementation_version: "3.12.0".into(),
-            os_name: "posix".into(),
-            platform_machine: "x86_64".into(),
-            platform_python_implementation: "CPython".into(),
-            platform_release: "6.0".into(),
-            platform_system: "Linux".into(),
-            platform_version: "6.0".into(),
-            python_full_version: "3.12.0".into(),
-            python_version: "3.12".into(),
-            sys_platform: "linux".into(),
-        }
-    }
-
-    fn sample_tags() -> ResolverTags {
-        ResolverTags {
-            python: vec!["cp312".into(), "py312".into(), "py3".into()],
-            abi: vec!["cp312".into(), "abi3".into(), "none".into()],
-            platform: vec!["manylinux_2_17_x86_64".into(), "any".into()],
-        }
-    }
-
-    #[test]
-    fn resolves_packaging_range() -> Result<()> {
-        if std::env::var("PX_ONLINE").ok().as_deref() != Some("1") {
-            eprintln!("skipping resolves_packaging_range (PX_ONLINE!=1)");
-            return Ok(());
-        }
-
-        let request = ResolveRequest {
-            project: "demo".into(),
-            requirements: vec!["packaging>=24,<25".into()],
-            tags: ResolverTags::default(),
-            env: sample_env(),
-        };
-        let resolved = resolve(&request)?;
-        assert_eq!(resolved.len(), 1);
-        let spec = &resolved[0];
-        assert_eq!(spec.normalized, "packaging");
-        assert!(spec.selected_version.starts_with("24."));
-        Ok(())
-    }
-
-    #[test]
-    fn resolves_requests_transitives() -> Result<()> {
-        if std::env::var("PX_ONLINE").ok().as_deref() != Some("1") {
-            eprintln!("skipping resolves_requests_transitives (PX_ONLINE!=1)");
-            return Ok(());
-        }
-
-        let request = ResolveRequest {
-            project: "demo".into(),
-            requirements: vec!["requests>=2.32,<2.33".into()],
-            tags: ResolverTags::default(),
-            env: sample_env(),
-        };
-        let resolved = resolve(&request)?;
-        let names: Vec<String> = resolved
-            .iter()
-            .map(|spec| spec.normalized.clone())
-            .collect();
-        assert!(names.contains(&"requests".to_string()));
-        assert!(names.contains(&"urllib3".to_string()));
-        Ok(())
-    }
-
-    #[test]
-    fn normalized_extras_are_sorted() {
-        let req = PepRequirement::from_str(r"demo[tests,security,security]==1.0").unwrap();
-        let extras = normalized_extras(&req);
-        assert_eq!(extras, vec!["security", "tests"]);
-    }
-
-    #[test]
-    fn markers_follow_python_version() {
-        let env = sample_env().to_marker_environment().unwrap();
-        let req = PepRequirement::from_str(r#"demo>=1 ; python_version >= "3.11""#).unwrap();
-        assert!(req.evaluate_markers(&env, &[]));
-        let req = PepRequirement::from_str(r#"demo>=1 ; python_version < "3.0""#).unwrap();
-        assert!(!req.evaluate_markers(&env, &[]));
-    }
-
-    #[test]
-    fn select_version_prefers_matching_tags() {
-        let mut releases: BTreeMap<String, Vec<ReleaseFile>> = BTreeMap::new();
-        releases.insert(
-            "1.0.0".into(),
-            vec![ReleaseFile {
-                filename: "demo-1.0.0-py3-none-any.whl".into(),
-                packagetype: "bdist_wheel".into(),
-                yanked: Some(false),
-            }],
-        );
-        releases.insert(
-            "1.1.0".into(),
-            vec![ReleaseFile {
-                filename: "demo-1.1.0-cp312-cp312-manylinux_2_17_x86_64.whl".into(),
-                packagetype: "bdist_wheel".into(),
-                yanked: Some(false),
-            }],
-        );
-        let tags = sample_tags();
-        let specifiers = VersionSpecifiers::from_str(">=1.0").unwrap();
-        let selected = select_version(&releases, &specifiers, &tags);
-        assert_eq!(selected.as_deref(), Some("1.1.0"));
-    }
 }

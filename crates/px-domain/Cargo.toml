@@ -17,6 +17,8 @@ serde_json.workspace = true
 sha2.workspace = true
 time = { version = "0.3", features = ["formatting"] }
 toml_edit = "0.22"
+rayon.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

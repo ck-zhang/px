@@ -1052,6 +1052,7 @@ fn resolve_dependencies_with_effects(
             platform: tags.platform.clone(),
         },
         env: resolver_env.clone(),
+        indexes: resolver_indexes(),
     };
     let resolved = resolve(&request).map_err(|err| {
         InstallUserError::new(
@@ -1101,6 +1102,38 @@ fn resolve_dependencies_with_effects(
         specs: autopin_specs,
         pins,
     })
+}
+
+fn resolver_indexes() -> Vec<String> {
+    let mut indexes = Vec::new();
+    if let Ok(primary) = env::var("PX_INDEX_URL")
+        .or_else(|_| env::var("PIP_INDEX_URL"))
+        .map(|value| value.trim().to_string())
+    {
+        if !primary.is_empty() {
+            indexes.push(normalize_index_url(&primary));
+        }
+    }
+    if let Ok(extra) = env::var("PIP_EXTRA_INDEX_URL") {
+        for entry in extra.split_whitespace() {
+            let trimmed = entry.trim();
+            if !trimmed.is_empty() {
+                indexes.push(normalize_index_url(trimmed));
+            }
+        }
+    }
+    if indexes.is_empty() {
+        indexes.push("https://pypi.org/pypi".to_string());
+    }
+    indexes
+}
+
+fn normalize_index_url(raw: &str) -> String {
+    let mut url = raw.trim_end_matches('/').to_string();
+    if !url.ends_with("/pypi") && !url.ends_with("/json") {
+        url.push_str("/pypi");
+    }
+    url
 }
 
 fn resolver_failure_details(err: &anyhow::Error) -> Value {
