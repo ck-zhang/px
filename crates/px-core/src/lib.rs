@@ -1425,23 +1425,36 @@ pub(crate) fn fetch_release(
     specifier: &str,
 ) -> Result<PypiReleaseResponse> {
     let url = format!("{PYPI_BASE_URL}/{normalized}/{version}/json");
-    let response = client
-        .get(&url)
-        .send()
-        .map_err(|err| anyhow!("failed to query PyPI for {specifier}: {err}"))?;
-    if response.status() == StatusCode::NOT_FOUND {
-        return Err(InstallUserError::new(
-            format!("PyPI does not provide {specifier}"),
-            json!({ "specifier": specifier }),
-        )
-        .into());
+    let mut last_error = None;
+    for attempt in 1..=3 {
+        let response = client
+            .get(&url)
+            .send()
+            .map_err(|err| anyhow!("failed to query PyPI for {specifier}: {err}"))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(InstallUserError::new(
+                format!("PyPI does not provide {specifier}"),
+                json!({ "specifier": specifier }),
+            )
+            .into());
+        }
+        let response = response
+            .error_for_status()
+            .map_err(|err| anyhow!("PyPI returned an error for {specifier}: {err}"))?;
+        match response.json::<PypiReleaseResponse>() {
+            Ok(result) => return Ok(result),
+            Err(err) => {
+                last_error = Some(err);
+                thread::sleep(Duration::from_millis(150 * attempt));
+            }
+        }
     }
-    let response = response
-        .error_for_status()
-        .map_err(|err| anyhow!("PyPI returned an error for {specifier}: {err}"))?;
-    response
-        .json::<PypiReleaseResponse>()
-        .map_err(|err| anyhow!("invalid JSON for {specifier}: {err}"))
+    Err(anyhow!(
+        "invalid JSON for {specifier}: {}",
+        last_error
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "unknown error".to_string())
+    ))
 }
 
 #[derive(Clone, Debug)]
