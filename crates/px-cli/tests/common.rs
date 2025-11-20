@@ -17,12 +17,21 @@ use toml_edit::DocumentMut;
 /// # Panics
 /// Panics if the temporary directory cannot be created or the fixture copy fails.
 pub fn prepare_fixture(prefix: &str) -> (TempDir, PathBuf) {
+    prepare_named_fixture("sample_px_app", prefix)
+}
+
+#[must_use]
+/// Copies a named fixture directory into a temporary location.
+///
+/// # Panics
+/// Panics if the temporary directory cannot be created or the fixture copy fails.
+pub fn prepare_named_fixture(fixture: &str, prefix: &str) -> (TempDir, PathBuf) {
     let temp = tempfile::Builder::new()
         .prefix(prefix)
         .tempdir()
         .expect("tempdir");
-    let dst = temp.path().join("sample_px_app");
-    copy_dir_all(&fixture_source(), &dst).expect("copy fixture");
+    let dst = temp.path().join(fixture);
+    copy_dir_all(&fixture_root(fixture), &dst).expect("copy fixture");
     (temp, dst)
 }
 
@@ -42,6 +51,11 @@ pub fn workspace_root() -> PathBuf {
 #[must_use]
 pub fn fixture_source() -> PathBuf {
     workspace_root().join("fixtures").join("sample_px_app")
+}
+
+#[must_use]
+pub fn fixture_root(name: &str) -> PathBuf {
+    workspace_root().join("fixtures").join(name)
 }
 
 #[must_use]

@@ -706,17 +706,17 @@ struct PxCli {
         short,
         long,
         help = "Suppress human output (errors still print to stderr)"
-    )]
+    , global = true)]
     quiet: bool,
     #[arg(short, long, action = ArgAction::Count, help = "Increase logging (-vv reaches trace)")]
     verbose: u8,
-    #[arg(long, help = "Force trace logging regardless of -v/-q")]
+    #[arg(long, help = "Force trace logging regardless of -v/-q", global = true)]
     trace: bool,
-    #[arg(long, help = "Emit {status,message,details} JSON envelopes")]
+    #[arg(long, help = "Emit {status,message,details} JSON envelopes", global = true)]
     json: bool,
-    #[arg(long, help = "Disable colored human output")]
+    #[arg(long, help = "Disable colored human output", global = true)]
     no_color: bool,
-    #[arg(long, value_parser = value_parser!(PathBuf), help = "Optional px config file path")]
+    #[arg(long, value_parser = value_parser!(PathBuf), help = "Optional px config file path", global = true)]
     config: Option<PathBuf>,
     #[command(subcommand)]
     command: CommandGroupCli,

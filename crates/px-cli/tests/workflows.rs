@@ -221,6 +221,54 @@ fn run_frozen_errors_when_environment_missing() {
     );
 }
 
+#[test]
+fn run_accepts_post_subcommand_json_flag() {
+    use common::prepare_named_fixture;
+    let (_tmp, project) = prepare_named_fixture("run-json-flag", "run-json-flag");
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["run", "--json", "sample_px_app.cli", "--", "JsonInline"])
+        .assert()
+        .success();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload.get("status"), Some(&Value::String("ok".into())));
+    let details = payload["details"].as_object().expect("details object");
+    assert_eq!(
+        details.get("entry"),
+        Some(&Value::String("sample_px_app.cli".into()))
+    );
+    let stdout = payload["details"]["stdout"].as_str().unwrap_or_default();
+    assert!(
+        stdout.contains("Hello, JsonInline!"),
+        "run output should include greeting when --json follows subcommand: {stdout:?}"
+    );
+}
+
+#[test]
+fn run_emits_hint_when_requests_socks_missing_under_proxy() {
+    use common::prepare_named_fixture;
+    let (_tmp, project) = prepare_named_fixture("run-proxy-traceback", "run-proxy-traceback");
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("ALL_PROXY", "socks5h://127.0.0.1:9999")
+        .args(["--json", "run", "sample_px_app.cli"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "failure");
+    let details = payload["details"].as_object().expect("details");
+    assert!(
+        details.contains_key("traceback"),
+        "proxy failure should include parsed traceback"
+    );
+    assert!(
+        details.get("hint").is_some() || details.get("stderr").is_some(),
+        "proxy failure should include remediation hint or stderr"
+    );
+}
+
 fn write_module(project: &Path, module: &str, body: &str) {
     let module_path = project.join("sample_px_app").join(format!("{module}.py"));
     fs::write(module_path, body).expect("write module");

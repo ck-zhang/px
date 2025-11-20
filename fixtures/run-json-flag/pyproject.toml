@@ -1,0 +1,16 @@
+[project]
+name = "sample_px_app"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+sample-px-app = "sample_px_app.cli:main"
+
+[tool]
+
+[tool.px]
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"

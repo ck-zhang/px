@@ -1,0 +1,14 @@
+version = 1
+
+[metadata]
+px_version = "0.1.0"
+created_at = "2025-11-20T01:13:04.936396148Z"
+mode = "p0-pinned"
+manifest_fingerprint = "4bdc6fb9f7598b76b914257792db035bfb9745bbbcbe0cd351117bbd3e324e6a"
+lock_id = "52d10cf2634c5817f0e9937a63201c8bc279c9a4e4083e9120a1504afd2a5674"
+
+[project]
+name = "sample_px_app"
+
+[python]
+requirement = ">=3.12"
