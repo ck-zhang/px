@@ -425,6 +425,21 @@ fn parse_channel_pair(input: &str) -> Result<(u8, u8)> {
 }
 
 fn ensure_runtimes_root() -> Result<PathBuf> {
+    if let Some(registry_path) = env::var_os("PX_RUNTIME_REGISTRY") {
+        let parent = PathBuf::from(&registry_path)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let root = parent.join("runtimes");
+        fs::create_dir_all(&root).with_context(|| {
+            format!(
+                "creating px runtimes directory near {}",
+                PathBuf::from(registry_path).display()
+            )
+        })?;
+        return Ok(root);
+    }
+
     let home = home_dir().ok_or_else(|| anyhow!("home directory not found"))?;
     let root = home.join(".px").join("runtimes");
     fs::create_dir_all(&root)

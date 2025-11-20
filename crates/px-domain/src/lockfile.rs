@@ -1212,7 +1212,7 @@ mod tests {
             manifest_path: root.join("pyproject.toml"),
             lock_path: root.join("px.lock"),
             name: "demo".into(),
-            python_requirement: ">=3.12".into(),
+            python_requirement: ">=3.11".into(),
             dependencies: vec!["demo==1.0.0".into()],
             python_override: None,
             manifest_fingerprint: "demo-fingerprint".into(),
@@ -1259,7 +1259,7 @@ mod tests {
         let lock = LockSnapshot {
             version: LOCK_VERSION,
             project_name: Some("demo".into()),
-            python_requirement: Some(">=3.12".into()),
+            python_requirement: Some(">=3.11".into()),
             manifest_fingerprint: Some("demo-fingerprint".into()),
             lock_id: Some("lock-demo".into()),
             dependencies: vec!["demo==1.0.0".into()],
@@ -1285,7 +1285,7 @@ mod tests {
         let lock = LockSnapshot {
             version: LOCK_VERSION,
             project_name: Some("demo".into()),
-            python_requirement: Some(">=3.12".into()),
+            python_requirement: Some(">=3.11".into()),
             manifest_fingerprint: Some("demo-fingerprint".into()),
             lock_id: Some("lock-demo".into()),
             dependencies: vec!["demo==1.0.0".into()],
@@ -1316,7 +1316,7 @@ mod tests {
         let lock = LockSnapshot {
             version: LOCK_VERSION,
             project_name: Some("demo".into()),
-            python_requirement: Some(">=3.12".into()),
+            python_requirement: Some(">=3.11".into()),
             manifest_fingerprint: Some("demo-fingerprint".into()),
             lock_id: Some("lock-demo".into()),
             dependencies: vec!["Demo[Extra]==1.0.0 ; python_version >= '3.12'".into()],
@@ -1416,7 +1416,7 @@ mod tests {
         let lock = LockSnapshot {
             version: LOCK_VERSION,
             project_name: Some("demo".into()),
-            python_requirement: Some(">=3.12".into()),
+            python_requirement: Some(">=3.11".into()),
             manifest_fingerprint: Some("demo-fingerprint".into()),
             lock_id: Some("lock-demo".into()),
             dependencies: vec!["demo==1.0.0".into()],

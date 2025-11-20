@@ -182,7 +182,7 @@ fn create_minimal_pyproject_doc(root: &Path) -> Result<DocumentMut> {
     let name = sanitize_package_candidate(root);
     let template = format!("[project]\nname = \"{name}\"\nversion = \"0.1.0\"\n",)
         + "description = \"Onboarded by px\"\n"
-        + "requires-python = \">=3.12\"\n"
+        + "requires-python = \">=3.11\"\n"
         + "dependencies = []\n\n[tool.px]\n"
         + "\n[build-system]\n"
         + "requires = [\"setuptools>=70\", \"wheel\"]\n"

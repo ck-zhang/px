@@ -41,7 +41,7 @@ impl ProjectSnapshot {
         let python_requirement = project
             .get("requires-python")
             .and_then(|item| item.as_str())
-            .map_or_else(|| ">=3.12".to_string(), std::string::ToString::to_string);
+            .map_or_else(|| ">=3.11".to_string(), std::string::ToString::to_string);
         let dependencies = read_dependencies_from_doc(&doc);
         let python_override = doc
             .get("tool")
@@ -141,14 +141,14 @@ mod tests {
             r#"[project]
 name = "demo"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = ["requests==2.32.3"]
 "#,
         )?;
 
         let snapshot = ProjectSnapshot::read_from(root)?;
         assert_eq!(snapshot.name, "demo");
-        assert_eq!(snapshot.python_requirement, ">=3.12");
+        assert_eq!(snapshot.python_requirement, ">=3.11");
         assert_eq!(snapshot.dependencies, vec!["requests==2.32.3".to_string()]);
         assert_eq!(snapshot.manifest_path, pyproject);
         assert_eq!(snapshot.lock_path, root.join("px.lock"));

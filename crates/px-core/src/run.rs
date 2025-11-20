@@ -521,12 +521,14 @@ fn infer_default_entry(manifest: &Path) -> Result<Option<ResolvedEntry>> {
     if let Some(name) = project.get("name").and_then(Item::as_str) {
         if !name.trim().is_empty() {
             let module = package_module_name(name);
-            return Ok(Some(ResolvedEntry {
-                entry: format!("{module}.cli"),
-                source: EntrySource::PackageCli {
-                    package: name.to_string(),
-                },
-            }));
+            if package_module_exists(manifest, &module) {
+                return Ok(Some(ResolvedEntry {
+                    entry: format!("{module}.cli"),
+                    source: EntrySource::PackageCli {
+                        package: name.to_string(),
+                    },
+                }));
+            }
         }
     }
 
@@ -556,6 +558,13 @@ fn parse_script_value(value: &str) -> Option<String> {
     } else {
         Some(module.to_string())
     }
+}
+
+fn package_module_exists(manifest: &Path, module: &str) -> bool {
+    let root = manifest.parent().unwrap_or_else(|| Path::new("."));
+    let module_path = module.replace('.', "/");
+    let dir = root.join(&module_path);
+    dir.join("__init__.py").exists() || dir.with_extension("py").exists()
 }
 
 fn package_module_name(name: &str) -> String {

@@ -182,13 +182,22 @@ pub fn resolve_runtime(
 ) -> Result<RuntimeSelection> {
     let registry = load_registry()?;
     if let Some(version) = override_version {
-        if let Some(record) = registry.find(version) {
+        let requested = normalize_channel(version)?;
+        if let Some(record) = registry.find(&requested) {
             return Ok(RuntimeSelection {
                 record,
                 source: RuntimeSource::Explicit,
             });
         }
-        bail!("px runtime {version} is not installed; run `px python install {version}`");
+        if let Ok(system) = inspect_system_python() {
+            if format_channel(&system.full_version)? == requested {
+                return Ok(RuntimeSelection {
+                    record: system,
+                    source: RuntimeSource::System,
+                });
+            }
+        }
+        bail!("px runtime {requested} is not installed; run `px python install {requested}`");
     }
 
     if let Some(record) = registry.best_for_requirement(requirement) {

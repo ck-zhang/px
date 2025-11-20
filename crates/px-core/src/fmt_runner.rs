@@ -5,8 +5,9 @@ use serde_json::{json, Value};
 use toml_edit::{DocumentMut, InlineTable, Item, Table};
 
 use crate::{
-    attach_autosync_details, build_pythonpath, ensure_project_environment_synced,
-    outcome_from_output, python_context_with_mode, runtime,
+    attach_autosync_details, auto_sync_environment, build_pythonpath,
+    ensure_project_environment_synced, issue_from_details, manifest_snapshot, outcome_from_output,
+    python_context_with_mode, runtime,
     tools::{disable_proxy_env, load_installed_tool, MIN_PYTHON_REQUIREMENT},
     CommandContext, EnvGuard, EnvironmentSyncReport, ExecutionOutcome, InstallUserError,
     PythonContext,
@@ -34,14 +35,36 @@ fn run_quality_command(
     kind: QualityKind,
     request: &FmtRequest,
 ) -> Result<ExecutionOutcome> {
-    let guard = if request.frozen || ctx.env_flag_enabled("CI") {
-        EnvGuard::Strict
-    } else {
-        EnvGuard::AutoSync
-    };
+    let guard = EnvGuard::Strict;
+    let snapshot = manifest_snapshot()?;
     let (py_ctx, sync_report) = match python_context_with_mode(ctx, guard) {
         Ok(result) => result,
-        Err(outcome) => return Ok(outcome),
+        Err(outcome) => {
+            let Some(issue) = issue_from_details(&outcome.details) else {
+                return Ok(outcome);
+            };
+            if !matches!(
+                issue,
+                crate::EnvironmentIssue::MissingEnv | crate::EnvironmentIssue::MissingArtifacts
+            ) {
+                return Ok(outcome);
+            }
+            match auto_sync_environment(ctx, &snapshot, issue) {
+                Ok(report) => match python_context_with_mode(ctx, guard) {
+                    Ok((py_ctx, inner_report)) => {
+                        let merged = inner_report.or(report);
+                        (py_ctx, merged)
+                    }
+                    Err(outcome) => return Ok(outcome),
+                },
+                Err(err) => {
+                    return Ok(ExecutionOutcome::failure(
+                        "failed to prepare formatter environment",
+                        json!({ "error": err.to_string() }),
+                    ))
+                }
+            }
+        }
     };
     let pyproject = py_ctx.project_root.join("pyproject.toml");
     let config = match load_quality_tools(&pyproject, kind) {

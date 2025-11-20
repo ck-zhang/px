@@ -787,7 +787,7 @@ mod tests {
 
 fn resolve_python_requirement_arg(raw: Option<&str>) -> String {
     raw.map(str::trim).filter(|s| !s.is_empty()).map_or_else(
-        || ">=3.12".to_string(),
+        || ">=3.11".to_string(),
         |s| {
             if s.starts_with('>') {
                 s.to_string()

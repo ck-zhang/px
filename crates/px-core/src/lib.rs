@@ -5,7 +5,7 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     env, fmt, fs,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     str::FromStr,
     sync::{
@@ -482,7 +482,10 @@ pub enum CommandStatus {
 }
 
 fn progress_enabled() -> bool {
-    env::var("PX_PROGRESS").map(|v| v != "0").unwrap_or(true)
+    match env::var("PX_PROGRESS") {
+        Ok(value) => value != "0",
+        Err(_) => io::stderr().is_terminal(),
+    }
 }
 
 struct ProgressReporter {
@@ -1877,7 +1880,7 @@ pub(crate) enum EnvGuard {
 }
 
 #[derive(Clone, Debug)]
-struct EnvironmentSyncReport {
+pub(crate) struct EnvironmentSyncReport {
     action: &'static str,
     note: String,
 }
@@ -1899,7 +1902,7 @@ impl EnvironmentSyncReport {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum EnvironmentIssue {
+pub(crate) enum EnvironmentIssue {
     MissingLock,
     LockDrift,
     MissingArtifacts,
@@ -1964,6 +1967,9 @@ impl EnvironmentIssue {
                 | EnvironmentIssue::RuntimeMismatch
         )
     }
+}
+pub(crate) fn issue_from_details(details: &Value) -> Option<EnvironmentIssue> {
+    EnvironmentIssue::from_details(details)
 }
 
 impl PythonContext {
@@ -2217,7 +2223,7 @@ fn ensure_environment_with_guard(
     }
 }
 
-fn auto_sync_environment(
+pub(crate) fn auto_sync_environment(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
     issue: EnvironmentIssue,

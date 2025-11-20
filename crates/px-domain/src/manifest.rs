@@ -317,7 +317,17 @@ pub(crate) fn upsert_dependency(deps: &mut Vec<String>, spec: &str) -> InsertOut
     let name = dependency_name(spec);
     for existing in deps.iter_mut() {
         if dependency_name(existing) == name {
-            if existing.trim() != spec.trim() {
+            let incoming = spec.trim();
+            let current = existing.trim();
+
+            // Avoid loosening pins when the user re-runs `px add foo` on an already pinned dep.
+            let incoming_has_constraint = requirement_has_constraint(incoming);
+            let current_has_constraint = requirement_has_constraint(current);
+            if current_has_constraint && !incoming_has_constraint {
+                return InsertOutcome::Unchanged;
+            }
+
+            if current != incoming {
                 *existing = spec.to_string();
                 return InsertOutcome::Updated(name);
             }
@@ -360,6 +370,15 @@ pub(crate) fn strip_wrapping_quotes(input: &str) -> &str {
     input
 }
 
+fn requirement_has_constraint(spec: &str) -> bool {
+    let head = strip_wrapping_quotes(spec)
+        .split(';')
+        .next()
+        .unwrap_or(spec);
+    head.chars()
+        .any(|ch| matches!(ch, '<' | '>' | '=' | '!' | '~' | '@'))
+}
+
 pub(crate) fn project_identity(doc: &DocumentMut) -> Result<(String, String)> {
     let project = project_table(doc)?;
     let name = project
@@ -370,7 +389,7 @@ pub(crate) fn project_identity(doc: &DocumentMut) -> Result<(String, String)> {
     let python_requirement = project
         .get("requires-python")
         .and_then(Item::as_str)
-        .map_or_else(|| ">=3.12".to_string(), std::string::ToString::to_string);
+        .map_or_else(|| ">=3.11".to_string(), std::string::ToString::to_string);
     Ok((name, python_requirement))
 }
 
@@ -573,7 +592,7 @@ mod tests {
         fs::write(
             path,
             format!(
-                "[project]\nname = \"demo\"\nversion = \"0.1.0\"\nrequires-python = \">=3.12\"\ndependencies = {dependencies}\n"
+                "[project]\nname = \"demo\"\nversion = \"0.1.0\"\nrequires-python = \">=3.11\"\ndependencies = {dependencies}\n"
             ),
         )?;
         Ok(())
@@ -597,6 +616,22 @@ mod tests {
         assert_eq!(remove_report.removed.len(), 1);
         let contents = fs::read_to_string(&pyproject)?;
         assert!(!contents.contains("requests=="));
+        Ok(())
+    }
+
+    #[test]
+    fn add_specs_does_not_loosen_existing_pin() -> Result<()> {
+        let dir = tempdir()?;
+        let pyproject = dir.path().join("pyproject.toml");
+        write_pyproject(&pyproject, "[\"requests==2.32.3\"]")?;
+
+        let mut editor = ManifestEditor::open(&pyproject)?;
+        let report = editor.add_specs(&["requests".to_string()])?;
+        assert!(report.added.is_empty());
+        assert!(report.updated.is_empty());
+
+        let contents = fs::read_to_string(&pyproject)?;
+        assert!(contents.contains("requests==2.32.3"));
         Ok(())
     }
 }

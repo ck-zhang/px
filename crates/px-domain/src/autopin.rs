@@ -323,7 +323,7 @@ mod tests {
             r#"[project]
 name = "demo"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = ["demo"]
 "#,
         )?;
@@ -372,7 +372,7 @@ dependencies = ["demo"]
             r#"[project]
 name = "demo"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = ["demo>=1.0", "helper==0.5"]
 "#,
         )?;
