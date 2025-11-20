@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     env, fmt, fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -703,7 +703,21 @@ pub(crate) fn install_snapshot(
             resolved_override = Some(resolved.pins);
         }
         let pins = if let Some(override_data) = override_pins {
-            pins_with_override(&marker_env, &dependencies, override_data)?
+            let mut pins: Vec<PinSpec> = override_data
+                .pins
+                .iter()
+                .filter(|pin| marker_applies(&pin.specifier, &marker_env))
+                .cloned()
+                .collect();
+            if pins.is_empty() {
+                for spec in &dependencies {
+                    if !marker_applies(spec, &marker_env) {
+                        continue;
+                    }
+                    pins.push(parse_exact_pin(spec)?);
+                }
+            }
+            pins
         } else {
             match resolved_override {
                 Some(pins) => pins,
@@ -1346,12 +1360,7 @@ fn download_artifact(
                     platform_tag: wheel.platform_tag.clone(),
                 }
             }
-            Err(err) => match build_wheel_via_sdist(cache_store, cache, &release, &pin, python) {
-                Ok(artifact) => artifact,
-                Err(build_err) => {
-                    return Err(err.context(format!("sdist fallback failed: {build_err}")))
-                }
-            },
+            Err(_) => build_wheel_via_sdist(cache_store, cache, &release, &pin, python)?,
         }
     };
 
@@ -1725,35 +1734,6 @@ pub(crate) fn summarize_autopins(entries: &[AutopinEntry]) -> Option<String> {
         summary.push(')');
     }
     Some(summary)
-}
-
-fn pins_with_override(
-    marker_env: &MarkerEnvironment,
-    dependencies: &[String],
-    override_pins: &InstallOverride,
-) -> Result<Vec<PinSpec>> {
-    let mut lookup: HashMap<String, VecDeque<PinSpec>> = HashMap::new();
-    for pin in &override_pins.pins {
-        lookup
-            .entry(autopin_pin_key(pin))
-            .or_default()
-            .push_back(pin.clone());
-    }
-    let mut pins = Vec::new();
-    for spec in dependencies {
-        if !marker_applies(spec, marker_env) {
-            continue;
-        }
-        let key = autopin_spec_key(spec);
-        if let Some(queue) = lookup.get_mut(&key) {
-            if let Some(pin) = queue.pop_front() {
-                pins.push(pin);
-                continue;
-            }
-        }
-        pins.push(parse_exact_pin(spec)?);
-    }
-    Ok(pins)
 }
 
 fn write_dependencies(doc: &mut DocumentMut, specs: &[String]) -> Result<()> {

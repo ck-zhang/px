@@ -324,8 +324,7 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
 
     fs::create_dir_all(&build_root)?;
     let sdist_path = build_root.join(request.filename);
-    temp_file
-        .persist(&sdist_path)
+    persist_named_tempfile(temp_file, &sdist_path)
         .map_err(|err| anyhow!("unable to persist sdist download: {err}"))?;
 
     let src_dir = build_root.join("src");
@@ -361,18 +360,7 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
-    if dest.exists() {
-        let existing_sha = compute_sha256(&dest)?;
-        let fresh_sha = compute_sha256(&built_wheel_path)?;
-        if existing_sha == fresh_sha {
-            fs::remove_file(&built_wheel_path)?;
-        } else {
-            fs::remove_file(&dest)?;
-            fs::rename(&built_wheel_path, &dest)?;
-        }
-    } else {
-        fs::rename(&built_wheel_path, &dest)?;
-    }
+    persist_or_copy(&built_wheel_path, &dest)?;
 
     let sha256 = compute_sha256(&dest)?;
     let size = fs::metadata(&dest)?.len();
@@ -444,6 +432,46 @@ fn download_sdist_once(request: &SdistRequest<'_>) -> Result<(NamedTempFile, Str
     Ok((tmp, sha256))
 }
 
+fn persist_named_tempfile(tmp: NamedTempFile, dest: &Path) -> io::Result<()> {
+    match tmp.persist(dest) {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            let file = err.file;
+            if is_cross_device(&err.error) {
+                let mut reader = file.reopen()?;
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let mut writer = File::create(dest)?;
+                io::copy(&mut reader, &mut writer)?;
+                file.close().ok();
+                Ok(())
+            } else {
+                Err(err.error)
+            }
+        }
+    }
+}
+
+fn persist_or_copy(src: &Path, dest: &Path) -> io::Result<()> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::rename(src, dest) {
+        Ok(()) => Ok(()),
+        Err(err) if is_cross_device(&err) => {
+            fs::copy(src, dest)?;
+            fs::remove_file(src)?;
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn is_cross_device(err: &io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(18))
+}
+
 fn extract_sdist(python: &str, sdist: &Path, dest: &Path) -> Result<()> {
     if dest.exists() {
         fs::remove_dir_all(dest)?;
@@ -489,11 +517,39 @@ fn run_python_build(python: &str, project_dir: &Path, out_dir: &Path) -> Result<
     let output = cmd
         .output()
         .with_context(|| format!("failed to run python -m build in {}", project_dir.display()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("python -m build failed: {stderr}");
+    if output.status.success() {
+        return Ok(());
     }
-    Ok(())
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    match pip_wheel_fallback(python, project_dir, out_dir) {
+        Ok(()) => Ok(()),
+        Err(pip_err) => {
+            bail!("python -m build failed: {stderr}\npython -m pip wheel failed: {pip_err}")
+        }
+    }
+}
+
+fn pip_wheel_fallback(python: &str, project_dir: &Path, out_dir: &Path) -> Result<()> {
+    let mut cmd = Command::new(python);
+    cmd.arg("-m")
+        .arg("pip")
+        .arg("wheel")
+        .arg("--no-deps")
+        .arg("--wheel-dir")
+        .arg(out_dir)
+        .arg(project_dir);
+    apply_python_env(&mut cmd);
+    let output = cmd.output().with_context(|| {
+        format!(
+            "failed to run python -m pip wheel in {}",
+            project_dir.display()
+        )
+    })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    bail!("{stderr}");
 }
 
 fn discover_project_dir(root: &Path) -> Result<PathBuf> {

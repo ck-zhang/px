@@ -19,7 +19,7 @@ use crate::{
     manifest_snapshot_at, outcome_from_output, persist_resolved_dependencies, refresh_project_site,
     resolve_dependencies_with_effects, runtime, CommandContext, ExecutionOutcome, InstallUserError,
 };
-use px_domain::{load_lockfile_optional, InstallOverride, ManifestEditor};
+use px_domain::{load_lockfile_optional, ManifestEditor};
 
 const TOOLS_DIR_ENV: &str = "PX_TOOLS_DIR";
 const TOOL_STORE_ENV: &str = "PX_TOOL_STORE";
@@ -106,18 +106,13 @@ pub fn tool_install(
     };
     persist_resolved_dependencies(&snapshot, &resolved.specs)?;
     let updated_snapshot = manifest_snapshot_at(&tool_root)?;
-    let override_data = InstallOverride {
-        dependencies: resolved.specs.clone(),
-        pins: resolved.pins.clone(),
+    let install_outcome = match install_snapshot(ctx, &updated_snapshot, false, None) {
+        Ok(outcome) => outcome,
+        Err(err) => match err.downcast::<InstallUserError>() {
+            Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+            Err(other) => return Err(other),
+        },
     };
-    let install_outcome =
-        match install_snapshot(ctx, &updated_snapshot, false, Some(&override_data)) {
-            Ok(outcome) => outcome,
-            Err(err) => match err.downcast::<InstallUserError>() {
-                Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
-                Err(other) => return Err(other),
-            },
-        };
     if matches!(install_outcome.state, crate::InstallState::MissingLock) {
         return Ok(ExecutionOutcome::failure(
             "px tool install could not write px.lock",
