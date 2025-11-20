@@ -5,9 +5,11 @@ use serde_json::{json, Value};
 use toml_edit::{DocumentMut, InlineTable, Item, Table};
 
 use crate::{
-    attach_autosync_details, outcome_from_output, python_context_with_mode, CommandContext,
-    EnvGuard, EnvironmentSyncReport, ExecutionOutcome, PythonContext,
+    attach_autosync_details, install_snapshot, manifest_snapshot_at, outcome_from_output,
+    python_context_with_mode, refresh_project_site, CommandContext, EnvGuard,
+    EnvironmentSyncReport, ExecutionOutcome, InstallUserError, PythonContext,
 };
+use px_domain::ManifestEditor;
 
 const DEFAULT_RUFF_REQUIREMENT: &str = "ruff==0.6.9";
 
@@ -68,7 +70,7 @@ fn run_quality_command(
     };
     let mut runs = Vec::new();
     for tool in &config.tools {
-        match execute_quality_tool(&env, kind, request, tool)? {
+        match execute_quality_tool(&env, kind, request, tool, true)? {
             ToolRun::Completed(record) => runs.push(record),
             ToolRun::Outcome(outcome) => return Ok(outcome),
         }
@@ -85,6 +87,7 @@ fn execute_quality_tool(
     kind: QualityKind,
     request: &FmtRequest,
     tool: &QualityTool,
+    allow_autoinstall: bool,
 ) -> Result<ToolRun> {
     let python_args = tool.python_args(&request.args);
     let envs = match env.py_ctx.base_env(env.env_payload) {
@@ -113,6 +116,17 @@ fn execute_quality_tool(
 
     let combined_output = format!("{}{}", output.stdout, output.stderr);
     if missing_module_error(&combined_output, &tool.module) {
+        if allow_autoinstall
+            && matches!(env.config.source, QualityConfigSource::Default)
+            && tool.is_default_ruff()
+        {
+            match auto_install_default_fmt_tool(env) {
+                Ok(()) => {
+                    return execute_quality_tool(env, kind, request, tool, false);
+                }
+                Err(outcome) => return Ok(ToolRun::Outcome(outcome)),
+            }
+        }
         let mut details = json!({
             "tool": tool.display_name(),
             "module": tool.module,
@@ -435,6 +449,10 @@ impl QualityTool {
     fn requirement_spec(&self) -> Option<String> {
         self.requirement.clone()
     }
+
+    fn is_default_ruff(&self) -> bool {
+        self.module == "ruff" && self.requirement.as_deref() == Some(DEFAULT_RUFF_REQUIREMENT)
+    }
 }
 
 struct QualityRunRecord {
@@ -455,6 +473,57 @@ fn missing_module_error(output: &str, module: &str) -> bool {
     let needle = format!("No module named '{module}'");
     let needle_unquoted = format!("No module named {module}");
     output.contains(&needle) || output.contains(&needle_unquoted)
+}
+
+fn auto_install_default_fmt_tool(env: &QualityToolEnv<'_, '_>) -> Result<(), ExecutionOutcome> {
+    let pyproject = env.py_ctx.project_root.join("pyproject.toml");
+    let requirement = DEFAULT_RUFF_REQUIREMENT.to_string();
+    let mut editor = ManifestEditor::open(&pyproject).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to read pyproject.toml",
+            json!({ "error": err.to_string(), "pyproject": pyproject.display().to_string() }),
+        )
+    })?;
+    let _ = editor.add_specs(&[requirement.clone()]).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to update pyproject.toml",
+            json!({ "error": err.to_string(), "pyproject": pyproject.display().to_string() }),
+        )
+    })?;
+    let snapshot = manifest_snapshot_at(&env.py_ctx.project_root).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to read project snapshot",
+            json!({
+                "error": err.to_string(),
+                "project_root": env.py_ctx.project_root.display().to_string(),
+            }),
+        )
+    })?;
+    let install_outcome = match install_snapshot(env.ctx, &snapshot, false, None) {
+        Ok(outcome) => outcome,
+        Err(err) => match err.downcast::<InstallUserError>() {
+            Ok(user) => return Err(ExecutionOutcome::user_error(user.message, user.details)),
+            Err(other) => {
+                return Err(ExecutionOutcome::failure(
+                    "failed to install default formatter",
+                    json!({ "error": other.to_string() }),
+                ))
+            }
+        },
+    };
+    if matches!(install_outcome.state, crate::InstallState::MissingLock) {
+        return Err(ExecutionOutcome::failure(
+            "px fmt could not refresh px.lock for default formatter",
+            json!({ "pyproject": pyproject.display().to_string() }),
+        ));
+    }
+    refresh_project_site(&snapshot, env.ctx).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to update project environment after installing formatter",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    Ok(())
 }
 
 impl QualityRunRecord {
