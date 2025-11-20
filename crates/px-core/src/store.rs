@@ -1062,6 +1062,80 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn prune_cache_entries_deletes_and_reports_errors() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let present = temp.path().join("wheel/demo-1.0.0.whl");
+        fs::create_dir_all(present.parent().unwrap())?;
+        fs::write(&present, b"demo")?;
+        let missing = temp.path().join("wheel/missing-1.0.0.whl");
+        let walk = CacheWalk {
+            exists: true,
+            files: vec![
+                CacheEntry {
+                    path: present.clone(),
+                    size: 4,
+                },
+                CacheEntry {
+                    path: missing.clone(),
+                    size: 9,
+                },
+            ],
+            dirs: Vec::new(),
+            total_bytes: 13,
+        };
+
+        let result = prune_cache_entries(&walk);
+
+        assert_eq!(result.candidate_entries, 2);
+        assert_eq!(result.candidate_size_bytes, 13);
+        assert_eq!(result.deleted_entries, 1);
+        assert_eq!(result.deleted_size_bytes, 4);
+        assert_eq!(result.errors.len(), 1);
+        assert!(
+            result.errors[0].path.ends_with(missing),
+            "expected error to refer to missing path"
+        );
+        assert!(
+            !present.exists(),
+            "present file should be removed after prune"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn marker_matches_rejects_mismatched_checksum() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let marker = temp.path().join("wheel/.px-wheel.json");
+        write_marker(&marker, "deadbeef")?;
+        assert!(
+            !marker_matches(&marker, "cafebabe"),
+            "marker should reject differing checksum"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn collect_cache_walk_sorts_entries() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let alpha = root.join("a/alpha.whl");
+        let beta = root.join("b/beta.whl");
+        fs::create_dir_all(alpha.parent().unwrap())?;
+        fs::create_dir_all(beta.parent().unwrap())?;
+        fs::write(&alpha, b"a")?;
+        fs::write(&beta, b"beta-bits")?;
+
+        let walk = collect_cache_walk(root)?;
+
+        assert!(walk.exists);
+        assert_eq!(walk.total_bytes, 1 + 9);
+        let files: Vec<&Path> = walk.files.iter().map(|entry| entry.path.as_path()).collect();
+        assert_eq!(files, vec![alpha.as_path(), beta.as_path()]);
+        assert_eq!(walk.dirs.len(), 2, "expected two child directories recorded");
+        Ok(())
+    }
+
     fn write_dummy_wheel(path: &Path, contents: &[u8]) -> Result<()> {
         let file = File::create(path)?;
         let mut writer = zip::ZipWriter::new(file);

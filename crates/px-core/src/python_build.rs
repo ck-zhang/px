@@ -431,3 +431,113 @@ fn ensure_runtimes_root() -> Result<PathBuf> {
         .with_context(|| format!("creating px runtimes directory at {}", root.display()))?;
     Ok(root)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use tempfile::tempdir;
+
+    fn make_download(
+        patch: u8,
+        url: &str,
+        target: (&str, &str, &str),
+    ) -> PythonDownload {
+        PythonDownload {
+            name: "cpython".to_string(),
+            arch: PythonDownloadArch {
+                family: target.1.to_string(),
+                variant: None,
+            },
+            os: target.0.to_string(),
+            libc: target.2.to_string(),
+            major: 3,
+            minor: 12,
+            patch,
+            prerelease: None,
+            url: url.to_string(),
+            variant: None,
+            build: None,
+        }
+    }
+
+    #[test]
+    fn select_release_asset_prefers_highest_patch_for_target() -> Result<()> {
+        let target = HostTarget {
+            label: "x86_64-unknown-linux-gnu",
+            os: "linux",
+            arch: "x86_64",
+            libc: "gnu",
+        };
+        let downloads = vec![
+            make_download(
+                2,
+                "https://example.invalid/python-3.12.2.tar.gz",
+                ("linux", "x86_64", "gnu"),
+            ),
+            make_download(
+                3,
+                "https://example.invalid/python-3.12.3.tar.gz",
+                ("linux", "x86_64", "gnu"),
+            ),
+            make_download(
+                1,
+                "https://example.invalid/python-3.12.1.tar.gz",
+                ("linux", "aarch64", "gnu"),
+            ),
+        ];
+
+        let asset = select_release_asset("3.12", &[target], &downloads)?;
+        assert_eq!(asset.name, "python-3.12.3.tar.gz");
+        assert!(matches!(asset.kind, ArchiveKind::TarGz));
+        assert_eq!(asset.target.label, target.label);
+        Ok(())
+    }
+
+    #[test]
+    fn select_release_asset_errors_when_platform_missing() {
+        let target = HostTarget {
+            label: "x86_64-unknown-linux-gnu",
+            os: "linux",
+            arch: "x86_64",
+            libc: "gnu",
+        };
+        let downloads = vec![make_download(
+            2,
+            "https://example.invalid/python-3.12.2.tar.gz",
+            ("darwin", "x86_64", "none"),
+        )];
+
+        let result = select_release_asset("3.12", &[target], &downloads);
+        assert!(
+            result.is_err(),
+            "expected error when no matching platform asset exists"
+        );
+    }
+
+    #[test]
+    fn locate_python_binary_finds_nested_candidate() -> Result<()> {
+        let temp = tempdir()?;
+        let windows = env::consts::OS == "windows";
+        let candidates = interpreter_names("3.12", windows)?;
+        let bin_dir = temp.path().join("runtime/bin");
+        fs::create_dir_all(&bin_dir)?;
+        let target = bin_dir.join(&candidates[0]);
+        fs::write(&target, b"#!/usr/bin/env python\n")?;
+
+        let located = locate_python_binary(temp.path(), "3.12")?;
+        assert_eq!(located, target);
+        Ok(())
+    }
+
+    #[test]
+    fn archive_kind_rejects_unknown_extension() {
+        assert!(archive_kind("python-3.12.3.txt").is_err());
+    }
+
+    #[test]
+    fn parse_channel_pair_requires_major_and_minor() {
+        assert!(parse_channel_pair("3").is_err());
+        assert!(parse_channel_pair("3.x").is_err());
+    }
+}

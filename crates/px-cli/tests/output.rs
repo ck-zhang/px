@@ -115,3 +115,50 @@ fn publish_requires_token_when_online() {
         "hint should mention token variable: {hint:?}"
     );
 }
+
+#[test]
+fn publish_errors_when_dist_missing() {
+    let (_tmp, project) = init_empty_project("output-publish-missing-dist");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["--json", "publish"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    let message = payload["message"].as_str().expect("message string");
+    assert!(
+        message.contains("no artifacts"),
+        "expected publish to fail when dist/ is empty: {message:?}"
+    );
+    assert_eq!(payload["details"]["dist_dir"], "dist");
+}
+
+#[test]
+fn build_dry_run_reports_empty_artifacts() {
+    let (_tmp, project) = init_empty_project("output-build-dry-run");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["--json", "build", "--dry-run"])
+        .assert()
+        .success();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["details"]["dry_run"], Value::Bool(true));
+    let artifacts = payload["details"]["artifacts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        artifacts.is_empty(),
+        "dry-run build should not report artifacts: {artifacts:?}"
+    );
+    assert!(
+        !project.join("dist").exists(),
+        "dry-run build should not create dist directory"
+    );
+}
