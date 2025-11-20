@@ -817,3 +817,56 @@ fn has_case_insensitive_extension(path: &Path, extension: &str) -> bool {
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn resolve_output_dir_handles_relative_and_absolute() -> Result<()> {
+        let root = tempdir()?;
+        let ctx = PythonContext {
+            project_root: root.path().to_path_buf(),
+            python: "/usr/bin/python".to_string(),
+            pythonpath: String::new(),
+            allowed_paths: Vec::new(),
+        };
+
+        let rel = PathBuf::from("custom/dist");
+        let resolved_rel = resolve_output_dir_from_request(&ctx, Some(&rel));
+        assert_eq!(resolved_rel, root.path().join("custom/dist"));
+
+        let abs = root.path().join("abs/dist");
+        let resolved_abs = resolve_output_dir_from_request(&ctx, Some(&abs));
+        assert_eq!(resolved_abs, abs);
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_matches_format_respects_targets() {
+        let sdist = PathBuf::from("dist/demo-0.1.0.tar.gz");
+        let wheel = PathBuf::from("dist/demo-0.1.0-py3-none-any.whl");
+
+        let sdist_only = BuildTargets {
+            sdist: true,
+            wheel: false,
+        };
+        assert!(artifact_matches_format(&sdist, sdist_only));
+        assert!(!artifact_matches_format(&wheel, sdist_only));
+
+        let wheel_only = BuildTargets {
+            sdist: false,
+            wheel: true,
+        };
+        assert!(artifact_matches_format(&wheel, wheel_only));
+        assert!(!artifact_matches_format(&sdist, wheel_only));
+
+        let both = BuildTargets {
+            sdist: true,
+            wheel: true,
+        };
+        assert!(artifact_matches_format(&sdist, both));
+        assert!(artifact_matches_format(&wheel, both));
+    }
+}

@@ -540,4 +540,15 @@ mod tests {
         assert!(parse_channel_pair("3").is_err());
         assert!(parse_channel_pair("3.x").is_err());
     }
+
+    #[test]
+    fn locate_python_binary_errors_when_missing() {
+        let temp = tempdir().expect("tempdir");
+        let err = locate_python_binary(temp.path(), "3.12").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unable to locate python binary"),
+            "expected missing binary message, got {msg:?}"
+        );
+    }
 }

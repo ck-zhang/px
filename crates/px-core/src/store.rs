@@ -1136,6 +1136,30 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn ensure_wheel_dist_rebuilds_on_marker_mismatch() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let wheel = temp.path().join("demo-1.0.0.whl");
+        write_dummy_wheel(&wheel, b"print('ok')")?;
+        let sha = compute_sha256(&wheel)?;
+
+        // First extraction writes a matching marker.
+        let dist = ensure_wheel_dist(&wheel, &sha)?;
+        let marker = dist.join(WHEEL_MARKER_NAME);
+        assert!(marker.exists(), "expected marker to be written");
+
+        // Corrupt the marker so a subsequent call must rebuild.
+        write_marker(&marker, "cafebabe")?;
+        let rebuilt = ensure_wheel_dist(&wheel, &sha)?;
+        assert_eq!(rebuilt, dist, "rebuilt dist should reuse same path");
+        let updated = fs::read_to_string(&marker)?;
+        assert!(
+            updated.contains(&sha),
+            "marker should be updated to correct checksum"
+        );
+        Ok(())
+    }
+
     fn write_dummy_wheel(path: &Path, contents: &[u8]) -> Result<()> {
         let file = File::create(path)?;
         let mut writer = zip::ZipWriter::new(file);
