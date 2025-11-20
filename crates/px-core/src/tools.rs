@@ -242,13 +242,14 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
         "tool": metadata.name,
         "args": request.args,
     });
-    let envs = vec![
+    let mut envs = vec![
         ("PYTHONPATH".into(), pythonpath),
         ("PYTHONUNBUFFERED".into(), "1".into()),
         ("PX_ALLOWED_PATHS".into(), allowed),
         ("PX_TOOL_ROOT".into(), tool_root.display().to_string()),
         ("PX_COMMAND_JSON".into(), env_payload.to_string()),
     ];
+    disable_proxy_env(&mut envs);
     let output = if passthrough {
         px_domain::run_command_passthrough(&runtime_selection.record.path, &args, &envs, &cwd)?
     } else {
@@ -642,6 +643,22 @@ fn infer_grip_port(args: &[String]) -> Option<u16> {
         }
     }
     None
+}
+
+fn disable_proxy_env(envs: &mut Vec<(String, String)>) {
+    const PROXY_VARS: [&str; 6] = [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+    for key in PROXY_VARS {
+        envs.push((key.to_string(), String::new()));
+    }
+    envs.push(("NO_PROXY".into(), "localhost,127.0.0.1".into()));
+    envs.push(("no_proxy".into(), "localhost,127.0.0.1".into()));
 }
 
 fn tools_env_store_root() -> Result<PathBuf> {
