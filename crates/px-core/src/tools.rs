@@ -18,7 +18,8 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 use crate::{
     build_pythonpath, compute_lock_hash, ensure_project_environment_synced, install_snapshot,
     manifest_snapshot_at, outcome_from_output, persist_resolved_dependencies, refresh_project_site,
-    resolve_dependencies_with_effects, runtime, CommandContext, ExecutionOutcome, InstallUserError,
+    resolve_dependencies_with_effects, runtime_manager, CommandContext, ExecutionOutcome,
+    InstallUserError,
 };
 use px_domain::{load_lockfile_optional, merge_resolved_dependencies, ManifestEditor};
 
@@ -444,9 +445,9 @@ pub fn tool_upgrade(
     tool_install(ctx, &install_request)
 }
 
-fn resolve_runtime(explicit: Option<&str>) -> Result<runtime::RuntimeSelection> {
+fn resolve_runtime(explicit: Option<&str>) -> Result<runtime_manager::RuntimeSelection> {
     let requirement = MIN_PYTHON_REQUIREMENT.to_string();
-    runtime::resolve_runtime(explicit, &requirement).map_err(|err| {
+    runtime_manager::resolve_runtime(explicit, &requirement).map_err(|err| {
         anyhow!(InstallUserError::new(
             "python runtime unavailable",
             json!({ "hint": err.to_string() }),
@@ -555,7 +556,7 @@ fn timestamp_string() -> Result<String> {
 fn finalize_tool_environment(
     root: &Path,
     snapshot: &px_domain::ProjectSnapshot,
-    runtime: &runtime::RuntimeSelection,
+    runtime: &runtime_manager::RuntimeSelection,
 ) -> Result<PathBuf> {
     let state_path = root.join(".px").join("state.json");
     let initial_site = fs::read_to_string(&state_path)

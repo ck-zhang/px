@@ -50,12 +50,11 @@ mod effects;
 mod fmt_runner;
 mod migration;
 mod project;
-mod project_state;
 mod pypi;
 mod python_build;
 mod python_cli;
 mod run;
-mod runtime;
+mod runtime_manager;
 mod tools;
 mod traceback;
 
@@ -902,8 +901,10 @@ struct RuntimeMetadata {
     platform: String,
 }
 
-fn prepare_project_runtime(snapshot: &ManifestSnapshot) -> Result<runtime::RuntimeSelection> {
-    let selection = runtime::resolve_runtime(
+fn prepare_project_runtime(
+    snapshot: &ManifestSnapshot,
+) -> Result<runtime_manager::RuntimeSelection> {
+    let selection = runtime_manager::resolve_runtime(
         snapshot.python_override.as_deref(),
         &snapshot.python_requirement,
     )

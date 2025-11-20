@@ -16,15 +16,15 @@ use toml_edit::{DocumentMut, Item};
 use crate::{
     compute_lock_hash, dependency_name, detect_runtime_metadata, ensure_env_matches_lock,
     install_snapshot, load_project_state, manifest_snapshot, manifest_snapshot_at,
-    persist_resolved_dependencies, project_state::evaluate_project_state, python_context_with_mode,
-    refresh_project_site, relative_path_str, resolve_dependencies_with_effects, CommandContext,
-    EnvGuard, ExecutionOutcome, InstallOutcome, InstallState, InstallUserError, ManifestSnapshot,
+    persist_resolved_dependencies, python_context_with_mode, refresh_project_site,
+    relative_path_str, resolve_dependencies_with_effects, CommandContext, EnvGuard,
+    ExecutionOutcome, InstallOutcome, InstallState, InstallUserError, ManifestSnapshot,
     PythonContext,
 };
 use px_domain::{
     collect_resolved_dependencies, detect_lock_drift, discover_project_root, infer_package_name,
-    load_lockfile_optional, project_name_from_pyproject, InstallOverride, ManifestEditor,
-    ProjectInitializer,
+    load_lockfile_optional, project_name_from_pyproject, state::ProjectStateReport,
+    InstallOverride, ManifestEditor, ProjectInitializer,
 };
 
 #[derive(Clone, Debug)]
@@ -761,6 +761,63 @@ fn issue_id_for(message: &str) -> String {
         let _ = write!(&mut short, "{byte:02x}");
     }
     format!("ISS-{}", short.to_ascii_uppercase())
+}
+
+fn evaluate_project_state(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+) -> Result<ProjectStateReport> {
+    let manifest_exists = snapshot.manifest_path.exists();
+    let manifest_fingerprint = manifest_exists.then(|| snapshot.manifest_fingerprint.clone());
+    let lock = load_lockfile_optional(&snapshot.lock_path)?;
+    let lock_exists = lock.is_some();
+    let lock_fingerprint = lock
+        .as_ref()
+        .and_then(|lock| lock.manifest_fingerprint.clone());
+    let mut manifest_clean = false;
+    if manifest_exists && lock_exists {
+        manifest_clean = match (&manifest_fingerprint, &lock_fingerprint) {
+            (Some(manifest), Some(lock_fp)) => manifest == lock_fp,
+            (Some(_), None) => detect_lock_drift(snapshot, lock.as_ref().unwrap(), None).is_empty(),
+            _ => false,
+        };
+    }
+    let mut lock_id = None;
+    if let Some(lock) = &lock {
+        lock_id = match lock.lock_id.clone() {
+            Some(id) => Some(id),
+            None => Some(compute_lock_hash(&snapshot.lock_path)?),
+        };
+    }
+
+    let state = load_project_state(ctx.fs(), &snapshot.root);
+    let env_exists = state.current_env.is_some();
+    let mut env_clean = false;
+    let mut env_issue = None;
+    if manifest_clean {
+        if let Some(lock_id) = lock_id.as_deref() {
+            match ensure_env_matches_lock(ctx, snapshot, lock_id) {
+                Ok(()) => env_clean = true,
+                Err(err) => match err.downcast::<InstallUserError>() {
+                    Ok(user) => env_issue = Some(user.details),
+                    Err(other) => return Err(other),
+                },
+            }
+        }
+    }
+
+    Ok(ProjectStateReport::new(
+        manifest_exists,
+        lock_exists,
+        env_exists,
+        manifest_clean,
+        env_clean,
+        snapshot.dependencies.is_empty(),
+        manifest_fingerprint,
+        lock_fingerprint,
+        lock_id,
+        env_issue,
+    ))
 }
 
 #[cfg(test)]

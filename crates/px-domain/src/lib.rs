@@ -15,6 +15,7 @@ pub mod project_resolver;
 pub mod resolver;
 pub mod runtime;
 pub mod snapshot;
+pub mod state;
 
 pub use autopin::{
     plan_autopin, AutopinEntry, AutopinPending, AutopinPlan, AutopinScope, AutopinState,
@@ -45,3 +46,4 @@ pub use snapshot::{
     current_project_root, discover_project_root, ensure_pyproject_exists,
     project_name_from_pyproject, ProjectSnapshot,
 };
+pub use state::{ProjectStateKind, ProjectStateReport};

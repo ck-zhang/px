@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::{
-    manifest_snapshot, runtime, CommandContext, ExecutionOutcome, InstallUserError,
+    manifest_snapshot, runtime_manager, CommandContext, ExecutionOutcome, InstallUserError,
     ProgressReporter,
 };
 use px_domain::ManifestEditor;
@@ -31,7 +31,7 @@ pub fn python_list(
     _ctx: &CommandContext,
     _request: &PythonListRequest,
 ) -> Result<ExecutionOutcome> {
-    let runtimes = runtime::list_runtimes()?;
+    let runtimes = runtime_manager::list_runtimes()?;
     let details: Vec<Value> = runtimes.iter().map(runtime_to_json).collect();
     if runtimes.is_empty() {
         return Ok(ExecutionOutcome::success(
@@ -59,7 +59,7 @@ pub fn python_install(
     request: &PythonInstallRequest,
 ) -> Result<ExecutionOutcome> {
     let spinner = ProgressReporter::spinner(format!("Installing Python {}", request.version));
-    let record = runtime::install_runtime(
+    let record = runtime_manager::install_runtime(
         &request.version,
         request.path.as_deref(),
         request.set_default,
@@ -80,8 +80,8 @@ pub fn python_install(
 /// Returns an error if the runtime is unavailable or the manifest cannot be edited.
 pub fn python_use(ctx: &CommandContext, request: &PythonUseRequest) -> Result<ExecutionOutcome> {
     let project_root = ctx.project_root()?;
-    let normalized = runtime::normalize_channel(&request.version)?;
-    let runtimes = runtime::list_runtimes()?;
+    let normalized = runtime_manager::normalize_channel(&request.version)?;
+    let runtimes = runtime_manager::list_runtimes()?;
     let Some(record) = runtimes.iter().find(|rt| rt.version == normalized) else {
         return Err(InstallUserError::new(
             format!("runtime {normalized} is not installed"),
@@ -121,11 +121,11 @@ pub fn python_info(
     _ctx: &CommandContext,
     _request: &PythonInfoRequest,
 ) -> Result<ExecutionOutcome> {
-    let runtimes = runtime::list_runtimes()?;
+    let runtimes = runtime_manager::list_runtimes()?;
     let default = runtimes.iter().find(|rt| rt.default).cloned();
     let project_snapshot = manifest_snapshot().ok();
     let project_runtime = project_snapshot.as_ref().and_then(|snapshot| {
-        runtime::resolve_runtime(
+        runtime_manager::resolve_runtime(
             snapshot.python_override.as_deref(),
             &snapshot.python_requirement,
         )
@@ -169,7 +169,7 @@ pub fn python_info(
     }
 }
 
-fn runtime_to_json(record: &runtime::RuntimeRecord) -> Value {
+fn runtime_to_json(record: &runtime_manager::RuntimeRecord) -> Value {
     json!({
         "version": record.version,
         "full_version": record.full_version,

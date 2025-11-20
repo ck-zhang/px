@@ -7,7 +7,7 @@ use toml_edit::{DocumentMut, InlineTable, Item, Table};
 use crate::{
     attach_autosync_details, auto_sync_environment, build_pythonpath,
     ensure_project_environment_synced, issue_from_details, manifest_snapshot, outcome_from_output,
-    python_context_with_mode, runtime,
+    python_context_with_mode, runtime_manager,
     tools::{disable_proxy_env, load_installed_tool, MIN_PYTHON_REQUIREMENT},
     CommandContext, EnvGuard, EnvironmentSyncReport, ExecutionOutcome, InstallUserError,
     PythonContext,
@@ -208,27 +208,29 @@ fn prepare_tool_run(
             ));
         }
     };
-    let runtime_selection =
-        match runtime::resolve_runtime(Some(&descriptor.runtime_version), MIN_PYTHON_REQUIREMENT) {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                return Err(ExecutionOutcome::user_error(
-                    format!(
-                        "px {}: Python runtime {} for tool '{}' is unavailable",
-                        kind.section_name(),
-                        descriptor.runtime_version,
-                        descriptor.name
-                    ),
-                    json!({
-                        "tool": descriptor.name,
-                        "module": tool.module,
-                        "runtime": descriptor.runtime_version,
-                        "config_source": env.config.source.as_str(),
-                        "hint": err.to_string(),
-                    }),
-                ));
-            }
-        };
+    let runtime_selection = match runtime_manager::resolve_runtime(
+        Some(&descriptor.runtime_version),
+        MIN_PYTHON_REQUIREMENT,
+    ) {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            return Err(ExecutionOutcome::user_error(
+                format!(
+                    "px {}: Python runtime {} for tool '{}' is unavailable",
+                    kind.section_name(),
+                    descriptor.runtime_version,
+                    descriptor.name
+                ),
+                json!({
+                    "tool": descriptor.name,
+                    "module": tool.module,
+                    "runtime": descriptor.runtime_version,
+                    "config_source": env.config.source.as_str(),
+                    "hint": err.to_string(),
+                }),
+            ));
+        }
+    };
 
     let snapshot = ProjectSnapshot::read_from(&descriptor.root).map_err(|err| {
         ExecutionOutcome::failure(
