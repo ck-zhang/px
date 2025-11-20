@@ -16,9 +16,10 @@ use toml_edit::{DocumentMut, Item};
 use crate::{
     compute_lock_hash, dependency_name, detect_runtime_metadata, ensure_env_matches_lock,
     install_snapshot, load_project_state, manifest_snapshot, manifest_snapshot_at,
-    project_state::evaluate_project_state, python_context_with_mode, refresh_project_site,
-    relative_path_str, CommandContext, EnvGuard, ExecutionOutcome, InstallOutcome, InstallState,
-    InstallUserError, ManifestSnapshot, PythonContext,
+    persist_resolved_dependencies, project_state::evaluate_project_state, python_context_with_mode,
+    refresh_project_site, relative_path_str, resolve_dependencies_with_effects, CommandContext,
+    EnvGuard, ExecutionOutcome, InstallOutcome, InstallState, InstallUserError, ManifestSnapshot,
+    PythonContext,
 };
 use px_domain::{
     collect_resolved_dependencies, detect_lock_drift, discover_project_root, infer_package_name,
@@ -466,26 +467,39 @@ pub fn project_update(
         return Ok(ExecutionOutcome::user_error(message, details));
     }
 
-    let override_data = InstallOverride {
-        dependencies: override_specs,
-        pins: Vec::new(),
-    };
-
-    let install_outcome = match install_snapshot(ctx, &snapshot, false, Some(&override_data)) {
-        Ok(result) => result,
+    let mut override_snapshot = snapshot.clone();
+    override_snapshot.dependencies = override_specs;
+    let resolved = match resolve_dependencies_with_effects(ctx.effects(), &override_snapshot) {
+        Ok(resolved) => resolved,
         Err(err) => match err.downcast::<InstallUserError>() {
             Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
             Err(err) => return Err(err),
         },
     };
 
-    refresh_project_site(&snapshot, ctx)?;
+    persist_resolved_dependencies(&snapshot, &resolved.specs)?;
+    let updated_snapshot = manifest_snapshot()?;
+    let override_data = InstallOverride {
+        dependencies: resolved.specs.clone(),
+        pins: resolved.pins.clone(),
+    };
+
+    let install_outcome =
+        match install_snapshot(ctx, &updated_snapshot, false, Some(&override_data)) {
+            Ok(result) => result,
+            Err(err) => match err.downcast::<InstallUserError>() {
+                Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                Err(err) => return Err(err),
+            },
+        };
+
+    refresh_project_site(&updated_snapshot, ctx)?;
 
     let updated_count = ready.len();
     let primary_label = ready.first().cloned();
     let mut details = json!({
         "pyproject": pyproject_path.display().to_string(),
-        "lockfile": snapshot.lock_path.display().to_string(),
+        "lockfile": updated_snapshot.lock_path.display().to_string(),
         "targets": ready,
     });
     if !unsupported.is_empty() {
