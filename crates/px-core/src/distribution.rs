@@ -1,13 +1,17 @@
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use flate2::{write::GzEncoder, Compression};
 use reqwest::{blocking::Client, StatusCode};
 use serde::Serialize;
 use serde_json::json;
+use sha2::Digest;
 use tar::Builder;
 use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
 use zip::{write::FileOptions, CompressionMethod, ZipWriter};
@@ -56,6 +60,30 @@ struct PublishRegistry {
     url: String,
 }
 
+#[derive(Clone, Debug)]
+struct ProjectMetadata {
+    name: String,
+    normalized_name: String,
+    version: String,
+    requires_python: Option<String>,
+    requires_dist: Vec<String>,
+    optional_requires: BTreeMap<String, Vec<String>>,
+    summary: Option<String>,
+    entry_points: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+#[derive(Clone, Debug)]
+struct SourceAsset {
+    relative: String,
+    content: SourceContent,
+}
+
+#[derive(Clone, Debug)]
+enum SourceContent {
+    File(PathBuf),
+    Inline(Vec<u8>),
+}
+
 enum ArtifactUploadKind {
     Wheel {
         pyversion: String,
@@ -88,6 +116,7 @@ fn build_project_outcome(ctx: &CommandContext, request: &BuildRequest) -> Result
     };
     let targets = build_targets_from_request(request);
     let out_dir = resolve_output_dir_from_request(&py_ctx, request.out.as_ref());
+    let metadata = load_project_metadata(&py_ctx.project_root)?;
 
     if request.dry_run {
         let artifacts = collect_artifact_summaries(&out_dir, None, &py_ctx)?;
@@ -108,13 +137,12 @@ fn build_project_outcome(ctx: &CommandContext, request: &BuildRequest) -> Result
     ctx.fs()
         .create_dir_all(&out_dir)
         .with_context(|| format!("creating output directory at {}", out_dir.display()))?;
-    let (name, version) = project_name_version(&py_ctx.project_root)?;
     let mut produced = Vec::new();
     if targets.sdist {
-        produced.push(write_sdist(&py_ctx, &out_dir, &name, &version)?);
+        produced.push(write_sdist(&py_ctx, &out_dir, &metadata)?);
     }
     if targets.wheel {
-        produced.push(write_wheel(&py_ctx, &out_dir, &name, &version)?);
+        produced.push(write_wheel(&py_ctx, &out_dir, &metadata)?);
     }
 
     let artifacts = summarize_selected_artifacts(&produced, &py_ctx)?;
@@ -394,9 +422,130 @@ fn summarize_selected_artifacts(
     Ok(entries)
 }
 
-fn project_name_version(root: &Path) -> Result<(String, String)> {
-    let pyproject_path = root.join("pyproject.toml");
-    let contents = fs::read_to_string(&pyproject_path)?;
+fn write_sdist(ctx: &PythonContext, out_dir: &Path, metadata: &ProjectMetadata) -> Result<PathBuf> {
+    let filename = format!("{}-{}.tar.gz", metadata.name, metadata.version);
+    let path = out_dir.join(filename);
+    let file = File::create(&path)?;
+    let encoder = GzEncoder::new(file, Compression::default());
+    let mut tar = Builder::new(encoder);
+    let base = format!("{}-{}", metadata.name, metadata.version);
+
+    append_metadata_files(&ctx.project_root, &mut tar, &base, metadata)?;
+    append_sources_to_sdist(&ctx.project_root, &mut tar, &base, metadata)?;
+
+    tar.finish()?;
+    let encoder = tar.into_inner()?;
+    encoder.finish()?;
+    Ok(path)
+}
+
+fn write_wheel(ctx: &PythonContext, out_dir: &Path, metadata: &ProjectMetadata) -> Result<PathBuf> {
+    let filename = format!(
+        "{}-{}-py3-none-any.whl",
+        metadata.normalized_name, metadata.version
+    );
+    let path = out_dir.join(filename);
+    let file = File::create(&path)?;
+    let mut zip = ZipWriter::new(file);
+    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    let source_assets = collect_source_assets(&ctx.project_root, metadata)?;
+    let mut records = Vec::new();
+    for asset in &source_assets {
+        let data = read_asset_bytes(asset)?;
+        zip.start_file(&asset.relative, options)?;
+        zip.write_all(&data)?;
+        records.push(record_entry(&asset.relative, &data));
+    }
+
+    let dist_info = format!(
+        "{}-{}.dist-info",
+        metadata.normalized_name, metadata.version
+    );
+    let metadata_path = format!("{dist_info}/METADATA");
+    let metadata_body = render_metadata(metadata);
+    zip.start_file(&metadata_path, options)?;
+    zip.write_all(metadata_body.as_bytes())?;
+    records.push(record_entry(&metadata_path, metadata_body.as_bytes()));
+
+    let wheel_path = format!("{dist_info}/WHEEL");
+    let wheel_body =
+        "Wheel-Version: 1.0\nGenerator: px\nRoot-Is-Purelib: true\nTag: py3-none-any\n".to_string();
+    zip.start_file(&wheel_path, options)?;
+    zip.write_all(wheel_body.as_bytes())?;
+    records.push(record_entry(&wheel_path, wheel_body.as_bytes()));
+
+    if let Some(entry_points_body) = render_entry_points(metadata) {
+        let ep_path = format!("{dist_info}/entry_points.txt");
+        zip.start_file(&ep_path, options)?;
+        zip.write_all(entry_points_body.as_bytes())?;
+        records.push(record_entry(&ep_path, entry_points_body.as_bytes()));
+    }
+
+    let record_path = format!("{dist_info}/RECORD");
+    records.push(format!("{record_path},,")); // RECORD has no hash/size
+    let mut record_body = records.join("\n");
+    record_body.push('\n');
+    zip.start_file(&record_path, options)?;
+    zip.write_all(record_body.as_bytes())?;
+
+    zip.finish()?;
+    Ok(path)
+}
+
+fn append_sources_to_sdist(
+    project_root: &Path,
+    tar: &mut Builder<GzEncoder<File>>,
+    base: &str,
+    metadata: &ProjectMetadata,
+) -> Result<()> {
+    let assets = collect_source_assets(project_root, metadata)?;
+    for asset in &assets {
+        let mut header = tar::Header::new_gnu();
+        let data = read_asset_bytes(asset)?;
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        let path_in_tgz = format!("{base}/{}", asset.relative);
+        tar.append_data(&mut header, path_in_tgz, data.as_slice())?;
+    }
+    Ok(())
+}
+
+fn append_metadata_files(
+    project_root: &Path,
+    tar: &mut Builder<GzEncoder<File>>,
+    base: &str,
+    metadata: &ProjectMetadata,
+) -> Result<()> {
+    let pyproject = project_root.join("pyproject.toml");
+    if pyproject.exists() {
+        tar.append_path_with_name(&pyproject, format!("{base}/pyproject.toml"))?;
+    }
+    for candidate in ["README.md", "README.rst", "LICENSE", "LICENSE.txt"] {
+        let path = project_root.join(candidate);
+        if path.exists() {
+            tar.append_path_with_name(&path, format!("{base}/{candidate}"))?;
+        }
+    }
+
+    let pkg_info_body = render_metadata(metadata);
+    let mut header = tar::Header::new_gnu();
+    header.set_size(pkg_info_body.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    tar.append_data(
+        &mut header,
+        format!("{base}/PKG-INFO"),
+        pkg_info_body.as_bytes(),
+    )?;
+    Ok(())
+}
+
+fn load_project_metadata(project_root: &Path) -> Result<ProjectMetadata> {
+    let pyproject_path = project_root.join("pyproject.toml");
+    let contents = fs::read_to_string(&pyproject_path)
+        .with_context(|| format!("reading {}", pyproject_path.display()))?;
     let doc: toml_edit::DocumentMut = contents.parse()?;
     let project = project_table(&doc)?;
     let name = project
@@ -409,75 +558,231 @@ fn project_name_version(root: &Path) -> Result<(String, String)> {
         .and_then(toml_edit::Item::as_str)
         .ok_or_else(|| anyhow!("pyproject missing [project].version"))?
         .to_string();
-    Ok((name, version))
+    let requires_python = project
+        .get("requires-python")
+        .and_then(toml_edit::Item::as_str)
+        .map(ToString::to_string);
+    let requires_dist = project
+        .get("dependencies")
+        .and_then(toml_edit::Item::as_array)
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|value| value.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let summary = project
+        .get("description")
+        .and_then(toml_edit::Item::as_str)
+        .map(ToString::to_string);
+    let entry_points = collect_entry_points(project);
+    let optional_requires = collect_optional_dependencies(project);
+    let normalized_name = normalize_package_name(&name);
+
+    Ok(ProjectMetadata {
+        name,
+        normalized_name,
+        version,
+        requires_python,
+        requires_dist,
+        optional_requires,
+        summary,
+        entry_points,
+    })
 }
 
-fn write_sdist(ctx: &PythonContext, out_dir: &Path, name: &str, version: &str) -> Result<PathBuf> {
-    let filename = format!("{name}-{version}.tar.gz");
-    let path = out_dir.join(filename);
-    let file = File::create(&path)?;
-    let encoder = GzEncoder::new(file, Compression::default());
-    let mut tar = Builder::new(encoder);
-    let base = format!("{name}-{version}");
-    let pyproject = ctx.project_root.join("pyproject.toml");
-    if pyproject.exists() {
-        tar.append_path_with_name(pyproject, format!("{base}/pyproject.toml"))?;
-    }
-    let readme = ctx.project_root.join("README.md");
-    if readme.exists() {
-        tar.append_path_with_name(readme, format!("{base}/README.md"))?;
-    }
-    let src = ctx.project_root.join("src");
-    if src.exists() {
-        tar.append_dir_all(format!("{base}/src"), src)?;
-    }
-    tar.finish()?;
-    let encoder = tar.into_inner()?;
-    encoder.finish()?;
-    Ok(path)
-}
-
-fn write_wheel(ctx: &PythonContext, out_dir: &Path, name: &str, version: &str) -> Result<PathBuf> {
-    let normalized = name.replace('-', "_");
-    let filename = format!("{normalized}-{version}-py3-none-any.whl");
-    let path = out_dir.join(filename);
-    let file = File::create(&path)?;
-    let mut zip = ZipWriter::new(file);
-    let src = ctx.project_root.join("src");
-    if src.exists() {
-        append_dir_to_zip(&mut zip, &src, &normalized)?;
-    }
-    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
-    let metadata = format!("Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n");
-    zip.start_file(format!("{normalized}/METADATA"), options)?;
-    zip.write_all(metadata.as_bytes())?;
-    zip.start_file(format!("{normalized}/WHEEL"), options)?;
-    zip.write_all(b"Wheel-Version: 1.0\nGenerator: px\nTag: py3-none-any\n")?;
-    zip.start_file(format!("{normalized}/RECORD"), options)?;
-    zip.write_all(b"")?;
-    zip.finish()?;
-    Ok(path)
-}
-
-fn append_dir_to_zip(zip: &mut ZipWriter<File>, src: &Path, prefix: &str) -> Result<()> {
-    if !src.exists() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if path.is_dir() {
-            append_dir_to_zip(zip, &path, &format!("{prefix}/{name}"))?;
-        } else {
-            let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
-            zip.start_file(format!("{prefix}/{name}"), options)?;
-            let mut file = File::open(&path)?;
-            io::copy(&mut file, zip)?;
+fn collect_entry_points(project: &Table) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut groups = BTreeMap::new();
+    collect_entry_point_group(project, "scripts", "console_scripts", &mut groups);
+    collect_entry_point_group(project, "gui-scripts", "gui_scripts", &mut groups);
+    if let Some(ep_table) = project
+        .get("entry-points")
+        .and_then(toml_edit::Item::as_table)
+    {
+        for (group, table) in ep_table.iter() {
+            if let Some(entries) = table.as_table() {
+                let mut mapped = BTreeMap::new();
+                for (name, value) in entries.iter() {
+                    if let Some(target) = value.as_str() {
+                        mapped.insert(name.to_string(), target.to_string());
+                    }
+                }
+                if !mapped.is_empty() {
+                    groups.insert(group.to_string(), mapped);
+                }
+            }
         }
     }
+    groups
+}
+
+fn collect_entry_point_group(
+    project: &Table,
+    project_key: &str,
+    entry_point_group: &str,
+    groups: &mut BTreeMap<String, BTreeMap<String, String>>,
+) {
+    if let Some(scripts) = project.get(project_key).and_then(toml_edit::Item::as_table) {
+        let mut mapped = BTreeMap::new();
+        for (name, value) in scripts.iter() {
+            if let Some(target) = value.as_str() {
+                mapped.insert(name.to_string(), target.to_string());
+            }
+        }
+        if !mapped.is_empty() {
+            groups.insert(entry_point_group.to_string(), mapped);
+        }
+    }
+}
+
+fn collect_optional_dependencies(project: &Table) -> BTreeMap<String, Vec<String>> {
+    let mut extras = BTreeMap::new();
+    if let Some(optional) = project
+        .get("optional-dependencies")
+        .and_then(toml_edit::Item::as_table)
+    {
+        for (name, array) in optional.iter() {
+            if let Some(values) = array.as_array() {
+                let mut deps = Vec::new();
+                for value in values {
+                    if let Some(spec) = value.as_str() {
+                        deps.push(spec.to_string());
+                    }
+                }
+                if !deps.is_empty() {
+                    extras.insert(name.to_string(), deps);
+                }
+            }
+        }
+    }
+    extras
+}
+
+fn collect_source_assets(
+    project_root: &Path,
+    metadata: &ProjectMetadata,
+) -> Result<Vec<SourceAsset>> {
+    let mut assets = Vec::new();
+    let mut seen = HashSet::new();
+    let src = project_root.join("src");
+    if src.exists() {
+        add_tree_assets(&src, &src, Path::new(""), &mut assets, &mut seen)?;
+    }
+    let pkg_root = project_root.join(&metadata.normalized_name);
+    if pkg_root.exists() {
+        add_tree_assets(
+            &pkg_root,
+            project_root,
+            Path::new(""),
+            &mut assets,
+            &mut seen,
+        )?;
+    }
+    assets.sort_by(|a, b| a.relative.cmp(&b.relative));
+    if assets.is_empty() {
+        let placeholder = format!("__version__ = \"{}\"\n", metadata.version);
+        assets.push(SourceAsset {
+            relative: format!("{}/__init__.py", metadata.normalized_name),
+            content: SourceContent::Inline(placeholder.into_bytes()),
+        });
+    }
+    if assets.is_empty() {
+        return Err(anyhow!(
+            "no package sources found (expected src/ or {name}/)",
+            name = metadata.normalized_name
+        ));
+    }
+    Ok(assets)
+}
+
+fn add_tree_assets(
+    path: &Path,
+    strip_prefix: &Path,
+    dest_prefix: &Path,
+    assets: &mut Vec<SourceAsset>,
+    seen: &mut HashSet<String>,
+) -> Result<()> {
+    if path
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+    {
+        return Ok(());
+    }
+    if path.file_name().is_some_and(|name| name == "__pycache__") {
+        return Ok(());
+    }
+    if path.is_dir() {
+        let mut entries: Vec<_> = fs::read_dir(path)?.collect::<Result<_, _>>()?;
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries {
+            add_tree_assets(&entry.path(), strip_prefix, dest_prefix, assets, seen)?;
+        }
+        return Ok(());
+    }
+    let relative = path
+        .strip_prefix(strip_prefix)
+        .unwrap_or(path)
+        .to_path_buf();
+    let mut dest = PathBuf::from(dest_prefix);
+    dest.push(relative);
+    let rel = normalize_archive_path(&dest);
+    if seen.insert(rel.clone()) {
+        assets.push(SourceAsset {
+            relative: rel,
+            content: SourceContent::File(path.to_path_buf()),
+        });
+    }
     Ok(())
+}
+
+fn render_metadata(metadata: &ProjectMetadata) -> String {
+    let mut lines = Vec::new();
+    lines.push("Metadata-Version: 2.1".to_string());
+    lines.push(format!("Name: {}", metadata.name));
+    lines.push(format!("Version: {}", metadata.version));
+    if let Some(summary) = &metadata.summary {
+        lines.push(format!("Summary: {summary}"));
+    }
+    if let Some(rp) = &metadata.requires_python {
+        lines.push(format!("Requires-Python: {rp}"));
+    }
+    for extra in metadata.optional_requires.keys() {
+        lines.push(format!("Provides-Extra: {extra}"));
+    }
+    for req in &metadata.requires_dist {
+        lines.push(format!("Requires-Dist: {req}"));
+    }
+    for (extra, reqs) in &metadata.optional_requires {
+        for req in reqs {
+            lines.push(format!(r#"Requires-Dist: {req} ; extra == "{extra}""#));
+        }
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+fn render_entry_points(metadata: &ProjectMetadata) -> Option<String> {
+    if metadata.entry_points.is_empty() {
+        return None;
+    }
+    let mut sections = Vec::new();
+    for (group, entries) in &metadata.entry_points {
+        sections.push(format!("[{group}]"));
+        for (name, target) in entries {
+            sections.push(format!("{name} = {target}"));
+        }
+        sections.push(String::new());
+    }
+    Some(sections.join("\n"))
+}
+
+fn record_entry(path: &str, data: &[u8]) -> String {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(data);
+    let digest = hasher.finalize();
+    let hash = URL_SAFE_NO_PAD.encode(digest);
+    format!("{path},sha256={hash},{}", data.len())
 }
 
 fn compute_file_sha256(path: &Path) -> Result<String> {
@@ -487,6 +792,34 @@ fn compute_file_sha256(path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     io::copy(&mut file, &mut hasher)?;
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn read_asset_bytes(asset: &SourceAsset) -> Result<Vec<u8>> {
+    match &asset.content {
+        SourceContent::File(path) => {
+            fs::read(path).with_context(|| format!("reading source file {}", path.display()))
+        }
+        SourceContent::Inline(bytes) => Ok(bytes.clone()),
+    }
+}
+
+fn normalize_package_name(name: &str) -> String {
+    let mut result = String::new();
+    for ch in name.chars() {
+        if matches!(ch, '-' | '.' | ' ') {
+            result.push('_');
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+fn normalize_archive_path(path: &Path) -> String {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn resolve_publish_registry(selection: Option<&str>) -> PublishRegistry {

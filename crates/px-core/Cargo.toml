@@ -25,6 +25,7 @@ zip.workspace = true
 time.workspace = true
 which = "6"
 tempfile.workspace = true
+base64 = "0.22"
 
 [features]
 default = []

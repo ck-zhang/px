@@ -1308,6 +1308,7 @@ name = "px-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "camino",
  "dirs-next",
  "flate2",

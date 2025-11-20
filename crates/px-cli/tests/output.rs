@@ -1,9 +1,10 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::Value;
+use std::process::Command;
 
 mod common;
 
-use common::{init_empty_project, parse_json, project_identity};
+use common::{init_empty_project, parse_json, prepare_fixture, project_identity};
 
 #[test]
 fn output_build_produces_wheel_and_sdist() {
@@ -251,4 +252,107 @@ fn publish_dry_run_accepts_custom_registry_url() {
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["details"]["registry"], registry);
     assert_eq!(payload["details"]["dry_run"], Value::Bool(true));
+}
+
+#[test]
+fn built_wheel_is_installable_with_pip() {
+    let (_tmp, project) = prepare_fixture("sample_px_app");
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["--json", "build", "wheel"])
+        .assert()
+        .success();
+
+    let payload = parse_json(&assert);
+    let artifacts = payload["details"]["artifacts"]
+        .as_array()
+        .expect("artifacts array");
+    let wheel_rel = artifacts
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .as_object()
+                .and_then(|map| map.get("path"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .find(|path| path.ends_with(".whl"))
+        .expect("wheel artifact path");
+    let wheel_path = project.join(&wheel_rel);
+    assert!(
+        wheel_path.exists(),
+        "wheel should exist at {}",
+        wheel_path.display()
+    );
+
+    let Some(python) = find_python() else {
+        eprintln!("skipping wheel install test (python binary not found)");
+        return;
+    };
+    let venv = tempfile::tempdir().expect("tempdir");
+    let status = Command::new(&python)
+        .args(["-m", "venv", venv.path().to_string_lossy().as_ref()])
+        .status()
+        .expect("spawn venv");
+    assert!(status.success(), "python -m venv failed with {status:?}");
+
+    let (python_bin, pip_bin) = venv_binaries(venv.path());
+    let status = Command::new(&pip_bin)
+        .args([
+            "install",
+            "--no-deps",
+            wheel_path.to_string_lossy().as_ref(),
+        ])
+        .status()
+        .expect("spawn pip install");
+    assert!(
+        status.success(),
+        "pip install should succeed for built wheel"
+    );
+
+    let status = Command::new(&python_bin)
+        .args([
+            "-c",
+            "import sample_px_app.cli as c; assert c.greet('PxWheel') == 'Hello, PxWheel!'",
+        ])
+        .status()
+        .expect("spawn python import test");
+    assert!(status.success(), "installed wheel should import correctly");
+}
+
+fn find_python() -> Option<String> {
+    let candidates = [
+        std::env::var("PYTHON").ok(),
+        Some("python3".to_string()),
+        Some("python".to_string()),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        let status = Command::new(&candidate)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if matches!(status, Ok(code) if code.success()) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn venv_binaries(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    if cfg!(windows) {
+        let python = root.join("Scripts").join("python.exe");
+        let pip = root.join("Scripts").join("pip.exe");
+        (python, pip)
+    } else {
+        let python = root.join("bin").join("python");
+        let pip = root.join("bin").join("pip");
+        (python, pip)
+    }
 }
