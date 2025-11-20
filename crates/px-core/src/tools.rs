@@ -20,11 +20,11 @@ use crate::{
     manifest_snapshot_at, outcome_from_output, persist_resolved_dependencies, refresh_project_site,
     resolve_dependencies_with_effects, runtime, CommandContext, ExecutionOutcome, InstallUserError,
 };
-use px_domain::{load_lockfile_optional, ManifestEditor};
+use px_domain::{load_lockfile_optional, merge_resolved_dependencies, ManifestEditor};
 
 const TOOLS_DIR_ENV: &str = "PX_TOOLS_DIR";
 const TOOL_STORE_ENV: &str = "PX_TOOL_STORE";
-const MIN_PYTHON_REQUIREMENT: &str = ">=3.8";
+pub(crate) const MIN_PYTHON_REQUIREMENT: &str = ">=3.8";
 
 #[derive(Clone, Debug)]
 pub struct ToolInstallRequest {
@@ -69,6 +69,43 @@ struct ToolMetadata {
     updated_at: String,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct InstalledTool {
+    pub name: String,
+    pub runtime_version: String,
+    pub root: PathBuf,
+}
+
+pub(crate) fn load_installed_tool(name: &str) -> Result<InstalledTool, InstallUserError> {
+    let normalized = normalize_tool_name(name);
+    let root = tool_root_dir(&normalized).map_err(|err| {
+        InstallUserError::new(
+            "failed to resolve tool directory",
+            json!({
+                "tool": normalized,
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    let metadata = read_metadata(&root).map_err(|err| {
+        InstallUserError::new(
+            format!("tool '{normalized}' is not installed"),
+            json!({
+                "error": err.to_string(),
+                "tool": normalized,
+                "root": root.display().to_string(),
+                "hint": format!("run `px tool install {normalized}` first"),
+            }),
+        )
+    })?;
+
+    Ok(InstalledTool {
+        name: metadata.name,
+        runtime_version: metadata.runtime_version,
+        root,
+    })
+}
+
 /// Installs or upgrades a px-managed tool inside the shared tools directory.
 ///
 /// # Errors
@@ -77,6 +114,20 @@ pub fn tool_install(
     ctx: &CommandContext,
     request: &ToolInstallRequest,
 ) -> Result<ExecutionOutcome> {
+    if name_looks_like_requirement(&request.name) {
+        let clean = request
+            .name
+            .split(|ch: char| "=<>~! ".contains(ch))
+            .next()
+            .unwrap_or(&request.name);
+        return Ok(ExecutionOutcome::user_error(
+            "tool name looks like a requirement spec",
+            json!({
+                "name": request.name,
+                "hint": format!("Use `px tool install {clean} {}`", request.name),
+            }),
+        ));
+    }
     let normalized = normalize_tool_name(&request.name);
     if normalized.is_empty() {
         return Ok(ExecutionOutcome::user_error(
@@ -105,7 +156,11 @@ pub fn tool_install(
             Err(other) => return Err(other),
         },
     };
-    persist_resolved_dependencies(&snapshot, &resolved.specs)?;
+    let marker_env = ctx
+        .marker_environment()
+        .context("failed to detect marker environment")?;
+    let merged = merge_resolved_dependencies(&snapshot.dependencies, &resolved.specs, &marker_env);
+    persist_resolved_dependencies(&snapshot, &merged)?;
     let updated_snapshot = manifest_snapshot_at(&tool_root)?;
     let install_outcome = match install_snapshot(ctx, &updated_snapshot, false, None) {
         Ok(outcome) => outcome,
@@ -466,6 +521,18 @@ fn normalize_tool_name(raw: &str) -> String {
         .to_lowercase()
 }
 
+fn name_looks_like_requirement(raw: &str) -> bool {
+    raw.contains("==")
+        || raw.contains(">=")
+        || raw.contains("<=")
+        || raw.contains("~=")
+        || raw.contains("!=")
+        || raw.contains('<')
+        || raw.contains('>')
+        || raw.contains('=')
+        || raw.contains(' ')
+}
+
 fn timestamp_string() -> Result<String> {
     let now = OffsetDateTime::now_utc();
     Ok(now.format(&time::format_description::well_known::Rfc3339)?)
@@ -645,7 +712,7 @@ fn infer_grip_port(args: &[String]) -> Option<u16> {
     None
 }
 
-fn disable_proxy_env(envs: &mut Vec<(String, String)>) {
+pub(crate) fn disable_proxy_env(envs: &mut Vec<(String, String)>) {
     const PROXY_VARS: [&str; 6] = [
         "HTTP_PROXY",
         "http_proxy",

@@ -52,18 +52,19 @@ fn main() -> Result<()> {
     let cli = PxCli::parse();
     init_tracing(cli.trace, cli.verbose);
 
+    let subcommand_json = matches!(&cli.command, CommandGroupCli::Fmt(args) if args.json);
     let global = GlobalOptions {
         quiet: cli.quiet,
         verbose: cli.verbose,
         trace: cli.trace,
-        json: cli.json,
+        json: cli.json || subcommand_json,
         config: cli.config.as_ref().map(|p| p.to_string_lossy().to_string()),
     };
 
     let ctx = CommandContext::new(&global, Arc::new(SystemEffects::new()))
         .map_err(|err| eyre!("{err:?}"))?;
     let (info, outcome) = dispatch_command(&ctx, &cli.command)?;
-    let code = emit_output(&cli, info, &outcome)?;
+    let code = emit_output(&cli, subcommand_json, info, &outcome)?;
 
     if code == 0 {
         Ok(())
@@ -93,7 +94,12 @@ fn init_tracing(trace: bool, verbose: u8) {
     let _ = tracing::subscriber::set_global_default(subscriber);
 }
 
-fn emit_output(cli: &PxCli, info: CommandInfo, outcome: &px_core::ExecutionOutcome) -> Result<i32> {
+fn emit_output(
+    cli: &PxCli,
+    subcommand_json: bool,
+    info: CommandInfo,
+    outcome: &px_core::ExecutionOutcome,
+) -> Result<i32> {
     let code = match outcome.status {
         CommandStatus::Ok => 0,
         CommandStatus::UserError => 1,
@@ -102,7 +108,7 @@ fn emit_output(cli: &PxCli, info: CommandInfo, outcome: &px_core::ExecutionOutco
 
     let style = Style::new(cli.no_color, atty::is(Stream::Stdout));
 
-    if cli.json {
+    if cli.json || subcommand_json {
         let payload = px_core::to_json_response(info, outcome, code);
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else if !cli.quiet {
@@ -993,6 +999,8 @@ struct FmtArgs {
         help = "Fail if px.lock is missing or the environment is out of sync"
     )]
     frozen: bool,
+    #[arg(long, help = "Emit {status,message,details} JSON envelopes")]
+    json: bool,
     #[arg(last = true, value_name = "ARG")]
     args: Vec<String>,
 }

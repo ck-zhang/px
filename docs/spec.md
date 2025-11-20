@@ -215,6 +215,8 @@ There is **no** `px cache`, `px env`, `px lock`, or `px workspace` top-level com
 
 ## 5. Command contracts (authoritative semantics)
 
+Command preconditions and end-states are defined against the canonical project states in [10. Project state machine](#10-project-state-machine). The bullets below should be read as “start in one of the allowed states, execute the behavior, and end in the target state.”
+
 ### 5.1 `px init`
 
 **Intent**
@@ -491,6 +493,9 @@ Run configured formatters/linters/cleanup **tools** via their px-managed tool en
 
 * Same env/lock consistency rules as `px run`.
 * Honors `--frozen` / `CI=1` (no env rebuilds).
+* Uses px’s tool store (px-managed tool environments), not project dependencies.
+* px fmt never edits `pyproject.toml` or `px.lock`; it only runs tools.
+* Supports `--json` structured output like other commands.
 * If a required tool isn’t installed:
 
   * Suggest installing it (e.g. `px tool install ruff`).

@@ -1,15 +1,17 @@
-use std::{fs, path::Path};
+use std::{env, fs, path::Path};
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use toml_edit::{DocumentMut, InlineTable, Item, Table};
 
 use crate::{
-    attach_autosync_details, install_snapshot, manifest_snapshot_at, outcome_from_output,
-    python_context_with_mode, refresh_project_site, CommandContext, EnvGuard,
-    EnvironmentSyncReport, ExecutionOutcome, InstallUserError, PythonContext,
+    attach_autosync_details, build_pythonpath, ensure_project_environment_synced,
+    outcome_from_output, python_context_with_mode, runtime,
+    tools::{disable_proxy_env, load_installed_tool, MIN_PYTHON_REQUIREMENT},
+    CommandContext, EnvGuard, EnvironmentSyncReport, ExecutionOutcome, InstallUserError,
+    PythonContext,
 };
-use px_domain::ManifestEditor;
+use px_domain::ProjectSnapshot;
 
 const DEFAULT_RUFF_REQUIREMENT: &str = "ruff==0.6.9";
 
@@ -70,7 +72,7 @@ fn run_quality_command(
     };
     let mut runs = Vec::new();
     for tool in &config.tools {
-        match execute_quality_tool(&env, kind, request, tool, true)? {
+        match execute_quality_tool(&env, kind, request, tool)? {
             ToolRun::Completed(record) => runs.push(record),
             ToolRun::Outcome(outcome) => return Ok(outcome),
         }
@@ -87,22 +89,19 @@ fn execute_quality_tool(
     kind: QualityKind,
     request: &FmtRequest,
     tool: &QualityTool,
-    allow_autoinstall: bool,
 ) -> Result<ToolRun> {
     let python_args = tool.python_args(&request.args);
-    let envs = match env.py_ctx.base_env(env.env_payload) {
-        Ok(envs) => envs,
-        Err(err) => {
-            return Ok(ToolRun::Outcome(ExecutionOutcome::failure(
-                "failed to prepare environment for tool",
-                json!({ "error": err.to_string() }),
-            )));
+    let prepared = match prepare_tool_run(env, kind, tool) {
+        Ok(prepared) => prepared,
+        Err(mut outcome) => {
+            attach_autosync_details(&mut outcome, env.sync_report.clone());
+            return Ok(ToolRun::Outcome(outcome));
         }
     };
     let output = env.ctx.python_runtime().run_command(
-        &env.py_ctx.python,
+        &prepared.python,
         &python_args,
-        &envs,
+        &prepared.envs,
         &env.py_ctx.project_root,
     )?;
     if output.code == 0 {
@@ -111,51 +110,14 @@ fn execute_quality_tool(
             &tool.module,
             python_args.clone(),
             output,
+            &prepared.runtime,
+            &prepared.tool_root,
         )));
     }
 
     let combined_output = format!("{}{}", output.stdout, output.stderr);
     if missing_module_error(&combined_output, &tool.module) {
-        if allow_autoinstall
-            && matches!(env.config.source, QualityConfigSource::Default)
-            && tool.is_default_ruff()
-        {
-            match auto_install_default_fmt_tool(env) {
-                Ok(()) => {
-                    return execute_quality_tool(env, kind, request, tool, false);
-                }
-                Err(outcome) => return Ok(ToolRun::Outcome(outcome)),
-            }
-        }
-        let mut details = json!({
-            "tool": tool.display_name(),
-            "module": tool.module,
-            "python_args": python_args,
-            "config_source": env.config.source.as_str(),
-            "pyproject": env.pyproject.display().to_string(),
-            "forwarded_args": &request.args,
-        });
-        if let Some(requirement) = tool.requirement_spec() {
-            details["requirement"] = json!(requirement);
-            details["hint"] = json!(format!(
-                "Run `px add --group dev {requirement}` to install {} in the project env.",
-                tool.display_name()
-            ));
-        } else {
-            details["hint"] = json!(format!(
-                "Add `requirement = \"{module}==<version>\"` under [tool.px.{section}] so px can suggest an install command.",
-                module = tool.module,
-                section = kind.section_name(),
-            ));
-        }
-        let mut outcome = ExecutionOutcome::user_error(
-            format!(
-                "px {}: module `{}` is not installed",
-                kind.section_name(),
-                tool.module
-            ),
-            details,
-        );
+        let mut outcome = missing_module_outcome(env, kind, tool, &python_args, &prepared, request);
         attach_autosync_details(&mut outcome, env.sync_report.clone());
         return Ok(ToolRun::Outcome(outcome));
     }
@@ -172,6 +134,8 @@ fn execute_quality_tool(
             "config_source": env.config.source.as_str(),
             "pyproject": env.pyproject.display().to_string(),
             "forwarded_args": &request.args,
+            "tool_root": prepared.tool_root,
+            "runtime": prepared.runtime,
         })),
     );
     attach_autosync_details(&mut failure, env.sync_report.clone());
@@ -187,6 +151,185 @@ struct QualityToolEnv<'ctx, 'payload> {
     sync_report: &'ctx Option<EnvironmentSyncReport>,
 }
 
+struct PreparedToolRun {
+    python: String,
+    envs: Vec<(String, String)>,
+    tool_root: String,
+    runtime: String,
+}
+
+fn prepare_tool_run(
+    env: &QualityToolEnv<'_, '_>,
+    kind: QualityKind,
+    tool: &QualityTool,
+) -> Result<PreparedToolRun, ExecutionOutcome> {
+    let descriptor = match load_installed_tool(tool.install_name()) {
+        Ok(desc) => desc,
+        Err(user) => {
+            let mut details = json!({
+                "tool": tool.display_name(),
+                "module": tool.module,
+                "config_source": env.config.source.as_str(),
+                "hint": tool.install_command(),
+            });
+            if !user.details.is_null() {
+                details["tool_state"] = user.details;
+            }
+            return Err(ExecutionOutcome::user_error(
+                format!(
+                    "px {}: tool '{}' is not installed",
+                    kind.section_name(),
+                    tool.display_name()
+                ),
+                details,
+            ));
+        }
+    };
+    let runtime_selection =
+        match runtime::resolve_runtime(Some(&descriptor.runtime_version), MIN_PYTHON_REQUIREMENT) {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                return Err(ExecutionOutcome::user_error(
+                    format!(
+                        "px {}: Python runtime {} for tool '{}' is unavailable",
+                        kind.section_name(),
+                        descriptor.runtime_version,
+                        descriptor.name
+                    ),
+                    json!({
+                        "tool": descriptor.name,
+                        "module": tool.module,
+                        "runtime": descriptor.runtime_version,
+                        "config_source": env.config.source.as_str(),
+                        "hint": err.to_string(),
+                    }),
+                ));
+            }
+        };
+
+    let snapshot = ProjectSnapshot::read_from(&descriptor.root).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to read tool metadata",
+            json!({
+                "tool": descriptor.name,
+                "root": descriptor.root.display().to_string(),
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+
+    if let Err(err) = ensure_project_environment_synced(env.ctx, &snapshot) {
+        return match err.downcast::<InstallUserError>() {
+            Ok(user) => Err(ExecutionOutcome::user_error(
+                format!(
+                    "px {}: tool '{}' is not ready",
+                    kind.section_name(),
+                    descriptor.name
+                ),
+                json!({
+                    "tool": descriptor.name,
+                    "module": tool.module,
+                    "config_source": env.config.source.as_str(),
+                    "details": user.details,
+                    "hint": tool.install_command(),
+                }),
+            )),
+            Err(other) => Err(ExecutionOutcome::failure(
+                "failed to prepare tool environment",
+                json!({
+                    "tool": descriptor.name,
+                    "root": descriptor.root.display().to_string(),
+                    "error": other.to_string(),
+                }),
+            )),
+        };
+    }
+
+    let (pythonpath, mut allowed_paths) = build_pythonpath(env.ctx.fs(), &descriptor.root)
+        .map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to prepare formatter environment variables",
+                json!({
+                    "tool": descriptor.name,
+                    "error": err.to_string(),
+                }),
+            )
+        })?;
+    let project_src = env.py_ctx.project_root.join("src");
+    if project_src.exists() {
+        allowed_paths.push(project_src);
+    }
+    allowed_paths.push(env.py_ctx.project_root.clone());
+    let allowed = env::join_paths(&allowed_paths)
+        .context("allowed path contains invalid UTF-8")
+        .map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to assemble formatter allowed paths",
+                json!({
+                    "tool": descriptor.name,
+                    "error": err.to_string(),
+                }),
+            )
+        })?
+        .into_string()
+        .map_err(|_| {
+            ExecutionOutcome::failure(
+                "allowed path contains non-utf8 data",
+                json!({
+                    "tool": descriptor.name,
+                }),
+            )
+        })?;
+
+    let mut envs = vec![
+        ("PYTHONPATH".into(), pythonpath),
+        ("PYTHONUNBUFFERED".into(), "1".into()),
+        ("PX_ALLOWED_PATHS".into(), allowed),
+        ("PX_TOOL_ROOT".into(), descriptor.root.display().to_string()),
+        (
+            "PX_PROJECT_ROOT".into(),
+            env.py_ctx.project_root.display().to_string(),
+        ),
+        ("PX_COMMAND_JSON".into(), env.env_payload.to_string()),
+    ];
+    disable_proxy_env(&mut envs);
+
+    Ok(PreparedToolRun {
+        python: runtime_selection.record.path,
+        envs,
+        tool_root: descriptor.root.display().to_string(),
+        runtime: runtime_selection.record.full_version,
+    })
+}
+
+fn missing_module_outcome(
+    env: &QualityToolEnv<'_, '_>,
+    kind: QualityKind,
+    tool: &QualityTool,
+    python_args: &[String],
+    prepared: &PreparedToolRun,
+    request: &FmtRequest,
+) -> ExecutionOutcome {
+    ExecutionOutcome::user_error(
+        format!(
+            "px {}: module `{}` is not installed in tool environment",
+            kind.section_name(),
+            tool.module
+        ),
+        json!({
+            "tool": tool.display_name(),
+            "module": tool.module,
+            "python_args": python_args,
+            "config_source": env.config.source.as_str(),
+            "pyproject": env.pyproject.display().to_string(),
+            "forwarded_args": &request.args,
+            "tool_root": &prepared.tool_root,
+            "runtime": &prepared.runtime,
+            "hint": tool.install_command(),
+        }),
+    )
+}
+
 fn build_success_details(
     runs: &[QualityRunRecord],
     pyproject: &Path,
@@ -199,6 +342,19 @@ fn build_success_details(
         "pyproject": pyproject.display().to_string(),
         "config_source": config.source.as_str(),
     });
+    if !runs.is_empty() {
+        let tools: Vec<Value> = runs
+            .iter()
+            .map(|run| {
+                json!({
+                    "tool": run.name,
+                    "runtime": run.runtime,
+                    "tool_root": run.tool_root,
+                })
+            })
+            .collect();
+        details["tools"] = json!(tools);
+    }
     if !request.args.is_empty() {
         details["forwarded_args"] = json!(&request.args);
     }
@@ -450,8 +606,15 @@ impl QualityTool {
         self.requirement.clone()
     }
 
-    fn is_default_ruff(&self) -> bool {
-        self.module == "ruff" && self.requirement.as_deref() == Some(DEFAULT_RUFF_REQUIREMENT)
+    fn install_name(&self) -> &str {
+        &self.module
+    }
+
+    fn install_command(&self) -> String {
+        match self.requirement_spec() {
+            Some(requirement) => format!("px tool install {requirement}"),
+            None => format!("px tool install {}", self.module),
+        }
     }
 }
 
@@ -462,6 +625,8 @@ struct QualityRunRecord {
     stdout: String,
     stderr: String,
     code: i32,
+    runtime: String,
+    tool_root: String,
 }
 
 enum ToolRun {
@@ -475,59 +640,15 @@ fn missing_module_error(output: &str, module: &str) -> bool {
     output.contains(&needle) || output.contains(&needle_unquoted)
 }
 
-fn auto_install_default_fmt_tool(env: &QualityToolEnv<'_, '_>) -> Result<(), ExecutionOutcome> {
-    let pyproject = env.py_ctx.project_root.join("pyproject.toml");
-    let requirement = DEFAULT_RUFF_REQUIREMENT.to_string();
-    let mut editor = ManifestEditor::open(&pyproject).map_err(|err| {
-        ExecutionOutcome::failure(
-            "failed to read pyproject.toml",
-            json!({ "error": err.to_string(), "pyproject": pyproject.display().to_string() }),
-        )
-    })?;
-    let _ = editor.add_specs(&[requirement.clone()]).map_err(|err| {
-        ExecutionOutcome::failure(
-            "failed to update pyproject.toml",
-            json!({ "error": err.to_string(), "pyproject": pyproject.display().to_string() }),
-        )
-    })?;
-    let snapshot = manifest_snapshot_at(&env.py_ctx.project_root).map_err(|err| {
-        ExecutionOutcome::failure(
-            "failed to read project snapshot",
-            json!({
-                "error": err.to_string(),
-                "project_root": env.py_ctx.project_root.display().to_string(),
-            }),
-        )
-    })?;
-    let install_outcome = match install_snapshot(env.ctx, &snapshot, false, None) {
-        Ok(outcome) => outcome,
-        Err(err) => match err.downcast::<InstallUserError>() {
-            Ok(user) => return Err(ExecutionOutcome::user_error(user.message, user.details)),
-            Err(other) => {
-                return Err(ExecutionOutcome::failure(
-                    "failed to install default formatter",
-                    json!({ "error": other.to_string() }),
-                ))
-            }
-        },
-    };
-    if matches!(install_outcome.state, crate::InstallState::MissingLock) {
-        return Err(ExecutionOutcome::failure(
-            "px fmt could not refresh px.lock for default formatter",
-            json!({ "pyproject": pyproject.display().to_string() }),
-        ));
-    }
-    refresh_project_site(&snapshot, env.ctx).map_err(|err| {
-        ExecutionOutcome::failure(
-            "failed to update project environment after installing formatter",
-            json!({ "error": err.to_string() }),
-        )
-    })?;
-    Ok(())
-}
-
 impl QualityRunRecord {
-    fn new(name: &str, module: &str, python_args: Vec<String>, output: crate::RunOutput) -> Self {
+    fn new(
+        name: &str,
+        module: &str,
+        python_args: Vec<String>,
+        output: crate::RunOutput,
+        runtime: &str,
+        tool_root: &str,
+    ) -> Self {
         Self {
             name: name.to_string(),
             module: module.to_string(),
@@ -535,6 +656,8 @@ impl QualityRunRecord {
             stdout: output.stdout,
             stderr: output.stderr,
             code: output.code,
+            runtime: runtime.to_string(),
+            tool_root: tool_root.to_string(),
         }
     }
 
@@ -546,6 +669,8 @@ impl QualityRunRecord {
             "stdout": self.stdout,
             "stderr": self.stderr,
             "code": self.code,
+            "runtime": self.runtime,
+            "tool_root": self.tool_root,
         })
     }
 }
