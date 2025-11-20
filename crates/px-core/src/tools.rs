@@ -16,10 +16,10 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 
 use crate::{
     build_pythonpath, compute_lock_hash, ensure_project_environment_synced, install_snapshot,
-    outcome_from_output, refresh_project_site, runtime, CommandContext, ExecutionOutcome,
-    InstallUserError,
+    manifest_snapshot_at, outcome_from_output, persist_resolved_dependencies, refresh_project_site,
+    resolve_dependencies_with_effects, runtime, CommandContext, ExecutionOutcome, InstallUserError,
 };
-use px_domain::{load_lockfile_optional, ManifestEditor};
+use px_domain::{load_lockfile_optional, InstallOverride, ManifestEditor};
 
 const TOOLS_DIR_ENV: &str = "PX_TOOLS_DIR";
 const TOOL_STORE_ENV: &str = "PX_TOOL_STORE";
@@ -97,9 +97,35 @@ pub fn tool_install(
     editor.set_tool_python(&runtime_selection.record.version)?;
 
     let snapshot = px_domain::ProjectSnapshot::read_from(&tool_root)?;
-    install_snapshot(ctx, &snapshot, false, None)?;
-    refresh_project_site(&snapshot, ctx)?;
-    let store_site = finalize_tool_environment(&tool_root, &snapshot, &runtime_selection)?;
+    let resolved = match resolve_dependencies_with_effects(ctx.effects(), &snapshot) {
+        Ok(resolved) => resolved,
+        Err(err) => match err.downcast::<InstallUserError>() {
+            Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+            Err(other) => return Err(other),
+        },
+    };
+    persist_resolved_dependencies(&snapshot, &resolved.specs)?;
+    let updated_snapshot = manifest_snapshot_at(&tool_root)?;
+    let override_data = InstallOverride {
+        dependencies: resolved.specs.clone(),
+        pins: resolved.pins.clone(),
+    };
+    let install_outcome =
+        match install_snapshot(ctx, &updated_snapshot, false, Some(&override_data)) {
+            Ok(outcome) => outcome,
+            Err(err) => match err.downcast::<InstallUserError>() {
+                Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                Err(other) => return Err(other),
+            },
+        };
+    if matches!(install_outcome.state, crate::InstallState::MissingLock) {
+        return Ok(ExecutionOutcome::failure(
+            "px tool install could not write px.lock",
+            json!({ "tool": normalized }),
+        ));
+    }
+    refresh_project_site(&updated_snapshot, ctx)?;
+    let store_site = finalize_tool_environment(&tool_root, &updated_snapshot, &runtime_selection)?;
 
     let pinned = ManifestEditor::open(&pyproject)?.dependencies();
     let installed_spec = pinned.first().cloned().unwrap_or(spec.clone());
@@ -431,10 +457,33 @@ fn finalize_tool_environment(
     snapshot: &px_domain::ProjectSnapshot,
     runtime: &runtime::RuntimeSelection,
 ) -> Result<PathBuf> {
+    let state_path = root.join(".px").join("state.json");
+    let initial_site = fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+        .and_then(|value| {
+            value
+                .get("current_env")
+                .and_then(|env| env.get("site_packages"))
+                .and_then(|path| path.as_str())
+                .map(PathBuf::from)
+        });
+    let source_site = initial_site
+        .clone()
+        .filter(|path| path.exists())
+        .or_else(|| find_env_site(root));
+
     let lock = load_lockfile_optional(&snapshot.lock_path)?.ok_or_else(|| {
         anyhow!(
             "px sync: lockfile missing at {}",
             snapshot.lock_path.display()
+        )
+    })?;
+    let source_site = source_site.ok_or_else(|| {
+        anyhow!(
+            "tool environment missing for {}; reinstall with `px tool install {}`",
+            snapshot.name,
+            snapshot.name
         )
     })?;
     let lock_hash = match lock.lock_id.clone() {
@@ -449,12 +498,25 @@ fn finalize_tool_environment(
     );
     let env_root = tools_env_store_root()?.join(&env_id);
     let site_path = env_root.join("site");
-    if !site_path.exists() {
-        copy_dir_contents(&root.join(".px").join("site"), &site_path)?;
+    if site_path.exists() {
+        fs::remove_dir_all(&site_path)?;
     }
+    copy_dir_contents(&source_site, &site_path)?;
     update_tool_state(root, &site_path, &env_id)?;
     let _ = fs::remove_dir_all(root.join(".px").join("site"));
     Ok(site_path)
+}
+
+fn find_env_site(root: &Path) -> Option<PathBuf> {
+    let envs_root = root.join(".px").join("envs");
+    let entries = fs::read_dir(envs_root).ok()?;
+    for entry in entries.flatten() {
+        let site = entry.path().join("site");
+        if site.exists() {
+            return Some(site);
+        }
+    }
+    None
 }
 
 fn collect_console_scripts(site_dir: &Path) -> Result<BTreeMap<String, String>> {
