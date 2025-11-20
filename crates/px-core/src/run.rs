@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use toml_edit::{DocumentMut, Item};
 
@@ -56,24 +56,63 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         "target": &request.target,
         "args": &request.args,
     });
+    let manifest = py_ctx.project_root.join("pyproject.toml");
+    let default_entry = || -> Result<ResolvedEntry> {
+        if !manifest.exists() {
+            return Err(anyhow!("manifest missing"));
+        }
+        infer_default_entry(&manifest)?.ok_or_else(|| anyhow!("no default entry configured"))
+    };
+
     if let Some(entry) = request.entry.as_deref() {
         if let Some(target) = detect_passthrough_target(entry, &py_ctx) {
             let mut outcome = run_passthrough(ctx, &py_ctx, target, &request.args, &command_args)?;
             attach_autosync_details(&mut outcome, sync_report);
             return Ok(outcome);
         }
+
+        if should_forward_to_default(entry, &py_ctx) && request.args.is_empty() {
+            match default_entry() {
+                Ok(resolved_default) => {
+                    let mut forwarded = Vec::with_capacity(request.args.len() + 1);
+                    forwarded.push(entry.to_string());
+                    forwarded.extend(request.args.iter().cloned());
+                    let mut outcome = run_module_entry(
+                        ctx,
+                        &py_ctx,
+                        resolved_default,
+                        &forwarded,
+                        &command_args,
+                    )?;
+                    attach_autosync_details(&mut outcome, sync_report);
+                    return Ok(outcome);
+                }
+                Err(err) => {
+                    let issue = if manifest.exists() {
+                        DefaultEntryIssue::NoScripts(manifest.clone())
+                    } else {
+                        DefaultEntryIssue::MissingManifest(manifest.clone())
+                    };
+                    let mut outcome = issue.into_outcome(&py_ctx);
+                    outcome.details["hint"] = json!(format!(
+                        "pass an entry explicitly or fix default inference ({err})"
+                    ));
+                    attach_autosync_details(&mut outcome, sync_report);
+                    return Ok(outcome);
+                }
+            }
+        }
     }
 
     let resolved = if let Some(entry) = request.entry.clone() {
         ResolvedEntry::explicit(entry)
     } else {
-        let manifest = py_ctx.project_root.join("pyproject.toml");
-        if !manifest.exists() {
-            return Ok(DefaultEntryIssue::MissingManifest(manifest).into_outcome(&py_ctx));
-        }
-        match infer_default_entry(&manifest)? {
-            Some(entry) => entry,
-            None => {
+        match default_entry() {
+            Ok(entry) => entry,
+            Err(_) if !manifest.exists() => {
+                return Ok(DefaultEntryIssue::MissingManifest(manifest).into_outcome(&py_ctx));
+            }
+            Err(_) => {
                 return Ok(DefaultEntryIssue::NoScripts(manifest).into_outcome(&py_ctx));
             }
         }
@@ -387,6 +426,21 @@ fn detect_passthrough_target(entry: &str, ctx: &PythonContext) -> Option<Passthr
     }
 
     None
+}
+
+fn should_forward_to_default(entry: &str, ctx: &PythonContext) -> bool {
+    if looks_like_python_alias(entry) || looks_like_path_target(entry) {
+        return false;
+    }
+    let pathish = Path::new(entry);
+    if pathish.exists() || entry.ends_with(".py") {
+        return false;
+    }
+    if entry.contains('.') || entry.contains('\\') || entry.contains('/') {
+        return false;
+    }
+    // If the manifest is missing, default inference will emit a clearer hint.
+    ctx.project_root.join("pyproject.toml").exists()
 }
 
 fn looks_like_python_alias(entry: &str) -> bool {

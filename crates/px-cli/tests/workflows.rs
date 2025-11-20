@@ -145,6 +145,35 @@ fn run_respects_explicit_entry_even_with_other_defaults() {
 }
 
 #[test]
+fn run_forwards_args_to_default_entry_when_no_entry_passed() {
+    let (_tmp, project) = prepare_fixture("run-forward-default");
+    set_project_scripts(&project, &[("sample-px-app", "sample_px_app.cli:main")]);
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["--json", "run", "--", "Forwarded"])
+        .assert()
+        .success();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    let details = payload["details"].as_object().expect("details object");
+    assert_eq!(
+        details.get("entry"),
+        Some(&Value::String("sample_px_app.cli".into()))
+    );
+    let args = details
+        .get("args")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        args.contains(&Value::String("Forwarded".into())),
+        "expected forwarded args to include original token: {args:?}"
+    );
+}
+
+#[test]
 fn run_errors_when_no_default_entry_available() {
     let (_tmp, project) = prepare_fixture("run-missing-default");
     let pyproject = project.join("pyproject.toml");

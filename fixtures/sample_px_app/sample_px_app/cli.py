@@ -9,9 +9,11 @@ def greet(name: str = "World") -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="sample-px-app")
-    parser.add_argument("-n", "--name", default="World")
+    parser.add_argument("-n", "--name", dest="name", default=None)
+    parser.add_argument("positional_name", nargs="?", default=None)
     args = parser.parse_args(argv)
-    print(greet(args.name))
+    target = args.positional_name or args.name or "World"
+    print(greet(target))
     return 0
 
 
