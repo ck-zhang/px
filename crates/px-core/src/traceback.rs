@@ -153,21 +153,21 @@ impl TracebackSummary {
         latest
     }
 
-    fn parse_block(lines: &[&str], mut idx: usize) -> Option<(Self, usize)> {
-        let mut frames = Vec::new();
-        while idx < lines.len() {
-            let line = lines[idx];
-            let trimmed = line.trim_start();
-            if trimmed.is_empty() {
-                idx += 1;
-                continue;
-            }
-            if is_pointer_line(trimmed) {
-                idx += 1;
-                continue;
-            }
-            if let Some(frame) = parse_frame_line(trimmed) {
-                let mut frame = frame;
+fn parse_block(lines: &[&str], mut idx: usize) -> Option<(Self, usize)> {
+    let mut frames = Vec::new();
+    while idx < lines.len() {
+        let line = lines[idx];
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            idx += 1;
+            continue;
+        }
+        if is_pointer_line(trimmed) || is_ellipsis_line(trimmed) {
+            idx += 1;
+            continue;
+        }
+        if let Some(frame) = parse_frame_line(trimmed) {
+            let mut frame = frame;
                 idx += 1;
                 if idx < lines.len() {
                     let next = lines[idx];
@@ -203,6 +203,11 @@ fn is_pointer_line(line: &str) -> bool {
         return false;
     }
     trimmed.chars().all(|ch| ch == '^' || ch == '~')
+}
+
+fn is_ellipsis_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("...") && trimmed.ends_with("...")
 }
 
 fn parse_frame_line(line: &str) -> Option<TracebackFrame> {
@@ -315,5 +320,16 @@ mod tests {
         let rec = report.recommendation.expect("recommendation");
         assert_eq!(rec.reason, "distribution_missing");
         assert!(rec.hint.contains("px install"));
+    }
+
+    #[test]
+    fn parses_tracebacks_with_elided_frames() {
+        let stderr = "Traceback (most recent call last):\n  File \"/app/main.py\", line 5, in <module>\n    main()\n  File \"/app/main.py\", line 2, in main\n    do_call()\n    ...<5 lines>...\n  File \"/app/lib.py\", line 9, in do_call\n    raise RuntimeError('boom')\nRuntimeError: boom\n";
+        let ctx = TracebackContext::new("run", "demo", None);
+        let report = analyze_python_traceback(stderr, &ctx).expect("report");
+        assert_eq!(report.error_type, "RuntimeError");
+        assert_eq!(report.error_message, "boom");
+        assert_eq!(report.frames.len(), 3);
+        assert_eq!(report.frames.last().unwrap().file, "/app/lib.py");
     }
 }
