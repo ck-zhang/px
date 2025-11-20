@@ -63,6 +63,19 @@ pub struct ResolvedSpecifier {
     pub marker: Option<String>,
     pub requires: Vec<String>,
     pub direct: bool,
+    pub source: Option<String>,
+    pub artifact: Option<ResolvedArtifact>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedArtifact {
+    pub url: String,
+    pub filename: String,
+    pub sha256: Option<String>,
+    pub python_tag: String,
+    pub abi_tag: String,
+    pub platform_tag: String,
+    pub is_direct: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +83,7 @@ struct RequirementFrame {
     raw: String,
     parent_extras: Vec<ExtraName>,
     direct: bool,
+    source: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +92,8 @@ struct Candidate {
     version_string: String,
     files: Vec<ReleaseFile>,
     requires: Vec<(String, Vec<ExtraName>)>,
+    artifact: Option<ResolvedArtifact>,
+    index: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -123,6 +139,7 @@ pub fn resolve(request: &ResolveRequest) -> Result<Vec<ResolvedSpecifier>> {
             raw: req.clone(),
             parent_extras: Vec::new(),
             direct: true,
+            source: None,
         })
         .collect();
 
@@ -230,6 +247,8 @@ impl<'a> ResolverContext<'a> {
                     marker: req.marker.clone(),
                     requires: Vec::new(),
                     direct: frame.direct,
+                    source: frame.source.clone(),
+                    artifact: candidate.artifact.clone(),
                 };
                 let child_requires: Vec<String> = candidate
                     .requires
@@ -252,6 +271,10 @@ impl<'a> ResolverContext<'a> {
                         raw: child,
                         parent_extras: extras,
                         direct: false,
+                        source: Some(format!(
+                            "{}=={}",
+                            req.original_name, candidate.version_string
+                        )),
                     });
                 }
 
@@ -356,11 +379,16 @@ impl<'a> ResolverContext<'a> {
             let requires = self
                 .fetch_version_requires(&index, &req.normalized, &version_str)
                 .unwrap_or_default();
+            let artifact = files
+                .iter()
+                .find_map(|file| select_artifact(file, &self.request.tags));
             candidates.push(Candidate {
                 version,
                 version_string: version_str,
                 files,
                 requires,
+                artifact,
+                index: index.clone(),
             });
         }
 
@@ -402,6 +430,20 @@ impl<'a> ResolverContext<'a> {
             version_string: version_str,
             files: Vec::new(),
             requires,
+            artifact: Some(ResolvedArtifact {
+                url: url.to_string(),
+                filename: filename.to_string(),
+                sha256: None,
+                python_tag: "py3".into(),
+                abi_tag: "none".into(),
+                platform_tag: "any".into(),
+                is_direct: true,
+            }),
+            index: self
+                .indexes
+                .first()
+                .cloned()
+                .unwrap_or_else(|| PYPI_BASE.to_string()),
         }])
     }
 
@@ -536,6 +578,7 @@ impl<'a> ResolverContext<'a> {
                 raw: child.clone(),
                 parent_extras: Vec::new(),
                 direct,
+                source: None,
             });
         }
     }
@@ -659,6 +702,25 @@ fn parse_wheel_tags(filename: &str) -> Option<(String, String, String)> {
         parts[parts.len() - 2].to_string(),
         parts[parts.len() - 1].to_string(),
     ))
+}
+
+fn select_artifact(file: &ReleaseFile, tags: &ResolverTags) -> Option<ResolvedArtifact> {
+    if file.packagetype != "bdist_wheel" || file.yanked.unwrap_or(false) {
+        return None;
+    }
+    let (py, abi, platform) = parse_wheel_tags(&file.filename)?;
+    if !wheel_matches(&py, &abi, &platform, tags) {
+        return None;
+    }
+    Some(ResolvedArtifact {
+        url: file.url.clone(),
+        filename: file.filename.clone(),
+        sha256: None,
+        python_tag: py,
+        abi_tag: abi,
+        platform_tag: platform,
+        is_direct: false,
+    })
 }
 
 fn parse_wheel_filename(filename: &str) -> Option<(String, String, (String, String, String))> {

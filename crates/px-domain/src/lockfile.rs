@@ -37,6 +37,8 @@ pub struct LockedArtifact {
     pub python_tag: String,
     pub abi_tag: String,
     pub platform_tag: String,
+    #[serde(default)]
+    pub is_direct_url: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -45,6 +47,8 @@ pub struct LockedDependency {
     pub direct: bool,
     pub artifact: Option<LockedArtifact>,
     pub requires: Vec<String>,
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -69,6 +73,7 @@ pub struct ResolvedDependency {
     pub artifact: LockedArtifact,
     pub direct: bool,
     pub requires: Vec<String>,
+    pub source: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -183,6 +188,9 @@ pub fn render_lockfile(
         }
         table.insert("artifact", Item::Table(render_artifact(&dep.artifact)));
         table.insert("direct", Item::Value(TomlValue::from(dep.direct)));
+        if let Some(source) = &dep.source {
+            table.insert("source", Item::Value(TomlValue::from(source.as_str())));
+        }
         if !dep.requires.is_empty() {
             let mut requires = Array::new();
             for req in &dep.requires {
@@ -334,6 +342,12 @@ fn render_artifact(artifact: &LockedArtifact) -> Table {
         "platform_tag",
         Item::Value(TomlValue::from(artifact.platform_tag.clone())),
     );
+    if artifact.is_direct_url {
+        table.insert(
+            "is_direct_url",
+            Item::Value(TomlValue::from(artifact.is_direct_url)),
+        );
+    }
     table
 }
 
@@ -430,6 +444,7 @@ pub fn collect_resolved_dependencies(lock: &LockSnapshot) -> Vec<ResolvedDepende
             artifact,
             direct: entry.direct,
             requires: entry.requires.clone(),
+            source: entry.source.clone(),
         });
     }
     deps.sort_by(|a, b| a.name.cmp(&b.name).then(a.specifier.cmp(&b.specifier)));
@@ -878,11 +893,16 @@ fn parse_lock_snapshot(doc: &DocumentMut) -> LockSnapshot {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            let source = table
+                .get("source")
+                .and_then(Item::as_str)
+                .map(std::string::ToString::to_string);
             resolved.push(LockedDependency {
                 name,
                 direct,
                 artifact,
                 requires,
+                source,
             });
         }
     } else if let Some(array) = doc.get("dependencies").and_then(Item::as_array) {
@@ -934,7 +954,10 @@ fn parse_artifact_table(table: &Table) -> Option<LockedArtifact> {
         .and_then(Item::as_str)
         .unwrap_or_default()
         .to_string();
-
+    let is_direct_url = table
+        .get("is_direct_url")
+        .and_then(Item::as_bool)
+        .unwrap_or(false);
     Some(LockedArtifact {
         filename,
         url,
@@ -944,6 +967,7 @@ fn parse_artifact_table(table: &Table) -> Option<LockedArtifact> {
         python_tag,
         abi_tag,
         platform_tag,
+        is_direct_url,
     })
 }
 
@@ -1068,6 +1092,7 @@ fn normalized_from_graph(graph: &LockGraphSnapshot) -> (Vec<String>, Vec<LockedD
             direct: true,
             artifact,
             requires: Vec::new(),
+            source: None,
         });
     }
     (dependencies, resolved)
@@ -1234,9 +1259,11 @@ mod tests {
                 python_tag: "py3".into(),
                 abi_tag: "none".into(),
                 platform_tag: "any".into(),
+                is_direct_url: false,
             },
             direct: true,
             requires: Vec::new(),
+            source: None,
         }]
     }
 
@@ -1268,6 +1295,7 @@ mod tests {
                 name: "demo".into(),
                 direct: true,
                 artifact: Some(LockedArtifact::default()),
+                source: None,
                 requires: Vec::new(),
             }],
             graph: None,
@@ -1302,8 +1330,10 @@ mod tests {
                     python_tag: "py3".into(),
                     abi_tag: "none".into(),
                     platform_tag: "any".into(),
+                    is_direct_url: false,
                 }),
                 requires: Vec::new(),
+                source: None,
             }],
             graph: None,
         };
@@ -1333,8 +1363,10 @@ mod tests {
                     python_tag: "py3".into(),
                     abi_tag: "none".into(),
                     platform_tag: "any".into(),
+                    is_direct_url: false,
                 }),
                 requires: Vec::new(),
+                source: None,
             }],
             graph: None,
         };
@@ -1370,8 +1402,10 @@ mod tests {
                     python_tag: "py3".into(),
                     abi_tag: "abi3".into(),
                     platform_tag: "any".into(),
+                    is_direct_url: false,
                 }),
                 requires: Vec::new(),
+                source: None,
             }],
             graph: Some(LockGraphSnapshot {
                 nodes: vec![GraphNode {
@@ -1399,6 +1433,7 @@ mod tests {
                         python_tag: "py3".into(),
                         abi_tag: "abi3".into(),
                         platform_tag: "any".into(),
+                        is_direct_url: false,
                     },
                 }],
             }),
@@ -1433,8 +1468,10 @@ mod tests {
                     python_tag: "py3".into(),
                     abi_tag: "none".into(),
                     platform_tag: "any".into(),
+                    is_direct_url: false,
                 }),
                 requires: Vec::new(),
+                source: None,
             }],
             graph: None,
         };

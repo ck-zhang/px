@@ -1399,6 +1399,7 @@ fn download_artifact(
                     python_tag: wheel.python_tag.clone(),
                     abi_tag: wheel.abi_tag.clone(),
                     platform_tag: wheel.platform_tag.clone(),
+                    is_direct_url: false,
                 }
             }
             Err(_) => build_wheel_via_sdist(cache_store, cache, &release, &pin, python)?,
@@ -1413,6 +1414,7 @@ fn download_artifact(
         artifact,
         direct: pin.direct,
         requires: pin.requires,
+        source: None,
     })
 }
 
@@ -1444,6 +1446,7 @@ fn build_wheel_via_sdist(
         python_tag: built.python_tag,
         abi_tag: built.abi_tag,
         platform_tag: built.platform_tag,
+        is_direct_url: false,
     })
 }
 
@@ -2512,8 +2515,10 @@ mod tests {
                     python_tag: "py3".into(),
                     abi_tag: "none".into(),
                     platform_tag: "any".into(),
+                    is_direct_url: false,
                 }),
                 requires: Vec::new(),
+                source: None,
             }],
             graph: None,
         };
@@ -2573,8 +2578,10 @@ mod tests {
                     python_tag: "py3".into(),
                     abi_tag: "none".into(),
                     platform_tag: "any".into(),
+                    is_direct_url: false,
                 }),
                 requires: Vec::new(),
+                source: None,
             }],
             graph: None,
         };
