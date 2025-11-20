@@ -1130,9 +1130,17 @@ mod tests {
 
         assert!(walk.exists);
         assert_eq!(walk.total_bytes, 1 + 9);
-        let files: Vec<&Path> = walk.files.iter().map(|entry| entry.path.as_path()).collect();
+        let files: Vec<&Path> = walk
+            .files
+            .iter()
+            .map(|entry| entry.path.as_path())
+            .collect();
         assert_eq!(files, vec![alpha.as_path(), beta.as_path()]);
-        assert_eq!(walk.dirs.len(), 2, "expected two child directories recorded");
+        assert_eq!(
+            walk.dirs.len(),
+            2,
+            "expected two child directories recorded"
+        );
         Ok(())
     }
 

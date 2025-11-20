@@ -438,11 +438,7 @@ mod tests {
     use std::env;
     use tempfile::tempdir;
 
-    fn make_download(
-        patch: u8,
-        url: &str,
-        target: (&str, &str, &str),
-    ) -> PythonDownload {
+    fn make_download(patch: u8, url: &str, target: (&str, &str, &str)) -> PythonDownload {
         PythonDownload {
             name: "cpython".to_string(),
             arch: PythonDownloadArch {

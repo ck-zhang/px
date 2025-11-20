@@ -153,21 +153,21 @@ impl TracebackSummary {
         latest
     }
 
-fn parse_block(lines: &[&str], mut idx: usize) -> Option<(Self, usize)> {
-    let mut frames = Vec::new();
-    while idx < lines.len() {
-        let line = lines[idx];
-        let trimmed = line.trim_start();
-        if trimmed.is_empty() {
-            idx += 1;
-            continue;
-        }
-        if is_pointer_line(trimmed) || is_ellipsis_line(trimmed) {
-            idx += 1;
-            continue;
-        }
-        if let Some(frame) = parse_frame_line(trimmed) {
-            let mut frame = frame;
+    fn parse_block(lines: &[&str], mut idx: usize) -> Option<(Self, usize)> {
+        let mut frames = Vec::new();
+        while idx < lines.len() {
+            let line = lines[idx];
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() {
+                idx += 1;
+                continue;
+            }
+            if is_pointer_line(trimmed) || is_ellipsis_line(trimmed) {
+                idx += 1;
+                continue;
+            }
+            if let Some(frame) = parse_frame_line(trimmed) {
+                let mut frame = frame;
                 idx += 1;
                 if idx < lines.len() {
                     let next = lines[idx];
