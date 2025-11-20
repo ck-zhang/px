@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     env, fs,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -218,7 +219,25 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
         .context("allowed path contains invalid UTF-8")?
         .into_string()
         .map_err(|_| anyhow!("allowed path contains non-utf8 data"))?;
+    let passthrough = ctx.env_flag_enabled("PX_TOOL_PASSTHROUGH") || request.args.is_empty();
     let cwd = env::current_dir().unwrap_or(tool_root.clone());
+    if passthrough {
+        if metadata.name == "grip" {
+            let port = infer_grip_port(&request.args).unwrap_or(6419);
+            println!(
+                "px tool {}: serving from {} on http://localhost:{port} (Ctrl+C to stop)",
+                metadata.name,
+                cwd.display()
+            );
+        } else {
+            println!(
+                "px tool {}: launching in {} (Ctrl+C to stop)",
+                metadata.name,
+                cwd.display()
+            );
+        }
+        io::stdout().flush().ok();
+    }
     let env_payload = json!({
         "tool": metadata.name,
         "args": request.args,
@@ -230,7 +249,6 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
         ("PX_TOOL_ROOT".into(), tool_root.display().to_string()),
         ("PX_COMMAND_JSON".into(), env_payload.to_string()),
     ];
-    let passthrough = ctx.env_flag_enabled("PX_TOOL_PASSTHROUGH") || request.args.is_empty();
     let output = if passthrough {
         px_domain::run_command_passthrough(&runtime_selection.record.path, &args, &envs, &cwd)?
     } else {
@@ -598,6 +616,32 @@ fn parse_entry_points(path: &Path, scripts: &mut BTreeMap<String, String>) -> Re
         }
     }
     Ok(())
+}
+
+fn infer_grip_port(args: &[String]) -> Option<u16> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-p" | "--port" => {
+                if let Some(value) = iter.next() {
+                    if let Ok(port) = value.parse::<u16>() {
+                        return Some(port);
+                    }
+                }
+            }
+            "--address" => {
+                if let Some(value) = iter.next() {
+                    if let Some(port) = value.rsplit(':').next() {
+                        if let Ok(port) = port.parse::<u16>() {
+                            return Some(port);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn tools_env_store_root() -> Result<PathBuf> {

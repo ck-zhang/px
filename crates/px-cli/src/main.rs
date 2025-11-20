@@ -689,6 +689,7 @@ fn normalize_run_invocation(args: &RunArgs) -> (Option<String>, Vec<String>) {
 #[command(
     author,
     version,
+    propagate_version = false,
     disable_help_subcommand = true,
     before_help = PX_BEFORE_HELP,
     help_template = PX_HELP_TEMPLATE
