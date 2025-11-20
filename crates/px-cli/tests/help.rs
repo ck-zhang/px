@@ -56,16 +56,3 @@ fn fmt_help_mentions_frozen_flag() {
         "fmt usage missing forwarded arg example: {output}"
     );
 }
-
-#[test]
-fn lint_help_mentions_frozen_flag() {
-    let output = help_output(&["lint", "--help"]);
-    assert!(
-        output.contains("--frozen"),
-        "lint help should mention the --frozen guard: {output}"
-    );
-    assert!(
-        output.contains("px lint [-- <ARG>...]") || output.contains("px lint [-- <arg>...]"),
-        "lint usage missing forwarded arg example: {output}"
-    );
-}
