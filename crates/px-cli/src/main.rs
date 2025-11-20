@@ -705,14 +705,19 @@ struct PxCli {
     #[arg(
         short,
         long,
-        help = "Suppress human output (errors still print to stderr)"
-    , global = true)]
+        help = "Suppress human output (errors still print to stderr)",
+        global = true
+    )]
     quiet: bool,
     #[arg(short, long, action = ArgAction::Count, help = "Increase logging (-vv reaches trace)")]
     verbose: u8,
     #[arg(long, help = "Force trace logging regardless of -v/-q", global = true)]
     trace: bool,
-    #[arg(long, help = "Emit {status,message,details} JSON envelopes", global = true)]
+    #[arg(
+        long,
+        help = "Emit {status,message,details} JSON envelopes",
+        global = true
+    )]
     json: bool,
     #[arg(long, help = "Disable colored human output", global = true)]
     no_color: bool,
@@ -1041,8 +1046,7 @@ struct ToolRunArgs {
     #[arg(
         value_name = "ARG",
         trailing_var_arg = true,
-        allow_hyphen_values = true,
-        last = true
+        allow_hyphen_values = true
     )]
     args: Vec<String>,
 }

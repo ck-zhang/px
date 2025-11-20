@@ -783,7 +783,7 @@ fn classify_artifact(filename: &str) -> Result<ArtifactUploadKind> {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .ok_or_else(|| anyhow!("wheel filename missing python tag"))?;
-        let mut parts = stem.rsplitn(3, '-');
+        let mut parts = stem.rsplit('-');
         let platform = parts
             .next()
             .ok_or_else(|| anyhow!("wheel filename missing platform tag"))?;
@@ -821,7 +821,24 @@ fn has_case_insensitive_extension(path: &Path, extension: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use httptest::{matchers::*, responders::*, Expectation, Server};
     use tempfile::tempdir;
+
+    fn sample_metadata() -> PublishMetadata {
+        PublishMetadata {
+            name: "demo".into(),
+            version: "0.1.0".into(),
+            summary: Some("demo package".into()),
+            description: None,
+            description_content_type: None,
+            keywords: None,
+            license: None,
+            home_page: None,
+            project_urls: Vec::new(),
+            classifiers: Vec::new(),
+            requires_python: None,
+        }
+    }
 
     #[test]
     fn resolve_output_dir_handles_relative_and_absolute() -> Result<()> {
@@ -868,5 +885,119 @@ mod tests {
         };
         assert!(artifact_matches_format(&sdist, both));
         assert!(artifact_matches_format(&wheel, both));
+    }
+
+    #[test]
+    fn build_targets_default_to_both_when_not_selected() {
+        let request = BuildRequest {
+            include_sdist: false,
+            include_wheel: false,
+            out: None,
+            dry_run: false,
+        };
+
+        let targets = build_targets_from_request(&request);
+        assert!(targets.sdist, "sdist should be selected by default");
+        assert!(targets.wheel, "wheel should be selected by default");
+    }
+
+    #[test]
+    fn format_bytes_scales_values() {
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(2048), "2.0 KB");
+        assert_eq!(format_bytes(1_572_864), "1.5 MB");
+    }
+
+    #[test]
+    fn classify_artifact_detects_known_formats() -> Result<()> {
+        let wheel = classify_artifact("demo-0.1.0-py3-none-any.whl")?;
+        match wheel {
+            ArtifactUploadKind::Wheel {
+                pyversion,
+                abi,
+                platform,
+            } => {
+                assert_eq!(pyversion, "py3");
+                assert_eq!(abi, "none");
+                assert_eq!(platform, "any");
+            }
+            _ => panic!("expected wheel classification"),
+        }
+
+        let tarball = classify_artifact("demo-0.1.0.tar.gz")?;
+        assert!(matches!(tarball, ArtifactUploadKind::Sdist));
+
+        let zip = classify_artifact("demo-0.1.0.zip")?;
+        assert!(matches!(zip, ArtifactUploadKind::Sdist));
+
+        assert!(
+            classify_artifact("demo-0.1.0.whl.txt").is_err(),
+            "non-artifact extensions should be rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_publish_registry_handles_aliases_and_urls() {
+        let default = resolve_publish_registry(None);
+        assert_eq!(default.label, "pypi");
+        assert_eq!(default.url, PYPI_UPLOAD_URL);
+
+        let testpypi = resolve_publish_registry(Some("test-pypi"));
+        assert_eq!(testpypi.label, "test-pypi");
+        assert_eq!(testpypi.url, TEST_PYPI_UPLOAD_URL);
+
+        let host = resolve_publish_registry(Some("packages.example.com"));
+        assert_eq!(host.label, "packages.example.com");
+        assert_eq!(host.url, "https://packages.example.com/legacy/");
+
+        let url = resolve_publish_registry(Some("https://upload.example.invalid/simple/"));
+        assert_eq!(url.label, "https://upload.example.invalid/simple/");
+        assert_eq!(url.url, "https://upload.example.invalid/simple/");
+    }
+
+    #[test]
+    fn upload_artifact_reports_forbidden_credentials() -> Result<()> {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/"),
+                request::body(matches("filetype")),
+            ])
+            .respond_with(status_code(403)),
+        );
+
+        let tmp = tempdir()?;
+        let file_path = tmp.path().join("demo-0.1.0.tar.gz");
+        fs::write(&file_path, b"dummy sdist")?;
+        let summary = ArtifactSummary {
+            path: file_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string(),
+            bytes: fs::metadata(&file_path)?.len(),
+            sha256: compute_file_sha256(&file_path)?,
+        };
+        let registry = PublishRegistry {
+            label: "mock-registry".into(),
+            url: server.url_str("/"),
+        };
+        let client = build_http_client()?;
+        let err = upload_artifact(
+            &client,
+            &registry,
+            "secret-token",
+            &sample_metadata(),
+            &summary,
+            &file_path,
+        )
+        .expect_err("forbidden response should error");
+
+        assert!(
+            err.to_string().contains("rejected"),
+            "error should mention credentials rejection: {err}"
+        );
+        Ok(())
     }
 }

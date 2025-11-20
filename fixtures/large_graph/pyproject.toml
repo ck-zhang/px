@@ -1,0 +1,29 @@
+[project]
+name = "large-graph-demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "requests==2.32.3",
+    "urllib3==2.2.3",
+    "idna==3.6",
+    "certifi==2024.12.14",
+    "charset-normalizer==3.3.2",
+    "click==8.1.7",
+    "rich==13.7.1",
+    "toml==0.10.2",
+    "packaging==24.1",
+    "platformdirs==4.3.6",
+    "filelock==3.16.0",
+    "attrs==24.2.0",
+    "typing-extensions==4.12.2",
+    "jinja2==3.1.4",
+    "markupsafe==2.1.5",
+    "pyyaml==6.0.2",
+    "tabulate==0.9.0",
+    "pluggy==1.5.0",
+    "iniconfig==2.0.0",
+    "cachetools==5.3.3",
+    "colorama==0.4.6",
+]
+
+[tool.px]

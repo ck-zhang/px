@@ -162,3 +162,93 @@ fn build_dry_run_reports_empty_artifacts() {
         "dry-run build should not create dist directory"
     );
 }
+
+#[test]
+fn publish_requires_online_flag_when_artifacts_exist() {
+    let (_tmp, project) = init_empty_project("output-publish-offline");
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["build"])
+        .assert()
+        .success();
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_PUBLISH_TOKEN", "dummy-token")
+        .args(["--json", "publish"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    let message = payload["message"].as_str().expect("message string");
+    assert!(
+        message.contains("PX_ONLINE=1 required for uploads"),
+        "expected offline guard message, got {message:?}"
+    );
+    let hint = payload["details"]["hint"].as_str().expect("hint string");
+    assert!(
+        hint.contains("PX_ONLINE=1"),
+        "hint should instruct enabling PX_ONLINE: {hint:?}"
+    );
+}
+
+#[test]
+fn publish_rejects_empty_token_value() {
+    let (_tmp, project) = init_empty_project("output-publish-empty-token");
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["build"])
+        .assert()
+        .success();
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_ONLINE", "1")
+        .env("PX_PUBLISH_TOKEN", "")
+        .args(["--json", "publish"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    let message = payload["message"].as_str().expect("message string");
+    assert!(
+        message.contains("PX_PUBLISH_TOKEN is empty"),
+        "expected empty token error, got {message:?}"
+    );
+    assert_eq!(
+        payload["details"]["token_env"], "PX_PUBLISH_TOKEN",
+        "details should reflect the token env used"
+    );
+}
+
+#[test]
+fn publish_dry_run_accepts_custom_registry_url() {
+    let (_tmp, project) = init_empty_project("output-publish-custom-registry");
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["build"])
+        .assert()
+        .success();
+
+    let registry = "https://registry.example.invalid/upload/";
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args([
+            "--json",
+            "publish",
+            "--dry-run",
+            "--registry",
+            registry,
+            "--token-env",
+            "PX_FAKE_TOKEN",
+        ])
+        .assert()
+        .success();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["details"]["registry"], registry);
+    assert_eq!(payload["details"]["dry_run"], Value::Bool(true));
+}

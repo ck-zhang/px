@@ -228,16 +228,30 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
         ));
     }
     let tool_root = tool_root_dir(&normalized)?;
-    let metadata = read_metadata(&tool_root).map_err(|err| {
-        InstallUserError::new(
-            format!("tool '{normalized}' is not installed"),
-            json!({
-                "error": err.to_string(),
-                "hint": format!("run `px tool install {normalized}` first"),
-            }),
-        )
-    })?;
-    let snapshot = px_domain::ProjectSnapshot::read_from(&tool_root)?;
+    let metadata = match read_metadata(&tool_root) {
+        Ok(meta) => meta,
+        Err(err) => {
+            return Ok(ExecutionOutcome::user_error(
+                format!("tool '{normalized}' is not installed"),
+                json!({
+                    "error": err.to_string(),
+                    "hint": format!("run `px tool install {normalized}` first"),
+                }),
+            ))
+        }
+    };
+    let snapshot = match px_domain::ProjectSnapshot::read_from(&tool_root) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            return Ok(ExecutionOutcome::user_error(
+                format!("tool '{normalized}' metadata is missing or corrupted"),
+                json!({
+                    "error": err.to_string(),
+                    "hint": format!("reinstall with `px tool install {normalized}`"),
+                }),
+            ))
+        }
+    };
     let runtime_selection = resolve_runtime(Some(&metadata.runtime_version))?;
     env::set_var("PX_RUNTIME_PYTHON", &runtime_selection.record.path);
     if let Err(err) = ensure_project_environment_synced(ctx, &snapshot) {

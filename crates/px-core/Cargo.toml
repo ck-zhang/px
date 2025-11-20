@@ -28,3 +28,6 @@ tempfile.workspace = true
 
 [features]
 default = []
+
+[dev-dependencies]
+httptest = "0.15"

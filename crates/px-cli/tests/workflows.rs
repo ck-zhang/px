@@ -222,6 +222,121 @@ fn run_frozen_errors_when_environment_missing() {
 }
 
 #[test]
+fn run_frozen_errors_when_lock_missing() {
+    let (_tmp, project) = prepare_fixture("run-json-flag");
+    let lock = project.join("px.lock");
+    fs::remove_file(&lock).expect("remove lock");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["--json", "run", "--frozen"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(
+        payload["details"]["reason"], "missing_lock",
+        "expected missing lock reason"
+    );
+    let hint = payload["details"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.to_ascii_lowercase().contains("px sync"),
+        "hint should direct to px sync, got {hint:?}"
+    );
+}
+
+#[test]
+fn run_frozen_errors_when_env_outdated() {
+    let (_tmp, project) = prepare_fixture("run-json-flag");
+    let px_dir = project.join(".px");
+    fs::create_dir_all(&px_dir).expect("px dir");
+    write_stale_state(&project, "stale-lock-hash");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["--json", "run", "--frozen"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(
+        payload["details"]["reason"], "env_outdated",
+        "expected env_outdated reason"
+    );
+    let hint = payload["details"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.to_ascii_lowercase().contains("px sync"),
+        "hint should direct to px sync, got {hint:?}"
+    );
+}
+
+#[test]
+fn run_frozen_errors_on_runtime_mismatch() {
+    let (_tmp, project) = prepare_fixture("run-json-flag");
+    let lock = project.join("px.lock");
+    let lock_id = "52d10cf2634c5817f0e9937a63201c8bc279c9a4e4083e9120a1504afd2a5674";
+    let px_dir = project.join(".px");
+    fs::create_dir_all(&px_dir).expect("px dir");
+    fs::create_dir_all(px_dir.join("site")).expect("site dir");
+
+    // Seed state with matching lock but an incompatible platform to trigger runtime mismatch.
+    let state = serde_json::json!({
+        "current_env": {
+            "id": "test-env",
+            "lock_hash": lock_id,
+            "platform": "osx_64",
+            "site_packages": project.join(".px").join("site").display().to_string(),
+            "python": {
+                "path": "python3",
+                "version": "3.11.0"
+            }
+        }
+    });
+    let mut buf = serde_json::to_vec_pretty(&state).expect("serialize state");
+    buf.push(b'\n');
+    fs::write(px_dir.join("state.json"), buf).expect("write state");
+    assert!(lock.exists(), "fixture lockfile should exist");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["--json", "run", "--frozen"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(
+        payload["details"]["reason"], "runtime_mismatch",
+        "expected runtime mismatch when platform differs"
+    );
+    let hint = payload["details"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.to_ascii_lowercase().contains("px sync"),
+        "hint should recommend px sync, got {hint:?}"
+    );
+}
+
+fn write_stale_state(project: &Path, lock_hash: &str) {
+    let state = serde_json::json!({
+        "current_env": {
+            "id": "test-env",
+            "lock_hash": lock_hash,
+            "platform": "any",
+            "site_packages": project.join(".px").join("site").display().to_string(),
+            "python": {
+                "path": "python3",
+                "version": "3.11.0"
+            }
+        }
+    });
+    let mut buf = serde_json::to_vec_pretty(&state).expect("serialize state");
+    buf.push(b'\n');
+    fs::write(project.join(".px").join("state.json"), buf).expect("write state");
+}
+
+#[test]
 fn run_accepts_post_subcommand_json_flag() {
     use common::prepare_named_fixture;
     let (_tmp, project) = prepare_named_fixture("run-json-flag", "run-json-flag");
@@ -267,6 +382,39 @@ fn run_emits_hint_when_requests_socks_missing_under_proxy() {
         details.get("hint").is_some() || details.get("stderr").is_some(),
         "proxy failure should include remediation hint or stderr"
     );
+}
+
+#[test]
+fn run_frozen_handles_large_dependency_graph() {
+    use common::prepare_named_fixture;
+    let (_tmp, project) = prepare_named_fixture("large_graph", "large-graph");
+    let lock = project.join("px.lock");
+    std::fs::remove_file(&lock).ok(); // force sync to write a fresh lock
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["--json", "sync"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    let status = payload["status"].as_str().unwrap_or_default();
+    assert_ne!(status, "ok", "large graph sync should not succeed");
+    let message = payload["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    assert!(
+        message.contains("resolver") || message.contains("dependency resolution failed"),
+        "expected resolver failure for large graph, got {message:?}"
+    );
+    if let Some(why) = payload["details"]["why"].as_str() {
+        let why_lower = why.to_ascii_lowercase();
+        assert!(
+            why_lower.contains("conflicting") || why_lower.contains("resolver"),
+            "details should mention resolver conflict, got {why:?}"
+        );
+    }
 }
 
 fn write_module(project: &Path, module: &str, body: &str) {
