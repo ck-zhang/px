@@ -317,6 +317,72 @@ fn px_commands_require_project_root() {
 }
 
 #[test]
+fn all_project_commands_surface_missing_project_errors() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let message = "No px project found. Run `px init` in your project directory first.";
+
+    let human_commands = vec![
+        vec!["status"],
+        vec!["add", "requests==2.32.3"],
+        vec!["remove", "requests"],
+        vec!["sync"],
+        vec!["update"],
+        vec!["run"],
+        vec!["test"],
+        vec!["fmt"],
+        vec!["why", "requests"],
+        vec!["build"],
+        vec!["publish"],
+    ];
+
+    for args in &human_commands {
+        let assert = cargo_bin_cmd!("px")
+            .current_dir(temp.path())
+            .args(args)
+            .assert()
+            .failure();
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        assert!(
+            stdout.contains(message),
+            "expected missing-project message for {args:?}, got {stdout:?}"
+        );
+    }
+
+    let json_commands = vec![
+        vec!["--json", "status"],
+        vec!["--json", "add", "requests==2.32.3"],
+        vec!["--json", "remove", "requests"],
+        vec!["--json", "sync"],
+        vec!["--json", "update"],
+        vec!["--json", "run"],
+        vec!["--json", "test"],
+        vec!["--json", "fmt"],
+        vec!["--json", "why", "requests"],
+        vec!["--json", "build"],
+        vec!["--json", "publish"],
+    ];
+
+    for args in &json_commands {
+        let assert = cargo_bin_cmd!("px")
+            .current_dir(temp.path())
+            .args(args)
+            .assert()
+            .failure();
+        let payload = parse_json(&assert);
+        let reason = payload["details"]["reason"].as_str().unwrap_or_default();
+        let hint = payload["details"]["hint"].as_str().unwrap_or_default();
+        assert_eq!(
+            "missing_project", reason,
+            "expected missing_project reason for {args:?}, got {payload}"
+        );
+        assert!(
+            hint.contains("px init"),
+            "expected hint to direct user to px init for {args:?}, got {hint}"
+        );
+    }
+}
+
+#[test]
 fn px_commands_walk_up_to_project_root() {
     if !require_online() {
         return;
