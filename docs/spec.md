@@ -485,20 +485,20 @@ Run tests in the project env, mirroring `px run`’s consistency rules.
 ### 5.8 `px fmt`
 
 **Intent**
-Run configured formatters/linters/cleanup tools in the project env.
+Run configured formatters/linters/cleanup **tools** via their px-managed tool environments.
 
 **Preconditions & behavior**
 
-* Same env/lock consistency semantics as `px run`.
-* Accepts `--frozen` (or honors `CI=1`) to refuse env rebuilds and require a clean env.
-* If required tools are missing:
+* Same env/lock consistency rules as `px run`.
+* Honors `--frozen` / `CI=1` (no env rebuilds).
+* If a required tool isn’t installed:
 
-  * px suggests adding them (e.g. `px add --group dev ruff`).
+  * Suggest installing it (e.g. `px tool install ruff`).
 
 **Postconditions**
 
-* Codebase may be modified by the tools.
-* Project env/lock consistency maintained.
+* Code may be modified by the invoked tools.
+* Manifest/lock unchanged; project consistency preserved.
 
 ---
 
