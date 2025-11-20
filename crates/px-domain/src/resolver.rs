@@ -93,6 +93,14 @@ impl ConstraintSet {
     fn allows(&self, version: &Version) -> bool {
         self.specs.iter().all(|spec| spec.contains(version))
     }
+
+    fn display(&self) -> String {
+        self.specs
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" && ")
+    }
 }
 
 pub fn resolve(request: &ResolveRequest) -> Result<Vec<ResolvedSpecifier>> {
@@ -259,6 +267,25 @@ impl<'a> ResolverContext<'a> {
             return Ok(false);
         }
         Ok(true)
+    }
+
+    fn conflict_report(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push("dependency resolution failed due to conflicts:".to_string());
+        let mut entries: Vec<_> = self.constraints.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, set) in entries {
+            let picked = self
+                .resolved
+                .get(name)
+                .map(|spec| spec.selected_version.clone())
+                .unwrap_or_else(|| "<none>".to_string());
+            lines.push(format!(
+                "  - {name}: picked {picked}, constraints [{}]",
+                set.display()
+            ));
+        }
+        lines.join("\n")
     }
 
     fn parse_requirement(&self, frame: &RequirementFrame) -> Result<Option<ParsedRequirement>> {
