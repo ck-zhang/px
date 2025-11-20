@@ -1,4 +1,4 @@
-use std::{env, fs};
+use std::{env, fs, process::Command};
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::Value;
@@ -18,6 +18,14 @@ fn px_command(temp: &TempDir) -> assert_cmd::Command {
     let mut cmd = cargo_bin_cmd!("px");
     cmd.current_dir(temp.path())
         .env("PX_ONLINE", "1")
+        .env("PX_CACHE_PATH", temp.path().join(".px-cache"));
+    cmd
+}
+
+fn px_command_offline(temp: &TempDir) -> assert_cmd::Command {
+    let mut cmd = cargo_bin_cmd!("px");
+    cmd.current_dir(temp.path())
+        .env("PX_ONLINE", "0")
         .env("PX_CACHE_PATH", temp.path().join(".px-cache"));
     cmd
 }
@@ -360,6 +368,429 @@ px-dev = ["pytest>=7.0"]
     assert!(
         !names.iter().any(|name| name == "tomli"),
         "tomli should be skipped when python_version >= 3.11"
+    );
+}
+
+#[test]
+fn migrate_apply_rolls_back_on_failure() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pyproject_path = temp.path().join("pyproject.toml");
+    write_file(
+        &temp,
+        "pyproject.toml",
+        r#"[project]
+name = "rollback-demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["click==8.1.7"]
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#,
+    );
+    let original = fs::read_to_string(&pyproject_path).expect("pyproject");
+    write_file(&temp, "requirements.txt", "definitely-not-a-real-pkg>=1\n");
+
+    let assert = px_command(&temp)
+        .args([
+            "migrate",
+            "--apply",
+            "--source",
+            "requirements.txt",
+            "--allow-dirty",
+        ])
+        .assert()
+        .failure();
+    let output = command_output(&assert);
+    assert!(
+        output.contains("definitely-not-a-real-pkg"),
+        "expected resolver failure to bubble up ({output})"
+    );
+
+    let current = fs::read_to_string(&pyproject_path).expect("pyproject restored");
+    assert_eq!(current, original, "pyproject should be restored on failure");
+    assert!(
+        !temp.path().join("px.lock").exists(),
+        "px.lock should not be written when migration fails"
+    );
+}
+
+#[test]
+fn migrate_respects_source_overrides() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(&temp, "requirements.txt", "rich==13.7.1\n");
+    write_file(&temp, "alt-reqs.txt", "httpx==0.27.0\n");
+    write_file(&temp, "requirements-dev.txt", "pytest==8.1.0\n");
+    write_file(&temp, "dev-alt.txt", "coverage==7.4.4\n");
+
+    let output = run_migrate_json(
+        &temp,
+        &["--source", "alt-reqs.txt", "--dev-source", "dev-alt.txt"],
+    );
+    let packages = output["details"]["packages"]
+        .as_array()
+        .expect("packages array");
+
+    let has_httpx = packages.iter().any(|pkg| {
+        pkg["name"] == "httpx" && pkg["source"] == "alt-reqs.txt" && pkg["scope"] == "prod"
+    });
+    let has_coverage = packages.iter().any(|pkg| {
+        pkg["name"] == "coverage" && pkg["source"] == "dev-alt.txt" && pkg["scope"] == "dev"
+    });
+    let has_rich = packages.iter().any(|pkg| pkg["name"] == "rich");
+    let has_pytest = packages.iter().any(|pkg| pkg["name"] == "pytest");
+
+    assert!(has_httpx, "override prod source should be used");
+    assert!(has_coverage, "override dev source should be used");
+    assert!(
+        !has_rich,
+        "default prod requirements should be ignored when override is set"
+    );
+    assert!(
+        !has_pytest,
+        "default dev requirements should be ignored when dev override is set"
+    );
+}
+
+#[test]
+fn migrate_blocks_dirty_worktree_without_flag() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(
+        &temp,
+        "pyproject.toml",
+        r#"[project]
+name = "dirty-demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#,
+    );
+    Command::new("git")
+        .arg("init")
+        .current_dir(temp.path())
+        .output()
+        .expect("git init");
+
+    let assert = px_command(&temp)
+        .args(["migrate", "--apply"])
+        .assert()
+        .failure();
+    let output = command_output(&assert);
+    assert!(
+        output.contains("worktree dirty") || output.contains("allow-dirty"),
+        "expected dirty worktree failure: {output}"
+    );
+
+    let success = px_command(&temp)
+        .args(["--json", "migrate", "--apply", "--allow-dirty"])
+        .assert()
+        .success();
+    let payload: Value = serde_json::from_slice(&success.get_output().stdout).expect("json");
+    assert_eq!(payload["status"], "ok");
+}
+
+#[test]
+fn migrate_lock_only_requires_pyproject() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let assert = px_command(&temp)
+        .args(["migrate", "--apply", "--lock-only"])
+        .assert()
+        .failure();
+    let output = command_output(&assert);
+    assert!(
+        output.contains("pyproject.toml required"),
+        "expected lock-only to require pyproject: {output}"
+    );
+}
+
+#[test]
+fn migrate_autopins_dev_specs_without_clobbering_existing() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(
+        &temp,
+        "pyproject.toml",
+        r#"[project]
+name = "dev-autopin"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["click==8.1.7"]
+
+[project.optional-dependencies]
+px-dev = ["pytest==7.4.4"]
+"#,
+    );
+    write_file(&temp, "requirements-dev.txt", "coverage>=7.4\n");
+
+    let output = run_migrate_json(&temp, &["--apply"]);
+    let names = autopinned(&output["details"]);
+    assert!(
+        names.contains(&"coverage".to_string()),
+        "coverage should be autopinned from requirements-dev"
+    );
+
+    let pycontents = fs::read_to_string(temp.path().join("pyproject.toml")).expect("pyproject");
+    let doc: DocumentMut = pycontents.parse().expect("pyproject toml");
+    let dev_array = doc["project"]["optional-dependencies"]["px-dev"]
+        .as_array()
+        .expect("px-dev optional dependency group should exist");
+    let dev_specs: Vec<_> = dev_array.iter().filter_map(|item| item.as_str()).collect();
+    assert!(
+        dev_specs.iter().any(|spec| spec.starts_with("coverage==")),
+        "coverage should be pinned in px-dev"
+    );
+    assert!(
+        dev_specs.iter().any(|spec| spec == &"pytest==7.4.4"),
+        "existing px-dev entries should remain intact"
+    );
+    assert!(
+        temp.path().join("px.lock").exists(),
+        "px.lock should be created after autopin apply"
+    );
+}
+
+#[test]
+fn migrate_preview_respects_offline_mode() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(&temp, "requirements.txt", "rich==13.7.1\n");
+
+    let assert = px_command_offline(&temp)
+        .args(["--json", "migrate"])
+        .assert()
+        .success();
+    let payload: Value = serde_json::from_slice(&assert.get_output().stdout).expect("json");
+    assert_eq!(payload["status"], "ok");
+    let actions = payload["details"]["actions"].as_object().expect("actions");
+    assert_eq!(actions["pyproject_updated"], Value::Bool(false));
+    assert_eq!(actions["lock_written"], Value::Bool(false));
+}
+
+#[test]
+fn migrate_apply_fails_fast_offline() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(&temp, "requirements.txt", "rich==13.7.1\n");
+
+    let assert = px_command_offline(&temp)
+        .args(["migrate", "--apply", "--allow-dirty"])
+        .assert()
+        .failure();
+    let output = command_output(&assert);
+    assert!(
+        output.contains("PX_ONLINE=1 required"),
+        "offline apply should fail fast with hint: {output}"
+    );
+}
+
+#[test]
+fn migrate_conflict_reports_precedence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(
+        &temp,
+        "pyproject.toml",
+        r#"[project]
+name = "conflict-demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["click==8.1.7"]
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#,
+    );
+    write_file(&temp, "requirements.txt", "click==7.1.0\n");
+
+    let assert = px_command(&temp)
+        .args(["--json", "migrate", "--apply", "--allow-dirty"])
+        .assert()
+        .failure();
+    let output = command_output(&assert);
+    let payload: Value = serde_json::from_str(output.trim()).expect("json error payload");
+    let message = payload["message"].as_str().unwrap_or("");
+    let hint = payload["details"]["hint"].as_str().unwrap_or("");
+    assert!(
+        message.contains("conflicting dependency sources"),
+        "expected conflict message: {message}"
+    );
+    assert!(
+        hint.contains("pyproject") || hint.contains("pyproject.toml"),
+        "conflict hint should mention precedence: {hint}"
+    );
+    assert!(
+        hint.contains("--source") || hint.contains("--dev-source"),
+        "conflict hint should mention explicit source flags: {hint}"
+    );
+}
+
+#[test]
+fn migrate_crash_restores_backup() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(&temp, "requirements.txt", "rich==13.7.1\n");
+
+    let assert = px_command(&temp)
+        .env("PX_TEST_MIGRATE_CRASH", "1")
+        .args([
+            "migrate",
+            "--apply",
+            "--source",
+            "requirements.txt",
+            "--allow-dirty",
+        ])
+        .assert()
+        .failure();
+    let output = command_output(&assert);
+    assert!(output.contains("test crash hook"));
+
+    let pyproject = temp.path().join("pyproject.toml");
+    assert!(
+        !pyproject.exists(),
+        "pyproject should be removed when migration creates it and then crashes"
+    );
+    assert!(
+        !temp.path().join("px.lock").exists(),
+        "px.lock should not exist after crash"
+    );
+}
+
+#[test]
+fn migrate_preserves_foreign_tool_sections() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(
+        &temp,
+        "pyproject.toml",
+        r#"[project]
+name = "foreign-tool"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.poetry]
+package-mode = false
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#,
+    );
+    write_file(&temp, "requirements.txt", "rich==13.7.1\n");
+
+    px_command(&temp)
+        .args([
+            "migrate",
+            "--apply",
+            "--allow-dirty",
+            "--source",
+            "requirements.txt",
+        ])
+        .assert()
+        .success();
+
+    let contents = fs::read_to_string(temp.path().join("pyproject.toml")).expect("pyproject");
+    assert!(
+        contents.contains("[tool.poetry]"),
+        "foreign tool section should be preserved"
+    );
+    assert!(
+        contents.contains("rich==13.7.1"),
+        "requirements should be merged"
+    );
+}
+
+#[test]
+fn migrate_preview_reports_foreign_tools() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(
+        &temp,
+        "pyproject.toml",
+        r#"[project]
+name = "foreign-preview"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.poetry]
+package-mode = false
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#,
+    );
+
+    write_file(&temp, "requirements.txt", "rich==13.7.1\n");
+
+    let assert = px_command(&temp)
+        .args(["--json", "migrate"])
+        .assert()
+        .success();
+    let payload: Value = serde_json::from_slice(&assert.get_output().stdout).expect("json");
+    let tools = payload["details"]["foreign_tools"]
+        .as_array()
+        .expect("foreign_tools");
+    assert!(
+        tools.iter().any(|t| t == "poetry"),
+        "foreign tool list should include poetry"
+    );
+    let hint = payload["details"]["hint"].as_str().unwrap_or("");
+    assert!(
+        hint.contains("foreign tool"),
+        "hint should mention foreign tools: {hint}"
+    );
+}
+
+#[test]
+fn migrate_rejects_poetry_owned_dependencies() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(
+        &temp,
+        "pyproject.toml",
+        r#"[project]
+name = "poetry-owned"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.poetry]
+package-mode = false
+
+[tool.poetry.dependencies]
+requests = "^2.32"
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#,
+    );
+
+    let assert = px_command_offline(&temp)
+        .args(["--json", "migrate", "--apply", "--allow-dirty"])
+        .assert()
+        .failure();
+
+    let payload: Value = serde_json::from_slice(&assert.get_output().stdout).expect("json");
+    assert_eq!(payload["status"], "error");
+    let message = payload["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("pyproject managed"),
+        "expected foreign owner refusal: {message}"
+    );
+    let hint = payload["details"]["hint"].as_str().unwrap_or("");
+    assert!(
+        hint.contains("poetry"),
+        "hint should reference poetry: {hint}"
     );
 }
 

@@ -44,6 +44,7 @@ pub struct BackupManager {
     root: PathBuf,
     dir: Option<PathBuf>,
     entries: Vec<String>,
+    copies: Vec<(PathBuf, PathBuf)>,
 }
 
 impl BackupManager {
@@ -53,6 +54,7 @@ impl BackupManager {
             root: root.to_path_buf(),
             dir: None,
             entries: Vec::new(),
+            copies: Vec::new(),
         }
     }
 
@@ -74,6 +76,24 @@ impl BackupManager {
         }
         fs::copy(path, &dest)?;
         self.entries.push(relative_path(&self.root, &dest));
+        self.copies.push((path.to_path_buf(), dest));
+        Ok(())
+    }
+
+    /// Restore every backed up file to its original location.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a restore copy fails.
+    pub fn restore_all(&self) -> Result<()> {
+        for (original, backup) in &self.copies {
+            if backup.exists() {
+                if let Some(parent) = original.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(backup, original)?;
+            }
+        }
         Ok(())
     }
 
@@ -188,4 +208,165 @@ fn create_minimal_pyproject_doc(root: &Path) -> Result<DocumentMut> {
         + "requires = [\"setuptools>=70\", \"wheel\"]\n"
         + "build-backend = \"setuptools.build_meta\"\n";
     Ok(template.parse()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::{
+        read_dependencies_from_doc, read_optional_dependency_group, requirement_display_name,
+    };
+    use tempfile::tempdir;
+    use toml_edit::DocumentMut;
+
+    fn pkg(spec: &str, scope: &str, source: &str) -> OnboardPackagePlan {
+        OnboardPackagePlan {
+            name: requirement_display_name(spec),
+            requested: spec.to_string(),
+            scope: scope.to_string(),
+            source: source.to_string(),
+        }
+    }
+
+    fn pyproject_with_backend(build_block: &str) -> String {
+        format!(
+            r#"[project]
+name = "backend-demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["base-project==1.0.0"]
+
+{build_block}
+"#
+        )
+    }
+
+    #[test]
+    fn prepare_plan_preserves_various_build_backends() -> Result<()> {
+        let cases = vec![
+            (
+                "setuptools",
+                r#"[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#,
+                "setuptools.build_meta",
+            ),
+            (
+                "hatchling",
+                r#"[build-system]
+requires = ["hatchling>=1.22"]
+build-backend = "hatchling.build"
+"#,
+                "hatchling.build",
+            ),
+            (
+                "flit",
+                r#"[build-system]
+requires = ["flit-core>=3.9.0"]
+build-backend = "flit_core.buildapi"
+"#,
+                "flit_core.buildapi",
+            ),
+            (
+                "poetry",
+                r#"[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"
+"#,
+                "poetry.core.masonry.api",
+            ),
+            (
+                "pdm",
+                r#"[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+"#,
+                "pdm.backend",
+            ),
+        ];
+
+        for (label, build_block, expected_backend) in cases {
+            let dir = tempdir()?;
+            let pyproject_path = dir.path().join("pyproject.toml");
+            fs::write(&pyproject_path, pyproject_with_backend(build_block))?;
+
+            let packages = vec![
+                pkg("httpx==0.27.0", "prod", "requirements.txt"),
+                pkg("pytest==8.2.0", "dev", "requirements-dev.txt"),
+            ];
+
+            let plan = prepare_pyproject_plan(dir.path(), &pyproject_path, false, &packages)?;
+            assert!(plan.needs_backup(), "expected backup for {label}");
+            assert!(!plan.created, "pyproject should already exist for {label}");
+
+            let contents = plan.contents.expect("pyproject should be rewritten");
+            let doc: DocumentMut = contents.parse()?;
+
+            let deps = read_dependencies_from_doc(&doc);
+            assert!(
+                deps.contains(&"base-project==1.0.0".to_string()),
+                "base dependency missing for {label}"
+            );
+            assert!(
+                deps.contains(&"httpx==0.27.0".to_string()),
+                "merged prod dependency missing for {label}"
+            );
+
+            let dev_specs = read_optional_dependency_group(&doc, "px-dev");
+            assert!(
+                dev_specs.contains(&"pytest==8.2.0".to_string()),
+                "dev dependency missing for {label}"
+            );
+
+            let backend = doc["build-system"]["build-backend"].as_str().unwrap_or("");
+            assert_eq!(
+                backend, expected_backend,
+                "build backend altered for {label}"
+            );
+
+            let requires = doc["build-system"]["requires"]
+                .as_array()
+                .expect("build-system.requires should remain an array");
+            assert!(
+                !requires.is_empty(),
+                "build-system.requires should be preserved for {label}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn lock_only_plan_leaves_existing_pyproject_unmodified() -> Result<()> {
+        let dir = tempdir()?;
+        let pyproject_path = dir.path().join("pyproject.toml");
+        fs::write(
+            &pyproject_path,
+            pyproject_with_backend(
+                r#"[build-system]
+requires = ["hatchling>=1.22"]
+build-backend = "hatchling.build"
+"#,
+            ),
+        )?;
+
+        let packages = vec![pkg("httpx==0.27.0", "prod", "requirements.txt")];
+
+        let plan = prepare_pyproject_plan(dir.path(), &pyproject_path, true, &packages)?;
+        assert!(
+            plan.contents.is_none(),
+            "lock-only should not rewrite pyproject"
+        );
+        assert!(
+            !plan.created,
+            "existing pyproject should not be marked created"
+        );
+        assert!(
+            !plan.needs_backup(),
+            "no backup needed when no contents are written"
+        );
+
+        Ok(())
+    }
 }

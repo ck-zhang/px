@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use std::{env, fs};
+use std::{collections::HashMap, env, fs, path::PathBuf};
+use toml_edit::DocumentMut;
 
 use px_domain::{
     collect_pyproject_packages, collect_requirement_packages, plan_autopin, prepare_pyproject_plan,
     resolve_onboard_path, AutopinEntry, AutopinPending, AutopinState, BackupManager,
-    InstallOverride, PinSpec,
+    InstallOverride, OnboardPackagePlan, PinSpec,
 };
 
 use crate::{
@@ -13,6 +14,29 @@ use crate::{
     resolve_dependencies_with_effects, summarize_autopins, CommandContext, ExecutionOutcome,
     InstallState, InstallUserError, ManifestSnapshot,
 };
+
+#[derive(Clone, Debug)]
+struct PackageConflict {
+    name: String,
+    scope: String,
+    kept_source: String,
+    kept_spec: String,
+    dropped_source: String,
+    dropped_spec: String,
+}
+
+#[cfg(test)]
+fn test_migration_crash_hook() -> anyhow::Result<()> {
+    if env::var("PX_TEST_MIGRATE_CRASH").ok().as_deref() == Some("1") {
+        anyhow::bail!("test crash hook");
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn test_migration_crash_hook() -> anyhow::Result<()> {
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum MigrationMode {
@@ -60,6 +84,105 @@ impl AutopinPreference {
     const fn autopin_enabled(self) -> bool {
         matches!(self, Self::Enabled)
     }
+}
+
+fn package_priority(
+    pkg: &OnboardPackagePlan,
+    requirements_rel: Option<&String>,
+    dev_rel: Option<&String>,
+    source_override: &Option<String>,
+    dev_override: &Option<String>,
+) -> u8 {
+    if requirements_rel
+        .map(|rel| rel == &pkg.source)
+        .unwrap_or(false)
+        && source_override.is_some()
+    {
+        return 3;
+    }
+    if dev_rel.map(|rel| rel == &pkg.source).unwrap_or(false) && dev_override.is_some() {
+        return 3;
+    }
+    if pkg.source.ends_with("pyproject.toml") {
+        2
+    } else {
+        1
+    }
+}
+
+fn apply_precedence(
+    packages: &[OnboardPackagePlan],
+    requirements_rel: Option<&String>,
+    dev_rel: Option<&String>,
+    source_override: &Option<String>,
+    dev_override: &Option<String>,
+) -> (Vec<OnboardPackagePlan>, Vec<PackageConflict>) {
+    let mut selected = HashMap::new();
+    let mut order = Vec::new();
+    let mut conflicts = Vec::new();
+
+    for pkg in packages {
+        let priority = package_priority(
+            pkg,
+            requirements_rel,
+            dev_rel,
+            source_override,
+            dev_override,
+        );
+        let key = (pkg.name.clone(), pkg.scope.clone());
+        match selected.get(&key) {
+            None => {
+                selected.insert(key.clone(), (priority, pkg.clone()));
+                order.push(key);
+            }
+            Some((existing_pri, existing_pkg)) => {
+                if *existing_pri > priority {
+                    if existing_pkg.requested != pkg.requested {
+                        conflicts.push(PackageConflict {
+                            name: pkg.name.clone(),
+                            scope: pkg.scope.clone(),
+                            kept_source: existing_pkg.source.clone(),
+                            kept_spec: existing_pkg.requested.clone(),
+                            dropped_source: pkg.source.clone(),
+                            dropped_spec: pkg.requested.clone(),
+                        });
+                    }
+                } else if *existing_pri < priority {
+                    if existing_pkg.requested != pkg.requested {
+                        conflicts.push(PackageConflict {
+                            name: pkg.name.clone(),
+                            scope: pkg.scope.clone(),
+                            kept_source: pkg.source.clone(),
+                            kept_spec: pkg.requested.clone(),
+                            dropped_source: existing_pkg.source.clone(),
+                            dropped_spec: existing_pkg.requested.clone(),
+                        });
+                    }
+                    selected.insert(key.clone(), (priority, pkg.clone()));
+                    if !order.contains(&key) {
+                        order.push(key);
+                    }
+                } else if existing_pkg.requested != pkg.requested {
+                    conflicts.push(PackageConflict {
+                        name: pkg.name.clone(),
+                        scope: pkg.scope.clone(),
+                        kept_source: existing_pkg.source.clone(),
+                        kept_spec: existing_pkg.requested.clone(),
+                        dropped_source: pkg.source.clone(),
+                        dropped_spec: pkg.requested.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut final_packages = Vec::new();
+    for key in order {
+        if let Some((_, pkg)) = selected.remove(&key) {
+            final_packages.push(pkg);
+        }
+    }
+    (final_packages, conflicts)
 }
 
 #[derive(Clone, Debug)]
@@ -135,10 +258,21 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     let mut packages = Vec::new();
     let mut source_summaries = Vec::new();
 
+    let requirements_rel = requirements_path
+        .as_ref()
+        .map(|path| crate::relative_path_str(path, &root));
+    let dev_rel = dev_path
+        .as_ref()
+        .map(|path| crate::relative_path_str(path, &root));
+    let mut foreign_tools = Vec::new();
+    let mut foreign_owners = Vec::new();
+
     if pyproject_exists {
         let (summary, mut rows) = collect_pyproject_packages(&root, &pyproject_path)?;
         source_summaries.push(summary);
         packages.append(&mut rows);
+        foreign_tools = detect_foreign_tool_sections(&pyproject_path)?;
+        foreign_owners = detect_foreign_tool_conflicts(&pyproject_path)?;
     }
 
     if let Some(path) = requirements_path.as_ref() {
@@ -166,6 +300,45 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     } else {
         "bare"
     };
+
+    let (packages, conflicts) = apply_precedence(
+        &packages,
+        requirements_rel.as_ref(),
+        dev_rel.as_ref(),
+        &source_override,
+        &dev_override,
+    );
+
+    if !conflicts.is_empty() {
+        let conflict_values: Vec<Value> = conflicts
+            .iter()
+            .map(|conflict| {
+                json!({
+                    "name": conflict.name,
+                    "scope": conflict.scope,
+                    "kept": {
+                        "source": conflict.kept_source,
+                        "spec": conflict.kept_spec,
+                    },
+                    "dropped": {
+                        "source": conflict.dropped_source,
+                        "spec": conflict.dropped_spec,
+                    },
+                })
+            })
+            .collect();
+        let mut details = json!({
+            "project_type": project_type,
+            "conflicts": conflict_values,
+            "precedence": "--source/--dev-source > pyproject.toml > requirements.txt",
+            "hint": "Resolve conflicting specs or rely on explicit --source/--dev-source to pick the right file.",
+        });
+        details["sources"] = json!(source_summaries);
+        return Ok(ExecutionOutcome::user_error(
+            "px migrate: conflicting dependency sources (pyproject takes precedence over requirements)",
+            details,
+        ));
+    }
 
     let prod_count = packages.iter().filter(|pkg| pkg.scope == "prod").count();
     let dev_count = packages.iter().filter(|pkg| pkg.scope == "dev").count();
@@ -213,10 +386,53 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         },
     });
 
+    let foreign_hint = (!foreign_tools.is_empty()).then(|| {
+        details["foreign_tools"] = Value::Array(
+            foreign_tools
+                .iter()
+                .map(|t| Value::String(t.clone()))
+                .collect(),
+        );
+        format!(
+            "Preserved foreign tool configuration: {}",
+            foreign_tools.join(", ")
+        )
+    });
+
+    if !foreign_owners.is_empty() {
+        details["foreign_owners"] = Value::Array(
+            foreign_owners
+                .iter()
+                .map(|t| Value::String(t.clone()))
+                .collect(),
+        );
+        details["hint"] = Value::String(format!(
+            "pyproject managed by {}; remove tool-managed dependencies or export requirements first",
+            foreign_owners.join(", ")
+        ));
+        return Ok(ExecutionOutcome::user_error(
+            "px migrate: pyproject managed by another tool",
+            details,
+        ));
+    }
+
     if !write_requested {
-        details["hint"] =
-            Value::String("Preview confirmed; rerun with --apply to write changes".to_string());
+        let mut hint = "Preview confirmed; rerun with --apply to write changes".to_string();
+        if let Some(extra) = foreign_hint.as_ref() {
+            hint = format!("{hint} • {extra}");
+        }
+        details["hint"] = Value::String(hint);
         return Ok(ExecutionOutcome::success(message, details));
+    }
+
+    if write_requested && !ctx.config().network.online {
+        details["hint"] = Value::String(
+            "PX_ONLINE=1 required for `px migrate --apply`; rerun with network access or drop --apply for preview.".to_string(),
+        );
+        return Ok(ExecutionOutcome::user_error(
+            "px migrate: PX_ONLINE=1 required for apply",
+            details,
+        ));
     }
 
     if !allow_dirty {
@@ -236,6 +452,8 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     }
 
     let mut backups = BackupManager::new(&root);
+    let mut created_files: Vec<PathBuf> = Vec::new();
+    let mut pyproject_modified = false;
     let pyproject_plan = prepare_pyproject_plan(&root, &pyproject_path, lock_only, &packages)?;
     let mut pyproject_backed_up = false;
     if pyproject_plan.needs_backup() {
@@ -247,6 +465,17 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
             fs::create_dir_all(parent)?;
         }
         fs::write(&pyproject_plan.path, contents)?;
+        pyproject_modified = true;
+        if pyproject_plan.created {
+            created_files.push(pyproject_plan.path.clone());
+        }
+    }
+
+    if pyproject_modified {
+        if let Err(err) = test_migration_crash_hook() {
+            rollback_failed_migration(&backups, &created_files)?;
+            return Err(err);
+        }
     }
 
     let mut autopin_entries = Vec::new();
@@ -264,14 +493,23 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
             let resolved = resolve_dependencies_with_effects(effects.as_ref(), &override_snapshot)?;
             Ok(resolved.pins)
         };
-        match plan_autopin(
+        let autopin_state = match plan_autopin(
             &autopin_snapshot,
             &pyproject_path,
             lock_only,
             no_autopin,
             &resolver,
             &marker_env,
-        )? {
+        ) {
+            Ok(state) => state,
+            Err(err) => {
+                if pyproject_modified {
+                    rollback_failed_migration(&backups, &created_files)?;
+                }
+                return Err(err);
+            }
+        };
+        match autopin_state {
             AutopinState::NotNeeded => {}
             AutopinState::Disabled { pending } => {
                 if !pending.is_empty() {
@@ -281,6 +519,9 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
                 details["hint"] = Value::String(
                     "Loose specs remain; drop --no-autopin or pin pyproject manually.".to_string(),
                 );
+                if pyproject_modified {
+                    rollback_failed_migration(&backups, &created_files)?;
+                }
                 return Ok(ExecutionOutcome::user_error(
                     "px migrate: automatic pinning disabled but loose specs remain",
                     details,
@@ -297,6 +538,7 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
                     }
                     fs::write(&pyproject_plan.path, contents)?;
                     autopin_changed_pyproject = true;
+                    pyproject_modified = true;
                 }
                 install_override = plan.install_override;
                 autopin_hint = summarize_autopins(&autopin_entries);
@@ -312,17 +554,30 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         }
     }
 
-    let snapshot = manifest_snapshot_at(&root)?;
+    let snapshot = match manifest_snapshot_at(&root) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            if pyproject_modified {
+                rollback_failed_migration(&backups, &created_files)?;
+            }
+            return Err(err);
+        }
+    };
     let lock_needs_backup = snapshot.lock_path.exists() && !lock_is_fresh(&snapshot)?;
     if lock_needs_backup {
         backups.backup(&snapshot.lock_path)?;
     }
     let install_outcome = match install_snapshot(ctx, &snapshot, false, install_override.as_ref()) {
         Ok(ok) => ok,
-        Err(err) => match err.downcast::<InstallUserError>() {
-            Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
-            Err(err) => return Err(err),
-        },
+        Err(err) => {
+            if pyproject_modified {
+                rollback_failed_migration(&backups, &created_files)?;
+            }
+            match err.downcast::<InstallUserError>() {
+                Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                Err(err) => return Err(err),
+            }
+        }
     };
 
     let backup_summary = backups.finish();
@@ -356,6 +611,13 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
                 hint = format!("{hint} • {extra}");
             }
         }
+        if let Some(extra) = foreign_hint.as_ref() {
+            if hint.is_empty() {
+                hint = extra.clone();
+            } else {
+                hint = format!("{hint} • {extra}");
+            }
+        }
         if !hint.is_empty() {
             details["hint"] = Value::String(hint);
         }
@@ -367,10 +629,100 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         if let Some(extra) = autopin_hint {
             hint = format!("{hint} • {extra}");
         }
+        if let Some(extra) = foreign_hint.as_ref() {
+            hint = format!("{hint} • {extra}");
+        }
         details["hint"] = Value::String(hint);
         Ok(ExecutionOutcome::success(
             "px migrate: nothing to apply (already in sync)",
             details,
         ))
     }
+}
+
+fn detect_foreign_tool_sections(path: &PathBuf) -> Result<Vec<String>> {
+    let contents = fs::read_to_string(path)?;
+    let doc: DocumentMut = contents.parse()?;
+    let tool_table = doc
+        .get("tool")
+        .and_then(toml_edit::Item::as_table)
+        .map(toml_edit::Table::iter)
+        .into_iter()
+        .flatten();
+
+    let known = ["poetry", "pdm", "hatch", "flit", "rye"];
+    let mut found = Vec::new();
+    for (key, _) in tool_table {
+        if known.contains(&key) {
+            found.push(key.to_string());
+        }
+    }
+    found.sort();
+    found.dedup();
+    Ok(found)
+}
+
+fn item_has_dependencies(item: &toml_edit::Item) -> bool {
+    if let Some(array) = item.as_array() {
+        return !array.is_empty();
+    }
+    if let Some(table) = item.as_table() {
+        return !table.is_empty();
+    }
+    false
+}
+
+fn table_declares_dependencies(table: &toml_edit::Table) -> bool {
+    for key in ["dependencies", "dev-dependencies"] {
+        if let Some(entry) = table.get(key) {
+            if item_has_dependencies(entry) {
+                return true;
+            }
+        }
+    }
+
+    if let Some(group_table) = table.get("group").and_then(toml_edit::Item::as_table) {
+        for (_, group_item) in group_table.iter() {
+            if let Some(group_entry) = group_item.as_table() {
+                if table_declares_dependencies(group_entry) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn detect_foreign_tool_conflicts(path: &PathBuf) -> Result<Vec<String>> {
+    let contents = fs::read_to_string(path)?;
+    let doc: DocumentMut = contents.parse()?;
+    let Some(tool_table) = doc.get("tool").and_then(toml_edit::Item::as_table) else {
+        return Ok(Vec::new());
+    };
+
+    let known = ["poetry", "pdm", "hatch", "flit", "rye"];
+    let mut owners = Vec::new();
+    for (key, value) in tool_table.iter() {
+        if !known.contains(&key) {
+            continue;
+        }
+        if let Some(table) = value.as_table() {
+            if table_declares_dependencies(table) {
+                owners.push(key.to_string());
+            }
+        }
+    }
+    owners.sort();
+    owners.dedup();
+    Ok(owners)
+}
+
+fn rollback_failed_migration(backups: &BackupManager, created_files: &[PathBuf]) -> Result<()> {
+    backups.restore_all()?;
+    for path in created_files {
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
 }
