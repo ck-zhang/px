@@ -37,6 +37,7 @@ pub struct ProjectStateReport {
 }
 
 impl ProjectStateReport {
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         manifest_exists: bool,

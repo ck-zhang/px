@@ -309,10 +309,10 @@ fn px_commands_require_project_root() {
         .assert()
         .failure();
 
-    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
         stderr.contains("No px project found. Run `px init` in your project directory first."),
-        "expected root error, got stderr: {stderr:?}"
+        "expected root error, got output: {stderr:?}"
     );
 }
 
