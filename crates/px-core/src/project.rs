@@ -330,10 +330,33 @@ pub fn project_status(ctx: &CommandContext) -> Result<ExecutionOutcome> {
         details["environment_issue"] = issue;
     }
     details["runtime"] = detect_runtime_details(ctx, &snapshot);
-    details["environment"] =
+    let env_details =
         collect_environment_status(ctx, &snapshot, outcome.state != InstallState::MissingLock)?;
+    details["environment"] = env_details.clone();
     match outcome.state {
         InstallState::UpToDate => {
+            let env_status = env_details
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            if !state_report.is_consistent() {
+                let canonical = state_report.canonical.as_str().to_string();
+                details["status"] = Value::String(canonical);
+                if let Some(reason) = env_details.get("reason") {
+                    details["reason"] = reason.clone();
+                }
+                if let Some(hint) = env_details.get("hint") {
+                    details["hint"] = hint.clone();
+                }
+                let message = match env_status {
+                    "missing" => "Project environment is missing",
+                    "out-of-sync" => "Project environment is out of sync with px.lock",
+                    "unknown" => "Project environment status is unknown",
+                    _ => "Project environment is not ready",
+                };
+                return Ok(ExecutionOutcome::user_error(message, details));
+            }
+
             details["status"] = Value::String("in-sync".to_string());
             Ok(ExecutionOutcome::success(
                 "Environment is in sync with px.lock",
