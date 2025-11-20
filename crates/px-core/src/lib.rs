@@ -621,6 +621,10 @@ pub use tools::{
     ToolListRequest, ToolRemoveRequest, ToolRunRequest, ToolUpgradeRequest,
 };
 
+pub const MISSING_PROJECT_MESSAGE: &str =
+    "No px project found. Run `px init` in your project directory first.";
+pub const MISSING_PROJECT_HINT: &str = "Run `px init` in your project directory first.";
+
 pub(crate) struct InstallOutcome {
     state: InstallState,
     lockfile: String,
@@ -2269,14 +2273,34 @@ pub(crate) fn python_context_with_mode(
 ) -> Result<(PythonContext, Option<EnvironmentSyncReport>), ExecutionOutcome> {
     match PythonContext::new_with_guard(ctx, guard) {
         Ok(result) => Ok(result),
-        Err(err) => match err.downcast::<InstallUserError>() {
-            Ok(user) => Err(ExecutionOutcome::user_error(user.message, user.details)),
-            Err(err) => Err(ExecutionOutcome::failure(
-                "failed to prepare python environment",
-                json!({ "error": err.to_string() }),
-            )),
-        },
+        Err(err) => {
+            if is_missing_project_error(&err) {
+                return Err(missing_project_outcome());
+            }
+            match err.downcast::<InstallUserError>() {
+                Ok(user) => Err(ExecutionOutcome::user_error(user.message, user.details)),
+                Err(err) => Err(ExecutionOutcome::failure(
+                    "failed to prepare python environment",
+                    json!({ "error": err.to_string() }),
+                )),
+            }
+        }
     }
+}
+
+pub fn missing_project_outcome() -> ExecutionOutcome {
+    ExecutionOutcome::user_error(
+        MISSING_PROJECT_MESSAGE,
+        json!({
+            "reason": "missing_project",
+            "hint": MISSING_PROJECT_HINT,
+        }),
+    )
+}
+
+pub fn is_missing_project_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.to_string().contains("No px project found"))
 }
 
 #[must_use]

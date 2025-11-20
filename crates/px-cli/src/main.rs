@@ -6,12 +6,13 @@ use atty::Stream;
 use clap::{value_parser, ArgAction, Args, Parser, Subcommand, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
 use px_core::{
-    self, diag_commands, AutopinPreference, BuildRequest, CommandContext, CommandGroup,
-    CommandInfo, CommandStatus, FmtRequest, GlobalOptions, LockBehavior, MigrateRequest,
-    MigrationMode, ProjectAddRequest, ProjectInitRequest, ProjectRemoveRequest, ProjectSyncRequest,
-    ProjectUpdateRequest, ProjectWhyRequest, PublishRequest, RunRequest, SystemEffects,
-    TestRequest, ToolInstallRequest, ToolListRequest, ToolRemoveRequest, ToolRunRequest,
-    ToolUpgradeRequest, WorkspacePolicy,
+    self, diag_commands, is_missing_project_error,
+    missing_project_outcome as core_missing_project_outcome, AutopinPreference, BuildRequest,
+    CommandContext, CommandGroup, CommandInfo, CommandStatus, FmtRequest, GlobalOptions,
+    LockBehavior, MigrateRequest, MigrationMode, ProjectAddRequest, ProjectInitRequest,
+    ProjectRemoveRequest, ProjectSyncRequest, ProjectUpdateRequest, ProjectWhyRequest,
+    PublishRequest, RunRequest, SystemEffects, TestRequest, ToolInstallRequest, ToolListRequest,
+    ToolRemoveRequest, ToolRunRequest, ToolUpgradeRequest, WorkspacePolicy,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -403,8 +404,16 @@ fn core_call(
     info: CommandInfo,
     outcome: anyhow::Result<px_core::ExecutionOutcome>,
 ) -> Result<(CommandInfo, px_core::ExecutionOutcome)> {
-    let result = outcome.map_err(|err| eyre!("{err:?}"))?;
-    Ok((info, result))
+    match outcome {
+        Ok(result) => Ok((info, result)),
+        Err(err) => {
+            if let Some(outcome) = missing_project_outcome(&err) {
+                Ok((info, outcome))
+            } else {
+                Err(eyre!("{err:?}"))
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -529,6 +538,14 @@ fn dispatch_command(
                 core_call(info, px_core::python_use(ctx, &request))
             }
         },
+    }
+}
+
+fn missing_project_outcome(err: &anyhow::Error) -> Option<px_core::ExecutionOutcome> {
+    if is_missing_project_error(err) {
+        Some(core_missing_project_outcome())
+    } else {
+        None
     }
 }
 

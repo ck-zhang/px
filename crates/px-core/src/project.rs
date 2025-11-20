@@ -15,11 +15,11 @@ use toml_edit::{DocumentMut, Item};
 
 use crate::{
     compute_lock_hash, dependency_name, detect_runtime_metadata, ensure_env_matches_lock,
-    install_snapshot, load_project_state, manifest_snapshot, manifest_snapshot_at,
-    persist_resolved_dependencies, python_context_with_mode, refresh_project_site,
-    relative_path_str, resolve_dependencies_with_effects, CommandContext, EnvGuard,
-    ExecutionOutcome, InstallOutcome, InstallState, InstallUserError, ManifestSnapshot,
-    PythonContext,
+    install_snapshot, is_missing_project_error, load_project_state, manifest_snapshot,
+    manifest_snapshot_at, missing_project_outcome, persist_resolved_dependencies,
+    python_context_with_mode, refresh_project_site, relative_path_str,
+    resolve_dependencies_with_effects, CommandContext, EnvGuard, ExecutionOutcome, InstallOutcome,
+    InstallState, InstallUserError, ManifestSnapshot, PythonContext,
 };
 use px_domain::{
     collect_resolved_dependencies, detect_lock_drift, discover_project_root, infer_package_name,
@@ -1039,10 +1039,13 @@ fn sync_manifest_environment(
     let snapshot = match manifest_snapshot() {
         Ok(snapshot) => snapshot,
         Err(err) => {
+            if is_missing_project_error(&err) {
+                return Err(missing_project_outcome());
+            }
             return Err(ExecutionOutcome::failure(
                 "failed to read project manifest",
                 json!({ "error": err.to_string() }),
-            ))
+            ));
         }
     };
     let outcome = match install_snapshot(ctx, &snapshot, false, None) {
