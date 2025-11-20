@@ -11,6 +11,8 @@ use pep440_rs::{Version, VersionSpecifiers};
 use serde::{Deserialize, Serialize};
 use which::which;
 
+use crate::python_build;
+
 const REGISTRY_ENV: &str = "PX_RUNTIME_REGISTRY";
 const REGISTRY_FILENAME: &str = "runtimes.json";
 
@@ -126,19 +128,36 @@ pub fn install_runtime(
     explicit_path: Option<&str>,
     set_default: bool,
 ) -> Result<RuntimeRecord> {
-    let interpreted_path = if let Some(path) = explicit_path {
+    let requested_channel = normalize_channel(requested_version)?;
+    let interpreter_path = if let Some(path) = explicit_path {
         PathBuf::from(path)
     } else {
-        discover_python_binary(requested_version)?
+        python_build::install_python(&requested_channel)?
     };
-    if !interpreted_path.exists() {
+    if !interpreter_path.exists() {
         bail!(
             "python interpreter not found at {}",
-            interpreted_path.display()
+            interpreter_path.display()
         );
     }
-    let details = inspect_python(&interpreted_path)?;
+    let details = inspect_python(&interpreter_path)?;
     let channel = format_channel(&details.full_version)?;
+    if channel != requested_channel {
+        if explicit_path.is_some() {
+            bail!(
+                "python at {} reports version {} but `{}` was requested",
+                details.executable,
+                details.full_version,
+                requested_channel
+            );
+        } else {
+            bail!(
+                "downloaded python runtime reports version {} but `{}` was requested",
+                details.full_version,
+                requested_channel
+            );
+        }
+    }
     let mut registry = load_registry()?;
     let mut record = RuntimeRecord {
         version: channel,
@@ -210,22 +229,6 @@ fn requirement_allows(requirement: &str, version: &str) -> bool {
         .unwrap_or(true)
 }
 
-fn discover_python_binary(version: &str) -> Result<PathBuf> {
-    let (major, minor) = parse_channel(version)?;
-    let candidates = [
-        format!("python{major}.{minor}"),
-        format!("python{major}"),
-        "python3".to_string(),
-        "python".to_string(),
-    ];
-    for candidate in candidates {
-        if let Ok(path) = which(&candidate) {
-            return Ok(path);
-        }
-    }
-    bail!("unable to locate python {version}; pass --path to px python install")
-}
-
 fn inspect_system_python() -> Result<RuntimeRecord> {
     let path = which("python3").or_else(|_| which("python"))?;
     let details = inspect_python(&path)?;
@@ -289,6 +292,11 @@ fn parse_channel(input: &str) -> Result<(u64, u64)> {
 }
 
 fn format_channel(version: &str) -> Result<String> {
+    let (major, minor) = parse_channel(version)?;
+    Ok(format!("{major}.{minor}"))
+}
+
+pub fn normalize_channel(version: &str) -> Result<String> {
     let (major, minor) = parse_channel(version)?;
     Ok(format!("{major}.{minor}"))
 }

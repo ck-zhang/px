@@ -1,7 +1,10 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
 
-use crate::{manifest_snapshot, runtime, CommandContext, ExecutionOutcome, InstallUserError};
+use crate::{
+    manifest_snapshot, runtime, CommandContext, ExecutionOutcome, InstallUserError,
+    ProgressReporter,
+};
 use px_domain::ManifestEditor;
 
 pub struct PythonListRequest;
@@ -55,11 +58,16 @@ pub fn python_install(
     _ctx: &CommandContext,
     request: &PythonInstallRequest,
 ) -> Result<ExecutionOutcome> {
+    let spinner = ProgressReporter::spinner(format!("Installing Python {}", request.version));
     let record = runtime::install_runtime(
         &request.version,
         request.path.as_deref(),
         request.set_default,
     )?;
+    spinner.finish(format!(
+        "Installed Python {} at {}",
+        record.version, record.path
+    ));
     Ok(ExecutionOutcome::success(
         format!("registered Python {} at {}", record.version, record.path),
         runtime_to_json(&record),
@@ -72,7 +80,7 @@ pub fn python_install(
 /// Returns an error if the runtime is unavailable or the manifest cannot be edited.
 pub fn python_use(ctx: &CommandContext, request: &PythonUseRequest) -> Result<ExecutionOutcome> {
     let project_root = ctx.project_root()?;
-    let normalized = normalize_channel(&request.version)?;
+    let normalized = runtime::normalize_channel(&request.version)?;
     let runtimes = runtime::list_runtimes()?;
     let Some(record) = runtimes.iter().find(|rt| rt.version == normalized) else {
         return Err(InstallUserError::new(
@@ -168,17 +176,4 @@ fn runtime_to_json(record: &runtime::RuntimeRecord) -> Value {
         "path": record.path,
         "default": record.default,
     })
-}
-
-fn normalize_channel(value: &str) -> Result<String> {
-    let mut parts = value.split('.');
-    let major = parts
-        .next()
-        .ok_or_else(|| anyhow!("python version must include a major component"))?
-        .parse::<u64>()?;
-    let minor = parts
-        .next()
-        .ok_or_else(|| anyhow!("python version must include a minor component"))?
-        .parse::<u64>()?;
-    Ok(format!("{major}.{minor}"))
 }

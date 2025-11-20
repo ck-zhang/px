@@ -671,7 +671,8 @@ If no available runtime satisfies constraints:
 
 * `px python install <version>`
 
-  * Install a runtime (implementation-specific), then add to px’s registry.
+  * Downloads the requested CPython release via `python-build-standalone` (fall back to `--path` for custom interpreters).
+  * Installs under `~/.px/runtimes/…` and registers it in the px runtime registry.
 
 * `px python use <version>`
 

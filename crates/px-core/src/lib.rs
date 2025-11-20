@@ -52,6 +52,7 @@ mod migration;
 mod project;
 mod project_state;
 mod pypi;
+mod python_build;
 mod python_cli;
 mod run;
 mod runtime;
