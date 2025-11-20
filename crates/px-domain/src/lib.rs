@@ -40,7 +40,7 @@ pub use resolver::{
     normalize_dist_name, resolve, ResolveRequest as ResolverRequest, ResolvedSpecifier,
     ResolverEnv, ResolverTags,
 };
-pub use runtime::{run_command, RunOutput};
+pub use runtime::{run_command, run_command_passthrough, RunOutput};
 pub use snapshot::{
     current_project_root, discover_project_root, ensure_pyproject_exists,
     project_name_from_pyproject, ProjectSnapshot,

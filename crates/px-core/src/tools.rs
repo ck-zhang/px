@@ -230,7 +230,12 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
         ("PX_TOOL_ROOT".into(), tool_root.display().to_string()),
         ("PX_COMMAND_JSON".into(), env_payload.to_string()),
     ];
-    let output = px_domain::run_command(&runtime_selection.record.path, &args, &envs, &cwd)?;
+    let passthrough = ctx.env_flag_enabled("PX_TOOL_PASSTHROUGH") || request.args.is_empty();
+    let output = if passthrough {
+        px_domain::run_command_passthrough(&runtime_selection.record.path, &args, &envs, &cwd)?
+    } else {
+        px_domain::run_command(&runtime_selection.record.path, &args, &envs, &cwd)?
+    };
     let details = json!({
         "tool": metadata.name,
         "entry": metadata.entry,

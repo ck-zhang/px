@@ -48,3 +48,35 @@ pub fn run_command(
         stderr,
     })
 }
+
+/// Execute a program with inherited stdio for interactive tools.
+///
+/// # Errors
+///
+/// Returns an error when the program cannot be spawned or exits abnormally.
+pub fn run_command_passthrough(
+    program: &str,
+    args: &[String],
+    envs: &[(String, String)],
+    cwd: &Path,
+) -> Result<RunOutput> {
+    let mut command = Command::new(program);
+    command.args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command.current_dir(cwd);
+    command.stdin(Stdio::inherit());
+    command.stdout(Stdio::inherit());
+    command.stderr(Stdio::inherit());
+
+    let status = command
+        .status()
+        .with_context(|| format!("failed to start {program}"))?;
+    let code = status.code().unwrap_or(-1);
+    Ok(RunOutput {
+        code,
+        stdout: String::new(),
+        stderr: String::new(),
+    })
+}
