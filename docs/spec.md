@@ -1,4 +1,6 @@
-# px Spec (Authoritative)
+# px Spec (Authoritative, state-machine focused)
+
+---
 
 ## 0. What px is
 
@@ -6,11 +8,12 @@ px is the **front door for Python**:
 
 * It owns **projects**, **tools**, and **runtimes**.
 * It decides **which Python** runs, **which packages** are on `sys.path`, and **where they come from**.
-* Once px is in charge, you should never have to ask:
 
-  * “Which Python is this?”
-  * “Why is this dependency even here?”
-  * “Why did upgrading Python break my CLI tools?”
+Once px is in charge, you should never have to ask:
+
+* “Which Python is this?”
+* “Why is this dependency even here?”
+* “Why did upgrading Python break my CLI tools?”
 
 px is **not** a general task runner, multi-language build tool, or plugin marketplace.
 
@@ -40,7 +43,7 @@ For a typical user, Python “with px” looks like:
 1. `px init` – declare this directory as a px project.
 2. `px add ...` – declare dependencies.
 3. `px sync` – resolve, lock, and build the environment.
-4. `px run ...` / `px test` / `px fmt` – execute in the project’s env.
+4. `px run ...` / `px test` / `px fmt` – execute in deterministic envs.
 5. Commit `pyproject.toml` + `px.lock`.
 
 That’s the core loop.
@@ -52,7 +55,22 @@ For global tools:
 1. `px tool install black`
 2. `px tool run black --check .`
 
-Tools are isolated from projects and from each other. Upgrading Python or changing project deps should not silently break them.
+Tools are isolated from projects and from each other. Upgrading Python or changing project deps must not silently break them.
+
+### 1.4 Design principles
+
+px’s behavior is governed by three principles:
+
+1. **Single state machine**
+   Every project is described by three artifacts (M, L, E) and a small state machine (§10). All commands are defined as transitions over that model (or are read-only).
+
+2. **Determinism**
+   Given the same project, runtimes, and configuration, px must make the same decisions: same runtime, same lockfile, same env, same command resolution (§3.4, §10.8).
+
+3. **Smooth UX, explicit mutation**
+
+   * Mutating operations are explicit (`init`, `add`, `remove`, `sync`, `update`, `migrate --apply`, `tool install/upgrade/remove`).
+   * “Reader” commands (`run`, `test`, `fmt`, `status`, `why`) never change manifests or lockfiles, and have tightly bounded behavior when they repair envs (if they ever do).
 
 ---
 
@@ -81,6 +99,7 @@ px may create/modify only:
   * `pyproject.toml`
 
     * px edits only `[project]` (PEP 621) and `[tool.px]` sections.
+
   * `dist/`
 
     * build artifacts (sdist, wheels).
@@ -134,7 +153,7 @@ px does **not** create `build/` etc. unless explicitly configured.
 `px.lock` is the authoritative description of the project’s environment:
 
 * Exact versions, hashes, markers, index URLs, platform tags.
-* A fingerprint of the `[project].dependencies` (and any px-specific dep config).
+* A fingerprint of `[project].dependencies` (and any px-specific dep config).
 
 It is **machine-generated only**; direct edits are unsupported.
 
@@ -147,6 +166,7 @@ A **project environment** is a px-managed environment under `.px/envs/...`:
   * `px.lock` hash,
   * runtime (e.g. Python 3.11),
   * platform.
+
 * It must contain exactly the packages described by `px.lock`.
 
 ### 3.3 Self-consistent project
@@ -162,13 +182,45 @@ All mutating commands below (`init`, `add`, `remove`, `sync`, `update`, `migrate
 * Leave the project self-consistent on success, or
 * Fail without partial changes.
 
+### 3.4 Deterministic surfaces
+
+For a fixed px version, runtime set, platform, and index configuration, the following surfaces must be deterministic:
+
+1. **Runtime selection**
+
+   * Project runtime resolution follows a fixed precedence (§7.2).
+   * Tool runtime resolution follows a fixed precedence (§6.4).
+   * px must never “guess” a different runtime across runs for the same inputs.
+
+2. **Lockfile generation**
+
+   * Given manifest M, runtime, platform, and index configuration, resolver must produce the same `px.lock` (including ordering, `mfingerprint`, and lock ID).
+
+3. **Environment materialization**
+
+   * Given a `px.lock` and runtime, the environment E must contain exactly the packages described by L.
+   * Rebuilding E for the same L must result in an equivalent environment (from px’s metadata point of view).
+
+4. **Target resolution for `px run`**
+
+   * For a given invocation, px must resolve the target using a fixed, documented rule (§5.6). No hidden fallbacks like `<package>.cli` are permitted.
+
+5. **Non-TTY output and `--json`**
+
+   * Under non-TTY stderr or `--json`, px must not emit interactive spinners or frame-based progress.
+   * Output must be line-oriented or structured JSON, with stable shapes and ordering (§8.4).
+
+6. **Error codes and shapes**
+
+   * A given failure mode must map to a stable PX error code and “Why/Fix” structure (§8.1). The wording may improve, but semantics remain.
+
+The project state machine in §10 is the reference model tying all of this together.
+
 ---
 
 ## 4. Command surface
 
 ### 4.1 Core project verbs
-
-These are what most users should learn first:
 
 * `px init`    – Create a new px project and empty lock/env.
 * `px add`     – Add dependencies and update lock/env.
@@ -177,7 +229,7 @@ These are what most users should learn first:
 * `px update`  – Upgrade dependencies within constraints and sync env.
 * `px run`     – Run a command inside the project env.
 * `px test`    – Run tests inside the project env.
-* `px fmt`     – Run formatters/linters/cleanup for the project.
+* `px fmt`     – Run formatters/linters/cleanup via px tools (project state read-only).
 * `px status`  – Show project / lock / env / runtime status.
 
 ### 4.2 Tools
@@ -215,7 +267,7 @@ There is **no** `px cache`, `px env`, `px lock`, or `px workspace` top-level com
 
 ## 5. Command contracts (authoritative semantics)
 
-Command preconditions and end-states are defined against the canonical project states in [10. Project state machine](#10-project-state-machine). The bullets below should be read as “start in one of the allowed states, execute the behavior, and end in the target state.”
+Command preconditions and end-states are defined against the canonical project states in [§10 Project state machine](#10-project-state-machine). Per-command invariants are summarized in the table in §10.8.
 
 ### 5.1 `px init`
 
@@ -258,7 +310,7 @@ Initialize a new px project and create an empty, self-consistent environment.
 **Postconditions (success)**
 
 * `pyproject.toml`, `px.lock`, `.px/` exist.
-* Project is self-consistent.
+* Project is self-consistent (`InitializedEmpty` / `Consistent`).
 
 **Failure behavior**
 
@@ -289,7 +341,6 @@ Add one or more dependencies and make them immediately available.
 * `pyproject.toml` and `px.lock` reflect the new deps.
 * Project env matches `px.lock`.
 * Project is self-consistent.
-* `px run` can immediately import the new packages.
 
 **Failure behavior**
 
@@ -329,7 +380,9 @@ Remove one or more direct dependencies and update the environment.
 
 * If a package is not a direct dep:
 
-  * Refuse with: `"<pkg> is not a direct dependency; px why <pkg> for more."`
+  * Refuse with:
+    `"<pkg> is not a direct dependency; px why <pkg> for more."`
+
 * On resolution failure:
 
   * No change to `pyproject.toml`, `px.lock`, or env.
@@ -345,25 +398,30 @@ Make the project environment match declared state.
 
 * Project root exists.
 
-**Behavior**
+**Behavior – dev (default)**
 
 1. **Lockfile phase**
 
    * Compute fingerprint of `[project].dependencies` (+ px dep config).
    * If `px.lock` is missing or fingerprint mismatch:
 
-     * If `--frozen` or `CI=1`:
-
-       * Fail: “px.lock missing or out of date; update locally and commit.”
-     * Else:
-
-       * Run resolver, write fresh `px.lock`.
+     * Run resolver, write fresh `px.lock`.
 
 2. **Environment phase**
 
    * If env is missing or its identity (hash/runtime) differs from `px.lock`:
 
      * Rebuild env from `px.lock`.
+
+**Behavior – `--frozen` / `CI=1`**
+
+* If `px.lock` is missing or manifest fingerprint mismatch:
+
+  * Fail: `px.lock missing or out of date; update locally and commit.`
+  * Do **not** run resolver.
+* Else (manifest + lock agree):
+
+  * If env is missing or stale, rebuild env from existing `px.lock`.
 
 **Postconditions (success)**
 
@@ -373,7 +431,7 @@ Make the project environment match declared state.
 
 **Failure behavior**
 
-* Env must not be left half-updated; operations should be transactional as far as possible.
+* Env must not be left half-updated; operations should be transactional.
 * Under `--frozen`/`CI=1`, no resolution is performed.
 
 ---
@@ -393,10 +451,13 @@ Upgrade dependencies to newer compatible versions and apply them.
 * Without args:
 
   * Attempt to update all dependencies to the newest versions allowed by constraints.
+
 * With specific packages:
 
   * Attempt to update only the named packages (and their transitive graph) within constraints.
+
 * Write updated `px.lock`.
+
 * Update env to match `px.lock`.
 
 **Postconditions (success)**
@@ -417,36 +478,55 @@ Upgrade dependencies to newer compatible versions and apply them.
 ### 5.6 `px run <target> [-- …args]`
 
 **Intent**
-Run a command using the project env.
+Run a command using the project env, with deterministic state behavior and deterministic target resolution.
 
 **Preconditions**
 
 * Project root exists.
-* In non-CI/dev mode:
+
+* In dev mode:
 
   * `px.lock` must exist and match `pyproject.toml`.
     If not, error and suggest `px sync`.
+
 * In CI / `--frozen` mode:
 
-  * Env must already be in sync; `px run` does not fix anything.
+  * Env must already be in sync; `px run` does **not** repair anything.
 
-**Behavior (dev)**
+**Target resolution (authoritative)**
+
+Given `px run <target> -- <args>…`:
+
+1. **Script alias (if configured)**
+
+   * If `[tool.px.scripts].<target>` exists, expand it to a concrete command line and run that inside the project env.
+
+2. **Direct command / script**
+
+   * Otherwise, treat `<target>` as an executable or script path to run with the project env’s PATH and Python:
+
+     * If `<target>` resolves to a file under the project root, run it as a script with the project runtime.
+     * Else, run `<target>` as a process, relying on PATH from the project env (so console scripts and `python` from the env take precedence).
+
+3. **No implicit module/CLI guessing**
+
+   * px **must not** implicitly transform `<target>` into `python -m <target>` or `<target>.cli` or similar.
+   * If the user wants module execution, they must say so (`px run python -m myapp.cli`) or define a `[tool.px.scripts]` alias.
+
+This makes `px run` behavior fully deterministic and avoids surprising `ModuleNotFoundError` from “helpful” fallbacks.
+
+**Behavior – dev**
 
 * If env is missing or does not match `px.lock`:
 
-  * Rebuild env from `px.lock` before running.
-* Execute `<target>` inside the project env:
+  * Rebuild env from `px.lock` before running (E repair is allowed).
+* Execute the resolved target inside the project env.
 
-  * Could be:
+**Behavior – `--frozen` / `CI=1`**
 
-    * a script file,
-    * `python -m ...`,
-    * a task alias from `[tool.px.scripts]` (if you define such a section).
-
-**Behavior (strict / CI)**
-
-* If `px.lock` missing or out-of-sync: fail.
+* If `px.lock` missing or out-of-sync with `pyproject.toml`: fail and suggest `px sync`.
 * If env not in sync with `px.lock`: fail.
+* Never repairs envs in this mode.
 
 **Postconditions (success)**
 
@@ -456,12 +536,19 @@ Run a command using the project env.
 **Failure behavior**
 
 * If no px project found:
-  `No px project found. Run "px init" in your project directory first.`
-* If there is no `px.lock` or it’s out-of-date:
-  Suggest `px sync`.
-* If a `ModuleNotFoundError` points to a missing dep:
 
-  * Add a px hint recommending `px add` for that module/package.
+  `No px project found. Run "px init" in your project directory first.`
+
+* If there is no `px.lock` or it’s out-of-date:
+
+  Suggest `px sync`.
+
+* If a `ModuleNotFoundError` points to a missing dep during target execution:
+
+  * Inspect project state (M, L):
+
+    * If dep is not in M/L: suggest `px add <pkg>`.
+    * If it is in M/L: suggest `px sync`.
 
 ---
 
@@ -472,11 +559,12 @@ Run tests in the project env, mirroring `px run`’s consistency rules.
 
 **Preconditions & behavior**
 
-* Same consistency semantics as `px run`:
+* Same consistency semantics as `px run` (with respect to project M/L/E):
 
   * In dev: may rebuild env from `px.lock` (no resolution).
-  * In CI/`--frozen`: fails if lock/env out of sync.
-* Discovers and runs the configured test runner (e.g. `pytest` by default).
+  * In CI/`--frozen`: fails if lock/env out of sync; no repair.
+
+* Discovers and runs the configured test runner (e.g. `pytest` by default) inside the project env.
 
 **Postconditions**
 
@@ -487,23 +575,45 @@ Run tests in the project env, mirroring `px run`’s consistency rules.
 ### 5.8 `px fmt`
 
 **Intent**
-Run configured formatters/linters/cleanup **tools** via their px-managed tool environments.
+Run configured formatters/linters/cleanup **tools** via their px-managed tool environments, without mutating project state (M/L/E).
 
-**Preconditions & behavior**
+**Preconditions**
 
-* Same env/lock consistency rules as `px run`.
-* Honors `--frozen` / `CI=1` (no env rebuilds).
-* Uses px’s tool store (px-managed tool environments), not project dependencies.
-* px fmt never edits `pyproject.toml` or `px.lock`; it only runs tools.
-* Supports `--json` structured output like other commands.
-* If a required tool isn’t installed:
+* Project root exists (so px can find `pyproject.toml` and `[tool.px]` config).
+* Required tools are either:
 
-  * Suggest installing it (e.g. `px tool install ruff`).
+  * installed via `px tool install`, or
+  * px reports which tools are missing.
+
+**Behavior**
+
+* `px fmt` uses px’s **tool store** (`~/.px/tools/...`), not the project’s env:
+
+  * Tools (e.g. `black`, `ruff`) run in their own locked environments (§6).
+  * `px fmt` must not create, update, or rebuild the project env or `px.lock`.
+
+* Project state:
+
+  * `px fmt` does **not** resolve or update `px.lock`.
+  * `px fmt` does **not** rebuild the project env, in dev or CI.
+  * `px fmt` may read `[tool.px]` and other config in `pyproject.toml`, but must not modify `pyproject.toml`.
+
+* Codebase:
+
+  * Code may be modified by the invoked tools (formatting, lint fixes, etc.).
+  * `px fmt` supports `--json` structured output like other commands.
+
+* Missing tools:
+
+  * If a required tool isn’t installed, `px fmt` must fail with:
+
+    * a clear error message, and
+    * a suggestion like: `px tool install ruff`.
 
 **Postconditions**
 
-* Code may be modified by the invoked tools.
-* Manifest/lock unchanged; project consistency preserved.
+* `pyproject.toml`, `px.lock`, and the project env (E) are unchanged.
+* Tool envs may be created/updated as part of `px tool` lifecycle, but this is separate from the project state machine.
 
 ---
 
@@ -521,13 +631,18 @@ Report project health without changing anything.
 * Summarize:
 
   * Project root path, project name.
+
   * Active runtime (version, path).
+
   * `px.lock`:
 
     * present / missing / out-of-sync with `pyproject.toml`.
+
   * Environment:
 
     * present / missing / in-sync / out-of-sync with `px.lock`.
+
+* May also print the derived project state (`Uninitialized`, `NeedsLock`, `NeedsEnv`, `Consistent`) for diagnostics.
 
 **Postconditions**
 
@@ -540,25 +655,28 @@ Report project health without changing anything.
 **Intent**
 Convert a legacy Python project into a deterministic px project.
 
-**`px migrate` (preview)**
+#### `px migrate` (preview)
 
 * Reads legacy inputs:
 
   * e.g. `requirements.txt`, `Pipfile`, `poetry.lock`, existing venv.
+
 * Computes a proposed:
 
   * `pyproject.toml`,
   * `px.lock`,
   * env plan.
-* Prints a human-readable summary, **no writes**.
 
-**`px migrate --apply`**
+* Prints a human-readable summary, **no writes** to M/L/E.
+
+#### `px migrate --apply`
 
 * Applies the plan:
 
   * Creates/updates `pyproject.toml` with `[project]` and `[tool.px]`.
   * Writes `px.lock`.
   * Builds env under `.px/`.
+
 * Leaves legacy files (e.g. `requirements.txt`) untouched, optionally recording migration in `[tool.px.migration]`.
 
 **Failure behavior**
@@ -566,6 +684,7 @@ Convert a legacy Python project into a deterministic px project.
 * On ambiguous sources (multiple conflicting dep sources):
 
   * Refuse and require explicit `--from` choice.
+
 * On failure, do not leave partial `pyproject.toml`/`px.lock`/env.
 
 ---
@@ -581,6 +700,8 @@ A **tool** is:
 
   * project envs, and
   * other tools.
+
+Tools never modify project roots.
 
 ### 6.2 Files & shape
 
@@ -599,10 +720,12 @@ Tools never modify project roots.
 * `px tool install <name> [spec] [--python VERSION]`
 
   * Resolve and lock the specified package.
+
   * Bind to a chosen runtime:
 
     * Default: px’s default runtime.
     * Or explicit `--python`.
+
   * Materialize env for the tool.
 
 * `px tool run <name> [-- …args]`
@@ -625,24 +748,52 @@ Tools never modify project roots.
   * Re-resolve within specified constraints.
   * Update `tool.lock` and env.
 
-### 6.4 Behavior on Python upgrades
+### 6.4 Tool runtime selection & behavior on Python upgrades
 
-If the runtime that a tool was locked against is no longer available or compatible:
+Tool runtimes must follow a deterministic precedence:
 
-* `px tool run` must **fail clearly**, for example:
+1. **Install-time binding**
 
-  ```text
-  PX201  Tool 'black' was installed for Python 3.11, but only Python 3.12 is available.
+   * Each tool is installed against a specific runtime version:
 
-  Why:
-    • The original runtime for this tool is not installed.
+     * From `--python VERSION` if provided, otherwise
+     * From px’s default runtime at install time.
 
-  Fix:
-    • Reinstall for the current runtime:  px tool install black
-    • Or install Python 3.11 and rerun.
-  ```
+   * That runtime version is recorded in `tool.lock`.
 
-No silent breakage.
+2. **Run-time resolution**
+
+   * `px tool run` must:
+
+     * Look up the runtime recorded in `tool.lock`.
+     * Use a px-managed interpreter for that exact version, if available.
+     * If the interpreter is missing, fail with a clear PX error.
+
+   * `px tool run` must **not** silently fall back to:
+
+     * a different px-managed runtime (e.g. 3.11 → 3.12), or
+     * the system Python.
+
+3. **Python upgrades**
+
+   If the runtime that a tool was locked against is no longer available or compatible:
+
+   * `px tool run` must **fail clearly**, for example:
+
+     ```text
+     PX201  Tool 'black' was installed for Python 3.11, but only Python 3.12 is available.
+
+     Why:
+       • The original runtime for this tool is not installed.
+
+     Fix:
+       • Reinstall for the current runtime:  px tool install black
+       • Or install Python 3.11 and rerun.
+     ```
+
+   * No silent breakage; no implicit re-resolution.
+
+This mirrors the determinism guarantees for projects, but at the tool level.
 
 ---
 
@@ -658,7 +809,7 @@ A **runtime** is a Python interpreter that px can:
 
 ### 7.2 Project runtime resolution
 
-Order of precedence:
+Order of precedence (deterministic):
 
 1. `[tool.px].python` (explicit per-project setting, e.g. `"3.11"`).
 2. `[project].requires-python` (PEP 621).
@@ -668,6 +819,8 @@ If no available runtime satisfies constraints:
 
 * Commands must fail with a clear explanation and suggest `px python install`.
 
+px must **not** fall back to arbitrary system interpreters outside its runtime registry once a project is under px management.
+
 ### 7.3 Commands
 
 * `px python list`
@@ -676,7 +829,7 @@ If no available runtime satisfies constraints:
 
 * `px python install <version>`
 
-  * Downloads the requested CPython release via `python-build-standalone` (fall back to `--path` for custom interpreters).
+  * Downloads the requested CPython release via `python-build-standalone` (or similar; implementation detail), and
   * Installs under `~/.px/runtimes/…` and registers it in the px runtime registry.
 
 * `px python use <version>`
@@ -695,7 +848,7 @@ If no available runtime satisfies constraints:
 
 ---
 
-## 8. Error & output model
+## 8. Error, output & CI model
 
 ### 8.1 Error shape
 
@@ -716,6 +869,7 @@ Fix:
   * Code + summary: error color.
   * “Why” bullets: normal.
   * “Fix” bullets: accent.
+
 * Python tracebacks:
 
   * Shown *after* the px error summary by default.
@@ -728,15 +882,19 @@ Examples (non-exhaustive):
 * **No project found**:
 
   * Suggest `px init`.
+
 * **Lock missing / out-of-sync**:
 
   * Suggest `px sync` (or fail under `--frozen`).
+
 * **Missing import in `px run`**:
 
-  * Suggest `px add <pkg>` or `px why <pkg>` if it’s supposed to be there.
+  * Suggest `px add <pkg>` or `px sync` depending on whether `<pkg>` is already in M/L (§10.6.2).
+
 * **Wrong interpreter (user ran `python` directly)**:
 
   * Suggest using `px run python ...`.
+
 * **Runtime mismatch for tool**:
 
   * Suggest `px tool install <tool>` again or `px python install`.
@@ -752,7 +910,26 @@ Under `CI=1` or explicit `--frozen`:
 
 * No prompts.
 * No auto-resolution.
-* `px run` / `px test` / `px fmt` do **not** rebuild envs; they just check consistency and fail if it’s broken.
+* `px run` / `px test` / `px fmt` do **not** rebuild project envs; they just check consistency and fail if it’s broken (for `run`/`test`) or run tools in isolation (`fmt`).
+
+### 8.4 Non-TTY & structured output (progress/logging)
+
+To ensure deterministic behavior in logs and CI:
+
+* If stderr is **not** a TTY, or `--json` is set:
+
+  * Commands must not emit spinners, progress bars, or frame-based animations.
+  * Progress must be represented as:
+
+    * line-oriented log messages (for human mode), or
+    * structured events inside `--json` output.
+
+* In non-TTY mode:
+
+  * Repeated progress updates should be throttled or collapsed; no flooding logs with frame-by-frame renders.
+  * Output ordering must be stable for a given command and state.
+
+This applies to all commands that show progress (e.g. resolver, env build, tool install).
 
 ---
 
@@ -763,7 +940,7 @@ px does **not**:
 * Act as a general task runner (no `px task` DSL).
 * Manage non-Python languages.
 * Provide a plugin marketplace or unbounded extension API.
-* Implicitly mutate state from read-only commands (`status`, `why`).
+* Implicitly mutate state from read-only commands (`status`, `why`, `fmt` w.r.t. project state).
 * Expose `cache`, `env`, `lock`, or `workspace` as primary user concepts.
 
 If any future changes violate these, they’re design regressions, not “nice additions”.
@@ -789,17 +966,18 @@ For each px project we define three artifacts:
   * full resolved dependency graph
   * runtime (python version/tag)
   * platform tags
-  * artifact/hashes
   * **manifest fingerprint** (see below)
 
 * **E (Env)**
   The current project environment under `.px/envs/...`:
 
   * pointer to `L` it was built from (lock hash / ID)
-  * actual installed packages (by px’s record, not by re-scanning site-packages)
+  * actual installed packages (tracked by px’s metadata, not by re-scanning site-packages)
   * runtime used
 
 You never introspect raw venv content to define state; you trust px’s own metadata.
+
+Tool environments are separate and are **not** part of this state machine.
 
 ---
 
@@ -814,6 +992,7 @@ From M, you compute a deterministic **manifest fingerprint**:
   * `[project].dependencies`
   * any `[tool.px].dependencies` extensions/groups
   * relevant Python/version markers
+
 * Output:
 
   * opaque hash, e.g. `sha256(hex-encoded)`.
@@ -888,7 +1067,7 @@ Fresh project with no deps:
 * `env_exists == true`, `env_clean == true`
 * So `project_consistent == true`
 
-This is the state after a successful `px init` in your current design.
+This is the state after a successful `px init`.
 
 #### 10.4.3 `NeedsLock`
 
@@ -940,7 +1119,7 @@ Now define commands *only* as transitions between these canonical states.
 
 **End state**
 
-* `InitializedEmpty` (which is also `Consistent` in this model).
+* `InitializedEmpty` (which is also `Consistent`).
 
 ---
 
@@ -957,9 +1136,11 @@ They’re both “mutable ops” over deps, then re-lock & rebuild:
 **Required behavior**
 
 * Modify M (add/remove deps).
+
 * Resolve deps from new M, creating a new L:
 
   * `L'.mfingerprint == mfingerprint(M')`.
+
 * Build E from L'.
 
 **End state**
@@ -983,6 +1164,7 @@ Reconcile M → L and then L → E.
 * If `lock_exists == false` or `manifest_clean == false`:
 
   * Resolve deps from M → new L.
+
 * Ensure E built from current L (create/replace env if needed).
 
 **End state**
@@ -994,6 +1176,7 @@ Reconcile M → L and then L → E.
 * If `lock_exists == false` or `manifest_clean == false`:
 
   * Fail. Do **not** resolve.
+
 * Else:
 
   * Only fix env (if `env_clean == false`).
@@ -1009,7 +1192,8 @@ Reconcile M → L and then L → E.
 
 **Allowed start states**
 
-* `Consistent` (strictest) or more broadly: `manifest_exists == true` and `lock_exists == true`.
+* `manifest_exists == true` and `lock_exists == true`
+  (in practice, you usually start from `Consistent`).
 
 **Behavior**
 
@@ -1027,9 +1211,9 @@ Reconcile M → L and then L → E.
 
 ---
 
-#### 10.5.5 `px run` / `px test` / `px fmt`
+#### 10.5.5 `px run` / `px test`
 
-Treat these as **readers** with *optional env repair* – never M/L authors.
+Treat `px run` and `px test` as **readers** over M/L with **optional env repair** in dev mode – never M/L authors.
 
 **Allowed start states (dev)**
 
@@ -1043,17 +1227,26 @@ Treat these as **readers** with *optional env repair* – never M/L authors.
   * Do **not** create/update L.
   * Fail with:
 
-    * “Manifest has changed; run `px sync` to update the lock.”
+    ```text
+    PX120  Project manifest has changed since px.lock was created.
+
+    Why:
+      • pyproject.toml dependencies differ from px.lock.
+
+    Fix:
+      • Run `px sync` to update px.lock and the environment.
+    ```
 
 **Allowed start states (CI/`--frozen`)**
 
-* Only `Consistent`. Anything else is a hard failure.
+* Only `Consistent`. Anything else is a hard failure; no repair.
 
 **Behavior (dev)**
 
 * If `NeedsEnv`:
 
-  * Rebuild E from L.
+  * Rebuild E from L (no re-resolution).
+
 * Run target via E.
 
 **Behavior (CI/`--frozen`)**
@@ -1063,8 +1256,64 @@ Treat these as **readers** with *optional env repair* – never M/L authors.
 
 **End state**
 
-* `M` & `L` unchanged.
+* M & L unchanged.
 * E may be rehydrated → at end you’re either `Consistent` or unchanged.
+
+---
+
+#### 10.5.6 `px fmt` (project state)
+
+`px fmt` intentionally **does not participate** in transitions of the project state machine beyond requiring a project root.
+
+**Allowed start states**
+
+* Any state where `manifest_exists == true`.
+
+**Behavior**
+
+* Does **not** read or modify L or E for decision-making.
+* Does **not** resolve or rebuild E, in dev or CI.
+* Runs only via tool envs (§6), which have their own isolated lifecycle.
+
+**End state**
+
+* M, L, E unchanged.
+* Only code files may be modified by formatter tools.
+
+---
+
+#### 10.5.7 `px status`
+
+**Allowed start states**
+
+* Any (including `Uninitialized`, in which case it reports that fact).
+
+**Behavior**
+
+* Compute and report:
+
+  * `manifest_exists`, `lock_exists`, `env_exists`,
+  * `manifest_clean`, `env_clean`,
+  * derived canonical state.
+
+**End state**
+
+* No changes to M/L/E.
+
+---
+
+#### 10.5.8 `px migrate` / `px migrate --apply`
+
+* `px migrate`:
+
+  * Read-only; may start from non-px projects (effectively `Uninitialized`).
+  * Produces a proposed M/L/E plan but does not write.
+
+* `px migrate --apply`:
+
+  * Creates M, L, and E from legacy inputs.
+  * On success: ends in `Consistent`.
+  * On failure: must not leave a partially migrated project.
 
 ---
 
@@ -1112,9 +1361,11 @@ On `ModuleNotFoundError: No module named 'pandas'` in `px run`:
 
      * This is **env drift** (`env_clean == false` or broken E), not a missing add.
      * Suggest `px sync`, not `px add pandas`.
+
    * Else if `pandas` appears only as transitive in L:
 
-     * Maybe `px why pandas` or no hint.
+     * Maybe suggest `px why pandas` or no hint.
+
    * Else (not in M or L):
 
      * Suggest `px add pandas`.
@@ -1139,4 +1390,39 @@ you can:
 * write tests like “starting from NeedsEnv, `px run` must end in Consistent or fail”,
 * and make hinting logic deterministic instead of heuristic.
 
-No extra abstraction is needed; just wire all your commands and error paths to this model and stop letting them improvise.
+---
+
+### 10.8 Command invariants (summary table, project commands)
+
+This table summarizes the project-level command invariants in terms of the state machine. It is subordinate to the definitions above and does not introduce new semantics.
+
+Legend:
+
+* M = manifest (`pyproject.toml`)
+* L = lock (`px.lock`)
+* E = env (project env)
+* States = { U = Uninitialized, IE = InitializedEmpty, NL = NeedsLock, NE = NeedsEnv, C = Consistent }
+
+#### 10.8.1 Project lifecycle & deps
+
+| Command              | Allowed start states | Writes M?                 | Writes L?                         | Writes E?                | Required end state (on success) | Notes                                                                     |
+| -------------------- | -------------------- | ------------------------- | --------------------------------- | ------------------------ | ------------------------------- | ------------------------------------------------------------------------- |
+| `px init`            | U                    | Yes                       | Yes                               | Yes                      | IE (also C)                     | Refuses if another tool clearly owns `pyproject.toml`.                    |
+| `px add`             | IE, C, NL, NE        | Yes                       | Yes                               | Yes                      | C                               | Atomic: on resolver failure, no changes.                                  |
+| `px remove`          | IE, C, NL, NE        | Yes                       | Yes                               | Yes                      | C                               | Only direct deps may be removed.                                          |
+| `px sync`            | IE, C, NL, NE        | NL: L only; others: maybe | Yes (in dev or when lock missing) | Yes (if E dirty/missing) | C                               | Under `--frozen`/CI: never writes L; only repairs E if M/L already clean. |
+| `px update`          | Any with M+L present | No                        | Yes                               | Yes                      | C                               | On resolution failure, no changes.                                        |
+| `px migrate`         | Any (legacy or U)    | No                        | No                                | No                       | N/A                             | Read-only planning; prints proposal.                                      |
+| `px migrate --apply` | Any (legacy or U)    | Yes                       | Yes                               | Yes                      | C                               | Must not leave partial migration on failure.                              |
+
+#### 10.8.2 Execution & inspection
+
+| Command     | Allowed start states (dev) | Allowed start states (CI/`--frozen`) | Writes M? | Writes L? | Writes E? (project) | Required end state (on success) | Notes                                                     |
+| ----------- | -------------------------- | ------------------------------------ | --------- | --------- | ------------------- | ------------------------------- | --------------------------------------------------------- |
+| `px run`    | C, NE                      | C                                    | No        | No        | Dev: NE→C; C→C      | C or unchanged                  | In dev, may repair E; in CI, never repairs E.             |
+| `px test`   | C, NE                      | C                                    | No        | No        | Dev: NE→C; C→C      | C or unchanged                  | Same rules as `px run`.                                   |
+| `px fmt`    | Any with `manifest_exists` | Any with `manifest_exists`           | No        | No        | No                  | Unchanged                       | Operates only on code and tool envs; never touches M/L/E. |
+| `px status` | Any                        | Any                                  | No        | No        | No                  | Unchanged                       | Purely introspective.                                     |
+| `px why`    | Any with `manifest_exists` | Any with `manifest_exists`           | No        | No        | No                  | Unchanged                       | Purely introspective.                                     |
+
+This table is a testing and implementation aid: if an implementation observes behavior outside these invariants (e.g. `px fmt` rebuilding E, `px run` updating L, or `px tool run` switching runtimes), that behavior is a spec violation.
