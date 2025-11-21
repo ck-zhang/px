@@ -57,6 +57,8 @@ uv-python = { version = "=0.0.1" }
 uv-resolver = { version = "=0.0.1" }
 uv-types = { version = "=0.0.1" }
 uv-workspace = { version = "=0.0.1" }
+uv-build-backend = { version = "=0.0.1" }
+uv-build-frontend = { version = "=0.0.1" }
 uv-version = { version = "0.9.11" }
 
 [workspace.metadata]

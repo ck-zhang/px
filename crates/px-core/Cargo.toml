@@ -26,6 +26,8 @@ time.workspace = true
 which = "6"
 tempfile.workspace = true
 base64 = "0.22"
+uv-build-backend.workspace = true
+walkdir = "2"
 
 [features]
 default = []

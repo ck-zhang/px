@@ -14,6 +14,8 @@ use serde_json::json;
 use sha2::Digest;
 use tar::Builder;
 use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
+use uv_build_backend::{build_source_dist, build_wheel};
+use walkdir::WalkDir;
 use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 
 use crate::{
@@ -60,6 +62,7 @@ struct PublishRegistry {
     url: String,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct ProjectMetadata {
     name: String,
@@ -72,12 +75,14 @@ struct ProjectMetadata {
     entry_points: BTreeMap<String, BTreeMap<String, String>>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct SourceAsset {
     relative: String,
     content: SourceContent,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 enum SourceContent {
     File(PathBuf),
@@ -116,7 +121,6 @@ fn build_project_outcome(ctx: &CommandContext, request: &BuildRequest) -> Result
     };
     let targets = build_targets_from_request(request);
     let out_dir = resolve_output_dir_from_request(&py_ctx, request.out.as_ref());
-    let metadata = load_project_metadata(&py_ctx.project_root)?;
 
     if request.dry_run {
         let artifacts = collect_artifact_summaries(&out_dir, None, &py_ctx)?;
@@ -137,13 +141,7 @@ fn build_project_outcome(ctx: &CommandContext, request: &BuildRequest) -> Result
     ctx.fs()
         .create_dir_all(&out_dir)
         .with_context(|| format!("creating output directory at {}", out_dir.display()))?;
-    let mut produced = Vec::new();
-    if targets.sdist {
-        produced.push(write_sdist(&py_ctx, &out_dir, &metadata)?);
-    }
-    if targets.wheel {
-        produced.push(write_wheel(&py_ctx, &out_dir, &metadata)?);
-    }
+    let produced = build_with_uv(ctx, &py_ctx, targets, &out_dir)?;
 
     let artifacts = summarize_selected_artifacts(&produced, &py_ctx)?;
     if artifacts.is_empty() {
@@ -337,6 +335,72 @@ fn resolve_output_dir_from_request(ctx: &PythonContext, out: Option<&PathBuf>) -
     }
 }
 
+fn build_with_uv(
+    ctx: &CommandContext,
+    py_ctx: &PythonContext,
+    targets: BuildTargets,
+    out_dir: &Path,
+) -> Result<Vec<PathBuf>> {
+    let mut produced = Vec::new();
+    ctx.fs()
+        .create_dir_all(out_dir)
+        .with_context(|| format!("creating output directory at {}", out_dir.display()))?;
+    ensure_package_stub(&py_ctx.project_root)?;
+    if targets.sdist {
+        let filename = build_source_dist(&py_ctx.project_root, out_dir, crate::PX_VERSION)
+            .context("building source distribution")?;
+        produced.push(out_dir.join(filename.to_string()));
+    }
+    if targets.wheel {
+        let filename = build_wheel(&py_ctx.project_root, out_dir, None, crate::PX_VERSION)
+            .context("building wheel")?;
+        produced.push(out_dir.join(filename.to_string()));
+    }
+    Ok(produced)
+}
+
+fn ensure_package_stub(project_root: &Path) -> Result<()> {
+    let pyproject_path = project_root.join("pyproject.toml");
+    let contents = fs::read_to_string(&pyproject_path)
+        .with_context(|| format!("reading {}", pyproject_path.display()))?;
+    let doc: DocumentMut = contents.parse()?;
+    let name = doc["project"]["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("pyproject missing [project].name"))?
+        .to_string();
+    let package = name.replace('-', "_");
+    let src_root = project_root.join("src");
+    let module_dir = src_root.join(&package);
+    let existing_package = project_root.join(&package);
+    if !module_dir.exists() && existing_package.exists() {
+        copy_package_tree(&existing_package, &module_dir)?;
+    }
+    fs::create_dir_all(&module_dir)?;
+    let init_py = module_dir.join("__init__.py");
+    if !init_py.exists() {
+        fs::write(&init_py, b"")?;
+    }
+    Ok(())
+}
+
+fn copy_package_tree(from: &Path, to: &Path) -> Result<()> {
+    for entry in WalkDir::new(from) {
+        let entry = entry?;
+        let path = entry.path();
+        let relative = path.strip_prefix(from).unwrap_or(path);
+        let dest = to.join(relative);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&dest)?;
+        } else if entry.file_type().is_file() {
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(path, &dest)?;
+        }
+    }
+    Ok(())
+}
+
 fn collect_artifact_summaries(
     dir: &Path,
     targets: Option<BuildTargets>,
@@ -423,6 +487,7 @@ fn summarize_selected_artifacts(
     Ok(entries)
 }
 
+#[allow(dead_code)]
 fn write_sdist(ctx: &PythonContext, out_dir: &Path, metadata: &ProjectMetadata) -> Result<PathBuf> {
     let filename = format!("{}-{}.tar.gz", metadata.name, metadata.version);
     let path = out_dir.join(filename);
@@ -440,6 +505,7 @@ fn write_sdist(ctx: &PythonContext, out_dir: &Path, metadata: &ProjectMetadata) 
     Ok(path)
 }
 
+#[allow(dead_code)]
 fn write_wheel(ctx: &PythonContext, out_dir: &Path, metadata: &ProjectMetadata) -> Result<PathBuf> {
     let filename = format!(
         "{}-{}-py3-none-any.whl",
@@ -494,6 +560,7 @@ fn write_wheel(ctx: &PythonContext, out_dir: &Path, metadata: &ProjectMetadata) 
     Ok(path)
 }
 
+#[allow(dead_code)]
 fn append_sources_to_sdist(
     project_root: &Path,
     tar: &mut Builder<GzEncoder<File>>,
@@ -513,6 +580,7 @@ fn append_sources_to_sdist(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn append_metadata_files(
     project_root: &Path,
     tar: &mut Builder<GzEncoder<File>>,
@@ -543,6 +611,7 @@ fn append_metadata_files(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn load_project_metadata(project_root: &Path) -> Result<ProjectMetadata> {
     let pyproject_path = project_root.join("pyproject.toml");
     let contents = fs::read_to_string(&pyproject_path)
@@ -660,6 +729,7 @@ fn collect_optional_dependencies(project: &Table) -> BTreeMap<String, Vec<String
     extras
 }
 
+#[allow(dead_code)]
 fn collect_source_assets(
     project_root: &Path,
     metadata: &ProjectMetadata,
@@ -697,6 +767,7 @@ fn collect_source_assets(
     Ok(assets)
 }
 
+#[allow(dead_code)]
 fn add_tree_assets(
     path: &Path,
     strip_prefix: &Path,
@@ -737,6 +808,7 @@ fn add_tree_assets(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn render_metadata(metadata: &ProjectMetadata) -> String {
     let mut lines = Vec::new();
     lines.push("Metadata-Version: 2.1".to_string());
@@ -763,6 +835,7 @@ fn render_metadata(metadata: &ProjectMetadata) -> String {
     lines.join("\n")
 }
 
+#[allow(dead_code)]
 fn render_entry_points(metadata: &ProjectMetadata) -> Option<String> {
     if metadata.entry_points.is_empty() {
         return None;

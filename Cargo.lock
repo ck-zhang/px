@@ -2751,6 +2751,8 @@ dependencies = [
  "time",
  "toml_edit 0.22.27",
  "tracing",
+ "uv-build-backend",
+ "walkdir",
  "which 6.0.3",
  "zip 0.6.6",
 ]
