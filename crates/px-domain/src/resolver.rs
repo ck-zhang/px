@@ -49,7 +49,8 @@ pub fn resolve(request: &ResolveRequest) -> Result<Vec<ResolvedSpecifier>> {
 }
 
 async fn resolve_with_uv(request: &ResolveRequest) -> Result<Vec<ResolvedSpecifier>> {
-    let cache_root = request.cache_dir.join("uv");
+    // Keep uv artifacts scoped under a px-controlled resolver cache directory without uv branding.
+    let cache_root = request.cache_dir.join("resolver-cache");
     let cache = Cache::from_path(&cache_root)
         .init()
         .context("failed to initialize uv cache")?;
