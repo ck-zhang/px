@@ -372,7 +372,7 @@ fn run_emits_hint_when_requests_socks_missing_under_proxy() {
         .failure();
 
     let payload = parse_json(&assert);
-    assert_eq!(payload["status"], "failure");
+    assert_eq!(payload["status"], "error");
     let details = payload["details"].as_object().expect("details");
     assert!(
         details.contains_key("traceback"),
@@ -395,26 +395,11 @@ fn run_frozen_handles_large_dependency_graph() {
         .current_dir(&project)
         .args(["--json", "sync"])
         .assert()
-        .failure();
+        .success();
 
     let payload = parse_json(&assert);
-    let status = payload["status"].as_str().unwrap_or_default();
-    assert_ne!(status, "ok", "large graph sync should not succeed");
-    let message = payload["message"]
-        .as_str()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    assert!(
-        message.contains("resolver") || message.contains("dependency resolution failed"),
-        "expected resolver failure for large graph, got {message:?}"
-    );
-    if let Some(why) = payload["details"]["why"].as_str() {
-        let why_lower = why.to_ascii_lowercase();
-        assert!(
-            why_lower.contains("conflicting") || why_lower.contains("resolver"),
-            "details should mention resolver conflict, got {why:?}"
-        );
-    }
+    assert_eq!(payload["status"], "ok");
+    assert!(lock.exists(), "sync should emit px.lock");
 }
 
 fn write_module(project: &Path, module: &str, body: &str) {

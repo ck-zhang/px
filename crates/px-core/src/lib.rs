@@ -245,7 +245,13 @@ impl Config {
                 store: cache_store.resolve_store_path()?,
             },
             network: NetworkConfig {
-                online: snapshot.flag_is_enabled("PX_ONLINE"),
+                online: match snapshot.var("PX_ONLINE") {
+                    Some(value) => {
+                        let lowered = value.to_ascii_lowercase();
+                        lowered != "0" && lowered != "false"
+                    }
+                    None => true,
+                },
             },
             resolver: ResolverConfig {
                 enabled: match snapshot.var("PX_RESOLVER") {
@@ -1043,6 +1049,7 @@ fn resolve_dependencies_with_effects(
     let marker_env = resolver_env
         .to_marker_environment()
         .map_err(|err| anyhow!("invalid marker environment: {err}"))?;
+    let cache_dir = effects.cache().resolve_store_path()?.path;
     let request = ResolverRequest {
         project: snapshot.name.clone(),
         requirements: snapshot.dependencies.clone(),
@@ -1053,6 +1060,8 @@ fn resolve_dependencies_with_effects(
         },
         env: resolver_env.clone(),
         indexes: resolver_indexes(),
+        cache_dir,
+        python: python.clone(),
     };
     let resolved = resolve(&request).map_err(|err| {
         InstallUserError::new(
@@ -1123,16 +1132,22 @@ fn resolver_indexes() -> Vec<String> {
         }
     }
     if indexes.is_empty() {
-        indexes.push("https://pypi.org/pypi".to_string());
+        indexes.push("https://pypi.org/simple".to_string());
     }
     indexes
 }
 
 fn normalize_index_url(raw: &str) -> String {
     let mut url = raw.trim_end_matches('/').to_string();
-    if !url.ends_with("/pypi") && !url.ends_with("/json") {
-        url.push_str("/pypi");
+    if url.ends_with("/simple") {
+        return url;
     }
+    if let Some(stripped) = url.strip_suffix("/pypi") {
+        url = stripped.to_string();
+    } else if let Some(stripped) = url.strip_suffix("/json") {
+        url = stripped.to_string();
+    }
+    url.push_str("/simple");
     url
 }
 
@@ -2344,7 +2359,7 @@ pub fn to_json_response(info: CommandInfo, outcome: &ExecutionOutcome, _code: i3
     let status = match outcome.status {
         CommandStatus::Ok => "ok",
         CommandStatus::UserError => "user-error",
-        CommandStatus::Failure => "failure",
+        CommandStatus::Failure => "error",
     };
     let details = match &outcome.details {
         Value::Object(_) => outcome.details.clone(),
@@ -2403,6 +2418,22 @@ mod tests {
         assert!(config.resolver.force_sdist);
         assert!(config.test.fallback_builtin);
         assert_eq!(config.test.skip_tests_flag.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn network_online_default_true() {
+        let snapshot = EnvSnapshot::testing(&[]);
+        let effects = SystemEffects::new();
+        let config = Config::from_snapshot(&snapshot, effects.cache()).expect("config");
+        assert!(config.network.online);
+    }
+
+    #[test]
+    fn network_can_be_disabled_via_env() {
+        let snapshot = EnvSnapshot::testing(&[("PX_ONLINE", "0")]);
+        let effects = SystemEffects::new();
+        let config = Config::from_snapshot(&snapshot, effects.cache()).expect("config");
+        assert!(!config.network.online);
     }
 
     #[test]

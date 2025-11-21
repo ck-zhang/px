@@ -25,16 +25,10 @@ struct PackageConflict {
     dropped_spec: String,
 }
 
-#[cfg(test)]
 fn test_migration_crash_hook() -> anyhow::Result<()> {
     if env::var("PX_TEST_MIGRATE_CRASH").ok().as_deref() == Some("1") {
         anyhow::bail!("test crash hook");
     }
-    Ok(())
-}
-
-#[cfg(not(test))]
-fn test_migration_crash_hook() -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -244,6 +238,17 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         }
     };
 
+    let lock_only = request.lock_behavior.is_lock_only();
+
+    if lock_only && !pyproject_exists {
+        return Ok(ExecutionOutcome::user_error(
+            "px migrate: pyproject.toml required when --lock-only is set",
+            json!({
+                "hint": "Create pyproject.toml or drop --lock-only to let px write it",
+            }),
+        ));
+    }
+
     if !pyproject_exists && requirements_path.is_none() && dev_path.is_none() {
         return Ok(ExecutionOutcome::user_error(
             "px migrate: no project files found",
@@ -331,7 +336,7 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
             "project_type": project_type,
             "conflicts": conflict_values,
             "precedence": "--source/--dev-source > pyproject.toml > requirements.txt",
-            "hint": "Resolve conflicting specs or rely on explicit --source/--dev-source to pick the right file.",
+            "hint": "Resolve conflicting specs or rely on explicit --source/--dev-source to pick the right file (pyproject.toml wins over requirements.txt when unspecified).",
         });
         details["sources"] = json!(source_summaries);
         return Ok(ExecutionOutcome::user_error(
@@ -349,7 +354,6 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     );
     let write_requested = request.mode.is_apply();
     let allow_dirty = request.workspace.allows_dirty();
-    let lock_only = request.lock_behavior.is_lock_only();
     let no_autopin = !request.autopin.autopin_enabled();
 
     if lock_only && !pyproject_exists {
@@ -410,7 +414,7 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
             "pyproject managed by {}; remove tool-managed dependencies or export requirements first",
             foreign_owners.join(", ")
         ));
-        return Ok(ExecutionOutcome::user_error(
+        return Ok(ExecutionOutcome::failure(
             "px migrate: pyproject managed by another tool",
             details,
         ));

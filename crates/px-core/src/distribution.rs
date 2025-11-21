@@ -224,7 +224,8 @@ fn publish_project_outcome(
         return Ok(ExecutionOutcome::success(message, details));
     }
 
-    if !ctx.is_online() {
+    let explicit_online = std::env::var("PX_ONLINE").ok().as_deref() == Some("1");
+    if !explicit_online {
         return Ok(ExecutionOutcome::user_error(
             "px publish: PX_ONLINE=1 required for uploads",
             json!({

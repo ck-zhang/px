@@ -11,7 +11,6 @@ dirs-next.workspace = true
 indexmap.workspace = true
 pep440_rs.workspace = true
 pep508_rs.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -19,6 +18,24 @@ time = { version = "0.3", features = ["formatting"] }
 toml_edit = "0.22"
 rayon.workspace = true
 url.workspace = true
+petgraph.workspace = true
+tokio.workspace = true
+uv-cache.workspace = true
+uv-client.workspace = true
+uv-configuration.workspace = true
+uv-dispatch.workspace = true
+uv-distribution.workspace = true
+uv-distribution-types.workspace = true
+uv-install-wheel.workspace = true
+uv-pep440.workspace = true
+uv-pep508.workspace = true
+uv-platform-tags.workspace = true
+uv-preview.workspace = true
+uv-pypi-types.workspace = true
+uv-python.workspace = true
+uv-resolver.workspace = true
+uv-types.workspace = true
+uv-workspace.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

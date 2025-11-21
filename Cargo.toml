@@ -10,7 +10,7 @@ members = [
 edition = "2021"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-rust-version = "1.78"
+rust-version = "1.89"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -40,6 +40,23 @@ dirs-next = "2"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
 rayon = "1.10"
+petgraph = "0.8.3"
+uv-cache = { version = "=0.0.1" }
+uv-client = { version = "=0.0.1" }
+uv-configuration = { version = "=0.0.1" }
+uv-dispatch = { version = "=0.0.1" }
+uv-distribution = { version = "=0.0.1" }
+uv-distribution-types = { version = "=0.0.1" }
+uv-install-wheel = { version = "=0.0.1", default-features = false }
+uv-pep440 = { version = "=0.0.1" }
+uv-pep508 = { version = "=0.0.1" }
+uv-platform-tags = { version = "=0.0.1" }
+uv-preview = { version = "=0.0.1" }
+uv-pypi-types = { version = "=0.0.1" }
+uv-python = { version = "=0.0.1" }
+uv-resolver = { version = "=0.0.1" }
+uv-types = { version = "=0.0.1" }
+uv-workspace = { version = "=0.0.1" }
 
 [workspace.metadata]
 px.description = "Opinionated Python toolchain scaffolding"
