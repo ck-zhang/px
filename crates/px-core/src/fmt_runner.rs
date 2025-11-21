@@ -5,12 +5,10 @@ use serde_json::{json, Value};
 use toml_edit::{DocumentMut, InlineTable, Item, Table};
 
 use crate::{
-    attach_autosync_details, auto_sync_environment, build_pythonpath,
-    ensure_project_environment_synced, issue_from_details, manifest_snapshot, outcome_from_output,
-    python_context_with_mode, runtime_manager,
+    build_pythonpath, ensure_project_environment_synced, is_missing_project_error,
+    manifest_snapshot, missing_project_outcome, outcome_from_output, runtime_manager,
     tools::{disable_proxy_env, load_installed_tool, MIN_PYTHON_REQUIREMENT},
-    CommandContext, EnvGuard, EnvironmentSyncReport, ExecutionOutcome, InstallUserError,
-    PythonContext,
+    CommandContext, ExecutionOutcome, InstallUserError,
 };
 use px_domain::ProjectSnapshot;
 
@@ -35,38 +33,16 @@ fn run_quality_command(
     kind: QualityKind,
     request: &FmtRequest,
 ) -> Result<ExecutionOutcome> {
-    let guard = EnvGuard::Strict;
-    let snapshot = manifest_snapshot()?;
-    let (py_ctx, sync_report) = match python_context_with_mode(ctx, guard) {
-        Ok(result) => result,
-        Err(outcome) => {
-            let Some(issue) = issue_from_details(&outcome.details) else {
-                return Ok(outcome);
-            };
-            if !matches!(
-                issue,
-                crate::EnvironmentIssue::MissingEnv | crate::EnvironmentIssue::MissingArtifacts
-            ) {
-                return Ok(outcome);
+    let snapshot = match manifest_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            if is_missing_project_error(&err) {
+                return Ok(missing_project_outcome());
             }
-            match auto_sync_environment(ctx, &snapshot, issue) {
-                Ok(report) => match python_context_with_mode(ctx, guard) {
-                    Ok((py_ctx, inner_report)) => {
-                        let merged = inner_report.or(report);
-                        (py_ctx, merged)
-                    }
-                    Err(outcome) => return Ok(outcome),
-                },
-                Err(err) => {
-                    return Ok(ExecutionOutcome::failure(
-                        "failed to prepare formatter environment",
-                        json!({ "error": err.to_string() }),
-                    ))
-                }
-            }
+            return Err(err);
         }
     };
-    let pyproject = py_ctx.project_root.join("pyproject.toml");
+    let pyproject = snapshot.manifest_path.clone();
     let config = match load_quality_tools(&pyproject, kind) {
         Ok(config) => config,
         Err(err) => {
@@ -87,11 +63,10 @@ fn run_quality_command(
     });
     let env = QualityToolEnv {
         ctx,
-        py_ctx: &py_ctx,
         config: &config,
         env_payload: &env_payload,
         pyproject: &pyproject,
-        sync_report: &sync_report,
+        project_root: snapshot.root.clone(),
     };
     let mut runs = Vec::new();
     for tool in &config.tools {
@@ -102,9 +77,7 @@ fn run_quality_command(
     }
 
     let details = build_success_details(&runs, &pyproject, &config, kind, request);
-    let mut outcome = ExecutionOutcome::success(kind.success_message(), details);
-    attach_autosync_details(&mut outcome, sync_report);
-    Ok(outcome)
+    Ok(ExecutionOutcome::success(kind.success_message(), details))
 }
 
 fn execute_quality_tool(
@@ -116,16 +89,13 @@ fn execute_quality_tool(
     let python_args = tool.python_args(&request.args);
     let prepared = match prepare_tool_run(env, kind, tool) {
         Ok(prepared) => prepared,
-        Err(mut outcome) => {
-            attach_autosync_details(&mut outcome, env.sync_report.clone());
-            return Ok(ToolRun::Outcome(outcome));
-        }
+        Err(outcome) => return Ok(ToolRun::Outcome(outcome)),
     };
     let output = env.ctx.python_runtime().run_command(
         &prepared.python,
         &python_args,
         &prepared.envs,
-        &env.py_ctx.project_root,
+        &env.project_root,
     )?;
     if output.code == 0 {
         return Ok(ToolRun::Completed(QualityRunRecord::new(
@@ -140,12 +110,11 @@ fn execute_quality_tool(
 
     let combined_output = format!("{}{}", output.stdout, output.stderr);
     if missing_module_error(&combined_output, &tool.module) {
-        let mut outcome = missing_module_outcome(env, kind, tool, &python_args, &prepared, request);
-        attach_autosync_details(&mut outcome, env.sync_report.clone());
+        let outcome = missing_module_outcome(env, kind, tool, &python_args, &prepared, request);
         return Ok(ToolRun::Outcome(outcome));
     }
 
-    let mut failure = outcome_from_output(
+    let failure = outcome_from_output(
         kind.section_name(),
         tool.display_name(),
         &output,
@@ -161,17 +130,15 @@ fn execute_quality_tool(
             "runtime": prepared.runtime,
         })),
     );
-    attach_autosync_details(&mut failure, env.sync_report.clone());
     Ok(ToolRun::Outcome(failure))
 }
 
 struct QualityToolEnv<'ctx, 'payload> {
     ctx: &'ctx CommandContext<'ctx>,
-    py_ctx: &'ctx PythonContext,
     config: &'ctx QualityToolConfig,
     env_payload: &'payload Value,
     pyproject: &'ctx Path,
-    sync_report: &'ctx Option<EnvironmentSyncReport>,
+    project_root: std::path::PathBuf,
 }
 
 struct PreparedToolRun {
@@ -280,11 +247,11 @@ fn prepare_tool_run(
                 }),
             )
         })?;
-    let project_src = env.py_ctx.project_root.join("src");
+    let project_src = env.project_root.join("src");
     if project_src.exists() {
         allowed_paths.push(project_src);
     }
-    allowed_paths.push(env.py_ctx.project_root.clone());
+    allowed_paths.push(env.project_root.clone());
     let allowed = env::join_paths(&allowed_paths)
         .context("allowed path contains invalid UTF-8")
         .map_err(|err| {
@@ -313,7 +280,7 @@ fn prepare_tool_run(
         ("PX_TOOL_ROOT".into(), descriptor.root.display().to_string()),
         (
             "PX_PROJECT_ROOT".into(),
-            env.py_ctx.project_root.display().to_string(),
+            env.project_root.display().to_string(),
         ),
         ("PX_COMMAND_JSON".into(), env.env_payload.to_string()),
     ];

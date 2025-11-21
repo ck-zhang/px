@@ -18,8 +18,9 @@ use crate::{
     install_snapshot, is_missing_project_error, load_project_state, manifest_snapshot,
     manifest_snapshot_at, missing_project_outcome, persist_resolved_dependencies,
     python_context_with_mode, refresh_project_site, relative_path_str,
-    resolve_dependencies_with_effects, CommandContext, EnvGuard, ExecutionOutcome, InstallOutcome,
-    InstallState, InstallUserError, ManifestSnapshot, PythonContext,
+    resolve_dependencies_with_effects, state_guard::StateViolation, CommandContext, EnvGuard,
+    ExecutionOutcome, InstallOutcome, InstallState, InstallUserError, ManifestSnapshot,
+    PythonContext,
 };
 use px_domain::{
     collect_resolved_dependencies, detect_lock_drift, discover_project_root, infer_package_name,
@@ -59,6 +60,13 @@ pub struct ProjectUpdateRequest {
 pub struct ProjectWhyRequest {
     pub package: Option<String>,
     pub issue: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MutationCommand {
+    Add,
+    Remove,
+    Update,
 }
 
 /// Initializes a px project in the current directory.
@@ -158,8 +166,14 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
         ));
     }
 
-    let root = ctx.project_root()?;
-    let pyproject_path = root.join("pyproject.toml");
+    let snapshot = manifest_snapshot()?;
+    let state_report = evaluate_project_state(ctx, &snapshot)?;
+    if let Err(outcome) = ensure_mutation_allowed(&snapshot, &state_report, MutationCommand::Add) {
+        return Ok(outcome);
+    }
+
+    let root = snapshot.root.clone();
+    let pyproject_path = snapshot.manifest_path.clone();
     let cleaned_specs: Vec<String> = request
         .specs
         .iter()
@@ -232,8 +246,16 @@ pub fn project_remove(
         ));
     }
 
-    let root = ctx.project_root()?;
-    let pyproject_path = root.join("pyproject.toml");
+    let snapshot = manifest_snapshot()?;
+    let state_report = evaluate_project_state(ctx, &snapshot)?;
+    if let Err(outcome) =
+        ensure_mutation_allowed(&snapshot, &state_report, MutationCommand::Remove)
+    {
+        return Ok(outcome);
+    }
+
+    let root = snapshot.root.clone();
+    let pyproject_path = snapshot.manifest_path.clone();
     let cleaned_specs: Vec<String> = request
         .specs
         .iter()
@@ -393,20 +415,15 @@ pub fn project_update(
     ctx: &CommandContext,
     request: &ProjectUpdateRequest,
 ) -> Result<ExecutionOutcome> {
-    let root = ctx.project_root()?;
-    let pyproject_path = root.join("pyproject.toml");
-    let lock_path = root.join("px.lock");
-    if !lock_path.exists() {
-        return Ok(ExecutionOutcome::user_error(
-            "px update requires an existing px.lock (run `px sync`)",
-            json!({
-                "lockfile": lock_path.display().to_string(),
-                "hint": "run `px sync` to create px.lock before updating",
-            }),
-        ));
-    }
-
     let snapshot = manifest_snapshot()?;
+    let state_report = evaluate_project_state(ctx, &snapshot)?;
+    if let Err(outcome) =
+        ensure_mutation_allowed(&snapshot, &state_report, MutationCommand::Update)
+    {
+        return Ok(outcome);
+    }
+    let pyproject_path = snapshot.manifest_path.clone();
+
     if snapshot.dependencies.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "px update: no dependencies declared",
@@ -572,6 +589,26 @@ pub fn project_why(ctx: &CommandContext, request: &ProjectWhyRequest) -> Result<
         }
     };
     let snapshot = manifest_snapshot()?;
+    let state_report = evaluate_project_state(ctx, &snapshot)?;
+    if !state_report.manifest_clean {
+        return Ok(ExecutionOutcome::user_error(
+            "Project manifest has changed since px.lock was created",
+            json!({
+                "pyproject": snapshot.manifest_path.display().to_string(),
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "hint": "Run `px sync` to update px.lock and the environment.",
+            }),
+        ));
+    }
+    if !state_report.lock_exists {
+        return Ok(ExecutionOutcome::user_error(
+            "px.lock not found",
+            json!({
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "hint": "Run `px sync` to create px.lock before inspecting dependencies.",
+            }),
+        ));
+    }
     let target = dependency_name(&package);
     if target.is_empty() {
         return Ok(ExecutionOutcome::user_error(
@@ -588,22 +625,37 @@ pub fn project_why(ctx: &CommandContext, request: &ProjectWhyRequest) -> Result<
         .map(|spec| dependency_name(spec))
         .filter(|name| !name.is_empty())
         .collect();
-    let (py_ctx, _) = match python_context_with_mode(ctx, EnvGuard::Strict) {
-        Ok(value) => value,
-        Err(outcome) => return Ok(outcome),
-    };
-    let graph = match collect_dependency_graph(ctx, &py_ctx) {
-        Ok(graph) => graph,
-        Err(outcome) => return Ok(outcome),
+    let graph = if state_report.env_clean {
+        match python_context_with_mode(ctx, EnvGuard::Strict) {
+            Ok((py_ctx, _)) => match collect_dependency_graph(ctx, &py_ctx) {
+                Ok(graph) => graph,
+                Err(outcome) => return Ok(outcome),
+            },
+            Err(_) => match collect_dependency_graph_from_lock(&snapshot) {
+                Ok(graph) => graph,
+                Err(outcome) => return Ok(outcome),
+            },
+        }
+    } else {
+        match collect_dependency_graph_from_lock(&snapshot) {
+            Ok(graph) => graph,
+            Err(outcome) => return Ok(outcome),
+        }
     };
     let entry = graph.packages.get(&target);
     if entry.is_none() {
+        let mut details = json!({
+            "package": package,
+            "hint": "run `px sync` to refresh the environment, then retry",
+        });
+        if !state_report.env_clean {
+            if let Some(issue) = state_report.env_issue {
+                details["environment_issue"] = issue;
+            }
+        }
         return Ok(ExecutionOutcome::user_error(
             format!("{package} is not installed in this project"),
-            json!({
-                "package": package,
-                "hint": "run `px sync` to refresh the environment, then retry",
-            }),
+            details,
         ));
     }
     let entry = entry.unwrap();
@@ -623,13 +675,17 @@ pub fn project_why(ctx: &CommandContext, request: &ProjectWhyRequest) -> Result<
             .map_or_else(|| entry.name.clone(), |path| path.join(" -> "));
         format!("{}=={} is required by {chain}", entry.name, version)
     };
-    let details = json!({
+    let mut details = json!({
         "package": entry.name,
         "normalized": target,
         "version": version,
         "direct": direct,
         "chains": chains,
     });
+    if !state_report.env_clean {
+        details["hint"] =
+            json!("Environment is out of sync with px.lock; run `px sync` to rebuild it.");
+    }
     Ok(ExecutionOutcome::success(message, details))
 }
 
@@ -786,7 +842,7 @@ fn issue_id_for(message: &str) -> String {
     format!("ISS-{}", short.to_ascii_uppercase())
 }
 
-fn evaluate_project_state(
+pub(crate) fn evaluate_project_state(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
 ) -> Result<ProjectStateReport> {
@@ -843,6 +899,14 @@ fn evaluate_project_state(
     ))
 }
 
+fn ensure_mutation_allowed(
+    snapshot: &ManifestSnapshot,
+    state_report: &ProjectStateReport,
+    command: MutationCommand,
+) -> Result<(), ExecutionOutcome> {
+    crate::state_guard::ensure_mutation_allowed(snapshot, state_report, command)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -862,6 +926,122 @@ mod tests {
             loosen_dependency_spec(spec).expect("parsed"),
             LoosenOutcome::Unsupported
         ));
+    }
+
+    #[test]
+    fn mutation_gate_blocks_update_without_lock() {
+        let snapshot = ManifestSnapshot {
+            root: PathBuf::from("/proj"),
+            manifest_path: PathBuf::from("/proj/pyproject.toml"),
+            lock_path: PathBuf::from("/proj/px.lock"),
+            name: "demo".into(),
+            python_requirement: ">=3.11".into(),
+            dependencies: vec![],
+            python_override: None,
+            manifest_fingerprint: "mf".into(),
+        };
+        let state = ProjectStateReport::new(
+            true,
+            false,
+            false,
+            false,
+            false,
+            true,
+            Some("mf".into()),
+            None,
+            None,
+            None,
+        );
+        let outcome =
+            ensure_mutation_allowed(&snapshot, &state, MutationCommand::Update).unwrap_err();
+        assert_eq!(outcome.status, crate::CommandStatus::UserError);
+        assert!(outcome.message.contains("px.lock not found"));
+    }
+
+    #[test]
+    fn mutation_gate_blocks_update_with_manifest_drift() {
+        let snapshot = ManifestSnapshot {
+            root: PathBuf::from("/proj"),
+            manifest_path: PathBuf::from("/proj/pyproject.toml"),
+            lock_path: PathBuf::from("/proj/px.lock"),
+            name: "demo".into(),
+            python_requirement: ">=3.11".into(),
+            dependencies: vec![],
+            python_override: None,
+            manifest_fingerprint: "mf".into(),
+        };
+        let state = ProjectStateReport::new(
+            true,
+            true,
+            false,
+            false,
+            false,
+            true,
+            Some("mf".into()),
+            Some("lf".into()),
+            Some("lid".into()),
+            None,
+        );
+        let outcome =
+            ensure_mutation_allowed(&snapshot, &state, MutationCommand::Update).unwrap_err();
+        assert_eq!(outcome.status, crate::CommandStatus::UserError);
+        assert!(outcome.message.contains("Project manifest has changed"));
+    }
+
+    #[test]
+    fn mutation_gate_allows_add_without_lock() {
+        let snapshot = ManifestSnapshot {
+            root: PathBuf::from("/proj"),
+            manifest_path: PathBuf::from("/proj/pyproject.toml"),
+            lock_path: PathBuf::from("/proj/px.lock"),
+            name: "demo".into(),
+            python_requirement: ">=3.11".into(),
+            dependencies: vec![],
+            python_override: None,
+            manifest_fingerprint: "mf".into(),
+        };
+        let state = ProjectStateReport::new(
+            true,
+            false,
+            false,
+            false,
+            false,
+            true,
+            Some("mf".into()),
+            None,
+            None,
+            None,
+        );
+        let outcome = ensure_mutation_allowed(&snapshot, &state, MutationCommand::Add);
+        assert!(outcome.is_ok());
+    }
+
+    #[test]
+    fn mutation_gate_allows_add_with_manifest_drift() {
+        let snapshot = ManifestSnapshot {
+            root: PathBuf::from("/proj"),
+            manifest_path: PathBuf::from("/proj/pyproject.toml"),
+            lock_path: PathBuf::from("/proj/px.lock"),
+            name: "demo".into(),
+            python_requirement: ">=3.11".into(),
+            dependencies: vec![],
+            python_override: None,
+            manifest_fingerprint: "mf".into(),
+        };
+        let state = ProjectStateReport::new(
+            true,
+            true,
+            false,
+            false,
+            false,
+            true,
+            Some("mf".into()),
+            Some("lf".into()),
+            Some("lid".into()),
+            None,
+        );
+        let outcome = ensure_mutation_allowed(&snapshot, &state, MutationCommand::Add);
+        assert!(outcome.is_ok());
     }
 }
 
@@ -1071,7 +1251,28 @@ fn sync_manifest_environment(
 
 fn project_sync_outcome(ctx: &CommandContext, frozen: bool) -> Result<ExecutionOutcome> {
     let snapshot = manifest_snapshot()?;
-    let outcome = match install_snapshot(ctx, &snapshot, frozen, None) {
+    if frozen {
+        let state = evaluate_project_state(ctx, &snapshot)?;
+        if !state.lock_exists || !state.manifest_clean {
+            if !state.lock_exists {
+                return Ok(StateViolation::MissingLock.into_outcome(&snapshot, "sync", &state));
+            }
+            return Ok(StateViolation::ManifestDrift.into_outcome(&snapshot, "sync", &state));
+        }
+        refresh_project_site(&snapshot, ctx)?;
+        return Ok(ExecutionOutcome::success(
+            "environment synced from existing px.lock",
+            json!({
+                "project": snapshot.name,
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "python": snapshot.python_requirement,
+                "mode": "frozen",
+                "state": "Consistent",
+            }),
+        ));
+    }
+
+    let outcome = match install_snapshot(ctx, &snapshot, false, None) {
         Ok(ok) => ok,
         Err(err) => match err.downcast::<InstallUserError>() {
             Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
@@ -1083,7 +1284,7 @@ fn project_sync_outcome(ctx: &CommandContext, frozen: bool) -> Result<ExecutionO
         "project": snapshot.name,
         "python": snapshot.python_requirement,
     });
-
+    // Sync is required to end in Consistent; reflect state in outcome.
     match outcome.state {
         InstallState::Installed => {
             refresh_project_site(&snapshot, ctx)?;
@@ -1094,12 +1295,10 @@ fn project_sync_outcome(ctx: &CommandContext, frozen: bool) -> Result<ExecutionO
         }
         InstallState::UpToDate => {
             refresh_project_site(&snapshot, ctx)?;
-            let message = if frozen && outcome.verified {
-                "lockfile verified".to_string()
-            } else {
-                "px.lock already up to date".to_string()
-            };
-            Ok(ExecutionOutcome::success(message, details))
+            Ok(ExecutionOutcome::success(
+                "px.lock already up to date".to_string(),
+                details,
+            ))
         }
         InstallState::Drift => {
             details["drift"] = Value::Array(outcome.drift.iter().map(|d| json!(d)).collect());
@@ -1263,6 +1462,66 @@ fn collect_dependency_graph(
                         parents.push(normalized.clone());
                     }
                 }
+            }
+        }
+    }
+
+    Ok(WhyGraph { packages, reverse })
+}
+
+fn collect_dependency_graph_from_lock(
+    snapshot: &ManifestSnapshot,
+) -> Result<WhyGraph, ExecutionOutcome> {
+    let lock = match load_lockfile_optional(&snapshot.lock_path) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            return Err(ExecutionOutcome::user_error(
+                "px.lock not found",
+                json!({
+                    "lockfile": snapshot.lock_path.display().to_string(),
+                    "hint": "Run `px sync` to create px.lock before inspecting dependencies.",
+                }),
+            ))
+        }
+        Err(err) => {
+            return Err(ExecutionOutcome::failure(
+                "failed to read px.lock",
+                json!({ "error": err.to_string(), "lockfile": snapshot.lock_path.display().to_string() }),
+            ))
+        }
+    };
+
+    let mut packages = HashMap::new();
+    let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
+    for dep in collect_resolved_dependencies(&lock) {
+        let normalized = dependency_name(&dep.specifier);
+        if normalized.is_empty() {
+            continue;
+        }
+        let version = version_from_spec(&dep.specifier);
+        packages
+            .entry(normalized.clone())
+            .or_insert_with(|| WhyPackage {
+                name: dep.name.clone(),
+                normalized: normalized.clone(),
+                version: version.clone(),
+                requires: dep.requires.clone(),
+            });
+        if let Some(pkg) = packages.get_mut(&normalized) {
+            if pkg.version.is_empty() {
+                pkg.version = version.clone();
+            }
+            if pkg.requires.is_empty() && !dep.requires.is_empty() {
+                pkg.requires = dep.requires.clone();
+            }
+        }
+        for parent in dep.requires {
+            if parent.is_empty() {
+                continue;
+            }
+            let parents = reverse.entry(parent).or_default();
+            if !parents.iter().any(|p| p == &normalized) {
+                parents.push(normalized.clone());
             }
         }
     }

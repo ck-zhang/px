@@ -55,6 +55,7 @@ mod python_build;
 mod python_cli;
 mod run;
 mod runtime_manager;
+mod state_guard;
 mod tools;
 mod traceback;
 
@@ -479,7 +480,7 @@ impl InstallUserError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum CommandStatus {
     Ok,
     UserError,
@@ -635,6 +636,7 @@ pub(crate) struct InstallOutcome {
     state: InstallState,
     lockfile: String,
     drift: Vec<String>,
+    #[allow(dead_code)]
     verified: bool,
 }
 
@@ -2024,6 +2026,7 @@ impl EnvironmentIssue {
         )
     }
 }
+#[allow(dead_code)]
 pub(crate) fn issue_from_details(details: &Value) -> Option<EnvironmentIssue> {
     EnvironmentIssue::from_details(details)
 }

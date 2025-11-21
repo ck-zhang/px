@@ -1,4 +1,5 @@
 use std::fs;
+use std::env;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
@@ -6,8 +7,9 @@ use serde_json::{json, Value};
 use toml_edit::{DocumentMut, Item};
 
 use crate::{
-    attach_autosync_details, outcome_from_output, project_table, python_context_with_mode,
-    CommandContext, EnvGuard, ExecutionOutcome, PythonContext,
+    attach_autosync_details, is_missing_project_error, manifest_snapshot, missing_project_outcome,
+    outcome_from_output, project_table, python_context_with_mode, state_guard::guard_for_execution,
+    CommandContext, ExecutionOutcome, PythonContext,
 };
 
 #[derive(Clone, Debug)]
@@ -42,11 +44,37 @@ pub fn run_project(ctx: &CommandContext, request: &RunRequest) -> Result<Executi
 
 fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<ExecutionOutcome> {
     let strict = request.frozen || ctx.env_flag_enabled("CI");
-    let guard = if strict {
-        EnvGuard::Strict
-    } else {
-        EnvGuard::AutoSync
+    let snapshot = match manifest_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            if is_missing_project_error(&err) {
+                return Ok(missing_project_outcome());
+            }
+            let msg = err.to_string();
+            if msg.contains("pyproject.toml not found") {
+                let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let manifest = root.join("pyproject.toml");
+                return Ok(ExecutionOutcome::user_error(
+                    format!("pyproject.toml not found in {}", root.display()),
+                    json!({
+                        "hint": "run `px migrate --apply` or pass ENTRY explicitly",
+                        "project_root": root.display().to_string(),
+                        "manifest": manifest.display().to_string(),
+                    }),
+                ));
+            }
+            return Err(err);
+        }
     };
+    let state_report = match crate::state_guard::state_or_violation(ctx, &snapshot, "run") {
+        Ok(report) => report,
+        Err(outcome) => return Ok(outcome),
+    };
+    let guard =
+        match guard_for_execution(strict, &snapshot, &state_report, "run") {
+            Ok(guard) => guard,
+            Err(outcome) => return Ok(outcome),
+        };
     let (py_ctx, sync_report) = match python_context_with_mode(ctx, guard) {
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
@@ -124,11 +152,37 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
 
 fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<ExecutionOutcome> {
     let strict = request.frozen || ctx.env_flag_enabled("CI");
-    let guard = if strict {
-        EnvGuard::Strict
-    } else {
-        EnvGuard::AutoSync
+    let snapshot = match manifest_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            if is_missing_project_error(&err) {
+                return Ok(missing_project_outcome());
+            }
+            let msg = err.to_string();
+            if msg.contains("pyproject.toml not found") {
+                let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let manifest = root.join("pyproject.toml");
+                return Ok(ExecutionOutcome::user_error(
+                    format!("pyproject.toml not found in {}", root.display()),
+                    json!({
+                        "hint": "run `px migrate --apply` or pass ENTRY explicitly",
+                        "project_root": root.display().to_string(),
+                        "manifest": manifest.display().to_string(),
+                    }),
+                ));
+            }
+            return Err(err);
+        }
     };
+    let state_report = match crate::state_guard::state_or_violation(ctx, &snapshot, "test") {
+        Ok(report) => report,
+        Err(outcome) => return Ok(outcome),
+    };
+    let guard =
+        match guard_for_execution(strict, &snapshot, &state_report, "test") {
+            Ok(guard) => guard,
+            Err(outcome) => return Ok(outcome),
+        };
     let (py_ctx, sync_report) = match python_context_with_mode(ctx, guard) {
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
