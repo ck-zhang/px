@@ -410,14 +410,26 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         let mut details = json!({
             "project_type": project_type,
             "conflicts": conflict_values,
-            "precedence": "--source/--dev-source > pyproject.toml > requirements.txt",
-            "hint": "Resolve conflicting specs or rely on explicit --source/--dev-source to pick the right file (pyproject.toml wins over requirements.txt when unspecified).",
         });
         details["sources"] = json!(source_summaries);
-        return Ok(ExecutionOutcome::user_error(
-            "px migrate: conflicting dependency sources (pyproject takes precedence over requirements)",
-            details,
-        ));
+
+        let single_source_conflict = source_summaries.len() == 1;
+
+        if single_source_conflict {
+            details["hint"] = json!("Remove duplicate/conflicting entries in pyproject.toml so each dependency is declared once.");
+            return Ok(ExecutionOutcome::user_error(
+                "px migrate: conflicting dependency entries in pyproject.toml",
+                details,
+            ));
+        } else {
+            details["precedence"] =
+                json!("--source/--dev-source > pyproject.toml > requirements.txt");
+            details["hint"] = json!("Resolve conflicting specs or rely on explicit --source/--dev-source to pick the right file (pyproject.toml wins over requirements.txt when unspecified).");
+            return Ok(ExecutionOutcome::user_error(
+                "px migrate: conflicting dependency sources (pyproject takes precedence over requirements)",
+                details,
+            ));
+        }
     }
 
     let prod_count = packages.iter().filter(|pkg| pkg.scope == "prod").count();
@@ -588,7 +600,10 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
                 if pyproject_modified {
                     rollback_failed_migration(&backups, &created_files)?;
                 }
-                return Err(err);
+                return match err.downcast::<InstallUserError>() {
+                    Ok(user) => Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                    Err(other) => Err(other),
+                };
             }
         };
         match autopin_state {
