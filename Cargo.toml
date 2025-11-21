@@ -66,20 +66,52 @@ px.description = "Opinionated Python toolchain scaffolding"
 pedantic = "warn"
 
 [patch.crates-io]
-uv-cache = { path = "../uv/crates/uv-cache" }
-uv-client = { path = "../uv/crates/uv-client" }
-uv-configuration = { path = "../uv/crates/uv-configuration" }
-uv-dispatch = { path = "../uv/crates/uv-dispatch" }
-uv-distribution = { path = "../uv/crates/uv-distribution" }
-uv-distribution-types = { path = "../uv/crates/uv-distribution-types" }
-uv-install-wheel = { path = "../uv/crates/uv-install-wheel" }
-uv-pep440 = { path = "../uv/crates/uv-pep440" }
-uv-pep508 = { path = "../uv/crates/uv-pep508" }
-uv-platform-tags = { path = "../uv/crates/uv-platform-tags" }
-uv-preview = { path = "../uv/crates/uv-preview" }
-uv-pypi-types = { path = "../uv/crates/uv-pypi-types" }
-uv-python = { path = "../uv/crates/uv-python" }
-uv-resolver = { path = "../uv/crates/uv-resolver" }
-uv-types = { path = "../uv/crates/uv-types" }
-uv-workspace = { path = "../uv/crates/uv-workspace" }
-uv-version = { path = "../uv/crates/uv-version" }
+uv-auth = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-build-backend = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-build-frontend = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-cache = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-cache-info = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-cache-key = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-client = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-configuration = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-console = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-dirs = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-dispatch = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-distribution = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-distribution-filename = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-distribution-types = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-extract = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-flags = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-fs = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-git = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-git-types = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-globfilter = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-install-wheel = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-installer = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-keyring = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-macros = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-metadata = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-normalize = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-once-map = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-options-metadata = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-pep440 = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-pep508 = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-platform = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-platform-tags = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-preview = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-pypi-types = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-python = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-redacted = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-requirements-txt = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-resolver = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-shell = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-small-str = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-state = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-static = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-torch = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-trampoline-builder = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-types = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-version = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-virtualenv = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-warnings = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-workspace = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
