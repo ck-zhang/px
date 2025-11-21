@@ -16,11 +16,11 @@ use toml_edit::{DocumentMut, Item};
 use crate::{
     compute_lock_hash, dependency_name, detect_runtime_metadata, ensure_env_matches_lock,
     install_snapshot, is_missing_project_error, load_project_state, manifest_snapshot,
-    manifest_snapshot_at, missing_project_outcome, persist_resolved_dependencies,
-    python_context_with_mode, refresh_project_site, relative_path_str,
-    resolve_dependencies_with_effects, state_guard::StateViolation, CommandContext, EnvGuard,
-    ExecutionOutcome, InstallOutcome, InstallState, InstallUserError, ManifestSnapshot,
-    PythonContext,
+    manifest_snapshot_at, marker_env_for_snapshot, missing_project_outcome,
+    persist_resolved_dependencies, python_context_with_mode, refresh_project_site,
+    relative_path_str, resolve_dependencies_with_effects, state_guard::StateViolation,
+    CommandContext, EnvGuard, ExecutionOutcome, InstallOutcome, InstallState, InstallUserError,
+    ManifestSnapshot, PythonContext,
 };
 use px_domain::{
     collect_resolved_dependencies, detect_lock_drift, discover_project_root, infer_package_name,
@@ -248,8 +248,7 @@ pub fn project_remove(
 
     let snapshot = manifest_snapshot()?;
     let state_report = evaluate_project_state(ctx, &snapshot)?;
-    if let Err(outcome) =
-        ensure_mutation_allowed(&snapshot, &state_report, MutationCommand::Remove)
+    if let Err(outcome) = ensure_mutation_allowed(&snapshot, &state_report, MutationCommand::Remove)
     {
         return Ok(outcome);
     }
@@ -417,8 +416,7 @@ pub fn project_update(
 ) -> Result<ExecutionOutcome> {
     let snapshot = manifest_snapshot()?;
     let state_report = evaluate_project_state(ctx, &snapshot)?;
-    if let Err(outcome) =
-        ensure_mutation_allowed(&snapshot, &state_report, MutationCommand::Update)
+    if let Err(outcome) = ensure_mutation_allowed(&snapshot, &state_report, MutationCommand::Update)
     {
         return Ok(outcome);
     }
@@ -729,7 +727,8 @@ fn explain_issue(_ctx: &CommandContext, issue_id: &str) -> Result<ExecutionOutco
             }),
         ));
     };
-    let drift = detect_lock_drift(&snapshot, &lock, None);
+    let marker_env = marker_env_for_snapshot(&snapshot);
+    let drift = detect_lock_drift(&snapshot, &lock, marker_env.as_ref());
     let mut normalized = trimmed.to_string();
     normalized.make_ascii_uppercase();
     for message in drift {
@@ -850,6 +849,7 @@ pub(crate) fn evaluate_project_state(
     let manifest_fingerprint = manifest_exists.then(|| snapshot.manifest_fingerprint.clone());
     let lock = load_lockfile_optional(&snapshot.lock_path)?;
     let lock_exists = lock.is_some();
+    let marker_env = marker_env_for_snapshot(snapshot);
     let lock_fingerprint = lock
         .as_ref()
         .and_then(|lock| lock.manifest_fingerprint.clone());
@@ -857,7 +857,9 @@ pub(crate) fn evaluate_project_state(
     if manifest_exists && lock_exists {
         manifest_clean = match (&manifest_fingerprint, &lock_fingerprint) {
             (Some(manifest), Some(lock_fp)) => manifest == lock_fp,
-            (Some(_), None) => detect_lock_drift(snapshot, lock.as_ref().unwrap(), None).is_empty(),
+            (Some(_), None) => {
+                detect_lock_drift(snapshot, lock.as_ref().unwrap(), marker_env.as_ref()).is_empty()
+            }
             _ => false,
         };
     }

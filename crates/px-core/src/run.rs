@@ -1,5 +1,5 @@
-use std::fs;
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
@@ -70,11 +70,10 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         Ok(report) => report,
         Err(outcome) => return Ok(outcome),
     };
-    let guard =
-        match guard_for_execution(strict, &snapshot, &state_report, "run") {
-            Ok(guard) => guard,
-            Err(outcome) => return Ok(outcome),
-        };
+    let guard = match guard_for_execution(strict, &snapshot, &state_report, "run") {
+        Ok(guard) => guard,
+        Err(outcome) => return Ok(outcome),
+    };
     let (py_ctx, sync_report) = match python_context_with_mode(ctx, guard) {
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
@@ -178,11 +177,10 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
         Ok(report) => report,
         Err(outcome) => return Ok(outcome),
     };
-    let guard =
-        match guard_for_execution(strict, &snapshot, &state_report, "test") {
-            Ok(guard) => guard,
-            Err(outcome) => return Ok(outcome),
-        };
+    let guard = match guard_for_execution(strict, &snapshot, &state_report, "test") {
+        Ok(guard) => guard,
+        Err(outcome) => return Ok(outcome),
+    };
     let (py_ctx, sync_report) = match python_context_with_mode(ctx, guard) {
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),

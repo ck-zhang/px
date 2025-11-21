@@ -126,10 +126,7 @@ async fn resolve_with_uv(request: &ResolveRequest) -> Result<Vec<ResolvedSpecifi
     )
     .context("failed to construct uv resolver")?;
 
-    let output = resolver
-        .resolve()
-        .await
-        .context("uv resolver failed to resolve dependencies")?;
+    let output = resolver.resolve().await?;
     let resolution: UvResolution = output.into();
     let direct_requirements = parse_direct_requirements(&request.requirements)?;
 

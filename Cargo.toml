@@ -57,9 +57,29 @@ uv-python = { version = "=0.0.1" }
 uv-resolver = { version = "=0.0.1" }
 uv-types = { version = "=0.0.1" }
 uv-workspace = { version = "=0.0.1" }
+uv-version = { version = "0.9.11" }
 
 [workspace.metadata]
 px.description = "Opinionated Python toolchain scaffolding"
 
 [workspace.lints.clippy]
 pedantic = "warn"
+
+[patch.crates-io]
+uv-cache = { path = "../uv/crates/uv-cache" }
+uv-client = { path = "../uv/crates/uv-client" }
+uv-configuration = { path = "../uv/crates/uv-configuration" }
+uv-dispatch = { path = "../uv/crates/uv-dispatch" }
+uv-distribution = { path = "../uv/crates/uv-distribution" }
+uv-distribution-types = { path = "../uv/crates/uv-distribution-types" }
+uv-install-wheel = { path = "../uv/crates/uv-install-wheel" }
+uv-pep440 = { path = "../uv/crates/uv-pep440" }
+uv-pep508 = { path = "../uv/crates/uv-pep508" }
+uv-platform-tags = { path = "../uv/crates/uv-platform-tags" }
+uv-preview = { path = "../uv/crates/uv-preview" }
+uv-pypi-types = { path = "../uv/crates/uv-pypi-types" }
+uv-python = { path = "../uv/crates/uv-python" }
+uv-resolver = { path = "../uv/crates/uv-resolver" }
+uv-types = { path = "../uv/crates/uv-types" }
+uv-workspace = { path = "../uv/crates/uv-workspace" }
+uv-version = { path = "../uv/crates/uv-version" }

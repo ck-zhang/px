@@ -649,12 +649,13 @@ pub(crate) enum InstallState {
 }
 
 pub(crate) fn lock_is_fresh(snapshot: &ManifestSnapshot) -> Result<bool> {
+    let marker_env = marker_env_for_snapshot(snapshot);
     match load_lockfile_optional(&snapshot.lock_path)? {
         Some(lock) => {
             if let Some(fingerprint) = &lock.manifest_fingerprint {
                 Ok(fingerprint == &snapshot.manifest_fingerprint)
             } else {
-                Ok(detect_lock_drift(snapshot, &lock, None).is_empty())
+                Ok(detect_lock_drift(snapshot, &lock, marker_env.as_ref()).is_empty())
             }
         }
         None => Ok(false),
@@ -674,6 +675,21 @@ pub(crate) fn manifest_snapshot() -> Result<ManifestSnapshot> {
 
 pub(crate) fn manifest_snapshot_at(root: &Path) -> Result<ManifestSnapshot> {
     ProjectSnapshot::read_from(root)
+}
+
+fn runtime_marker_environment(snapshot: &ManifestSnapshot) -> Result<MarkerEnvironment> {
+    let runtime = prepare_project_runtime(snapshot)?;
+    let resolver_env = detect_marker_environment(&runtime.record.path)?;
+    resolver_env.to_marker_environment()
+}
+
+fn marker_env_for_snapshot(snapshot: &ManifestSnapshot) -> Option<MarkerEnvironment> {
+    runtime_marker_environment(snapshot).ok().or_else(|| {
+        detect_interpreter()
+            .ok()
+            .and_then(|python| detect_marker_environment(&python).ok())
+            .and_then(|env| env.to_marker_environment().ok())
+    })
 }
 
 pub(crate) fn install_snapshot(
@@ -916,6 +932,36 @@ struct RuntimeMetadata {
 fn prepare_project_runtime(
     snapshot: &ManifestSnapshot,
 ) -> Result<runtime_manager::RuntimeSelection> {
+    if let Ok(explicit) = env::var("PX_RUNTIME_PYTHON") {
+        if let Ok(details) = runtime_manager::inspect_python(Path::new(&explicit)) {
+            let requirement = snapshot
+                .python_override
+                .as_deref()
+                .unwrap_or(&snapshot.python_requirement);
+            if let (Ok(specs), Ok(version)) = (
+                pep440_rs::VersionSpecifiers::from_str(requirement),
+                pep440_rs::Version::from_str(&details.full_version),
+            ) {
+                if specs.contains(&version) {
+                    let channel = runtime_manager::format_channel(&details.full_version)
+                        .unwrap_or_else(|_| requirement.to_string());
+                    let record = runtime_manager::RuntimeRecord {
+                        version: channel,
+                        full_version: details.full_version,
+                        path: details.executable,
+                        default: false,
+                    };
+                    let selection = runtime_manager::RuntimeSelection {
+                        record,
+                        source: runtime_manager::RuntimeSource::Explicit,
+                    };
+                    env::set_var("PX_RUNTIME_PYTHON", &selection.record.path);
+                    return Ok(selection);
+                }
+            }
+        }
+    }
+
     let selection = runtime_manager::resolve_runtime(
         snapshot.python_override.as_deref(),
         &snapshot.python_requirement,
@@ -1155,10 +1201,11 @@ fn normalize_index_url(raw: &str) -> String {
 
 fn resolver_failure_details(err: &anyhow::Error) -> Value {
     let message = err.to_string();
-    let issue = message.clone();
+    let mut issues = vec![message.clone()];
+    issues.extend(err.chain().skip(1).map(std::string::ToString::to_string));
     let details = json!({
         "reason": "resolve_failed",
-        "issues": [issue],
+        "issues": issues,
         "hint": "Inspect dependency constraints and rerun `px sync`.",
         "code": diag_commands::SYNC,
     });
@@ -1166,7 +1213,7 @@ fn resolver_failure_details(err: &anyhow::Error) -> Value {
         if message.contains("unable to resolve") {
             return json!({
                 "reason": "resolve_no_match",
-                "issues": [issue],
+                "issues": issues,
                 "requirement": req,
                 "hint": format!("Relax or remove `{}` in pyproject.toml, then rerun `px sync`.", req),
                 "code": diag_commands::SYNC,
@@ -1177,7 +1224,7 @@ fn resolver_failure_details(err: &anyhow::Error) -> Value {
         {
             return json!({
                 "reason": "invalid_requirement",
-                "issues": [issue],
+                "issues": issues,
                 "requirement": req,
                 "hint": format!("Fix `{}` to a valid PEP 508 requirement, then rerun `px sync`.", req),
                 "code": diag_commands::SYNC,
@@ -1187,7 +1234,7 @@ fn resolver_failure_details(err: &anyhow::Error) -> Value {
     if message.contains("failed to query PyPI") || message.contains("PyPI error") {
         return json!({
             "reason": "pypi_unreachable",
-            "issues": [issue],
+            "issues": issues,
             "hint": "Check your network connection (PX_ONLINE=1) and rerun `px sync`.",
             "code": diag_commands::SYNC,
         });
@@ -2156,7 +2203,10 @@ pub(crate) fn ensure_project_environment_synced(
         .into());
     };
 
-    let drift = detect_lock_drift(snapshot, &lock, None);
+    let runtime = prepare_project_runtime(snapshot)?;
+    let marker_env = detect_marker_environment(&runtime.record.path)?.to_marker_environment()?;
+
+    let drift = detect_lock_drift(snapshot, &lock, Some(&marker_env));
     if !drift.is_empty() {
         return Err(InstallUserError::new(
             "px.lock is out of date",
@@ -2188,7 +2238,6 @@ pub(crate) fn ensure_project_environment_synced(
         Some(value) => value,
         None => compute_lock_hash(&lock_path)?,
     };
-    let _ = prepare_project_runtime(snapshot)?;
     ensure_env_matches_lock(ctx, snapshot, &lock_hash)
 }
 

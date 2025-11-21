@@ -85,7 +85,7 @@ fn init_tracing(trace: bool, verbose: u8) {
         }
     };
 
-    let filter = format!("px={level},px_cli={level}");
+    let filter = format!("px={level},px_cli={level},px_core={level},px_domain={level}");
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -642,6 +642,7 @@ fn migrate_request_from_args(args: &MigrateArgs) -> MigrateRequest {
         } else {
             AutopinPreference::Enabled
         },
+        python: args.python.clone(),
     }
 }
 
@@ -873,6 +874,12 @@ enum ToolCommand {
 #[derive(Args, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 struct MigrateArgs {
+    #[arg(
+        long = "python",
+        value_name = "VERSION",
+        help = "Python version channel to use for resolution (e.g. 3.11)"
+    )]
+    python: Option<String>,
     #[arg(
         long,
         action = ArgAction::SetTrue,

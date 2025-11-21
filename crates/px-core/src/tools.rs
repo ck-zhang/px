@@ -146,7 +146,7 @@ pub fn tool_install(
 
     let pyproject = tool_root.join("pyproject.toml");
     let mut editor = ManifestEditor::open(&pyproject)?;
-    editor.write_dependencies(&[spec.clone()])?;
+    editor.write_dependencies(std::slice::from_ref(&spec))?;
     editor.set_tool_python(&runtime_selection.record.version)?;
 
     let snapshot = px_domain::ProjectSnapshot::read_from(&tool_root)?;

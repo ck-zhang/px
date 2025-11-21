@@ -1,14 +1,16 @@
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::{collections::HashMap, env, fs, path::PathBuf};
-use toml_edit::DocumentMut;
+use toml_edit::{DocumentMut, Item};
+use which::which;
 
 use px_domain::{
     collect_pyproject_packages, collect_requirement_packages, plan_autopin, prepare_pyproject_plan,
     resolve_onboard_path, AutopinEntry, AutopinPending, AutopinState, BackupManager,
-    InstallOverride, OnboardPackagePlan, PinSpec,
+    InstallOverride, OnboardPackagePlan, PinSpec, PyprojectPlan,
 };
 
+use crate::runtime_manager;
 use crate::{
     discover_project_root, install_snapshot, lock_is_fresh, manifest_snapshot_at,
     resolve_dependencies_with_effects, summarize_autopins, CommandContext, ExecutionOutcome,
@@ -30,6 +32,57 @@ fn test_migration_crash_hook() -> anyhow::Result<()> {
         anyhow::bail!("test crash hook");
     }
     Ok(())
+}
+
+fn apply_python_override(plan: &PyprojectPlan, python: &str) -> Result<DocumentMut> {
+    let mut doc: DocumentMut = if let Some(contents) = &plan.contents {
+        contents.parse()?
+    } else {
+        fs::read_to_string(&plan.path)?.parse()?
+    };
+    let tool = doc
+        .entry("tool")
+        .or_insert(Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .expect("tool table");
+    let px = tool
+        .entry("px")
+        .or_insert(Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .expect("px table");
+    px.insert("python", toml_edit::value(python));
+    Ok(doc)
+}
+
+fn fallback_runtime_by_channel(channel: &str) -> Result<runtime_manager::RuntimeSelection> {
+    let normalized = runtime_manager::normalize_channel(channel)?;
+    let candidates = [
+        format!("python{}", normalized.replace('.', "")),
+        format!("python{normalized}"),
+    ];
+    for candidate in candidates {
+        if let Ok(path) = which(&candidate) {
+            if let Ok(details) = runtime_manager::inspect_python(&path) {
+                if runtime_manager::format_channel(&details.full_version).ok()
+                    == Some(normalized.clone())
+                {
+                    let record = runtime_manager::RuntimeRecord {
+                        version: normalized.clone(),
+                        full_version: details.full_version,
+                        path: details.executable,
+                        default: false,
+                    };
+                    return Ok(runtime_manager::RuntimeSelection {
+                        record,
+                        source: runtime_manager::RuntimeSource::Explicit,
+                    });
+                }
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "python runtime {channel} is not installed; run `px python install {channel}`"
+    ))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -187,6 +240,7 @@ pub struct MigrateRequest {
     pub workspace: WorkspacePolicy,
     pub lock_behavior: LockBehavior,
     pub autopin: AutopinPreference,
+    pub python: Option<String>,
 }
 
 /// Migrates an existing Python project into px format.
@@ -199,6 +253,27 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         Some(path) => path,
         None => env::current_dir().context("unable to determine current directory")?,
     };
+    let mut python_override_value = request.python.clone();
+
+    if let Some(python) = &request.python {
+        let selection = match runtime_manager::resolve_runtime(Some(python), ">=0")
+            .or_else(|_| fallback_runtime_by_channel(python))
+        {
+            Ok(selection) => selection,
+            Err(err) => {
+                return Ok(ExecutionOutcome::user_error(
+                    "px migrate: python runtime unavailable",
+                    json!({
+                        "hint": err.to_string(),
+                        "reason": "missing_runtime",
+                        "requested": python,
+                    }),
+                ));
+            }
+        };
+        env::set_var("PX_RUNTIME_PYTHON", &selection.record.path);
+        python_override_value = Some(selection.record.version.clone());
+    }
     let pyproject_path = root.join("pyproject.toml");
     let pyproject_exists = pyproject_path.exists();
 
@@ -458,7 +533,10 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     let mut backups = BackupManager::new(&root);
     let mut created_files: Vec<PathBuf> = Vec::new();
     let mut pyproject_modified = false;
-    let pyproject_plan = prepare_pyproject_plan(&root, &pyproject_path, lock_only, &packages)?;
+    let mut pyproject_plan = prepare_pyproject_plan(&root, &pyproject_path, lock_only, &packages)?;
+    if let Some(python) = &python_override_value {
+        pyproject_plan.contents = Some(apply_python_override(&pyproject_plan, python)?.to_string());
+    }
     let mut pyproject_backed_up = false;
     if pyproject_plan.needs_backup() {
         backups.backup(&pyproject_plan.path)?;

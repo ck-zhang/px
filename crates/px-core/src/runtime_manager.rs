@@ -250,12 +250,12 @@ fn inspect_system_python() -> Result<RuntimeRecord> {
     })
 }
 
-struct PythonDetails {
-    full_version: String,
-    executable: String,
+pub(crate) struct PythonDetails {
+    pub(crate) full_version: String,
+    pub(crate) executable: String,
 }
 
-fn inspect_python(path: &Path) -> Result<PythonDetails> {
+pub(crate) fn inspect_python(path: &Path) -> Result<PythonDetails> {
     const SCRIPT: &str =
         "import json, platform, sys; print(json.dumps({'version': platform.python_version(), 'executable': sys.executable}))";
     let output = Command::new(path)
@@ -300,7 +300,7 @@ fn parse_channel(input: &str) -> Result<(u64, u64)> {
     Ok((major, minor))
 }
 
-fn format_channel(version: &str) -> Result<String> {
+pub(crate) fn format_channel(version: &str) -> Result<String> {
     let (major, minor) = parse_channel(version)?;
     Ok(format!("{major}.{minor}"))
 }
