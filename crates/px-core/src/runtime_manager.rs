@@ -9,7 +9,6 @@ use anyhow::{anyhow, bail, Context, Result};
 use dirs_next::home_dir;
 use pep440_rs::{Version, VersionSpecifiers};
 use serde::{Deserialize, Serialize};
-use which::which;
 
 use crate::python_build;
 
@@ -40,17 +39,9 @@ pub enum RuntimeSource {
     Explicit,
     Requirement,
     Default,
-    System,
 }
 
 impl RuntimeRegistry {
-    fn find(&self, version: &str) -> Option<RuntimeRecord> {
-        self.runtimes
-            .iter()
-            .find(|runtime| runtime.version == version)
-            .cloned()
-    }
-
     fn best_for_requirement(&self, requirement: &str) -> Option<RuntimeRecord> {
         let specifiers = VersionSpecifiers::from_str(requirement).ok()?;
         self.runtimes
@@ -176,38 +167,66 @@ pub fn install_runtime(
     Ok(record)
 }
 
+fn managed_runtimes_root() -> Option<PathBuf> {
+    registry_path()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join("runtimes")))
+}
+
+fn is_px_managed(record: &RuntimeRecord) -> bool {
+    let Some(root) = managed_runtimes_root() else {
+        return false;
+    };
+    Path::new(&record.path).starts_with(root)
+}
+
 pub fn resolve_runtime(
     override_version: Option<&str>,
     requirement: &str,
 ) -> Result<RuntimeSelection> {
     let registry = load_registry()?;
+    let mut managed: Vec<RuntimeRecord> = Vec::new();
+    let mut external: Vec<RuntimeRecord> = Vec::new();
+    for runtime in registry.runtimes {
+        if is_px_managed(&runtime) {
+            managed.push(runtime);
+        } else {
+            external.push(runtime);
+        }
+    }
+
     if let Some(version) = override_version {
         let requested = normalize_channel(version)?;
-        if let Some(record) = registry.find(&requested) {
+        if let Some(record) = managed
+            .iter()
+            .find(|runtime| runtime.version == requested)
+            .cloned()
+            .or_else(|| {
+                external
+                    .iter()
+                    .find(|runtime| runtime.version == requested)
+                    .cloned()
+            })
+        {
             return Ok(RuntimeSelection {
                 record,
                 source: RuntimeSource::Explicit,
             });
         }
-        if let Ok(system) = inspect_system_python() {
-            if format_channel(&system.full_version)? == requested {
-                return Ok(RuntimeSelection {
-                    record: system,
-                    source: RuntimeSource::System,
-                });
-            }
-        }
         bail!("px runtime {requested} is not installed; run `px python install {requested}`");
     }
 
-    if let Some(record) = registry.best_for_requirement(requirement) {
+    let managed_registry = RuntimeRegistry {
+        runtimes: managed.clone(),
+    };
+    if let Some(record) = managed_registry.best_for_requirement(requirement) {
         return Ok(RuntimeSelection {
             record,
             source: RuntimeSource::Requirement,
         });
     }
 
-    if let Some(record) = registry.default_runtime() {
+    if let Some(record) = managed_registry.default_runtime() {
         if requirement_allows(requirement, &record.full_version) {
             return Ok(RuntimeSelection {
                 record,
@@ -216,15 +235,17 @@ pub fn resolve_runtime(
         }
     }
 
-    let system = inspect_system_python()?;
-    if requirement_allows(requirement, &system.full_version) {
-        return Ok(RuntimeSelection {
-            record: system,
-            source: RuntimeSource::System,
-        });
+    let fallback_registry = RuntimeRegistry { runtimes: external };
+    if let Some(record) = fallback_registry.best_for_requirement(requirement) {
+        let source = if record.default {
+            RuntimeSource::Default
+        } else {
+            RuntimeSource::Requirement
+        };
+        return Ok(RuntimeSelection { record, source });
     }
 
-    bail!("no python runtime satisfies `{requirement}`");
+    bail!("no python runtime satisfies `{requirement}`; run `px python install <version>`");
 }
 
 fn requirement_allows(requirement: &str, version: &str) -> bool {
@@ -236,18 +257,6 @@ fn requirement_allows(requirement: &str, version: &str) -> bool {
                 .map(|ver| specifiers.contains(&ver))
         })
         .unwrap_or(true)
-}
-
-fn inspect_system_python() -> Result<RuntimeRecord> {
-    let path = which("python3").or_else(|_| which("python"))?;
-    let details = inspect_python(&path)?;
-    let channel = format_channel(&details.full_version)?;
-    Ok(RuntimeRecord {
-        version: channel,
-        full_version: details.full_version,
-        path: details.executable,
-        default: false,
-    })
 }
 
 pub(crate) struct PythonDetails {

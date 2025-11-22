@@ -340,6 +340,7 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
 
     extract_sdist(request.python_path, &sdist_path, &src_dir)?;
     let project_dir = discover_project_dir(&src_dir)?;
+    ensure_build_bootstrap(request.python_path)?;
     run_python_build(request.python_path, &project_dir, &dist_dir)?;
 
     let built_wheel_path = find_wheel(&dist_dir)?;
@@ -505,26 +506,26 @@ else:
 }
 
 fn run_python_build(python: &str, project_dir: &Path, out_dir: &Path) -> Result<()> {
-    let mut cmd = Command::new(python);
-    cmd.arg("-m")
-        .arg("build")
-        .arg("--wheel")
-        .arg("--outdir")
-        .arg(out_dir)
-        .arg(project_dir);
-    apply_python_env(&mut cmd);
-    cmd.env("PX_BUILD_FROM_SDIST", "1");
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to run python -m build in {}", project_dir.display()))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     match pip_wheel_fallback(python, project_dir, out_dir) {
-        Ok(()) => Ok(()),
+        Ok(()) => return Ok(()),
         Err(pip_err) => {
-            bail!("python -m build failed: {stderr}\npython -m pip wheel failed: {pip_err}")
+            let mut cmd = Command::new(python);
+            cmd.arg("-m")
+                .arg("build")
+                .arg("--wheel")
+                .arg("--outdir")
+                .arg(out_dir)
+                .arg(project_dir);
+            apply_python_env(&mut cmd);
+            cmd.env("PX_BUILD_FROM_SDIST", "1");
+            let output = cmd.output().with_context(|| {
+                format!("failed to run python -m build in {}", project_dir.display())
+            })?;
+            if output.status.success() {
+                return Ok(());
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            bail!("python -m pip wheel failed: {pip_err}\npython -m build failed: {stderr}")
         }
     }
 }
@@ -550,6 +551,38 @@ fn pip_wheel_fallback(python: &str, project_dir: &Path, out_dir: &Path) -> Resul
     }
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     bail!("{stderr}");
+}
+
+fn ensure_build_bootstrap(python: &str) -> Result<()> {
+    let mut cmd = Command::new(python);
+    cmd.arg("-m")
+        .arg("pip")
+        .arg("install")
+        .arg("--upgrade")
+        .arg("--quiet")
+        .arg("pip")
+        .arg("build")
+        .arg("wheel")
+        .arg("pysocks");
+    apply_python_env(&mut cmd);
+    for key in [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        cmd.env_remove(key);
+    }
+    let output = cmd
+        .output()
+        .context("failed to bootstrap build tools (pip/build/wheel/pysocks)")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    bail!("failed to bootstrap build tools: {stderr}");
 }
 
 fn discover_project_dir(root: &Path) -> Result<PathBuf> {

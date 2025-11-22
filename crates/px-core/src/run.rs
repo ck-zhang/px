@@ -231,13 +231,16 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
 #[derive(Debug, Clone)]
 struct ResolvedEntry {
     entry: String,
+    call: Option<String>,
     source: EntrySource,
 }
 
 impl ResolvedEntry {
     fn explicit(entry: String) -> Self {
+        let (entry, call) = parse_entry_value(&entry).unwrap_or((entry.clone(), None));
         Self {
             entry,
+            call,
             source: EntrySource::Explicit,
         }
     }
@@ -350,12 +353,32 @@ fn run_module_entry(
     extra_args: &[String],
     command_args: &Value,
 ) -> Result<ExecutionOutcome> {
-    let ResolvedEntry { entry, source } = resolved;
-    let mut python_args = vec!["-m".to_string(), entry.clone()];
-    python_args.extend(extra_args.iter().cloned());
-
+    let ResolvedEntry {
+        entry,
+        call,
+        source,
+    } = resolved;
+    let mut mode = "module";
+    let mut python_args;
+    let mut env_entry = entry.clone();
+    let argv0 = source
+        .script_name()
+        .map(std::string::ToString::to_string)
+        .unwrap_or_else(|| entry.clone());
     let mut envs = py_ctx.base_env(command_args)?;
-    envs.push(("PX_RUN_ENTRY".into(), entry.clone()));
+    if let Some(call_name) = call.as_ref() {
+        mode = "console-script";
+        env_entry = format!("{entry}:{call_name}");
+        python_args = vec![
+            "-c".to_string(),
+            console_entry_payload(&entry, call_name, &argv0),
+        ];
+        python_args.extend(extra_args.iter().cloned());
+    } else {
+        python_args = vec!["-m".to_string(), entry.clone()];
+        python_args.extend(extra_args.iter().cloned());
+    }
+    envs.push(("PX_RUN_ENTRY".into(), env_entry.clone()));
 
     let output = core_ctx.python_runtime().run_command(
         &py_ctx.python,
@@ -364,8 +387,8 @@ fn run_module_entry(
         &py_ctx.project_root,
     )?;
     let mut details = json!({
-        "mode": "module",
-        "entry": entry.clone(),
+        "mode": mode,
+        "entry": env_entry.clone(),
         "args": extra_args,
         "source": source.label(),
     });
@@ -375,17 +398,37 @@ fn run_module_entry(
     if source.is_inferred() {
         details["defaulted"] = Value::Bool(true);
     }
+    if let Some(call_name) = call {
+        details["call"] = Value::String(call_name);
+    }
     if let EntrySource::PackageCli { package } = &source {
         details["package"] = Value::String(package.clone());
     }
 
     Ok(outcome_from_output(
         "run",
-        &entry,
+        &env_entry,
         &output,
         "px run",
         Some(details),
     ))
+}
+
+fn console_entry_payload(module: &str, call: &str, argv0: &str) -> String {
+    let access = call
+        .split('.')
+        .filter_map(|part| {
+            let trimmed = part.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+        .fold(String::new(), |mut acc, part| {
+            acc.push('.');
+            acc.push_str(&part);
+            acc
+        });
+    format!(
+        "import importlib, sys; sys.argv[0] = {argv0:?}; mod = importlib.import_module({module:?}); target = mod{access}; sys.exit(target())"
+    )
 }
 
 fn run_passthrough(
@@ -550,9 +593,10 @@ fn infer_default_entry(manifest: &Path) -> Result<Option<ResolvedEntry>> {
     let doc: DocumentMut = contents.parse()?;
     let project = project_table(&doc)?;
 
-    if let Some((script, module)) = first_script_entry(project.get("scripts")) {
+    if let Some((script, module, call)) = first_script_entry(project.get("scripts")) {
         return Ok(Some(ResolvedEntry {
             entry: module,
+            call,
             source: EntrySource::ProjectScript { script },
         }));
     }
@@ -563,9 +607,10 @@ fn infer_default_entry(manifest: &Path) -> Result<Option<ResolvedEntry>> {
         .and_then(|tool| tool.get("px"))
         .and_then(Item::as_table)
         .and_then(|px| px.get("scripts"));
-    if let Some((script, module)) = first_script_entry(px_scripts_item) {
+    if let Some((script, module, call)) = first_script_entry(px_scripts_item) {
         return Ok(Some(ResolvedEntry {
             entry: module,
+            call,
             source: EntrySource::PxScript { script },
         }));
     }
@@ -576,6 +621,7 @@ fn infer_default_entry(manifest: &Path) -> Result<Option<ResolvedEntry>> {
             if package_module_exists(manifest, &module) {
                 return Ok(Some(ResolvedEntry {
                     entry: format!("{module}.cli"),
+                    call: None,
                     source: EntrySource::PackageCli {
                         package: name.to_string(),
                     },
@@ -587,29 +633,38 @@ fn infer_default_entry(manifest: &Path) -> Result<Option<ResolvedEntry>> {
     Ok(None)
 }
 
-fn first_script_entry(item: Option<&Item>) -> Option<(String, String)> {
+fn first_script_entry(item: Option<&Item>) -> Option<(String, String, Option<String>)> {
     let scripts = item?.as_table()?;
     for (name, item) in scripts {
         if let Some(value) = item.as_str() {
-            if let Some(module) = parse_script_value(value) {
-                return Some((name.to_string(), module));
+            if let Some((module, call)) = parse_entry_value(value) {
+                return Some((name.to_string(), module, call));
             }
         }
     }
     None
 }
 
-fn parse_script_value(value: &str) -> Option<String> {
+fn parse_entry_value(value: &str) -> Option<(String, Option<String>)> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
     }
-    let module = trimmed.split([':', ' ']).next().map_or("", str::trim);
-    if module.is_empty() {
-        None
-    } else {
-        Some(module.to_string())
+    let token = trimmed.split_whitespace().next().unwrap_or("").trim();
+    if token.is_empty() {
+        return None;
     }
+    let mut parts = token.splitn(2, ':');
+    let module = parts.next().unwrap_or("").trim();
+    if module.is_empty() {
+        return None;
+    }
+    let call = parts
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    Some((module.to_string(), call))
 }
 
 fn package_module_exists(manifest: &Path, module: &str) -> bool {

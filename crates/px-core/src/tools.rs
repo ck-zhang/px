@@ -19,7 +19,7 @@ use crate::{
     build_pythonpath, compute_lock_hash, ensure_project_environment_synced, install_snapshot,
     manifest_snapshot_at, outcome_from_output, persist_resolved_dependencies, refresh_project_site,
     resolve_dependencies_with_effects, runtime_manager, CommandContext, ExecutionOutcome,
-    InstallUserError,
+    InstallOverride, InstallUserError,
 };
 use px_domain::{load_lockfile_optional, merge_resolved_dependencies, ManifestEditor};
 
@@ -150,7 +150,7 @@ pub fn tool_install(
     editor.set_tool_python(&runtime_selection.record.version)?;
 
     let snapshot = px_domain::ProjectSnapshot::read_from(&tool_root)?;
-    let resolved = match resolve_dependencies_with_effects(ctx.effects(), &snapshot) {
+    let resolved = match resolve_dependencies_with_effects(ctx.effects(), &snapshot, true) {
         Ok(resolved) => resolved,
         Err(err) => match err.downcast::<InstallUserError>() {
             Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
@@ -163,13 +163,18 @@ pub fn tool_install(
     let merged = merge_resolved_dependencies(&snapshot.dependencies, &resolved.specs, &marker_env);
     persist_resolved_dependencies(&snapshot, &merged)?;
     let updated_snapshot = manifest_snapshot_at(&tool_root)?;
-    let install_outcome = match install_snapshot(ctx, &updated_snapshot, false, None) {
-        Ok(outcome) => outcome,
-        Err(err) => match err.downcast::<InstallUserError>() {
-            Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
-            Err(other) => return Err(other),
-        },
+    let install_override = InstallOverride {
+        dependencies: resolved.specs.clone(),
+        pins: resolved.pins.clone(),
     };
+    let install_outcome =
+        match install_snapshot(ctx, &updated_snapshot, false, Some(&install_override)) {
+            Ok(outcome) => outcome,
+            Err(err) => match err.downcast::<InstallUserError>() {
+                Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                Err(other) => return Err(other),
+            },
+        };
     if matches!(install_outcome.state, crate::InstallState::MissingLock) {
         return Ok(ExecutionOutcome::failure(
             "px tool install could not write px.lock",

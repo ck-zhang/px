@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{bail, Result};
 use time::{format_description, OffsetDateTime};
-use toml_edit::DocumentMut;
+use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 
 use crate::{
     init::sanitize_package_candidate,
@@ -145,6 +145,7 @@ pub fn prepare_pyproject_plan(
         created = true;
         create_minimal_pyproject_doc(root)?
     };
+    ensure_project_metadata(&mut doc, root);
 
     let mut prod_specs = Vec::new();
     let mut dev_specs = Vec::new();
@@ -157,6 +158,9 @@ pub fn prepare_pyproject_plan(
         } else {
             prod_specs.push(pkg.requested.clone());
         }
+    }
+    if prod_specs.is_empty() && !dev_specs.is_empty() {
+        prod_specs.append(&mut dev_specs);
     }
 
     let mut changed = false;
@@ -208,6 +212,35 @@ fn create_minimal_pyproject_doc(root: &Path) -> Result<DocumentMut> {
         + "requires = [\"setuptools>=70\", \"wheel\"]\n"
         + "build-backend = \"setuptools.build_meta\"\n";
     Ok(template.parse()?)
+}
+
+fn ensure_project_metadata(doc: &mut DocumentMut, root: &Path) {
+    let project = doc
+        .entry("project")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .expect("project table");
+    if !project.contains_key("name") {
+        project.insert(
+            "name",
+            Item::Value(TomlValue::from(sanitize_package_candidate(root))),
+        );
+    }
+    if !project.contains_key("version") {
+        project.insert("version", Item::Value(TomlValue::from("0.1.0")));
+    }
+    if !project.contains_key("requires-python") {
+        project.insert("requires-python", Item::Value(TomlValue::from(">=3.11")));
+    }
+    if !project.contains_key("dependencies") {
+        project.insert("dependencies", Item::Value(TomlValue::Array(Array::new())));
+    }
+    let tool = doc
+        .entry("tool")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .expect("tool table");
+    tool.entry("px").or_insert(Item::Table(Table::new()));
 }
 
 #[cfg(test)]

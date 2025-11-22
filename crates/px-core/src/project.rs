@@ -507,7 +507,8 @@ pub fn project_update(
 
     let mut override_snapshot = snapshot.clone();
     override_snapshot.dependencies = override_specs;
-    let resolved = match resolve_dependencies_with_effects(ctx.effects(), &override_snapshot) {
+    let resolved = match resolve_dependencies_with_effects(ctx.effects(), &override_snapshot, true)
+    {
         Ok(resolved) => resolved,
         Err(err) => match err.downcast::<InstallUserError>() {
             Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),

@@ -229,11 +229,31 @@ pub fn read_requirements_file(path: &Path) -> Result<Vec<String>> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let spec = if let Some(idx) = trimmed.find('#') {
+        let mut spec = if let Some(idx) = trimmed.find('#') {
             trimmed[..idx].trim()
         } else {
             trimmed
         };
+        if let Some(stripped) = spec.strip_prefix("-e ") {
+            spec = stripped.trim();
+        } else if let Some(stripped) = spec.strip_prefix("--editable ") {
+            spec = stripped.trim();
+        }
+        if let Some(extras) = spec.strip_prefix(".[") {
+            if let Some(end) = extras.find(']') {
+                let names = extras[..end].split(',');
+                for extra in names {
+                    let trimmed = extra.trim().to_lowercase();
+                    if trimmed == "socks" {
+                        specs.push("pysocks".to_string());
+                    }
+                }
+            }
+            continue;
+        }
+        if spec == "." || spec.starts_with("./") || spec.starts_with(".[") {
+            continue;
+        }
         if !spec.is_empty() {
             specs.push(spec.to_string());
         }

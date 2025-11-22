@@ -698,14 +698,15 @@ pub(crate) fn install_snapshot(
     frozen: bool,
     override_pins: Option<&InstallOverride>,
 ) -> Result<InstallOutcome> {
+    let mut snapshot = snapshot.clone();
     let lockfile = snapshot.lock_path.display().to_string();
-    let _ = prepare_project_runtime(snapshot)?;
+    let _ = prepare_project_runtime(&snapshot)?;
 
     if frozen {
-        return verify_lock(snapshot);
+        return verify_lock(&snapshot);
     }
 
-    if lock_is_fresh(snapshot)? {
+    if lock_is_fresh(&snapshot)? {
         Ok(InstallOutcome {
             state: InstallState::UpToDate,
             lockfile,
@@ -716,6 +717,7 @@ pub(crate) fn install_snapshot(
         if let Some(parent) = snapshot.lock_path.parent() {
             fs::create_dir_all(parent)?;
         }
+        let mut manifest_updated = false;
         let mut dependencies = if let Some(override_data) = override_pins {
             override_data.dependencies.clone()
         } else {
@@ -724,11 +726,12 @@ pub(crate) fn install_snapshot(
         let marker_env = ctx.marker_environment()?;
         let mut resolved_override = None;
         if override_pins.is_none() && ctx.config().resolver.enabled {
-            let resolved = resolve_dependencies(ctx, snapshot)?;
+            let resolved = resolve_dependencies(ctx, &snapshot)?;
             if !resolved.specs.is_empty() {
                 dependencies =
                     merge_resolved_dependencies(&dependencies, &resolved.specs, &marker_env);
-                persist_resolved_dependencies(snapshot, &dependencies)?;
+                persist_resolved_dependencies(&snapshot, &dependencies)?;
+                manifest_updated = true;
             }
             resolved_override = Some(resolved.pins);
         }
@@ -754,8 +757,16 @@ pub(crate) fn install_snapshot(
                 None => ensure_exact_pins(&marker_env, &dependencies)?,
             }
         };
+        if manifest_updated {
+            snapshot = manifest_snapshot_at(&snapshot.root).map_err(|err| {
+                InstallUserError::new(
+                    "failed to reload project manifest",
+                    json!({ "error": err.to_string() }),
+                )
+            })?;
+        }
         let resolved = resolve_pins(ctx, &pins, ctx.config().resolver.force_sdist)?;
-        let contents = render_lockfile(snapshot, &resolved, PX_VERSION)?;
+        let contents = render_lockfile(&snapshot, &resolved, PX_VERSION)?;
         fs::write(&snapshot.lock_path, contents)?;
         Ok(InstallOutcome {
             state: InstallState::Installed,
@@ -1083,14 +1094,15 @@ fn resolve_dependencies(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
 ) -> Result<ResolvedSpecOutput> {
-    resolve_dependencies_with_effects(ctx.effects(), snapshot)
+    resolve_dependencies_with_effects(ctx.effects(), snapshot, true)
 }
 
 fn resolve_dependencies_with_effects(
     effects: &dyn Effects,
     snapshot: &ManifestSnapshot,
+    show_progress: bool,
 ) -> Result<ResolvedSpecOutput> {
-    let spinner = ProgressReporter::spinner("Resolving dependencies");
+    let spinner = show_progress.then(|| ProgressReporter::spinner("Resolving dependencies"));
     let python = effects.python().detect_interpreter()?;
     let tags = detect_interpreter_tags(&python)?;
     let resolver_env = detect_marker_environment(&python)?;
@@ -1154,7 +1166,9 @@ fn resolve_dependencies_with_effects(
             }
         }
     }
-    spinner.finish(format!("Resolved {} dependencies", pins.len()));
+    if let Some(spinner) = spinner {
+        spinner.finish(format!("Resolved {} dependencies", pins.len()));
+    }
     Ok(ResolvedSpecOutput {
         specs: autopin_specs,
         pins,

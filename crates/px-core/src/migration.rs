@@ -584,7 +584,8 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         let resolver = move |snap: &ManifestSnapshot, specs: &[String]| -> Result<Vec<PinSpec>> {
             let mut override_snapshot = snap.clone();
             override_snapshot.dependencies = specs.to_vec();
-            let resolved = resolve_dependencies_with_effects(effects.as_ref(), &override_snapshot)?;
+            let resolved =
+                resolve_dependencies_with_effects(effects.as_ref(), &override_snapshot, false)?;
             Ok(resolved.pins)
         };
         let autopin_state = match plan_autopin(
