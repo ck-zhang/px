@@ -1,6 +1,6 @@
 #![deny(clippy::all, warnings)]
 
-use std::{path::PathBuf, sync::Arc};
+use std::{env, path::PathBuf, sync::Arc};
 
 use atty::Stream;
 use clap::{value_parser, ArgAction, Args, Parser, Subcommand, ValueEnum};
@@ -54,6 +54,10 @@ fn main() -> Result<()> {
     init_tracing(cli.trace, cli.verbose);
 
     let subcommand_json = matches!(&cli.command, CommandGroupCli::Fmt(args) if args.json);
+    if cli.json || subcommand_json {
+        // Suppress spinners/progress when JSON output is requested.
+        env::set_var("PX_PROGRESS", "0");
+    }
     let global = GlobalOptions {
         quiet: cli.quiet,
         verbose: cli.verbose,

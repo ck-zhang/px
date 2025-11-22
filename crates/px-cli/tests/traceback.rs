@@ -8,9 +8,14 @@ use common::prepare_fixture;
 #[test]
 fn run_missing_import_surfaces_px_hint() {
     let (_tmp, project) = prepare_fixture("traceback-missing-import");
+    let Some(python) = find_python() else {
+        eprintln!("skipping traceback test (python binary not found)");
+        return;
+    };
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
-        .args(["run", "sample_px_app.bad_import"])
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["run", "python", "-m", "sample_px_app.bad_import"])
         .assert()
         .failure();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout");
@@ -31,9 +36,14 @@ fn run_missing_import_surfaces_px_hint() {
 #[test]
 fn run_missing_import_exposes_traceback_in_json() {
     let (_tmp, project) = prepare_fixture("traceback-json-import");
+    let Some(python) = find_python() else {
+        eprintln!("skipping traceback test (python binary not found)");
+        return;
+    };
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
-        .args(["--json", "run", "sample_px_app.bad_import"])
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["--json", "run", "python", "-m", "sample_px_app.bad_import"])
         .assert()
         .failure();
     let payload: Value = serde_json::from_slice(&assert.get_output().stdout).expect("json");
@@ -58,4 +68,23 @@ fn run_missing_import_exposes_traceback_in_json() {
             .and_then(Value::as_str),
         Some("missing_import")
     );
+}
+
+fn find_python() -> Option<String> {
+    let candidates = [
+        std::env::var("PYTHON").ok(),
+        Some("python3".to_string()),
+        Some("python".to_string()),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        let status = std::process::Command::new(&candidate)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if matches!(status, Ok(code) if code.success()) {
+            return Some(candidate);
+        }
+    }
+    None
 }

@@ -257,14 +257,20 @@ fn publish_dry_run_accepts_custom_registry_url() {
 #[test]
 fn built_wheel_is_installable_with_pip() {
     let (_tmp, project) = prepare_fixture("sample_px_app");
+    let Some(python) = find_python() else {
+        eprintln!("skipping wheel install test (python binary not found)");
+        return;
+    };
     cargo_bin_cmd!("px")
         .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
         .args(["sync"])
         .assert()
         .success();
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
         .args(["--json", "build", "wheel"])
         .assert()
         .success();
@@ -291,10 +297,6 @@ fn built_wheel_is_installable_with_pip() {
         wheel_path.display()
     );
 
-    let Some(python) = find_python() else {
-        eprintln!("skipping wheel install test (python binary not found)");
-        return;
-    };
     let venv = tempfile::tempdir().expect("tempdir");
     let status = Command::new(&python)
         .args(["-m", "venv", venv.path().to_string_lossy().as_ref()])

@@ -98,10 +98,15 @@ fn recommendation_expectations() -> HashMap<&'static str, &'static str> {
 #[test]
 fn px_reports_recommendations_for_builtin_exceptions() {
     let (_tmp, project) = prepare_traceback_fixture("traceback-matrix");
+    let Some(python) = find_python() else {
+        eprintln!("skipping traceback matrix test (python binary not found)");
+        return;
+    };
     let expectations = recommendation_expectations();
     for name in fixture_cases() {
         let assert = cargo_bin_cmd!("px")
             .current_dir(&project)
+            .env("PX_RUNTIME_PYTHON", &python)
             .args(["--json", "run", "python", "demo_tracebacks.py", name])
             .assert()
             .failure();
@@ -150,4 +155,23 @@ fn verify_traceback(payload: &Value, expected_type: &str, expected_reason: Optio
             );
         }
     }
+}
+
+fn find_python() -> Option<String> {
+    let candidates = [
+        std::env::var("PYTHON").ok(),
+        Some("python3".to_string()),
+        Some("python".to_string()),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        let status = std::process::Command::new(&candidate)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if matches!(status, Ok(code) if code.success()) {
+            return Some(candidate);
+        }
+    }
+    None
 }

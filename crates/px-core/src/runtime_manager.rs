@@ -235,17 +235,7 @@ pub fn resolve_runtime(
         }
     }
 
-    let fallback_registry = RuntimeRegistry { runtimes: external };
-    if let Some(record) = fallback_registry.best_for_requirement(requirement) {
-        let source = if record.default {
-            RuntimeSource::Default
-        } else {
-            RuntimeSource::Requirement
-        };
-        return Ok(RuntimeSelection { record, source });
-    }
-
-    bail!("no python runtime satisfies `{requirement}`; run `px python install <version>`");
+    bail!("no px-managed runtime satisfies `{requirement}`; run `px python install <version>`");
 }
 
 fn requirement_allows(requirement: &str, version: &str) -> bool {

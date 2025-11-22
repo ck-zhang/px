@@ -8,7 +8,7 @@ use toml_edit::{DocumentMut, Item};
 
 use crate::{
     attach_autosync_details, is_missing_project_error, manifest_snapshot, missing_project_outcome,
-    outcome_from_output, project_table, python_context_with_mode, state_guard::guard_for_execution,
+    outcome_from_output, python_context_with_mode, state_guard::guard_for_execution,
     CommandContext, ExecutionOutcome, PythonContext,
 };
 
@@ -57,7 +57,7 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
                 return Ok(ExecutionOutcome::user_error(
                     format!("pyproject.toml not found in {}", root.display()),
                     json!({
-                        "hint": "run `px migrate --apply` or pass ENTRY explicitly",
+                        "hint": "run `px migrate --apply` or pass a target explicitly",
                         "project_root": root.display().to_string(),
                         "manifest": manifest.display().to_string(),
                     }),
@@ -66,6 +66,19 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             return Err(err);
         }
     };
+    let target = request
+        .entry
+        .clone()
+        .or_else(|| request.target.clone())
+        .unwrap_or_default();
+    if target.trim().is_empty() {
+        return Ok(ExecutionOutcome::user_error(
+            "px run requires a target",
+            json!({
+                "hint": "pass a command or script explicitly, or define [tool.px.scripts].<name>",
+            }),
+        ));
+    }
     let state_report = match crate::state_guard::state_or_violation(ctx, &snapshot, "run") {
         Ok(report) => report,
         Err(outcome) => return Ok(outcome),
@@ -79,74 +92,138 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         Err(outcome) => return Ok(outcome),
     };
     let command_args = json!({
-        "entry": &request.entry,
-        "target": &request.target,
+        "target": &target,
         "args": &request.args,
     });
     let manifest = py_ctx.project_root.join("pyproject.toml");
-    let default_entry = || -> Result<ResolvedEntry> {
-        if !manifest.exists() {
-            return Err(anyhow!("manifest missing"));
-        }
-        infer_default_entry(&manifest)?.ok_or_else(|| anyhow!("no default entry configured"))
-    };
 
-    if let Some(entry) = request.entry.as_deref() {
-        if let Some(target) = detect_passthrough_target(entry, &py_ctx) {
-            let mut outcome = run_passthrough(ctx, &py_ctx, target, &request.args, &command_args)?;
-            attach_autosync_details(&mut outcome, sync_report);
-            return Ok(outcome);
-        }
-
-        if should_forward_to_default(entry, &py_ctx) && request.args.is_empty() {
-            match default_entry() {
-                Ok(resolved_default) => {
-                    let mut forwarded = Vec::with_capacity(request.args.len() + 1);
-                    forwarded.push(entry.to_string());
-                    forwarded.extend(request.args.iter().cloned());
-                    let mut outcome = run_module_entry(
-                        ctx,
-                        &py_ctx,
-                        resolved_default,
-                        &forwarded,
-                        &command_args,
-                    )?;
-                    attach_autosync_details(&mut outcome, sync_report);
-                    return Ok(outcome);
-                }
-                Err(err) => {
-                    let issue = if manifest.exists() {
-                        DefaultEntryIssue::NoScripts(manifest.clone())
-                    } else {
-                        DefaultEntryIssue::MissingManifest(manifest.clone())
-                    };
-                    let mut outcome = issue.into_outcome(&py_ctx);
-                    outcome.details["hint"] = json!(format!(
-                        "pass an entry explicitly or fix default inference ({err})"
-                    ));
-                    attach_autosync_details(&mut outcome, sync_report);
-                    return Ok(outcome);
-                }
-            }
-        }
+    if let Some(resolved) = resolve_px_script(&manifest, &target)? {
+        let mut outcome = run_module_entry(ctx, &py_ctx, resolved, &request.args, &command_args)?;
+        attach_autosync_details(&mut outcome, sync_report);
+        return Ok(outcome);
     }
 
-    let resolved = if let Some(entry) = request.entry.clone() {
-        ResolvedEntry::explicit(entry)
-    } else {
-        match default_entry() {
-            Ok(entry) => entry,
-            Err(_) if !manifest.exists() => {
-                return Ok(DefaultEntryIssue::MissingManifest(manifest).into_outcome(&py_ctx));
-            }
-            Err(_) => {
-                return Ok(DefaultEntryIssue::NoScripts(manifest).into_outcome(&py_ctx));
-            }
-        }
-    };
-    let mut outcome = run_module_entry(ctx, &py_ctx, resolved, &request.args, &command_args)?;
+    if let Some(script_path) = script_under_project_root(&py_ctx.project_root, &target) {
+        let mut outcome =
+            run_project_script(ctx, &py_ctx, &script_path, &request.args, &command_args)?;
+        attach_autosync_details(&mut outcome, sync_report);
+        return Ok(outcome);
+    }
+
+    if let Some(target) = detect_passthrough_target(&target, &py_ctx) {
+        let mut outcome = run_passthrough(ctx, &py_ctx, target, &request.args, &command_args)?;
+        attach_autosync_details(&mut outcome, sync_report);
+        return Ok(outcome);
+    }
+
+    let mut outcome = run_executable(ctx, &py_ctx, &target, &request.args, &command_args)?;
     attach_autosync_details(&mut outcome, sync_report);
     Ok(outcome)
+}
+
+fn resolve_px_script(manifest: &Path, target: &str) -> Result<Option<ResolvedEntry>> {
+    if !manifest.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(manifest)?;
+    let doc: DocumentMut = contents.parse()?;
+    let scripts = doc
+        .get("tool")
+        .and_then(Item::as_table)
+        .and_then(|tool| tool.get("px"))
+        .and_then(Item::as_table)
+        .and_then(|px| px.get("scripts"))
+        .and_then(Item::as_table);
+    let Some(table) = scripts else {
+        return Ok(None);
+    };
+    let value = match table.get(target) {
+        Some(item) => item,
+        None => return Ok(None),
+    };
+    let Some(raw) = value.as_str() else {
+        return Ok(None);
+    };
+    let (entry, call) = parse_entry_value(raw)
+        .ok_or_else(|| anyhow!("invalid [tool.px.scripts] entry for `{target}`"))?;
+    Ok(Some(ResolvedEntry {
+        entry,
+        call,
+        source: EntrySource::PxScript {
+            script: target.to_string(),
+        },
+    }))
+}
+
+fn script_under_project_root(root: &Path, target: &str) -> Option<PathBuf> {
+    let candidate = if Path::new(target).is_absolute() {
+        PathBuf::from(target)
+    } else {
+        root.join(target)
+    };
+    let canonical = candidate.canonicalize().ok()?;
+    if canonical.starts_with(root) && canonical.is_file() {
+        Some(canonical)
+    } else {
+        None
+    }
+}
+
+fn run_project_script(
+    core_ctx: &CommandContext,
+    py_ctx: &PythonContext,
+    script: &Path,
+    extra_args: &[String],
+    command_args: &Value,
+) -> Result<ExecutionOutcome> {
+    let envs = py_ctx.base_env(command_args)?;
+    let mut args = Vec::with_capacity(extra_args.len() + 1);
+    args.push(script.display().to_string());
+    args.extend(extra_args.iter().cloned());
+    let output = core_ctx.python_runtime().run_command(
+        &py_ctx.python,
+        &args,
+        &envs,
+        &py_ctx.project_root,
+    )?;
+    let details = json!({
+        "mode": "script",
+        "script": script.display().to_string(),
+        "args": extra_args,
+    });
+    Ok(outcome_from_output(
+        "run",
+        &script.display().to_string(),
+        &output,
+        "px run",
+        Some(details),
+    ))
+}
+
+fn run_executable(
+    core_ctx: &CommandContext,
+    py_ctx: &PythonContext,
+    program: &str,
+    extra_args: &[String],
+    command_args: &Value,
+) -> Result<ExecutionOutcome> {
+    let envs = py_ctx.base_env(command_args)?;
+    let output =
+        core_ctx
+            .python_runtime()
+            .run_command(program, extra_args, &envs, &py_ctx.project_root)?;
+    let details = json!({
+        "mode": "executable",
+        "program": program,
+        "args": extra_args,
+    });
+    Ok(outcome_from_output(
+        "run",
+        program,
+        &output,
+        "px run",
+        Some(details),
+    ))
 }
 
 fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<ExecutionOutcome> {
@@ -164,7 +241,7 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
                 return Ok(ExecutionOutcome::user_error(
                     format!("pyproject.toml not found in {}", root.display()),
                     json!({
-                        "hint": "run `px migrate --apply` or pass ENTRY explicitly",
+                        "hint": "run `px migrate --apply` or pass a target explicitly",
                         "project_root": root.display().to_string(),
                         "manifest": manifest.display().to_string(),
                     }),
@@ -235,73 +312,21 @@ struct ResolvedEntry {
     source: EntrySource,
 }
 
-impl ResolvedEntry {
-    fn explicit(entry: String) -> Self {
-        let (entry, call) = parse_entry_value(&entry).unwrap_or((entry.clone(), None));
-        Self {
-            entry,
-            call,
-            source: EntrySource::Explicit,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 enum EntrySource {
-    Explicit,
-    ProjectScript { script: String },
     PxScript { script: String },
-    PackageCli { package: String },
 }
 
 impl EntrySource {
     fn label(&self) -> &'static str {
         match self {
-            EntrySource::Explicit => "explicit",
-            EntrySource::ProjectScript { .. } => "project-scripts",
             EntrySource::PxScript { .. } => "px-scripts",
-            EntrySource::PackageCli { .. } => "package-cli",
         }
     }
 
     fn script_name(&self) -> Option<&str> {
         match self {
-            EntrySource::ProjectScript { script } | EntrySource::PxScript { script } => {
-                Some(script.as_str())
-            }
-            _ => None,
-        }
-    }
-
-    fn is_inferred(&self) -> bool {
-        !matches!(self, EntrySource::Explicit)
-    }
-}
-
-#[derive(Debug)]
-enum DefaultEntryIssue {
-    MissingManifest(PathBuf),
-    NoScripts(PathBuf),
-}
-
-impl DefaultEntryIssue {
-    fn into_outcome(self, ctx: &PythonContext) -> ExecutionOutcome {
-        match self {
-            DefaultEntryIssue::MissingManifest(path) => ExecutionOutcome::user_error(
-                format!("pyproject.toml not found in {}", ctx.project_root.display()),
-                json!({
-                    "hint": "run `px migrate --apply` or pass ENTRY explicitly",
-                    "project_root": ctx.project_root.display().to_string(),
-                    "manifest": path.display().to_string(),
-                }),
-            ),
-            DefaultEntryIssue::NoScripts(path) => ExecutionOutcome::user_error(
-                "no default entry found; add [project.scripts] or [tool.px.scripts]",
-                json!({
-                    "hint": "define a script under [project.scripts] or [tool.px.scripts], or run `px run <module>` explicitly",
-                    "manifest": path.display().to_string(),
-                }),
-            ),
+            EntrySource::PxScript { script } => Some(script.as_str()),
         }
     }
 }
@@ -395,14 +420,8 @@ fn run_module_entry(
     if let Some(script) = source.script_name() {
         details["script"] = Value::String(script.to_string());
     }
-    if source.is_inferred() {
-        details["defaulted"] = Value::Bool(true);
-    }
     if let Some(call_name) = call {
         details["call"] = Value::String(call_name);
-    }
-    if let EntrySource::PackageCli { package } = &source {
-        details["package"] = Value::String(package.clone());
     }
 
     Ok(outcome_from_output(
@@ -523,21 +542,6 @@ fn detect_passthrough_target(entry: &str, ctx: &PythonContext) -> Option<Passthr
     None
 }
 
-fn should_forward_to_default(entry: &str, ctx: &PythonContext) -> bool {
-    if looks_like_python_alias(entry) || looks_like_path_target(entry) {
-        return false;
-    }
-    let pathish = Path::new(entry);
-    if pathish.exists() || entry.ends_with(".py") {
-        return false;
-    }
-    if entry.contains('.') || entry.contains('\\') || entry.contains('/') {
-        return false;
-    }
-    // If the manifest is missing, default inference will emit a clearer hint.
-    ctx.project_root.join("pyproject.toml").exists()
-}
-
 fn looks_like_python_alias(entry: &str) -> bool {
     let lower = entry.to_lowercase();
     lower == "python"
@@ -588,63 +592,6 @@ fn resolve_executable_path(entry: &str, root: &Path) -> (String, Option<String>)
     }
 }
 
-fn infer_default_entry(manifest: &Path) -> Result<Option<ResolvedEntry>> {
-    let contents = fs::read_to_string(manifest)?;
-    let doc: DocumentMut = contents.parse()?;
-    let project = project_table(&doc)?;
-
-    if let Some((script, module, call)) = first_script_entry(project.get("scripts")) {
-        return Ok(Some(ResolvedEntry {
-            entry: module,
-            call,
-            source: EntrySource::ProjectScript { script },
-        }));
-    }
-
-    let px_scripts_item = doc
-        .get("tool")
-        .and_then(Item::as_table)
-        .and_then(|tool| tool.get("px"))
-        .and_then(Item::as_table)
-        .and_then(|px| px.get("scripts"));
-    if let Some((script, module, call)) = first_script_entry(px_scripts_item) {
-        return Ok(Some(ResolvedEntry {
-            entry: module,
-            call,
-            source: EntrySource::PxScript { script },
-        }));
-    }
-
-    if let Some(name) = project.get("name").and_then(Item::as_str) {
-        if !name.trim().is_empty() {
-            let module = package_module_name(name);
-            if package_module_exists(manifest, &module) {
-                return Ok(Some(ResolvedEntry {
-                    entry: format!("{module}.cli"),
-                    call: None,
-                    source: EntrySource::PackageCli {
-                        package: name.to_string(),
-                    },
-                }));
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-fn first_script_entry(item: Option<&Item>) -> Option<(String, String, Option<String>)> {
-    let scripts = item?.as_table()?;
-    for (name, item) in scripts {
-        if let Some(value) = item.as_str() {
-            if let Some((module, call)) = parse_entry_value(value) {
-                return Some((name.to_string(), module, call));
-            }
-        }
-    }
-    None
-}
-
 fn parse_entry_value(value: &str) -> Option<(String, Option<String>)> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -667,75 +614,6 @@ fn parse_entry_value(value: &str) -> Option<(String, Option<String>)> {
     Some((module.to_string(), call))
 }
 
-fn package_module_exists(manifest: &Path, module: &str) -> bool {
-    let root = manifest.parent().unwrap_or_else(|| Path::new("."));
-    let module_path = module.replace('.', "/");
-    let dir = root.join(&module_path);
-    dir.join("__init__.py").exists() || dir.with_extension("py").exists()
-}
-
-fn package_module_name(name: &str) -> String {
-    name.replace(['-', ' '], "_")
-}
-
 fn missing_pytest(stderr: &str) -> bool {
     stderr.contains("No module named") && stderr.contains("pytest")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    fn write_manifest(contents: &str) -> (tempfile::TempDir, PathBuf) {
-        let temp = tempdir().expect("tempdir");
-        let path = temp.path().join("pyproject.toml");
-        fs::write(&path, contents).expect("write manifest");
-        (temp, path)
-    }
-
-    #[test]
-    fn prefers_project_scripts_over_px_scripts() {
-        let manifest = r#"
-[project]
-name = "demo-app"
-version = "0.1.0"
-
-[project.scripts]
-app = "demo.app:main"
-
-[tool.px.scripts]
-alt = "demo.alt:main"
-"#;
-        let (_tmp, path) = write_manifest(manifest);
-        let resolved = infer_default_entry(&path)
-            .expect("entry lookup")
-            .expect("default entry");
-        assert_eq!(resolved.entry, "demo.app");
-        match resolved.source {
-            EntrySource::ProjectScript { script } => assert_eq!(script, "app"),
-            other => panic!("expected project script, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn falls_back_to_px_scripts_when_project_scripts_missing() {
-        let manifest = r#"
-[project]
-name = "demo-app"
-version = "0.1.0"
-
-[tool.px.scripts]
-lint = "demo.lint:main"
-"#;
-        let (_tmp, path) = write_manifest(manifest);
-        let resolved = infer_default_entry(&path)
-            .expect("entry lookup")
-            .expect("default entry");
-        assert_eq!(resolved.entry, "demo.lint");
-        match resolved.source {
-            EntrySource::PxScript { script } => assert_eq!(script, "lint"),
-            other => panic!("expected px script, got {other:?}"),
-        }
-    }
 }

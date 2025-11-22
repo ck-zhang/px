@@ -417,8 +417,13 @@ fn project_status_reports_missing_lock() {
     let lock = project.join("px.lock");
     fs::remove_file(&lock).expect("remove px.lock");
 
+    let Some(python) = find_python() else {
+        eprintln!("skipping status test (python binary not found)");
+        return;
+    };
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
         .args(["--json", "status"])
         .assert()
         .failure();
@@ -446,8 +451,13 @@ fn project_status_detects_manifest_drift() {
     }
     fs::write(&pyproject, doc.to_string()).expect("write pyproject");
 
+    let Some(python) = find_python() else {
+        eprintln!("skipping status test (python binary not found)");
+        return;
+    };
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
         .args(["--json", "status"])
         .assert()
         .failure();
@@ -467,6 +477,25 @@ fn project_status_detects_manifest_drift() {
         hint.contains("px sync"),
         "drift hint should suggest px sync: {hint:?}"
     );
+}
+
+fn find_python() -> Option<String> {
+    let candidates = [
+        std::env::var("PYTHON").ok(),
+        Some("python3".to_string()),
+        Some("python".to_string()),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        let status = std::process::Command::new(&candidate)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if matches!(status, Ok(code) if code.success()) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn scaffold_demo(temp: &TempDir, package: &str) {
