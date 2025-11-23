@@ -215,7 +215,7 @@ fn extract_sdist(python: &str, sdist: &Path, dest: &Path) -> Result<()> {
 
 fn run_python_build(python: &str, project_dir: &Path, out_dir: &Path) -> Result<()> {
     match pip_wheel_fallback(python, project_dir, out_dir) {
-        Ok(()) => return Ok(()),
+        Ok(()) => Ok(()),
         Err(pip_err) => {
             let mut cmd = Command::new(python);
             cmd.arg("-m")
@@ -230,10 +230,11 @@ fn run_python_build(python: &str, project_dir: &Path, out_dir: &Path) -> Result<
                 format!("failed to run python -m build in {}", project_dir.display())
             })?;
             if output.status.success() {
-                return Ok(());
+                Ok(())
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                bail!("python -m pip wheel failed: {pip_err}\npython -m build failed: {stderr}")
             }
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            bail!("python -m pip wheel failed: {pip_err}\npython -m build failed: {stderr}")
         }
     }
 }
@@ -310,15 +311,14 @@ fn find_wheel(dist_dir: &Path) -> Result<PathBuf> {
     let mut found = None;
     for entry in fs::read_dir(dist_dir)? {
         let entry = entry?;
-        if entry.file_type()?.is_file() {
-            if entry
+        if entry.file_type()?.is_file()
+            && entry
                 .path()
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("whl"))
-            {
-                found = Some(entry.path());
-                break;
-            }
+        {
+            found = Some(entry.path());
+            break;
         }
     }
     found.ok_or_else(|| anyhow!("wheel not found in {}", dist_dir.display()))

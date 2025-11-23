@@ -1,8 +1,7 @@
-use std::{env, fs, path::Path};
+use std::{env, path::Path};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use toml_edit::{DocumentMut, InlineTable, Item, Table};
 
 use crate::{
     build_pythonpath, ensure_project_environment_synced, is_missing_project_error,
@@ -10,9 +9,11 @@ use crate::{
     tools::{disable_proxy_env, load_installed_tool, MIN_PYTHON_REQUIREMENT},
     CommandContext, ExecutionOutcome, InstallUserError,
 };
+use crate::fmt_plan::{
+    load_quality_tools, missing_module_error, QualityConfigSource, QualityKind, QualityTool,
+    QualityToolConfig,
+};
 use px_domain::ProjectSnapshot;
-
-const DEFAULT_RUFF_REQUIREMENT: &str = "ruff==0.6.9";
 
 #[derive(Clone, Debug)]
 pub struct FmtRequest {
@@ -386,230 +387,6 @@ fn no_tools_configured_outcome(kind: QualityKind, pyproject: &Path) -> Execution
     )
 }
 
-fn load_quality_tools(pyproject: &Path, kind: QualityKind) -> Result<QualityToolConfig> {
-    let contents = fs::read_to_string(pyproject)
-        .with_context(|| format!("reading {}", pyproject.display()))?;
-    let doc: DocumentMut = contents.parse()?;
-    let section_table = doc
-        .get("tool")
-        .and_then(Item::as_table)
-        .and_then(|tool| tool.get("px"))
-        .and_then(Item::as_table)
-        .and_then(|px| px.get(kind.section_name()))
-        .and_then(Item::as_table);
-
-    if let Some(table) = section_table {
-        let tools = parse_quality_section(table)?;
-        if tools.is_empty() {
-            return Err(anyhow!(
-                "no commands configured under [tool.px.{}]",
-                kind.section_name()
-            ));
-        }
-        return Ok(QualityToolConfig {
-            tools,
-            source: QualityConfigSource::Pyproject,
-        });
-    }
-
-    Ok(QualityToolConfig {
-        tools: kind.default_tools(),
-        source: QualityConfigSource::Default,
-    })
-}
-
-fn parse_quality_section(table: &Table) -> Result<Vec<QualityTool>> {
-    if let Some(item) = table.get("commands") {
-        let tools = parse_commands_item(item)?;
-        if !tools.is_empty() {
-            return Ok(tools);
-        }
-    }
-
-    if let Some(module) = table.get("module").and_then(Item::as_str) {
-        let args = parse_item_string_array(table.get("args"))?;
-        let label = table
-            .get("label")
-            .and_then(Item::as_str)
-            .map(ToString::to_string);
-        let requirement = table
-            .get("requirement")
-            .and_then(Item::as_str)
-            .map(ToString::to_string);
-        return Ok(vec![QualityTool::new(
-            module.to_string(),
-            args,
-            label,
-            requirement,
-        )]);
-    }
-    Ok(Vec::new())
-}
-
-fn parse_commands_item(item: &Item) -> Result<Vec<QualityTool>> {
-    if let Some(array) = item.as_array() {
-        let mut tools = Vec::new();
-        for entry in array {
-            let inline = entry
-                .as_inline_table()
-                .ok_or_else(|| anyhow!("commands entries must be inline tables"))?;
-            tools.push(QualityTool::from_inline_table(inline)?);
-        }
-        return Ok(tools);
-    }
-    if let Some(array) = item.as_array_of_tables() {
-        let mut tools = Vec::new();
-        for table in array {
-            tools.push(QualityTool::from_table(table)?);
-        }
-        return Ok(tools);
-    }
-    Ok(Vec::new())
-}
-
-fn parse_item_string_array(item: Option<&Item>) -> Result<Vec<String>> {
-    let Some(array_item) = item else {
-        return Ok(Vec::new());
-    };
-    let array = array_item
-        .as_array()
-        .ok_or_else(|| anyhow!("args must be an array of strings"))?;
-    let mut values = Vec::new();
-    for value in array {
-        let literal = value
-            .as_str()
-            .ok_or_else(|| anyhow!("args entries must be strings"))?;
-        values.push(literal.to_string());
-    }
-    Ok(values)
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum QualityKind {
-    Fmt,
-}
-
-impl QualityKind {
-    fn section_name(self) -> &'static str {
-        match self {
-            QualityKind::Fmt => "fmt",
-        }
-    }
-
-    fn success_message(self) -> &'static str {
-        match self {
-            QualityKind::Fmt => "formatted source files",
-        }
-    }
-
-    fn default_tools(self) -> Vec<QualityTool> {
-        match self {
-            QualityKind::Fmt => vec![QualityTool::new(
-                "ruff".to_string(),
-                vec!["format".to_string()],
-                None,
-                Some(DEFAULT_RUFF_REQUIREMENT.to_string()),
-            )],
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
-enum QualityConfigSource {
-    Default,
-    Pyproject,
-}
-
-impl QualityConfigSource {
-    fn as_str(&self) -> &'static str {
-        match self {
-            QualityConfigSource::Default => "default",
-            QualityConfigSource::Pyproject => "pyproject",
-        }
-    }
-}
-
-struct QualityToolConfig {
-    tools: Vec<QualityTool>,
-    source: QualityConfigSource,
-}
-
-#[derive(Clone)]
-struct QualityTool {
-    label: String,
-    module: String,
-    args: Vec<String>,
-    requirement: Option<String>,
-}
-
-impl QualityTool {
-    fn new(
-        module: String,
-        args: Vec<String>,
-        label: Option<String>,
-        requirement: Option<String>,
-    ) -> Self {
-        let label = label.unwrap_or_else(|| module.clone());
-        Self {
-            label,
-            module,
-            args,
-            requirement,
-        }
-    }
-
-    fn from_table(table: &Table) -> Result<Self> {
-        let module = table
-            .get("module")
-            .and_then(Item::as_str)
-            .ok_or_else(|| anyhow!("tool entry missing `module`"))?
-            .to_string();
-        let args = parse_item_string_array(table.get("args"))?;
-        let label = table
-            .get("label")
-            .and_then(Item::as_str)
-            .map(ToString::to_string);
-        let requirement = table
-            .get("requirement")
-            .and_then(Item::as_str)
-            .map(ToString::to_string);
-        Ok(Self::new(module, args, label, requirement))
-    }
-
-    fn from_inline_table(inline: &InlineTable) -> Result<Self> {
-        let table = inline.clone().into_table();
-        Self::from_table(&table)
-    }
-
-    fn display_name(&self) -> &str {
-        &self.label
-    }
-
-    fn python_args(&self, forwarded: &[String]) -> Vec<String> {
-        let mut args = Vec::with_capacity(2 + self.args.len() + forwarded.len());
-        args.push("-m".to_string());
-        args.push(self.module.clone());
-        args.extend(self.args.iter().cloned());
-        args.extend(forwarded.iter().cloned());
-        args
-    }
-
-    fn requirement_spec(&self) -> Option<String> {
-        self.requirement.clone()
-    }
-
-    fn install_name(&self) -> &str {
-        &self.module
-    }
-
-    fn install_command(&self) -> String {
-        match self.requirement_spec() {
-            Some(requirement) => format!("px tool install {requirement}"),
-            None => format!("px tool install {}", self.module),
-        }
-    }
-}
-
 struct QualityRunRecord {
     name: String,
     module: String,
@@ -624,12 +401,6 @@ struct QualityRunRecord {
 enum ToolRun {
     Completed(QualityRunRecord),
     Outcome(ExecutionOutcome),
-}
-
-fn missing_module_error(output: &str, module: &str) -> bool {
-    let needle = format!("No module named '{module}'");
-    let needle_unquoted = format!("No module named {module}");
-    output.contains(&needle) || output.contains(&needle_unquoted)
 }
 
 impl QualityRunRecord {

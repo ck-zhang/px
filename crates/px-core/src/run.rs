@@ -1,11 +1,11 @@
 use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
-use toml_edit::{DocumentMut, Item};
 
+use crate::run_plan::{plan_run_target, PassthroughReason, PassthroughTarget, ResolvedEntry, RunTargetPlan};
+use crate::tooling::{missing_pyproject_outcome, run_target_required_outcome};
 use crate::{
     attach_autosync_details, is_missing_project_error, manifest_snapshot, missing_project_outcome,
     outcome_from_output, python_context_with_mode, state_guard::guard_for_execution,
@@ -53,15 +53,7 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             let msg = err.to_string();
             if msg.contains("pyproject.toml not found") {
                 let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                let manifest = root.join("pyproject.toml");
-                return Ok(ExecutionOutcome::user_error(
-                    format!("pyproject.toml not found in {}", root.display()),
-                    json!({
-                        "hint": "run `px migrate --apply` or pass a target explicitly",
-                        "project_root": root.display().to_string(),
-                        "manifest": manifest.display().to_string(),
-                    }),
-                ));
+                return Ok(missing_pyproject_outcome("test", &root));
             }
             return Err(err);
         }
@@ -72,12 +64,7 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         .or_else(|| request.target.clone())
         .unwrap_or_default();
     if target.trim().is_empty() {
-        return Ok(ExecutionOutcome::user_error(
-            "px run requires a target",
-            json!({
-                "hint": "pass a command or script explicitly, or define [tool.px.scripts].<name>",
-            }),
-        ));
+        return Ok(run_target_required_outcome());
     }
     let state_report = match crate::state_guard::state_or_violation(ctx, &snapshot, "run") {
         Ok(report) => report,
@@ -97,76 +84,23 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
     });
     let manifest = py_ctx.project_root.join("pyproject.toml");
 
-    if let Some(resolved) = resolve_px_script(&manifest, &target)? {
-        let mut outcome = run_module_entry(ctx, &py_ctx, resolved, &request.args, &command_args)?;
-        attach_autosync_details(&mut outcome, sync_report);
-        return Ok(outcome);
-    }
-
-    if let Some(script_path) = script_under_project_root(&py_ctx.project_root, &target) {
-        let mut outcome =
-            run_project_script(ctx, &py_ctx, &script_path, &request.args, &command_args)?;
-        attach_autosync_details(&mut outcome, sync_report);
-        return Ok(outcome);
-    }
-
-    if let Some(target) = detect_passthrough_target(&target, &py_ctx) {
-        let mut outcome = run_passthrough(ctx, &py_ctx, target, &request.args, &command_args)?;
-        attach_autosync_details(&mut outcome, sync_report);
-        return Ok(outcome);
-    }
-
-    let mut outcome = run_executable(ctx, &py_ctx, &target, &request.args, &command_args)?;
+    let plan = plan_run_target(&py_ctx, &manifest, &target)?;
+    let mut outcome = match plan {
+        RunTargetPlan::PxScript(resolved) => {
+            run_module_entry(ctx, &py_ctx, resolved, &request.args, &command_args)?
+        }
+        RunTargetPlan::Script(path) => {
+            run_project_script(ctx, &py_ctx, &path, &request.args, &command_args)?
+        }
+        RunTargetPlan::Passthrough(target) => {
+            run_passthrough(ctx, &py_ctx, target, &request.args, &command_args)?
+        }
+        RunTargetPlan::Executable(program) => {
+            run_executable(ctx, &py_ctx, &program, &request.args, &command_args)?
+        }
+    };
     attach_autosync_details(&mut outcome, sync_report);
     Ok(outcome)
-}
-
-fn resolve_px_script(manifest: &Path, target: &str) -> Result<Option<ResolvedEntry>> {
-    if !manifest.exists() {
-        return Ok(None);
-    }
-    let contents = fs::read_to_string(manifest)?;
-    let doc: DocumentMut = contents.parse()?;
-    let scripts = doc
-        .get("tool")
-        .and_then(Item::as_table)
-        .and_then(|tool| tool.get("px"))
-        .and_then(Item::as_table)
-        .and_then(|px| px.get("scripts"))
-        .and_then(Item::as_table);
-    let Some(table) = scripts else {
-        return Ok(None);
-    };
-    let value = match table.get(target) {
-        Some(item) => item,
-        None => return Ok(None),
-    };
-    let Some(raw) = value.as_str() else {
-        return Ok(None);
-    };
-    let (entry, call) = parse_entry_value(raw)
-        .ok_or_else(|| anyhow!("invalid [tool.px.scripts] entry for `{target}`"))?;
-    Ok(Some(ResolvedEntry {
-        entry,
-        call,
-        source: EntrySource::PxScript {
-            script: target.to_string(),
-        },
-    }))
-}
-
-fn script_under_project_root(root: &Path, target: &str) -> Option<PathBuf> {
-    let candidate = if Path::new(target).is_absolute() {
-        PathBuf::from(target)
-    } else {
-        root.join(target)
-    };
-    let canonical = candidate.canonicalize().ok()?;
-    if canonical.starts_with(root) && canonical.is_file() {
-        Some(canonical)
-    } else {
-        None
-    }
 }
 
 fn run_project_script(
@@ -237,15 +171,7 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
             let msg = err.to_string();
             if msg.contains("pyproject.toml not found") {
                 let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                let manifest = root.join("pyproject.toml");
-                return Ok(ExecutionOutcome::user_error(
-                    format!("pyproject.toml not found in {}", root.display()),
-                    json!({
-                        "hint": "run `px migrate --apply` or pass a target explicitly",
-                        "project_root": root.display().to_string(),
-                        "manifest": manifest.display().to_string(),
-                    }),
-                ));
+                return Ok(missing_pyproject_outcome("run", &root));
             }
             return Err(err);
         }
@@ -303,50 +229,6 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
     );
     attach_autosync_details(&mut outcome, sync_report);
     Ok(outcome)
-}
-
-#[derive(Debug, Clone)]
-struct ResolvedEntry {
-    entry: String,
-    call: Option<String>,
-    source: EntrySource,
-}
-
-#[derive(Debug, Clone)]
-enum EntrySource {
-    PxScript { script: String },
-}
-
-impl EntrySource {
-    fn label(&self) -> &'static str {
-        match self {
-            EntrySource::PxScript { .. } => "px-scripts",
-        }
-    }
-
-    fn script_name(&self) -> Option<&str> {
-        match self {
-            EntrySource::PxScript { script } => Some(script.as_str()),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PassthroughTarget {
-    program: String,
-    display: String,
-    reason: PassthroughReason,
-    resolved: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-enum PassthroughReason {
-    PythonAlias,
-    ExecutablePath,
-    PythonScript {
-        script_arg: String,
-        script_path: String,
-    },
 }
 
 fn run_builtin_tests(
@@ -505,113 +387,6 @@ fn run_passthrough(
         "px run",
         Some(details),
     ))
-}
-
-fn detect_passthrough_target(entry: &str, ctx: &PythonContext) -> Option<PassthroughTarget> {
-    if looks_like_python_alias(entry) {
-        return Some(PassthroughTarget {
-            program: ctx.python.clone(),
-            display: entry.to_string(),
-            reason: PassthroughReason::PythonAlias,
-            resolved: Some(ctx.python.clone()),
-        });
-    }
-
-    if let Some((script_arg, script_path)) = python_script_target(entry, &ctx.project_root) {
-        return Some(PassthroughTarget {
-            program: ctx.python.clone(),
-            display: entry.to_string(),
-            reason: PassthroughReason::PythonScript {
-                script_arg,
-                script_path,
-            },
-            resolved: Some(ctx.python.clone()),
-        });
-    }
-
-    if looks_like_path_target(entry) {
-        let (program, resolved) = resolve_executable_path(entry, &ctx.project_root);
-        return Some(PassthroughTarget {
-            program,
-            display: entry.to_string(),
-            reason: PassthroughReason::ExecutablePath,
-            resolved,
-        });
-    }
-
-    None
-}
-
-fn looks_like_python_alias(entry: &str) -> bool {
-    let lower = entry.to_lowercase();
-    lower == "python"
-        || lower == "python3"
-        || lower.starts_with("python3.")
-        || lower == "py"
-        || lower == "py3"
-}
-
-fn looks_like_path_target(entry: &str) -> bool {
-    let path = Path::new(entry);
-    path.components().count() > 1 || entry.contains('/') || entry.contains('\\')
-}
-
-pub(crate) fn python_script_target(entry: &str, root: &Path) -> Option<(String, String)> {
-    if !looks_like_python_script(entry) {
-        return None;
-    }
-    let script_arg = entry.to_string();
-    let script_path = resolve_script_path(entry, root);
-    Some((script_arg, script_path))
-}
-
-fn looks_like_python_script(entry: &str) -> bool {
-    Path::new(entry)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("py") || ext.eq_ignore_ascii_case("pyw"))
-}
-
-fn resolve_script_path(entry: &str, root: &Path) -> String {
-    let path = Path::new(entry);
-    if path.is_absolute() {
-        entry.to_string()
-    } else {
-        root.join(path).display().to_string()
-    }
-}
-
-fn resolve_executable_path(entry: &str, root: &Path) -> (String, Option<String>) {
-    let path = Path::new(entry);
-    if path.is_absolute() {
-        (entry.to_string(), Some(entry.to_string()))
-    } else {
-        let resolved = root.join(path);
-        let display = resolved.display().to_string();
-        (display.clone(), Some(display))
-    }
-}
-
-fn parse_entry_value(value: &str) -> Option<(String, Option<String>)> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let token = trimmed.split_whitespace().next().unwrap_or("").trim();
-    if token.is_empty() {
-        return None;
-    }
-    let mut parts = token.splitn(2, ':');
-    let module = parts.next().unwrap_or("").trim();
-    if module.is_empty() {
-        return None;
-    }
-    let call = parts
-        .next()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    Some((module.to_string(), call))
 }
 
 fn missing_pytest(stderr: &str) -> bool {

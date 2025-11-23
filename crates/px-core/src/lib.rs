@@ -2020,6 +2020,7 @@ pub fn format_status_message(info: CommandInfo, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::EnvSnapshot;
     use crate::pypi::{PypiDigests, PypiFile};
     use crate::python_sys::{current_marker_environment, InterpreterSupportedTag};
     use crate::run::python_script_target;

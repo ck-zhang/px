@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{relative_path_str, PythonContext};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct BuildTargets {
     pub(crate) sdist: bool,
     pub(crate) wheel: bool,
@@ -25,7 +25,7 @@ impl BuildTargets {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct ArtifactSummary {
     pub path: String,
     pub bytes: u64,
@@ -107,7 +107,7 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn artifact_matches_format(path: &Path, targets: BuildTargets) -> bool {
+pub(crate) fn artifact_matches_format(path: &Path, targets: BuildTargets) -> bool {
     if targets.sdist {
         if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
             if ext.eq_ignore_ascii_case("gz") {
@@ -123,4 +123,43 @@ fn artifact_matches_format(path: &Path, targets: BuildTargets) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_matches_format_respects_targets() {
+        let sdist = PathBuf::from("dist/demo-0.1.0.tar.gz");
+        let wheel = PathBuf::from("dist/demo-0.1.0-py3-none-any.whl");
+
+        let sdist_only = BuildTargets {
+            sdist: true,
+            wheel: false,
+        };
+        assert!(artifact_matches_format(&sdist, sdist_only));
+        assert!(!artifact_matches_format(&wheel, sdist_only));
+
+        let wheel_only = BuildTargets {
+            sdist: false,
+            wheel: true,
+        };
+        assert!(artifact_matches_format(&wheel, wheel_only));
+        assert!(!artifact_matches_format(&sdist, wheel_only));
+
+        let both = BuildTargets {
+            sdist: true,
+            wheel: true,
+        };
+        assert!(artifact_matches_format(&sdist, both));
+        assert!(artifact_matches_format(&wheel, both));
+    }
+
+    #[test]
+    fn format_bytes_scales_values() {
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(2048), "2.0 KB");
+        assert_eq!(format_bytes(1_572_864), "1.5 MB");
+    }
 }

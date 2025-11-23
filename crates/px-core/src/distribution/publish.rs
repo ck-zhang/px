@@ -1,4 +1,3 @@
-use std::env;
 use std::fs;
 use std::path::Path;
 
@@ -7,22 +6,10 @@ use reqwest::{blocking::Client, StatusCode};
 use serde_json::json;
 use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
 
-use crate::{
-    build_http_client, project_table, python_context, relative_path_str, CommandContext,
-    ExecutionOutcome,
-};
+use crate::{build_http_client, project_table, python_context, CommandContext, ExecutionOutcome};
 
-use super::artifacts::{collect_artifact_summaries, ArtifactSummary};
-
-#[derive(Clone, Debug)]
-pub struct PublishRequest {
-    pub registry: Option<String>,
-    pub token_env: Option<String>,
-    pub dry_run: bool,
-}
-
-const PYPI_UPLOAD_URL: &str = "https://upload.pypi.org/legacy/";
-const TEST_PYPI_UPLOAD_URL: &str = "https://test.pypi.org/legacy/";
+use super::artifacts::ArtifactSummary;
+use super::plan::{plan_publish, PublishPlanning, PublishRegistry, PublishRequest};
 
 #[derive(Clone, Debug)]
 struct PublishMetadata {
@@ -37,12 +24,6 @@ struct PublishMetadata {
     project_urls: Vec<String>,
     classifiers: Vec<String>,
     requires_python: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-struct PublishRegistry {
-    label: String,
-    url: String,
 }
 
 #[derive(Clone, Debug)]
@@ -71,141 +52,56 @@ fn publish_project_outcome(
         Ok(py) => py,
         Err(outcome) => return Ok(outcome),
     };
-    let registry = request
-        .registry
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("pypi");
-    let token_env = request
-        .token_env
-        .clone()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| ctx.config().publish.default_token_env.to_string());
-    let dist_dir = py_ctx.project_root.join("dist");
-    let artifacts = collect_artifact_summaries(&dist_dir, None, &py_ctx)?;
-    if artifacts.is_empty() {
-        return Ok(ExecutionOutcome::user_error(
-            "px publish: no artifacts found (run `px build` first)",
-            json!({ "dist_dir": relative_path_str(&dist_dir, &py_ctx.project_root) }),
-        ));
-    }
+    let plan = match plan_publish(ctx, &py_ctx, request)? {
+        PublishPlanning::Plan(plan) => plan,
+        PublishPlanning::Outcome(outcome) => return Ok(outcome),
+    };
 
-    if request.dry_run {
+    if plan.dry_run {
         let details = json!({
-            "registry": registry,
-            "token_env": token_env,
+            "registry": plan.registry.label,
+            "token_env": plan.token_env,
             "dry_run": true,
-            "artifacts": artifacts.clone(),
+            "artifacts": plan.artifacts.clone(),
         });
         let message = format!(
-            "px publish: dry-run to {registry} ({} artifacts)",
-            artifacts.len()
+            "px publish: dry-run to {} ({} artifacts)",
+            plan.registry.label,
+            plan.artifacts.len()
         );
         return Ok(ExecutionOutcome::success(message, details));
     }
 
-    let explicit_online = std::env::var("PX_ONLINE").ok().as_deref() == Some("1");
-    if !explicit_online {
-        return Ok(ExecutionOutcome::user_error(
-            "px publish: PX_ONLINE=1 required for uploads",
-            json!({
-                "registry": registry,
-                "token_env": token_env,
-                "hint": format!(
-                    "export PX_ONLINE=1 && {token_env}=<token> before publishing"
-                ),
-            }),
-        ));
-    }
-
-    if !ctx.env_contains(&token_env) {
-        return Ok(ExecutionOutcome::user_error(
-            format!("px publish: {token_env} must be set"),
-            json!({
-                "registry": registry,
-                "token_env": token_env,
-                "hint": format!("export {token_env}=<token> before publishing"),
-            }),
-        ));
-    }
-
-    let token_value = env::var(&token_env)
-        .map_err(|err| anyhow!("failed to read {token_env} from environment: {err}"))?;
-    if token_value.trim().is_empty() {
-        return Ok(ExecutionOutcome::user_error(
-            format!("px publish: {token_env} is empty"),
-            json!({
-                "registry": registry,
-                "token_env": token_env,
-                "hint": format!("export {token_env}=<token> before publishing"),
-            }),
-        ));
-    }
-
-    let registry_info = resolve_publish_registry(request.registry.as_deref());
     let metadata = load_publish_metadata(&py_ctx.project_root)?;
     let client = build_http_client()?;
-    for summary in &artifacts {
+    let token_value = plan
+        .token
+        .as_ref()
+        .ok_or_else(|| anyhow!("publish plan missing token"))?;
+    for summary in &plan.artifacts {
         let file_path = py_ctx.project_root.join(&summary.path);
         upload_artifact(
             &client,
-            &registry_info,
-            &token_value,
+            &plan.registry,
+            token_value,
             &metadata,
             summary,
             &file_path,
         )?;
     }
 
-    let count = artifacts.len();
+    let count = plan.artifacts.len();
     let details = json!({
-        "registry": registry_info.label,
-        "token_env": token_env,
+        "registry": plan.registry.label,
+        "token_env": plan.token_env,
         "dry_run": false,
-        "artifacts": artifacts,
+        "artifacts": plan.artifacts,
     });
     let message = format!(
         "px publish: uploaded {} artifacts to {}",
-        count, registry_info.label
+        count, plan.registry.label
     );
     Ok(ExecutionOutcome::success(message, details))
-}
-
-fn resolve_publish_registry(selection: Option<&str>) -> PublishRegistry {
-    let trimmed = selection.and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    });
-    match trimmed {
-        None => PublishRegistry {
-            label: "pypi".to_string(),
-            url: PYPI_UPLOAD_URL.to_string(),
-        },
-        Some(value) if value.starts_with("http://") || value.starts_with("https://") => {
-            PublishRegistry {
-                label: value.to_string(),
-                url: value.to_string(),
-            }
-        }
-        Some(value) => match value.to_ascii_lowercase().as_str() {
-            "pypi" => PublishRegistry {
-                label: "pypi".to_string(),
-                url: PYPI_UPLOAD_URL.to_string(),
-            },
-            "testpypi" | "test-pypi" => PublishRegistry {
-                label: value.to_string(),
-                url: TEST_PYPI_UPLOAD_URL.to_string(),
-            },
-            _ => PublishRegistry {
-                label: value.to_string(),
-                url: format!("https://{value}/legacy/"),
-            },
-        },
-    }
 }
 
 fn load_publish_metadata(project_root: &Path) -> Result<PublishMetadata> {
@@ -550,25 +446,6 @@ mod tests {
             "non-artifact extensions should be rejected"
         );
         Ok(())
-    }
-
-    #[test]
-    fn resolve_publish_registry_handles_aliases_and_urls() {
-        let default = resolve_publish_registry(None);
-        assert_eq!(default.label, "pypi");
-        assert_eq!(default.url, PYPI_UPLOAD_URL);
-
-        let testpypi = resolve_publish_registry(Some("test-pypi"));
-        assert_eq!(testpypi.label, "test-pypi");
-        assert_eq!(testpypi.url, TEST_PYPI_UPLOAD_URL);
-
-        let host = resolve_publish_registry(Some("packages.example.com"));
-        assert_eq!(host.label, "packages.example.com");
-        assert_eq!(host.url, "https://packages.example.com/legacy/");
-
-        let url = resolve_publish_registry(Some("https://upload.example.invalid/simple/"));
-        assert_eq!(url.label, "https://upload.example.invalid/simple/");
-        assert_eq!(url.url, "https://upload.example.invalid/simple/");
     }
 
     #[test]

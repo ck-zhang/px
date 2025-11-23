@@ -136,7 +136,7 @@ fn load_cached_build(meta_path: &Path) -> Result<Option<BuiltWheel>> {
     };
     let meta: BuiltWheelMetadata = serde_json::from_str(&contents)
         .with_context(|| format!("failed to parse {}", meta_path.display()))?;
-    let dist_path = meta.dist_path.as_ref().map(|value| PathBuf::from(value));
+    let dist_path = meta.dist_path.as_ref().map(PathBuf::from);
     Ok(Some(BuiltWheel {
         filename: meta.filename,
         url: meta.url,
@@ -364,10 +364,12 @@ mod tests {
         let envs: Vec<(String, String)> = cmd
             .get_envs()
             .filter_map(|(k, v)| {
-                Some((
-                    k?.to_string_lossy().into_owned(),
-                    v?.to_string_lossy().into_owned(),
-                ))
+                v.map(|value| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
             })
             .collect();
         assert!(

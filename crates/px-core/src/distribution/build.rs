@@ -23,14 +23,7 @@ use crate::{
 use super::artifacts::{
     collect_artifact_summaries, format_bytes, summarize_selected_artifacts, BuildTargets,
 };
-
-#[derive(Clone, Debug)]
-pub struct BuildRequest {
-    pub include_sdist: bool,
-    pub include_wheel: bool,
-    pub out: Option<PathBuf>,
-    pub dry_run: bool,
-}
+use super::plan::{plan_build, BuildRequest};
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
@@ -72,37 +65,36 @@ fn build_project_outcome(ctx: &CommandContext, request: &BuildRequest) -> Result
         Ok(py) => py,
         Err(outcome) => return Ok(outcome),
     };
-    let targets = build_targets_from_request(request);
-    let out_dir = resolve_output_dir_from_request(&py_ctx, request.out.as_ref());
+    let plan = plan_build(&py_ctx, request);
 
     if request.dry_run {
-        let artifacts = collect_artifact_summaries(&out_dir, None, &py_ctx)?;
+        let artifacts = collect_artifact_summaries(&plan.out_dir, None, &py_ctx)?;
         let details = json!({
             "artifacts": artifacts,
-            "out_dir": relative_path_str(&out_dir, &py_ctx.project_root),
-            "format": targets.label(),
+            "out_dir": relative_path_str(&plan.out_dir, &py_ctx.project_root),
+            "format": plan.targets.label(),
             "dry_run": true,
         });
         let message = format!(
             "px build: dry-run (format={}, out={})",
-            targets.label(),
-            relative_path_str(&out_dir, &py_ctx.project_root)
+            plan.targets.label(),
+            relative_path_str(&plan.out_dir, &py_ctx.project_root)
         );
         return Ok(ExecutionOutcome::success(message, details));
     }
 
     ctx.fs()
-        .create_dir_all(&out_dir)
-        .with_context(|| format!("creating output directory at {}", out_dir.display()))?;
-    let produced = build_with_uv(ctx, &py_ctx, targets, &out_dir)?;
+        .create_dir_all(&plan.out_dir)
+        .with_context(|| format!("creating output directory at {}", plan.out_dir.display()))?;
+    let produced = build_with_uv(ctx, &py_ctx, plan.targets, &plan.out_dir)?;
 
     let artifacts = summarize_selected_artifacts(&produced, &py_ctx)?;
     if artifacts.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "px build: build completed but produced no artifacts",
             json!({
-                "out_dir": relative_path_str(&out_dir, &py_ctx.project_root),
-                "format": targets.label(),
+                "out_dir": relative_path_str(&plan.out_dir, &py_ctx.project_root),
+                "format": plan.targets.label(),
             }),
         ));
     }
@@ -126,34 +118,12 @@ fn build_project_outcome(ctx: &CommandContext, request: &BuildRequest) -> Result
     };
     let details = json!({
         "artifacts": artifacts,
-        "out_dir": relative_path_str(&out_dir, &py_ctx.project_root),
-        "format": targets.label(),
+        "out_dir": relative_path_str(&plan.out_dir, &py_ctx.project_root),
+        "format": plan.targets.label(),
         "dry_run": false,
         "skip_tests": ctx.config().test.skip_tests_flag.clone(),
     });
     Ok(ExecutionOutcome::success(message, details))
-}
-
-fn build_targets_from_request(request: &BuildRequest) -> BuildTargets {
-    let mut targets = BuildTargets {
-        sdist: request.include_sdist,
-        wheel: request.include_wheel,
-    };
-    if !targets.sdist && !targets.wheel {
-        targets = BuildTargets {
-            sdist: true,
-            wheel: true,
-        };
-    }
-    targets
-}
-
-fn resolve_output_dir_from_request(ctx: &PythonContext, out: Option<&PathBuf>) -> PathBuf {
-    match out {
-        Some(path) if path.is_absolute() => path.clone(),
-        Some(path) => ctx.project_root.join(path),
-        None => ctx.project_root.join("dist"),
-    }
 }
 
 fn build_with_uv(
@@ -620,78 +590,4 @@ fn normalize_archive_path(path: &Path) -> String {
         .map(|c| c.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn resolve_output_dir_handles_relative_and_absolute() -> Result<()> {
-        let root = tempdir()?;
-        let ctx = PythonContext {
-            project_root: root.path().to_path_buf(),
-            python: "/usr/bin/python".to_string(),
-            pythonpath: String::new(),
-            allowed_paths: Vec::new(),
-        };
-
-        let rel = PathBuf::from("custom/dist");
-        let resolved_rel = resolve_output_dir_from_request(&ctx, Some(&rel));
-        assert_eq!(resolved_rel, root.path().join("custom/dist"));
-
-        let abs = root.path().join("abs/dist");
-        let resolved_abs = resolve_output_dir_from_request(&ctx, Some(&abs));
-        assert_eq!(resolved_abs, abs);
-        Ok(())
-    }
-
-    #[test]
-    fn artifact_matches_format_respects_targets() {
-        let sdist = PathBuf::from("dist/demo-0.1.0.tar.gz");
-        let wheel = PathBuf::from("dist/demo-0.1.0-py3-none-any.whl");
-
-        let sdist_only = BuildTargets {
-            sdist: true,
-            wheel: false,
-        };
-        assert!(artifact_matches_format(&sdist, sdist_only));
-        assert!(!artifact_matches_format(&wheel, sdist_only));
-
-        let wheel_only = BuildTargets {
-            sdist: false,
-            wheel: true,
-        };
-        assert!(artifact_matches_format(&wheel, wheel_only));
-        assert!(!artifact_matches_format(&sdist, wheel_only));
-
-        let both = BuildTargets {
-            sdist: true,
-            wheel: true,
-        };
-        assert!(artifact_matches_format(&sdist, both));
-        assert!(artifact_matches_format(&wheel, both));
-    }
-
-    #[test]
-    fn build_targets_default_to_both_when_not_selected() {
-        let request = BuildRequest {
-            include_sdist: false,
-            include_wheel: false,
-            out: None,
-            dry_run: false,
-        };
-
-        let targets = build_targets_from_request(&request);
-        assert!(targets.sdist, "sdist should be selected by default");
-        assert!(targets.wheel, "wheel should be selected by default");
-    }
-
-    #[test]
-    fn format_bytes_scales_values() {
-        assert_eq!(format_bytes(500), "500 B");
-        assert_eq!(format_bytes(2048), "2.0 KB");
-        assert_eq!(format_bytes(1_572_864), "1.5 MB");
-    }
 }
