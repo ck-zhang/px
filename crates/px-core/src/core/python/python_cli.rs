@@ -2,8 +2,8 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::{
-    manifest_snapshot, runtime_manager, CommandContext, ExecutionOutcome, InstallUserError,
-    ProgressReporter,
+    manifest_snapshot, progress::ProgressReporter, runtime_manager, CommandContext,
+    ExecutionOutcome, InstallUserError,
 };
 use px_domain::ManifestEditor;
 

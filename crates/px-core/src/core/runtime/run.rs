@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use crate::run_plan::{plan_run_target, PassthroughReason, PassthroughTarget, ResolvedEntry, RunTargetPlan};
+use crate::run_plan::{
+    plan_run_target, PassthroughReason, PassthroughTarget, ResolvedEntry, RunTargetPlan,
+};
 use crate::tooling::{missing_pyproject_outcome, run_target_required_outcome};
 use crate::{
     attach_autosync_details, is_missing_project_error, manifest_snapshot, missing_project_outcome,

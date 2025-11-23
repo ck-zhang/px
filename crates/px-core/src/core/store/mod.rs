@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::python_sys::detect_interpreter;
 
+pub mod pypi;
+
 mod cache;
 mod prefetch;
 mod sdist;

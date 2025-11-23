@@ -3,15 +3,15 @@ use std::{env, path::Path};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
+use crate::fmt_plan::{
+    load_quality_tools, missing_module_error, QualityConfigSource, QualityKind, QualityTool,
+    QualityToolConfig,
+};
 use crate::{
     build_pythonpath, ensure_project_environment_synced, is_missing_project_error,
     manifest_snapshot, missing_project_outcome, outcome_from_output, runtime_manager,
     tools::{disable_proxy_env, load_installed_tool, MIN_PYTHON_REQUIREMENT},
     CommandContext, ExecutionOutcome, InstallUserError,
-};
-use crate::fmt_plan::{
-    load_quality_tools, missing_module_error, QualityConfigSource, QualityKind, QualityTool,
-    QualityToolConfig,
 };
 use px_domain::ProjectSnapshot;
 

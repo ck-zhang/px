@@ -9,16 +9,18 @@ use crate::config::{Config, EnvSnapshot, GlobalOptions};
 use crate::effects::{self, Effects, SharedEffects};
 use crate::python_sys::detect_marker_environment;
 use crate::store::CacheLocation;
+use crate::CommandGroup;
+use crate::ExecutionOutcome;
 
 #[derive(Clone, Copy, Debug)]
 pub struct CommandInfo {
-    pub group: super::CommandGroup,
+    pub group: CommandGroup,
     pub name: &'static str,
 }
 
 impl CommandInfo {
     #[must_use]
-    pub const fn new(group: super::CommandGroup, name: &'static str) -> Self {
+    pub const fn new(group: CommandGroup, name: &'static str) -> Self {
         Self { group, name }
     }
 }
@@ -28,7 +30,7 @@ pub trait CommandHandler<R> {
     ///
     /// # Errors
     /// Returns an error if command execution fails unexpectedly.
-    fn handle(&self, ctx: &CommandContext, request: R) -> Result<super::ExecutionOutcome>;
+    fn handle(&self, ctx: &CommandContext, request: R) -> Result<ExecutionOutcome>;
 }
 
 pub struct CommandContext<'a> {

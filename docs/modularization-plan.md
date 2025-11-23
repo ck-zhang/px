@@ -1,6 +1,6 @@
 # px Modularization Plan
 
-This plan shapes the workspace into three crates while making `px-core` modular on the inside. It must uphold the global design in `docs/spec.md`, especially the single project state machine (§10), deterministic surfaces (§3.4), and the strict split between readers and writers for commands (§10.5/§10.8).
+Goal: keep three crates while making `px-core` modular and still matching `docs/spec.md` (state machine, deterministic surfaces, reader/writer split).
 
 ## Scope and constraints
 - Keep exactly three crates: `px-domain`, `px-core`, `px-cli`.
@@ -36,7 +36,11 @@ Dependency rules are enforced by convention first, then by boundary tests (see P
 - `run.rs` and `fmt_runner.rs` (~600 each): combine planning, process wiring, and user messaging; user-facing strings should move to `tooling`.
 - `store/mod.rs` (~380 LOC) plus wheel/sdist/cache code in one layer: cache layout vs extraction vs metadata should be distinct modules.
 
-## Phased execution
+## Status
+- Phase 1: distribution/run/fmt split into planners + executors; boundary test added.
+- Phase 2: package layout and boundary rules locked; ready to move modules and trim the facade as below.
+- Phase 3: API polish and lean facade still ahead.
+
 ### Phase 0 — guardrails
 - Keep clippy/tests green; add doc-comments to public items that remain part of the `px-core` facade.
 - Document allowed intra-`px-core` dependencies (matrix above) next to the code.
@@ -50,9 +54,9 @@ Dependency rules are enforced by convention first, then by boundary tests (see P
 - In `store`, separate cache layout/indexing from wheel/sdist extraction and metadata; keep `mod.rs` as a thin facade.
 
 ### Phase 2 — enforce boundaries inside `px-core`
-- Create subdirectories (`core/config`, `core/python`, `core/store`, `core/distribution`, `core/runtime`, `core/tooling`) and move modules accordingly.
-- Mark cross-area APIs `pub(crate)`; expose only a minimal re-export set from `lib.rs` that matches the CLI needs.
-- Add boundary tests or a compile-time deny-list (e.g., `cfg(test)` module that asserts disallowed imports) to prevent cycles that violate the dependency rules.
+- Filesystem layout: introduce `core/` with package facades. Map existing modules to packages to match the dependency matrix: `core/config` (`config.rs`, `context.rs`, `state_guard.rs`); `core/python` (`python_sys.rs`, `python_build.rs`, `python_cli.rs`, marker/env detection); `core/store` (current `store/` tree plus download types in `pypi.rs`); `core/distribution` (build/publish/artifacts plus packaging metadata helpers); `core/runtime` (planners/executors in `run*`/`fmt*`, `process.rs`, `runtime_manager.rs`, `traceback.rs`, and command orchestrators in `project/`, `tools/`, `migration/`); `core/tooling` (`tooling.rs`, `diagnostics.rs`, `progress.rs`, `outcome.rs`, logging/progress glue). Each package gets a `mod.rs` facade that keeps internal helpers `pub(crate)`.
+- Public facade: keep `lib.rs` under 200 LOC that re-exports only what `px-cli` consumes (command/context types, `SystemEffects`, request structs for project/run/fmt/build/publish/tool/python/migrate flows, `ExecutionOutcome`/`CommandStatus`, and the missing-project constants/formatters). Everything else is re-exported through the relevant package `mod.rs` and stays `pub(crate)`.
+- Boundary enforcement: extend `crates/px-core/tests/boundaries.rs` (or a `cfg(test)` deny-list) to assert the allowed edges in the dependency matrix, not just the `store` ↛ `runtime` back-edge. Keep `ARCHITECTURE.md` in sync with the checks so new modules must opt into a package before gaining cross-package imports.
 
 ### Phase 3 — API polishing
 - Trim `lib.rs` to a facade (<200 LOC) plus re-exports and constants.
