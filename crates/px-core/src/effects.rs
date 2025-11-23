@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::process::{run_command, RunOutput};
 use crate::python_sys::detect_interpreter;
 use crate::store::{
     cache_wheel, collect_cache_walk, compute_cache_usage, ensure_sdist_build, prefetch_artifacts,
@@ -10,7 +11,6 @@ use crate::store::{
     SdistRequest,
 };
 use anyhow::{Context, Result};
-use px_domain::{run_command, RunOutput};
 
 use crate::pypi::PypiReleaseResponse;
 

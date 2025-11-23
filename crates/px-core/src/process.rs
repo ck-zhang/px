@@ -80,3 +80,75 @@ pub fn run_command_passthrough(
         stderr: String::new(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_captures_output_and_status_unix() -> Result<()> {
+        let output = run_command(
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                "printf out && printf err >&2; exit 7".to_string(),
+            ],
+            &[],
+            Path::new("."),
+        )?;
+        assert_eq!(output.code, 7);
+        assert_eq!(output.stdout, "out");
+        assert_eq!(output.stderr, "err");
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_command_captures_output_and_status_windows() -> Result<()> {
+        let output = run_command(
+            "cmd",
+            &[
+                "/C".to_string(),
+                "@echo off & echo out & echo err 1>&2 & exit /B 7".to_string(),
+            ],
+            &[],
+            Path::new("."),
+        )?;
+        assert_eq!(output.code, 7);
+        assert_eq!(output.stdout.trim(), "out");
+        assert_eq!(output.stderr.trim(), "err");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_passthrough_returns_status_unix() -> Result<()> {
+        let output = run_command_passthrough(
+            "/bin/sh",
+            &["-c".to_string(), "exit 0".to_string()],
+            &[],
+            Path::new("."),
+        )?;
+        assert_eq!(output.code, 0);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_command_passthrough_returns_status_windows() -> Result<()> {
+        let output = run_command_passthrough(
+            "cmd",
+            &["/C".to_string(), "exit /B 0".to_string()],
+            &[],
+            Path::new("."),
+        )?;
+        assert_eq!(output.code, 0);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        Ok(())
+    }
+}

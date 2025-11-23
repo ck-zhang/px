@@ -145,14 +145,6 @@ impl ManifestEditor {
         Ok(true)
     }
 
-    pub(crate) fn doc(&self) -> &DocumentMut {
-        &self.doc
-    }
-
-    pub(crate) fn doc_mut(&mut self) -> &mut DocumentMut {
-        &mut self.doc
-    }
-
     fn save(&self) -> Result<()> {
         fs::write(&self.path, self.doc.to_string())?;
         Ok(())
@@ -289,25 +281,6 @@ pub(crate) fn read_optional_dependency_group(doc: &DocumentMut, group: &str) -> 
                 .collect()
         })
         .unwrap_or_default()
-}
-
-pub(crate) fn write_optional_dependency_group(
-    doc: &mut DocumentMut,
-    group: &str,
-    specs: &[String],
-) -> Result<()> {
-    let project = project_table_mut(doc)?;
-    let optional_table = project
-        .entry("optional-dependencies")
-        .or_insert(Item::Table(Table::new()))
-        .as_table_mut()
-        .ok_or_else(|| anyhow!("optional-dependencies must be a table"))?;
-    let mut array = Array::new();
-    for spec in specs {
-        array.push_formatted(TomlValue::from(spec.clone()));
-    }
-    optional_table.insert(group, Item::Value(TomlValue::Array(array)));
-    Ok(())
 }
 
 pub(crate) fn project_table(doc: &DocumentMut) -> Result<&Table> {
