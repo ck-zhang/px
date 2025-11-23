@@ -5,18 +5,14 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     env, fmt, fs,
-    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
-        mpsc, Arc, Mutex, OnceLock,
-    },
+    sync::{mpsc, Arc, Mutex},
     thread,
     time::Duration,
 };
 
-use self::effects::{Effects, SharedEffects};
+use self::effects::Effects;
 use crate::python_sys::{
     detect_interpreter, detect_interpreter_tags, detect_marker_environment, InterpreterTags,
 };
@@ -24,13 +20,13 @@ use crate::store::{ArtifactRequest, CacheLocation, SdistRequest};
 use anyhow::{anyhow, Context, Result};
 use pep440_rs::{Operator, VersionSpecifiers};
 use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement, VersionOrUrl};
-use px_domain::RunOutput;
+use progress::{download_concurrency, ProgressReporter};
 use px_domain::{
-    analyze_lock_diff, autopin_pin_key, autopin_spec_key, canonical_extras, current_project_root,
-    detect_lock_drift, discover_project_root, format_specifier, load_lockfile_optional,
-    marker_applies, merge_resolved_dependencies, normalize_dist_name, render_lockfile, resolve,
-    spec_requires_pin, verify_locked_artifacts, AutopinEntry, InstallOverride, LockSnapshot,
-    LockedArtifact, PinSpec, ProjectSnapshot, ResolvedDependency, ResolverRequest, ResolverTags,
+    analyze_lock_diff, autopin_pin_key, autopin_spec_key, canonical_extras, detect_lock_drift,
+    discover_project_root, format_specifier, load_lockfile_optional, marker_applies,
+    merge_resolved_dependencies, normalize_dist_name, render_lockfile, resolve, spec_requires_pin,
+    verify_locked_artifacts, AutopinEntry, InstallOverride, LockSnapshot, LockedArtifact, PinSpec,
+    ProjectSnapshot, ResolvedDependency, ResolverRequest, ResolverTags,
 };
 use reqwest::{blocking::Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -41,7 +37,11 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 use crate::pypi::{PypiFile, PypiReleaseResponse};
 use crate::traceback::{analyze_python_traceback, TracebackContext};
 
+mod config;
+mod context;
 mod diagnostics;
+mod outcome;
+mod progress;
 mod python_sys;
 mod store;
 
@@ -49,6 +49,7 @@ mod distribution;
 mod effects;
 mod fmt_runner;
 mod migration;
+mod process;
 mod project;
 mod pypi;
 mod python_build;
@@ -59,8 +60,14 @@ mod state_guard;
 mod tools;
 mod traceback;
 
+pub use config::{
+    CacheConfig, Config, GlobalOptions, NetworkConfig, PublishConfig, ResolverConfig, TestConfig,
+};
+pub use context::{CommandContext, CommandHandler, CommandInfo};
 pub use diagnostics::commands as diag_commands;
 pub use effects::SystemEffects;
+pub use outcome::{CommandStatus, ExecutionOutcome, InstallUserError};
+pub use process::RunOutput;
 
 const PYPI_BASE_URL: &str = "https://pypi.org/pypi";
 const PX_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -119,15 +126,6 @@ sys.path[:] = _new_path
 
 type ManifestSnapshot = ProjectSnapshot;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct GlobalOptions {
-    pub quiet: bool,
-    pub verbose: u8,
-    pub trace: bool,
-    pub json: bool,
-    pub config: Option<String>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CommandGroup {
@@ -168,443 +166,6 @@ impl fmt::Display for CommandGroup {
             CommandGroup::Python => "python",
         };
         f.write_str(name)
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct CommandInfo {
-    pub group: CommandGroup,
-    pub name: &'static str,
-}
-
-impl CommandInfo {
-    #[must_use]
-    pub const fn new(group: CommandGroup, name: &'static str) -> Self {
-        Self { group, name }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct EnvSnapshot {
-    vars: HashMap<String, String>,
-}
-
-impl EnvSnapshot {
-    fn capture() -> Self {
-        Self {
-            vars: env::vars().collect(),
-        }
-    }
-
-    fn flag_is_enabled(&self, key: &str) -> bool {
-        matches!(self.vars.get(key).map(String::as_str), Some("1"))
-    }
-
-    fn var(&self, key: &str) -> Option<&str> {
-        self.vars.get(key).map(String::as_str)
-    }
-
-    fn contains(&self, key: &str) -> bool {
-        self.vars.contains_key(key)
-    }
-
-    #[cfg(test)]
-    fn testing(pairs: &[(&str, &str)]) -> Self {
-        let vars = pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect();
-        Self { vars }
-    }
-}
-
-#[derive(Debug)]
-pub struct Config {
-    cache: CacheConfig,
-    network: NetworkConfig,
-    resolver: ResolverConfig,
-    test: TestConfig,
-    publish: PublishConfig,
-}
-
-impl Config {
-    /// Builds a configuration snapshot from the current process environment.
-    ///
-    /// # Errors
-    /// Returns an error if cache paths cannot be resolved or inspected.
-    pub fn from_env(effects: &dyn Effects) -> Result<Self> {
-        let snapshot = EnvSnapshot::capture();
-        Self::from_snapshot(&snapshot, effects.cache())
-    }
-
-    fn from_snapshot(
-        snapshot: &EnvSnapshot,
-        cache_store: &dyn effects::CacheStore,
-    ) -> Result<Self> {
-        Ok(Self {
-            cache: CacheConfig {
-                store: cache_store.resolve_store_path()?,
-            },
-            network: NetworkConfig {
-                online: match snapshot.var("PX_ONLINE") {
-                    Some(value) => {
-                        let lowered = value.to_ascii_lowercase();
-                        lowered != "0" && lowered != "false"
-                    }
-                    None => true,
-                },
-            },
-            resolver: ResolverConfig {
-                enabled: match snapshot.var("PX_RESOLVER") {
-                    Some(value) => value == "1",
-                    None => true,
-                },
-                force_sdist: snapshot.flag_is_enabled("PX_FORCE_SDIST"),
-            },
-            test: TestConfig {
-                fallback_builtin: snapshot.flag_is_enabled("PX_TEST_FALLBACK_STD"),
-                skip_tests_flag: snapshot.var("PX_SKIP_TESTS").map(ToOwned::to_owned),
-            },
-            publish: PublishConfig {
-                default_token_env: "PX_PUBLISH_TOKEN",
-            },
-        })
-    }
-
-    #[must_use]
-    pub fn cache(&self) -> &CacheConfig {
-        &self.cache
-    }
-
-    #[must_use]
-    pub fn network(&self) -> &NetworkConfig {
-        &self.network
-    }
-
-    #[must_use]
-    pub fn resolver(&self) -> &ResolverConfig {
-        &self.resolver
-    }
-
-    #[must_use]
-    pub fn test(&self) -> &TestConfig {
-        &self.test
-    }
-
-    #[must_use]
-    pub fn publish(&self) -> &PublishConfig {
-        &self.publish
-    }
-}
-
-#[derive(Debug)]
-pub struct CacheConfig {
-    pub store: CacheLocation,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct NetworkConfig {
-    pub online: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ResolverConfig {
-    pub enabled: bool,
-    pub force_sdist: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct TestConfig {
-    pub fallback_builtin: bool,
-    pub skip_tests_flag: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct PublishConfig {
-    pub default_token_env: &'static str,
-}
-
-pub struct CommandContext<'a> {
-    pub global: &'a GlobalOptions,
-    env: EnvSnapshot,
-    config: Config,
-    project_root: OnceLock<PathBuf>,
-    effects: SharedEffects,
-}
-
-impl<'a> CommandContext<'a> {
-    /// Creates a new command context with the provided global options.
-    ///
-    /// # Errors
-    /// Returns an error if the environment snapshot or configuration cannot be prepared.
-    pub fn new(global: &'a GlobalOptions, effects: SharedEffects) -> Result<Self> {
-        let env = EnvSnapshot::capture();
-        let config = Config::from_snapshot(&env, effects.cache())?;
-        Ok(Self {
-            global,
-            env,
-            config,
-            project_root: OnceLock::new(),
-            effects,
-        })
-    }
-
-    pub fn effects(&self) -> &dyn Effects {
-        self.effects.as_ref()
-    }
-
-    pub fn shared_effects(&self) -> SharedEffects {
-        self.effects.clone()
-    }
-
-    pub fn cache(&self) -> &CacheLocation {
-        &self.config.cache.store
-    }
-
-    pub fn is_online(&self) -> bool {
-        self.config.network.online
-    }
-
-    pub fn fs(&self) -> &dyn effects::FileSystem {
-        self.effects.fs()
-    }
-
-    pub fn python_runtime(&self) -> &dyn effects::PythonRuntime {
-        self.effects.python()
-    }
-
-    pub fn git(&self) -> &dyn effects::GitClient {
-        self.effects.git()
-    }
-
-    pub fn cache_store(&self) -> &dyn effects::CacheStore {
-        self.effects.cache()
-    }
-
-    pub fn pypi(&self) -> &dyn effects::PypiClient {
-        self.effects.pypi()
-    }
-
-    /// Detects the marker environment for PEP 508 resolution.
-    ///
-    /// # Errors
-    /// Returns an error if interpreter detection fails.
-    pub fn marker_environment(&self) -> Result<MarkerEnvironment> {
-        let python = self.python_runtime().detect_interpreter()?;
-        let resolver_env = detect_marker_environment(&python)?;
-        resolver_env.to_marker_environment()
-    }
-
-    /// Resolves the current project's root directory.
-    ///
-    /// # Errors
-    /// Returns an error if the working directory cannot be inspected.
-    pub fn project_root(&self) -> Result<PathBuf> {
-        if let Some(path) = self.project_root.get() {
-            Ok(path.clone())
-        } else {
-            let path = current_project_root()?;
-            let _ = self.project_root.set(path.clone());
-            Ok(path)
-        }
-    }
-
-    pub fn config(&self) -> &Config {
-        &self.config
-    }
-
-    pub fn env_contains(&self, key: &str) -> bool {
-        self.env.contains(key)
-    }
-
-    pub fn env_flag_enabled(&self, key: &str) -> bool {
-        self.env.flag_is_enabled(key)
-    }
-}
-
-pub trait CommandHandler<R> {
-    /// Executes a command handler within the provided context.
-    ///
-    /// # Errors
-    /// Returns an error if command execution fails unexpectedly.
-    fn handle(&self, ctx: &CommandContext, request: R) -> Result<ExecutionOutcome>;
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionOutcome {
-    pub status: CommandStatus,
-    pub message: String,
-    #[serde(default)]
-    pub details: Value,
-}
-
-impl ExecutionOutcome {
-    pub fn success(message: impl Into<String>, details: Value) -> Self {
-        Self {
-            status: CommandStatus::Ok,
-            message: message.into(),
-            details,
-        }
-    }
-
-    pub fn failure(message: impl Into<String>, details: Value) -> Self {
-        Self {
-            status: CommandStatus::Failure,
-            message: message.into(),
-            details,
-        }
-    }
-
-    pub fn user_error(message: impl Into<String>, details: Value) -> Self {
-        Self {
-            status: CommandStatus::UserError,
-            message: message.into(),
-            details,
-        }
-    }
-}
-
-#[derive(thiserror::Error, Debug)]
-#[error("{message}")]
-pub struct InstallUserError {
-    message: String,
-    details: Value,
-}
-
-impl InstallUserError {
-    fn new(message: impl Into<String>, details: Value) -> Self {
-        Self {
-            message: message.into(),
-            details,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum CommandStatus {
-    Ok,
-    UserError,
-    Failure,
-}
-
-fn progress_enabled() -> bool {
-    match env::var("PX_PROGRESS") {
-        Ok(value) => value != "0",
-        Err(_) => io::stderr().is_terminal(),
-    }
-}
-
-struct ProgressReporter {
-    current: Arc<AtomicUsize>,
-    stop: Option<Arc<AtomicBool>>,
-    handle: Option<thread::JoinHandle<()>>,
-    enabled: bool,
-}
-
-impl ProgressReporter {
-    fn spinner(label: impl Into<String>) -> Self {
-        Self::start(label, None)
-    }
-
-    fn bar(label: impl Into<String>, total: usize) -> Self {
-        if total == 0 {
-            return Self::spinner(label);
-        }
-        Self::start(label, Some(total))
-    }
-
-    fn start(label: impl Into<String>, total: Option<usize>) -> Self {
-        let label = label.into();
-        if !progress_enabled() {
-            return Self {
-                current: Arc::new(AtomicUsize::new(0)),
-                stop: None,
-                handle: None,
-                enabled: false,
-            };
-        }
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let current = Arc::new(AtomicUsize::new(0));
-        let thread_label = label.clone();
-        let thread_total = total;
-        let thread_stop = Arc::clone(&stop);
-        let thread_current = Arc::clone(&current);
-        let handle = thread::spawn(move || {
-            ProgressReporter::run(&thread_label, thread_total, &thread_current, &thread_stop);
-        });
-
-        Self {
-            current,
-            stop: Some(stop),
-            handle: Some(handle),
-            enabled: true,
-        }
-    }
-
-    fn increment(&self) {
-        if self.enabled {
-            self.current.fetch_add(1, AtomicOrdering::Relaxed);
-        }
-    }
-
-    fn finish(mut self, message: impl Into<String>) {
-        if self.enabled {
-            if let Some(stop) = self.stop.take() {
-                stop.store(true, AtomicOrdering::Relaxed);
-            }
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.join();
-            }
-            let _ = io::stderr().write_all(b"\r\x1b[2K");
-            let _ = io::stderr().flush();
-        }
-        eprintln!("px ▸ {}", message.into());
-    }
-
-    fn run(label: &str, total: Option<usize>, current: &Arc<AtomicUsize>, stop: &Arc<AtomicBool>) {
-        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let mut idx = 0;
-        while !stop.load(AtomicOrdering::Relaxed) {
-            let frame = FRAMES[idx % FRAMES.len()];
-            idx += 1;
-            let line = if let Some(total) = total {
-                let current = current.load(AtomicOrdering::Relaxed).min(total);
-                format!("\r\x1b[2Kpx ▸ {label} [{current}/{total}] {frame}")
-            } else {
-                format!("\r\x1b[2Kpx ▸ {label} {frame}")
-            };
-            let _ = io::stderr().write_all(line.as_bytes());
-            let _ = io::stderr().flush();
-            thread::sleep(Duration::from_millis(80));
-        }
-    }
-}
-
-fn download_concurrency(total: usize) -> usize {
-    let requested = env::var("PX_DOWNLOADS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok());
-    let available = thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(4)
-        .max(1);
-    let max_workers = requested.unwrap_or(available).clamp(1, 16);
-    max_workers.min(total.max(1))
-}
-
-impl Drop for ProgressReporter {
-    fn drop(&mut self) {
-        if self.enabled {
-            if let Some(stop) = self.stop.take() {
-                stop.store(true, AtomicOrdering::Relaxed);
-            }
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.join();
-            }
-            let _ = io::stderr().write_all(b"\r\x1b[2K");
-            let _ = io::stderr().flush();
-        }
     }
 }
 

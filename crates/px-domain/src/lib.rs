@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![deny(clippy::all, warnings)]
 #![allow(
     clippy::missing_errors_doc,
@@ -13,7 +12,6 @@ pub mod manifest;
 pub mod onboard;
 pub mod project_resolver;
 pub mod resolver;
-pub mod runtime;
 pub mod snapshot;
 pub mod state;
 
@@ -41,7 +39,6 @@ pub use resolver::{
     normalize_dist_name, resolve, ResolveRequest as ResolverRequest, ResolvedSpecifier,
     ResolverEnv, ResolverTags,
 };
-pub use runtime::{run_command, run_command_passthrough, RunOutput};
 pub use snapshot::{
     current_project_root, discover_project_root, ensure_pyproject_exists,
     project_name_from_pyproject, ProjectSnapshot,
