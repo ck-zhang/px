@@ -1,13 +1,13 @@
+use std::{env, fs, path::PathBuf};
+
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use std::{collections::HashMap, env, fs, path::PathBuf};
-use toml_edit::{DocumentMut, Item};
-use which::which;
+use toml_edit::DocumentMut;
 
 use px_domain::{
     collect_pyproject_packages, collect_requirement_packages, plan_autopin, prepare_pyproject_plan,
     resolve_onboard_path, AutopinEntry, AutopinPending, AutopinState, BackupManager,
-    InstallOverride, OnboardPackagePlan, PinSpec, PyprojectPlan,
+    InstallOverride, PinSpec,
 };
 
 use crate::runtime_manager;
@@ -17,72 +17,14 @@ use crate::{
     InstallState, InstallUserError, ManifestSnapshot,
 };
 
-#[derive(Clone, Debug)]
-struct PackageConflict {
-    name: String,
-    scope: String,
-    kept_source: String,
-    kept_spec: String,
-    dropped_source: String,
-    dropped_spec: String,
-}
+use super::plan::{apply_precedence, apply_python_override};
+use super::runtime::fallback_runtime_by_channel;
 
 fn test_migration_crash_hook() -> anyhow::Result<()> {
     if env::var("PX_TEST_MIGRATE_CRASH").ok().as_deref() == Some("1") {
         anyhow::bail!("test crash hook");
     }
     Ok(())
-}
-
-fn apply_python_override(plan: &PyprojectPlan, python: &str) -> Result<DocumentMut> {
-    let mut doc: DocumentMut = if let Some(contents) = &plan.contents {
-        contents.parse()?
-    } else {
-        fs::read_to_string(&plan.path)?.parse()?
-    };
-    let tool = doc
-        .entry("tool")
-        .or_insert(Item::Table(toml_edit::Table::new()))
-        .as_table_mut()
-        .expect("tool table");
-    let px = tool
-        .entry("px")
-        .or_insert(Item::Table(toml_edit::Table::new()))
-        .as_table_mut()
-        .expect("px table");
-    px.insert("python", toml_edit::value(python));
-    Ok(doc)
-}
-
-fn fallback_runtime_by_channel(channel: &str) -> Result<runtime_manager::RuntimeSelection> {
-    let normalized = runtime_manager::normalize_channel(channel)?;
-    let candidates = [
-        format!("python{}", normalized.replace('.', "")),
-        format!("python{normalized}"),
-    ];
-    for candidate in candidates {
-        if let Ok(path) = which(&candidate) {
-            if let Ok(details) = runtime_manager::inspect_python(&path) {
-                if runtime_manager::format_channel(&details.full_version).ok()
-                    == Some(normalized.clone())
-                {
-                    let record = runtime_manager::RuntimeRecord {
-                        version: normalized.clone(),
-                        full_version: details.full_version,
-                        path: details.executable,
-                        default: false,
-                    };
-                    return Ok(runtime_manager::RuntimeSelection {
-                        record,
-                        source: runtime_manager::RuntimeSource::Explicit,
-                    });
-                }
-            }
-        }
-    }
-    Err(anyhow::anyhow!(
-        "python runtime {channel} is not installed; run `px python install {channel}`"
-    ))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -131,105 +73,6 @@ impl AutopinPreference {
     const fn autopin_enabled(self) -> bool {
         matches!(self, Self::Enabled)
     }
-}
-
-fn package_priority(
-    pkg: &OnboardPackagePlan,
-    requirements_rel: Option<&String>,
-    dev_rel: Option<&String>,
-    source_override: &Option<String>,
-    dev_override: &Option<String>,
-) -> u8 {
-    if requirements_rel
-        .map(|rel| rel == &pkg.source)
-        .unwrap_or(false)
-        && source_override.is_some()
-    {
-        return 3;
-    }
-    if dev_rel.map(|rel| rel == &pkg.source).unwrap_or(false) && dev_override.is_some() {
-        return 3;
-    }
-    if pkg.source.ends_with("pyproject.toml") {
-        2
-    } else {
-        1
-    }
-}
-
-fn apply_precedence(
-    packages: &[OnboardPackagePlan],
-    requirements_rel: Option<&String>,
-    dev_rel: Option<&String>,
-    source_override: &Option<String>,
-    dev_override: &Option<String>,
-) -> (Vec<OnboardPackagePlan>, Vec<PackageConflict>) {
-    let mut selected = HashMap::new();
-    let mut order = Vec::new();
-    let mut conflicts = Vec::new();
-
-    for pkg in packages {
-        let priority = package_priority(
-            pkg,
-            requirements_rel,
-            dev_rel,
-            source_override,
-            dev_override,
-        );
-        let key = (pkg.name.clone(), pkg.scope.clone());
-        match selected.get(&key) {
-            None => {
-                selected.insert(key.clone(), (priority, pkg.clone()));
-                order.push(key);
-            }
-            Some((existing_pri, existing_pkg)) => {
-                if *existing_pri > priority {
-                    if existing_pkg.requested != pkg.requested {
-                        conflicts.push(PackageConflict {
-                            name: pkg.name.clone(),
-                            scope: pkg.scope.clone(),
-                            kept_source: existing_pkg.source.clone(),
-                            kept_spec: existing_pkg.requested.clone(),
-                            dropped_source: pkg.source.clone(),
-                            dropped_spec: pkg.requested.clone(),
-                        });
-                    }
-                } else if *existing_pri < priority {
-                    if existing_pkg.requested != pkg.requested {
-                        conflicts.push(PackageConflict {
-                            name: pkg.name.clone(),
-                            scope: pkg.scope.clone(),
-                            kept_source: pkg.source.clone(),
-                            kept_spec: pkg.requested.clone(),
-                            dropped_source: existing_pkg.source.clone(),
-                            dropped_spec: existing_pkg.requested.clone(),
-                        });
-                    }
-                    selected.insert(key.clone(), (priority, pkg.clone()));
-                    if !order.contains(&key) {
-                        order.push(key);
-                    }
-                } else if existing_pkg.requested != pkg.requested {
-                    conflicts.push(PackageConflict {
-                        name: pkg.name.clone(),
-                        scope: pkg.scope.clone(),
-                        kept_source: existing_pkg.source.clone(),
-                        kept_spec: existing_pkg.requested.clone(),
-                        dropped_source: pkg.source.clone(),
-                        dropped_spec: pkg.requested.clone(),
-                    });
-                }
-            }
-        }
-    }
-
-    let mut final_packages = Vec::new();
-    for key in order {
-        if let Some((_, pkg)) = selected.remove(&key) {
-            final_packages.push(pkg);
-        }
-    }
-    (final_packages, conflicts)
 }
 
 #[derive(Clone, Debug)]

@@ -12,7 +12,7 @@ use crate::{
     ExecutionOutcome,
 };
 
-use super::{collect_artifact_summaries, ArtifactSummary};
+use super::artifacts::{collect_artifact_summaries, ArtifactSummary};
 
 #[derive(Clone, Debug)]
 pub struct PublishRequest {
@@ -502,7 +502,7 @@ fn classify_artifact(filename: &str) -> Result<ArtifactUploadKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::compute_file_sha256;
+    use super::super::artifacts::compute_file_sha256;
     use super::*;
     use httptest::{matchers::*, responders::*, Expectation, Server};
     use tempfile::tempdir;
