@@ -19,20 +19,23 @@ px is **not** a general task runner, multi-language build tool, or plugin market
 
 ---
 
-## 1. Mental model
+## 1. Mental model (updated)
 
 ### 1.1 Nouns
 
-px exposes three primary concepts:
+px exposes **four** primary concepts:
 
 * **Project**
   A directory with `pyproject.toml` and/or `px.lock` that px manages end-to-end.
+
+* **Workspace**
+  A set of related px projects in one tree that share a **single dependency universe** (one lock, one env) for development.
 
 * **Tool**
   A named Python CLI installed into its own isolated, CAS-backed environment, runnable from anywhere.
 
 * **Runtime**
-  A Python interpreter (e.g. 3.10, 3.11) that px knows about and can assign to projects and tools.
+  A Python interpreter (e.g. 3.10, 3.11) that px knows about and can assign to projects, tools, and workspaces.
 
 Everything else – envs, lockfiles, caches – are implementation details.
 
@@ -57,44 +60,75 @@ For global tools:
 
 Tools are isolated from projects and from each other. Upgrading Python or changing project deps must not silently break them.
 
-### 1.4 Design principles
+### 1.4 Design principles (updated)
 
 px’s behavior is governed by three principles:
 
-1. **Single state machine**
-   Every project is described by three artifacts (M, L, E) and a small state machine (§10). All commands are defined as transitions over that model (or are read-only).
+1. **Two parallel state machines, same shape**
+
+   * Each **project** is described by three artifacts (M, L, E) and a small state machine (§10).
+   * Each **workspace** is described by three artifacts (WM, WL, WE) and an analogous state machine (§11).
+   * All commands are defined as transitions over one of these machines (or are read-only).
+     If a workspace governs a project, the **workspace** machine is authoritative for deps/env; the project’s own lock/env are only used when the project is standalone.
 
 2. **Determinism**
-   Given the same project, runtimes, and configuration, px must make the same decisions: same runtime, same lockfile, same env, same command resolution (§3.4, §10.8).
+
+   Given the same project/workspace, runtimes, and configuration, px must make the same decisions: same runtime, same lockfile(s), same env(s), same command resolution (§3.5, §10.8, §11.6).
 
 3. **Smooth UX, explicit mutation**
 
-   * Mutating operations are explicit (`init`, `add`, `remove`, `sync`, `update`, `migrate --apply`, `tool install/upgrade/remove`).
+   * Mutating operations are explicit (`init`, `add`, `remove`, `sync`, `update`, `migrate --apply`, workspace sync/update, `tool install/upgrade/remove`).
    * “Reader” commands (`run`, `test`, `fmt`, `status`, `why`) never change manifests or lockfiles, and have tightly bounded behavior when they repair envs (if they ever do).
+
+### 1.5 Workspace lifecycle (new)
+
+For a multi-project repo, Python “with px” looks like:
+
+1. `px init` in member projects – declare each directory as a px project.
+2. Configure a workspace at the repo root (see §2.1, §11.1) listing member projects.
+3. `px sync` (from the workspace root or any member) – resolve **across all members**, write a workspace lock, and build a shared env.
+4. `px run` / `px test` inside any member – execute in that shared workspace env.
+5. Commit:
+
+   * the workspace manifest + workspace lock, and
+   * each member’s `pyproject.toml` (and optionally its own `px.lock` if you use it standalone).
 
 ---
 
-## 2. Filesystem & project shape
+## 2. Filesystem & project/workspace shape (updated)
 
-### 2.1 Project root & discovery
+### 2.1 Roots & discovery
+
+px distinguishes **project roots** and **workspace roots**.
 
 A directory is a **px project root** if it contains:
 
 * `pyproject.toml` with `[tool.px]`, or
 * `px.lock`.
 
-For any project-level command, px:
+A directory is a **px workspace root** if it contains:
 
-1. Starts at CWD.
-2. Walks upward until it finds a project root.
-3. If none is found:
+* `pyproject.toml` with `[tool.px.workspace]`.
+
+Workspace and project roots may coincide (the workspace root can also be a project root), but they are conceptually separate.
+
+**Project-level command discovery:**
+
+1. Starting from CWD, walk upward until you find a **workspace root**.
+2. If found and CWD is inside a listed member project, that project is **workspace‑governed**: project commands use the workspace state machine (§11.6).
+3. Otherwise, walk upward to find a **project root** (no workspace above).
+4. If none is found:
    `No px project found. Run "px init" in your project directory first.`
 
-### 2.2 px-owned artifacts in a project
+**Workspace-level discovery:**
+
+* To reason about workspaces (status, sync, etc.), px finds the nearest workspace root above CWD (if any) via `[tool.px.workspace]`.
+
+### 2.2 px-owned artifacts in a project/workspace (updated)
 
 px may create/modify only:
 
-* **User-facing / shared:**
+* **User-facing / shared (per project):**
 
   * `pyproject.toml`
 
@@ -104,14 +138,26 @@ px may create/modify only:
 
     * build artifacts (sdist, wheels).
 
-* **px-specific:**
+* **px-specific (per project):**
 
-  * `px.lock` – locked dependency graph for this project.
+  * `px.lock` – locked dependency graph for this **project** when it is managed standalone (no governing workspace).
   * `.px/` – all internal state:
 
-    * `.px/envs/` – project envs (venv-like, but px-owned).
+    * `.px/envs/` – envs owned by this project or workspace (see below).
     * `.px/logs/` – logs.
-    * `.px/state.json` – metadata (current env ID derived from lock_id + runtime, stored lock_id, runtime/platform fingerprints; validated and rewritten atomically).
+    * `.px/state.json` – metadata (current env ID(s), stored lock_id(s), runtime/platform fingerprints; validated and rewritten atomically).
+
+* **px-specific (per workspace root):**
+
+  * `[tool.px.workspace]` in `pyproject.toml` – workspace manifest (WM), including:
+
+    * list of member project paths (relative to workspace root),
+    * optional shared settings (e.g. default runtime, index config).
+  * `px.workspace.lock` – workspace lock (WL) describing the **union** dependency graph of all members.
+  * Workspace env metadata under `.px/` at the workspace root (WE). Physical layout is an implementation detail, but:
+
+    * Workspace envs are distinguishable from per-project envs via px metadata.
+    * A workspace env is always tied to `px.workspace.lock` and a runtime.
 
 px **must not** create other top-level files or directories.
 
@@ -142,47 +188,79 @@ px **must not** create other top-level files or directories.
       myapp-0.1.0-py3-none-any.whl
   ```
 
-px does **not** create `build/` etc. unless explicitly configured.
+For a workspace, the root has the workspace manifest/lock/env metadata plus the usual project artifacts if it is also a project.
 
 ---
 
-## 3. Global concepts
+## 3. Global concepts (updated)
 
-### 3.1 Lockfile
+### 3.1 Lockfiles (updated)
 
-`px.lock` is the authoritative description of the project’s environment:
+There are now two kinds of lockfiles:
 
-* Exact versions, hashes, markers, index URLs, platform tags.
-* A fingerprint of `[project].dependencies` (and any px-specific dep config).
+* **Project lockfile** – `px.lock` in a project root:
 
-It is **machine-generated only**; direct edits are unsupported.
+  * Authoritative description of that project’s environment **when the project is not governed by a workspace**.
+  * Exact versions, hashes, markers, index URLs, platform tags.
+  * A fingerprint of `[project].dependencies` (and any px-specific dep config).
 
-### 3.2 Project environment
+* **Workspace lockfile** – `px.workspace.lock` in a workspace root:
 
-A **project environment** is a px-managed environment under `.px/envs/...`:
+  * Authoritative description of the **shared** environment for all member projects.
+  * Full resolved dependency graph across all members.
+  * Mapping of each package node to its owning project (member) or “external”.
+  * A **workspace manifest fingerprint** of the combined member manifests (§11.2.1).
 
-* It is tied to:
+Both lockfiles are **machine-generated only**; direct edits are unsupported.
 
-  * `px.lock` hash,
+### 3.2 Project environment (unchanged in meaning)
+
+A **project environment** is a px-managed environment under `.px/envs/...` tied to:
+
+* a project lock (`px.lock`) and
+* a runtime/platform.
+
+It must contain exactly the packages described by that project’s lock.
+
+Project envs are used only when the project is **not** governed by a workspace. In a workspace, member projects use the workspace env (§3.3, §11.6).
+
+### 3.3 Workspace environment (new)
+
+A **workspace environment** is a px-managed environment under `.px/envs/...` at the workspace root:
+
+* Tied to:
+
+  * `px.workspace.lock` (WL) hash,
   * runtime (e.g. Python 3.11),
   * platform.
 
-* It must contain exactly the packages described by `px.lock`.
+* Contains exactly the packages described by WL.
 
-### 3.3 Self-consistent project
+When a project is a **workspace member**, `px run` / `px test` / `px sync` for that project use the workspace env; per-project envs are not used in that context.
+
+### 3.4 Self-consistent project/workspace (updated)
 
 A project is **self-consistent** if:
 
-* `pyproject.toml` and `px.lock` agree (fingerprint matches).
-* There exists a project environment whose identity matches `px.lock`.
-* `px status` reports: `Environment in sync with px.lock`.
+* `pyproject.toml` and **its governing lock** agree:
 
-All mutating commands below (`init`, `add`, `remove`, `sync`, `update`, `migrate --apply`) must either:
+  * standalone project → `px.lock` fingerprint matches;
+  * workspace‑governed project → its manifest is included in the workspace manifest fingerprint, and WL matches that combined fingerprint.
+* There exists an environment whose identity matches that lock (project env or workspace env).
+* `px status` reports: `Environment in sync with lock`.
 
-* Leave the project self-consistent on success, or
+A workspace is **self-consistent** if:
+
+* `[tool.px.workspace]` exists and matches `px.workspace.lock` (workspace manifest fingerprint).
+* A workspace env exists and matches `px.workspace.lock`.
+* `px status` at the workspace root reports the workspace as `Consistent` (§11.4).
+
+All mutating commands must either:
+
+* Leave the relevant object (project or workspace) self-consistent on success, or
 * Fail without partial changes.
 
-### 3.4 Deterministic surfaces
+### 3.5 Deterministic surfaces (extended)
 
 For a fixed px version, runtime set, platform, and index configuration, the following surfaces must be deterministic:
 
@@ -214,7 +292,16 @@ For a fixed px version, runtime set, platform, and index configuration, the foll
 
    * A given failure mode must map to a stable PX error code and “Why/Fix” structure (§8.1). The wording may improve, but semantics remain.
 
-The project state machine in §10 is the reference model tying all of this together.
+7. **Workspace lockfile generation**
+
+   * Given workspace manifest WM (member list + their manifests), runtime, platform, and index configuration, the resolver must produce the same `px.workspace.lock` (including ordering, `wmfingerprint`, and workspace lock ID).
+
+8. **Workspace environment materialization**
+
+   * Given `px.workspace.lock` and runtime, the workspace environment WE must contain exactly the packages described by WL.
+   * Rebuilding WE for the same WL must result in an equivalent environment (from px’s metadata point of view).
+
+The project state machine in §10 and the workspace state machine in §11 are the reference models tying all of this together.
 
 ---
 
@@ -261,13 +348,23 @@ The project state machine in §10 is the reference model tying all of this toget
   * `px why <package>`
   * `px why --issue <id>`
 
-There is **no** `px cache`, `px env`, `px lock`, or `px workspace` top-level command.
+### 4.6 Workspace-aware routing (overview)
+
+You can keep the same top-level commands. Their **routing** now depends on whether a workspace root is found above CWD (§2.1, §5.11, §11.6):
+
+* If no workspace root applies → commands operate on the **project state machine** (§10).
+* If a workspace root applies and CWD is inside a member project → commands operate on the **workspace state machine** for deps/env, while still reading/writing that project’s manifest.
+* At the workspace root:
+
+  * `px sync` / `px update` / `px status` operate on the workspace state machine by default.
+
+You still do **not** expose `px workspace` as a separate top-level verb; “workspace” is a higher-level unit that reuses the existing command surface. There is also no `px cache`, `px env`, or `px lock` top-level command.
 
 ---
 
 ## 5. Command contracts (authoritative semantics)
 
-Command preconditions and end-states are defined against the canonical project states in [§10 Project state machine](#10-project-state-machine). Per-command invariants are summarized in the table in §10.8.
+Command preconditions and end-states are defined against the canonical project states in [§10 Project state machine](#10-project-state-machine) and, when routed via a workspace, the workspace states in §11. Per-command invariants are summarized in the table in §10.8.
 
 ### 5.1 `px init`
 
@@ -689,6 +786,77 @@ Convert a legacy Python project into a deterministic px project.
 
 ---
 
+### 5.11 Workspace-aware routing
+
+For any command that operates on M/L/E (`init`, `add`, `remove`, `sync`, `update`, `run`, `test`, `status`):
+
+1. **Detect workspace context**
+
+   * Find nearest workspace root above CWD.
+   * If found, and CWD is inside a project listed as a member in `[tool.px.workspace].members`:
+
+     * **Workspace-governed project**:
+
+       * Reads/writes **project manifest** (that member’s `pyproject.toml`).
+       * Reads/writes **workspace lock/env** (WL/WE), not per-project lock/env.
+   * If no applicable workspace root:
+
+     * Use **project state machine** (M/L/E, `px.lock`, project env).
+
+2. **Semantics for key commands in workspace context**
+
+   * `px add/remove` (from a member):
+
+     * Modify that member’s `[project].dependencies`.
+     * Re-resolve **workspace** graph → update `px.workspace.lock`.
+     * Rebuild workspace env WE.
+     * End state: workspace `Consistent` (§11.4); member’s deps are reflected via WL.
+     * Per-project `px.lock` is not written/updated in this mode.
+
+   * `px sync` (from a member or the workspace root):
+
+     * Operates on WM/WL/WE:
+
+       * If `px.workspace.lock` missing or out-of-date w.r.t WM: resolve union graph, write WL.
+       * Ensure WE matches WL.
+     * Does **not** touch per-project `px.lock` for members.
+
+   * `px update` (from a member or the workspace root):
+
+     * Operates on WL (updating versions within constraints across all members).
+     * Rebuild WE.
+     * Member projects see updated deps via WL.
+
+   * `px run` / `px test` (from a member):
+
+     * Require workspace `Consistent` or `NeedsEnv` (like project `run`/`test`).
+     * In dev: may rebuild WE from WL (no workspace re-resolution).
+     * In CI/`--frozen`: must see workspace `Consistent`; never repairs WE.
+     * Always use WE; never per-project envs for members.
+
+   * `px status`:
+
+     * At workspace root: report workspace state (WM/WL/WE) plus a summary of each member’s manifest health.
+     * In a member: report both:
+
+       * workspace state, and
+       * that project’s manifest status (e.g. “member manifest included in workspace fingerprint: yes/no”).
+
+3. **Standalone vs workspace-governed projects**
+
+   * A project that is **not** listed as a workspace member uses the **project** state machine exclusively (§10).
+   * A project that **is** listed as a member and has a workspace root above it uses:
+
+     * project manifest M in its own directory,
+     * workspace lock/env (WL/WE) for everything that would normally use L/E.
+
+This guarantees there is only one authority for deps/env at a time:
+
+* either the **project** state machine (standalone), or
+* the **workspace** state machine (for members).
+
+---
+
 ## 6. Tools
 
 ### 6.1 Concept
@@ -910,7 +1078,7 @@ Under `CI=1` or explicit `--frozen`:
 
 * No prompts.
 * No auto-resolution.
-* `px run` / `px test` / `px fmt` do **not** rebuild project envs; they just check consistency and fail if it’s broken (for `run`/`test`) or run tools in isolation (`fmt`).
+* `px run` / `px test` / `px fmt` do **not** rebuild project/workspace envs; they just check consistency and fail if it’s broken (for `run`/`test`) or run tools in isolation (`fmt`).
 
 ### 8.4 Non-TTY & structured output (progress/logging)
 
@@ -933,15 +1101,17 @@ This applies to all commands that show progress (e.g. resolver, env build, tool 
 
 ---
 
-## 9. Non-goals (hard boundaries)
+## 9. Non-goals (updated)
 
 px does **not**:
 
 * Act as a general task runner (no `px task` DSL).
 * Manage non-Python languages.
 * Provide a plugin marketplace or unbounded extension API.
-* Implicitly mutate state from read-only commands (`status`, `why`, `fmt` w.r.t. project state).
-* Expose `cache`, `env`, `lock`, or `workspace` as primary user concepts.
+* Implicitly mutate state from read-only commands (`status`, `why`, `fmt` w.r.t. project/workspace state).
+* Expose `cache` or `env` as primary user concepts.
+
+Workspaces are an **advanced** concept for multi-project repos; most users can ignore them and treat px as a per-project tool.
 
 If any future changes violate these, they’re design regressions, not “nice additions”.
 
@@ -1432,10 +1602,216 @@ This table is a testing and implementation aid: if an implementation observes be
 
 ---
 
-## 11. Troubleshooting (error codes → required transitions)
+## 11. Workspace state machine (new)
+
+### 11.1 Core entities
+
+For each px workspace we define three artifacts:
+
+* **WM (Workspace Manifest)**
+  Derived from `[tool.px.workspace]` in the workspace root `pyproject.toml`:
+
+  * list of member project paths (relative to workspace root),
+  * optionally shared Python constraints, index config, etc.
+
+  Each member project itself has a project manifest M in its own `pyproject.toml`.
+
+* **WL (Workspace Lock)** – `px.workspace.lock`:
+
+  * full resolved dependency graph across **all members**,
+  * runtime (Python version/tag) for the workspace,
+  * platform tags,
+  * mapping from graph nodes to owning member project (or “external”),
+  * **workspace manifest fingerprint** (see below).
+
+* **WE (Workspace Env)**
+  The workspace environment under `.px/...` at the workspace root:
+
+  * pointer to WL it was built from (lock hash / ID),
+  * actual installed packages (tracked by px’s metadata),
+  * runtime used.
+
+You never introspect raw venv content to define workspace state; you trust px’s metadata.
+
+### 11.2 Identity & fingerprints
+
+#### 11.2.1 Workspace manifest fingerprint (`wmfingerprint`)
+
+From WM and the member manifests, compute a deterministic **workspace manifest fingerprint**:
+
+* Inputs:
+
+  * Workspace members list.
+  * For each member:
+
+    * `[project].dependencies` (and any `[tool.px].dependencies` extensions/groups),
+    * relevant Python/version markers.
+
+* Output:
+
+  * opaque hash, e.g. `sha256(hex-encoded)`.
+
+Call this `wmfingerprint(WM)`.
+
+#### 11.2.2 Workspace lock identity
+
+`px.workspace.lock` must store:
+
+* `wmfingerprint` it was computed from.
+* A workspace lock ID (e.g. hash of the full lock content): `wl_id`.
+* runtime & platform info.
+
+So WL is valid for exactly one `wmfingerprint`.
+
+#### 11.2.3 Workspace env identity
+
+Each workspace env WE stores:
+
+* `wl_id` it was built from.
+* runtime version & ABI.
+* platform.
+
+So we can answer “is WE built from this WL?” without scraping site-packages.
+
+### 11.3 Derived workspace state flags
+
+For a workspace, define:
+
+* `w_manifest_exists` := `[tool.px.workspace]` present and parseable.
+* `w_lock_exists` := `px.workspace.lock` present and parseable.
+* `w_env_exists` := px metadata shows at least one workspace env for this root.
+
+Assuming all three parse cleanly, define:
+
+* `w_manifest_clean` := `w_lock_exists` and `WL.wmfingerprint == wmfingerprint(WM)`.
+* `w_env_clean` := `w_env_exists` and `WE.wl_id == WL.wl_id`.
+
+Core invariant:
+
+```text
+workspace_consistent := w_manifest_clean && w_env_clean
+```
+
+That’s the single boolean everything else should talk about at the workspace level.
+
+### 11.4 Canonical workspace states
+
+Analogous to projects:
+
+* **`WUninitialized`**
+
+  * `w_manifest_exists == false`
+  * No workspace lock, no workspace env.
+
+* **`WInitializedEmpty`**
+
+  * `w_manifest_exists == true`
+  * Member list may be empty or contain projects with empty deps.
+  * `w_lock_exists == true` with correct `wmfingerprint` and empty/degenerate graph.
+  * `w_env_exists == true`, `w_env_clean == true`.
+  * So `workspace_consistent == true`.
+
+* **`WNeedsLock`**
+
+  * `w_manifest_exists == true` and
+  * (`w_lock_exists == false` or `w_manifest_clean == false`).
+
+  Typical cause: member manifests changed, or `px.workspace.lock` removed.
+
+* **`WNeedsEnv`**
+
+  * `w_manifest_clean == true` and
+  * (`w_env_exists == false` or `w_env_clean == false`).
+
+  Typical cause: first install on a machine, or user wiped workspace env.
+
+* **`WConsistent`**
+
+  * `w_manifest_clean == true`
+  * `w_env_clean == true`.
+
+This is what you want after workspace-level `sync`, `update`, or successful workspace-aware `add/remove` from members.
+
+### 11.5 Workspace command behavior (using existing verbs)
+
+Map existing commands to workspace states when invoked in workspace context:
+
+* **`px sync` (from workspace root or member)**
+
+  * Allowed start states: any with `w_manifest_exists == true`.
+  * Dev behavior:
+
+    * If `WNeedsLock`: resolve union of member manifests → new WL.
+    * Ensure WE built from WL (`WConsistent`).
+  * `--frozen` / CI:
+
+    * If `WNeedsLock`: fail, no resolution.
+    * If `WNeedsEnv`: rebuild WE only.
+  * End state (success): `WConsistent`.
+
+* **`px update` (from workspace root or member)**
+
+  * Requires `w_manifest_exists` and `w_lock_exists`.
+  * Updates WL (versions within constraints) and WE.
+  * End state: `WConsistent`.
+
+* **`px add` / `px remove` (from member)**
+
+  * Modify only that member’s manifest.
+  * Then same as “dev” `px sync` at workspace level:
+
+    * recompute WL from all members,
+    * rebuild WE.
+  * End state: `WConsistent`.
+
+* **`px run` / `px test` (from member)**
+
+  * Allowed start states (dev): `WConsistent`, `WNeedsEnv`.
+  * CI/`--frozen`: only `WConsistent`.
+  * Dev may repair WE (no re-resolution); CI never repairs.
+
+* **`px status`**
+
+  * At workspace root:
+
+    * report workspace state (`WUninitialized`, `WNeedsLock`, `WNeedsEnv`, `WConsistent`),
+    * list members and whether their manifests were included in `wmfingerprint`.
+  * In a member:
+
+    * report workspace state plus a line like:
+
+      * `member: included in workspace manifest: yes/no`.
+
+### 11.6 Projects as workspace members
+
+A project is a **workspace member** if:
+
+* its path is listed (or matches a glob) in `[tool.px.workspace].members`, and
+* the workspace root is an ancestor directory.
+
+Rules:
+
+* In workspace context:
+
+  * The project’s manifest M is still authoritative for that project’s own metadata.
+  * Its per-project lock/env (`px.lock`, project E) are **ignored** for resolution/materialization.
+  * All dependency and env operations go through WL/WE.
+
+* Outside workspace context (no applicable workspace root):
+
+  * The project uses the **project** state machine (§10) as before, with `px.lock` and its own env.
+
+This guarantees there is only one authority for deps/env at a time:
+
+* either the **project** state machine (standalone), or
+* the **workspace** state machine (for members).
+
+---
+
+## 12. Troubleshooting (error codes → required transitions)
 
 * `missing_lock` (`PX120`): run `px sync` (without `--frozen`) to create or refresh `px.lock`.
 * `lock_drift` (`PX120`): run `px sync` to realign `px.lock` with the manifest/runtime; frozen commands must refuse.
-* `missing_env` / `env_outdated` (`PX201`): run `px sync` to (re)build the project env; `--frozen` refuses to repair.
+* `missing_env` / `env_outdated` (`PX201`): run `px sync` to (re)build the relevant project/workspace env; `--frozen` refuses to repair.
 * `runtime_mismatch`: run `px sync` after activating the desired Python, or pin `tool.px.python`.
 * `invalid_state`: delete or repair `.px/state.json` and retry; state is validated and rewritten atomically.
