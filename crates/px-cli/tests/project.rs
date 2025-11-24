@@ -122,6 +122,34 @@ fn project_init_refuses_when_pyproject_exists() {
 }
 
 #[test]
+fn project_init_reports_orphaned_lockfile() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path();
+    fs::write(project_dir.join("px.lock"), "").expect("write px.lock");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(project_dir)
+        .args(["init"])
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("px.lock found but pyproject.toml is missing"),
+        "expected missing manifest warning, got {stdout:?}"
+    );
+    assert!(
+        stdout.contains("px.lock"),
+        "should mention existing px.lock: {stdout:?}"
+    );
+    let lower = stdout.to_ascii_lowercase();
+    assert!(
+        lower.contains("restore pyproject.toml") || lower.contains("restore"),
+        "expected remediation about restoring/removing artifacts: {stdout:?}"
+    );
+}
+
+#[test]
 fn project_surfaces_invalid_pyproject_without_trace() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path();

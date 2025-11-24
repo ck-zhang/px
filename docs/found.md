@@ -114,3 +114,17 @@
 - Expected vs actual: Expected a user-error about the bad requirement; instead the command claimed it would resolve and write the lockfile.
 - Root cause: The dry-run path only looked at state flags and never attempted resolution, so resolver failures were masked.
 - Fix summary: Dry-run sync now runs the resolver without writing files and surfaces the same `resolve_failed` user-error; test added to prevent regressions.
+
+## `px init` misreported projects with only px.lock
+
+- Description: Running `px init` in a directory that only contained `px.lock` (no `pyproject.toml`) claimed the project was “already initialized (pyproject.toml present)” instead of guiding the user to restore/create the manifest.
+- Repro:
+  ```sh
+  tmp=$(mktemp -d)
+  cd "$tmp"
+  touch px.lock
+  /home/toxictoast/Documents/0-Code/px/target/debug/px init
+  ```
+- Expected vs actual: Expected an error about the missing `pyproject.toml` with a hint to restore it or remove the orphaned lock; instead got a misleading “already initialized” message.
+- Root cause: `px init` treats the presence of `px.lock` as a fully initialized project and never checks whether `pyproject.toml` actually exists before returning the “already initialized” outcome.
+- Fix summary: Detect orphaned lockfiles and return a dedicated user-error pointing out the missing manifest, with remediation guidance; added regression test.

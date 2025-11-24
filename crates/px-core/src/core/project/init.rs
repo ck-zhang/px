@@ -31,7 +31,11 @@ pub fn project_init(
 ) -> Result<ExecutionOutcome> {
     let cwd = env::current_dir().context("unable to determine current directory")?;
     if let Some(existing_root) = discover_project_root()? {
-        return existing_pyproject_response(&existing_root.join("pyproject.toml"));
+        let pyproject = existing_root.join("pyproject.toml");
+        if !pyproject.exists() {
+            return Ok(incomplete_project_response(&existing_root));
+        }
+        return existing_pyproject_response(&pyproject);
     }
     let root = cwd;
     let pyproject_path = root.join("pyproject.toml");
@@ -214,6 +218,19 @@ fn existing_pyproject_response(pyproject_path: &Path) -> Result<ExecutionOutcome
         "project already initialized (pyproject.toml present)",
         details,
     ))
+}
+
+fn incomplete_project_response(root: &Path) -> ExecutionOutcome {
+    let lockfile = root.join("px.lock");
+    ExecutionOutcome::user_error(
+        "px.lock found but pyproject.toml is missing",
+        json!({
+            "pyproject": root.join("pyproject.toml").display().to_string(),
+            "lockfile": lockfile.display().to_string(),
+            "reason": "missing_manifest",
+            "hint": "Restore pyproject.toml or remove px.lock before re-running `px init`.",
+        }),
+    )
 }
 
 fn dirty_worktree_response(changes: &[String]) -> ExecutionOutcome {
