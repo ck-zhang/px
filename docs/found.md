@@ -89,3 +89,28 @@
 - Expected vs actual: Expected the flags to be rejected (or to actually skip execution); instead they were silently accepted then the command proceeded normally.
 - Root cause: A shared flag struct was flattened into read-only commands even though the options weren't implemented there.
 - Fix summary: Removed the mutation-only flags from run/test/fmt so unsupported options are rejected early; added a regression test to ensure the parser stops on the unused flag.
+
+## `px sync --dry-run` hid resolver errors
+
+- Description: Dry-run sync reported success even when dependency resolution would fail, e.g., with an invalid requirement string.
+- Repro:
+  ```sh
+  tmp=$(mktemp -d)
+  cd "$tmp"
+  cat > pyproject.toml <<'EOF'
+  [project]
+  name = "demo"
+  version = "0.1.0"
+  requires-python = ">=3.11"
+  dependencies = ["not a spec"]
+  [tool]
+  [tool.px]
+  [build-system]
+  requires = ["setuptools>=70", "wheel"]
+  build-backend = "setuptools.build_meta"
+  EOF
+  /home/toxictoast/Documents/0-Code/px/target/debug/px --json sync --dry-run
+  ```
+- Expected vs actual: Expected a user-error about the bad requirement; instead the command claimed it would resolve and write the lockfile.
+- Root cause: The dry-run path only looked at state flags and never attempted resolution, so resolver failures were masked.
+- Fix summary: Dry-run sync now runs the resolver without writing files and surfaces the same `resolve_failed` user-error; test added to prevent regressions.

@@ -390,6 +390,42 @@ fn project_add_dry_run_leaves_project_unchanged() {
 }
 
 #[test]
+fn sync_dry_run_reports_resolution_failures() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path();
+    fs::write(
+        project_dir.join("pyproject.toml"),
+        r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["not a spec"]
+
+[tool]
+[tool.px]
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#,
+    )
+    .expect("write pyproject");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(project_dir)
+        .args(["--json", "sync", "--dry-run"])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(
+        payload["message"],
+        "px sync: dependency resolution failed (dry-run)"
+    );
+    assert_eq!(payload["details"]["reason"], "resolve_failed");
+}
+
+#[test]
 fn project_remove_deletes_dependency() {
     if !require_online() {
         return;

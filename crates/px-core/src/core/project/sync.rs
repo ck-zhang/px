@@ -3,8 +3,8 @@ use serde_json::{json, Value};
 use anyhow::Result;
 
 use crate::{
-    install_snapshot, manifest_snapshot, refresh_project_site, CommandContext, ExecutionOutcome,
-    InstallState, InstallUserError,
+    install_snapshot, manifest_snapshot, refresh_project_site, resolve_dependencies_with_effects,
+    CommandContext, ExecutionOutcome, InstallState, InstallUserError,
 };
 
 use super::evaluate_project_state;
@@ -71,6 +71,20 @@ fn project_sync_dry_run(ctx: &CommandContext, frozen: bool) -> Result<ExecutionO
         "sync_env" => "would rebuild environment from px.lock (dry-run)",
         _ => "environment already in sync (dry-run)",
     };
+    if action == "resolve_lock" {
+        if let Err(err) = resolve_dependencies_with_effects(ctx.effects(), &snapshot, true) {
+            match err.downcast::<InstallUserError>() {
+                Ok(user) => {
+                    return Ok(ExecutionOutcome::user_error(
+                        "px sync: dependency resolution failed (dry-run)",
+                        user.details,
+                    ))
+                }
+                Err(other) => return Err(other),
+            }
+        }
+    }
+
     Ok(ExecutionOutcome::success(
         message.to_string(),
         json!({
