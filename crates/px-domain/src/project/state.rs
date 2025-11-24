@@ -162,6 +162,15 @@ mod tests {
             Case {
                 manifest_exists: true,
                 lock_exists: true,
+                manifest_clean: false,
+                lock_issue: false,
+                env_clean: false,
+                deps_empty: false,
+                expected: ProjectStateKind::NeedsLock,
+            },
+            Case {
+                manifest_exists: true,
+                lock_exists: true,
                 manifest_clean: true,
                 lock_issue: true,
                 env_clean: true,

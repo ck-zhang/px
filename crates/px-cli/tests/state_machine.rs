@@ -66,3 +66,29 @@ fn frozen_test_refuses_autosync_for_missing_env() {
         .unwrap_or_default();
     assert_eq!(reason, "missing_env");
 }
+
+#[test]
+fn frozen_sync_reports_lock_drift() {
+    let (_tmp, project) = prepare_fixture("drifted-lock");
+    let lock_path = project.join("px.lock");
+    let contents = fs::read_to_string(&lock_path).expect("read lock");
+    let rewritten = contents.replace(
+        "manifest_fingerprint = \"4bdc6fb9f7598b76b914257792db035bfb9745bbbcbe0cd351117bbd3e324e6a\"",
+        "manifest_fingerprint = \"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"",
+    );
+    fs::write(&lock_path, rewritten).expect("write drifted lock");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["--json", "sync", "--frozen"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    let reason = payload["details"]
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    assert_eq!(reason, "lock_drift");
+}
