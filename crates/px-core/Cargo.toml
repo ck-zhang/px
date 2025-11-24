@@ -34,3 +34,4 @@ default = []
 
 [dev-dependencies]
 httptest = "0.15"
+serial_test = "2"

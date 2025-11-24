@@ -49,6 +49,16 @@ impl InstallUserError {
             details,
         }
     }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    #[must_use]
+    pub fn details(&self) -> &Value {
+        &self.details
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

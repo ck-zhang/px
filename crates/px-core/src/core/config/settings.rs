@@ -80,7 +80,7 @@ impl Config {
                 online: match snapshot.var("PX_ONLINE") {
                     Some(value) => {
                         let lowered = value.to_ascii_lowercase();
-                        lowered != "0" && lowered != "false"
+                        !matches!(lowered.as_str(), "0" | "false" | "no" | "off" | "")
                     }
                     None => true,
                 },
@@ -153,4 +153,81 @@ pub struct TestConfig {
 #[derive(Debug, Clone, Copy)]
 pub struct PublishConfig {
     pub default_token_env: &'static str,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        effects,
+        store::{
+            ArtifactRequest, BuiltWheel, CacheLocation, CachePruneResult, CacheUsage, CacheWalk,
+            CachedArtifact, PrefetchOptions, PrefetchSpec, PrefetchSummary, SdistRequest,
+        },
+    };
+    use std::path::Path;
+    use std::path::PathBuf;
+
+    struct DummyCacheStore;
+
+    impl effects::CacheStore for DummyCacheStore {
+        fn resolve_store_path(&self) -> anyhow::Result<CacheLocation> {
+            Ok(CacheLocation {
+                path: PathBuf::from("/tmp/cache"),
+                source: "test",
+            })
+        }
+
+        fn compute_usage(&self, _path: &Path) -> anyhow::Result<CacheUsage> {
+            unimplemented!()
+        }
+
+        fn collect_walk(&self, _path: &Path) -> anyhow::Result<CacheWalk> {
+            unimplemented!()
+        }
+
+        fn prune(&self, _walk: &CacheWalk) -> CachePruneResult {
+            unimplemented!()
+        }
+
+        fn prefetch(
+            &self,
+            _cache: &Path,
+            _specs: &[PrefetchSpec<'_>],
+            _options: PrefetchOptions,
+        ) -> anyhow::Result<PrefetchSummary> {
+            unimplemented!()
+        }
+
+        fn cache_wheel(
+            &self,
+            _cache: &Path,
+            _request: &ArtifactRequest,
+        ) -> anyhow::Result<CachedArtifact> {
+            unimplemented!()
+        }
+
+        fn ensure_sdist_build(
+            &self,
+            _cache: &Path,
+            _request: &SdistRequest,
+        ) -> anyhow::Result<BuiltWheel> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn px_online_handles_common_falsey_values() {
+        let snapshot = EnvSnapshot::testing(&[("PX_ONLINE", "no")]);
+        let config = Config::from_snapshot(&snapshot, &DummyCacheStore).unwrap();
+        assert!(!config.network().online);
+
+        let snapshot = EnvSnapshot::testing(&[("PX_ONLINE", "off")]);
+        let config = Config::from_snapshot(&snapshot, &DummyCacheStore).unwrap();
+        assert!(!config.network().online);
+
+        let snapshot = EnvSnapshot::testing(&[("PX_ONLINE", "")]);
+        let config = Config::from_snapshot(&snapshot, &DummyCacheStore).unwrap();
+        assert!(!config.network().online);
+    }
 }

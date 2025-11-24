@@ -714,6 +714,82 @@ fn project_status_detects_manifest_drift() {
     );
 }
 
+#[test]
+fn run_and_test_report_missing_manifest_command() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    fs::write(root.join("px.lock"), "").expect("touch lock");
+
+    let run = cargo_bin_cmd!("px")
+        .current_dir(root)
+        .args(["--json", "run", "demo"])
+        .assert()
+        .failure();
+    let payload = parse_json(&run);
+    assert_eq!(payload["details"]["command"], json!("run"));
+
+    let test = cargo_bin_cmd!("px")
+        .current_dir(root)
+        .args(["--json", "test"])
+        .assert()
+        .failure();
+    let payload = parse_json(&test);
+    assert_eq!(payload["details"]["command"], json!("test"));
+}
+
+#[test]
+fn status_surfaces_invalid_python_requirement() {
+    let (_temp, root) = common::init_empty_project("px-invalid-python");
+    let pyproject = root.join("pyproject.toml");
+    let mut doc: DocumentMut = fs::read_to_string(&pyproject)
+        .expect("read pyproject")
+        .parse()
+        .expect("parse pyproject");
+    doc["project"]["requires-python"] = toml_edit::value("not-a-spec");
+    fs::write(&pyproject, doc.to_string()).expect("write pyproject");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(root)
+        .args(["--json", "status"])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    let hint = payload["details"]["hint"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        hint.contains("invalid requires-python"),
+        "expected invalid requires-python hint, got {hint}"
+    );
+}
+
+#[test]
+fn corrupt_state_file_is_reported() {
+    let (_temp, root) = common::init_empty_project("px-corrupt-state");
+    let state = root.join(".px").join("state.json");
+    fs::create_dir_all(state.parent().unwrap()).expect("create .px");
+    fs::write(&state, "{not-json").expect("corrupt state");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(root)
+        .args(["--json", "status"])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    assert!(payload["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("px state file is unreadable"));
+    assert!(
+        payload["details"]["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(".px/state.json"),
+        "expected hint to point to state file: {payload:?}"
+    );
+}
+
 fn find_python() -> Option<String> {
     let candidates = [
         std::env::var("PYTHON").ok(),

@@ -55,6 +55,45 @@ fn python_install_and_use_records_runtime() {
     );
 }
 
+#[test]
+fn python_list_reports_corrupt_registry() {
+    let registry_dir = tempdir().expect("registry tempdir");
+    let registry = registry_dir.path().join("broken.json");
+    fs::write(&registry, "not-json").expect("write registry");
+    let assert = cargo_bin_cmd!("px")
+        .env("PX_RUNTIME_REGISTRY", registry.to_str().unwrap())
+        .args(["--json", "python", "list"])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    assert!(payload["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("unable to read px runtime registry"));
+    assert_eq!(
+        payload["details"]["registry"].as_str().unwrap_or_default(),
+        registry.display().to_string()
+    );
+}
+
+#[test]
+fn python_info_surfaces_manifest_errors() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path();
+    fs::write(root.join("pyproject.toml"), "[project\nname='broken'").expect("write pyproject");
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(root)
+        .args(["--json", "python", "info"])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    let message = payload["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("pyproject.toml"),
+        "expected manifest parse failure, got {message:?}"
+    );
+}
+
 fn detect_host_python() -> (PathBuf, String) {
     for candidate in ["python3", "python"] {
         if let Ok(output) = Command::new(candidate)

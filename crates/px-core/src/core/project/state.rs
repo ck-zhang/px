@@ -5,6 +5,7 @@ use crate::{
     CommandContext, ExecutionOutcome, InstallUserError, ManifestSnapshot,
 };
 use px_domain::{detect_lock_drift, load_lockfile_optional, ProjectStateReport};
+use serde_json::json;
 
 use super::MutationCommand;
 
@@ -38,7 +39,16 @@ pub(crate) fn evaluate_project_state(
         };
     }
 
-    let state = load_project_state(ctx.fs(), &snapshot.root);
+    let state = load_project_state(ctx.fs(), &snapshot.root).map_err(|err| {
+        InstallUserError::new(
+            "px state file is unreadable",
+            json!({
+                "error": err.to_string(),
+                "state": snapshot.root.join(".px").join("state.json"),
+                "hint": "Remove or repair the corrupted .px/state.json file, then rerun the command.",
+            }),
+        )
+    })?;
     let env_exists = state.current_env.is_some();
     let mut env_clean = false;
     let mut env_issue = None;

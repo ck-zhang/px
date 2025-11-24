@@ -153,6 +153,14 @@ fn core_call(
                 Ok((info, outcome))
             } else if let Some(outcome) = px_core::manifest_error_outcome(&err) {
                 Ok((info, outcome))
+            } else if let Some(user) = err.downcast_ref::<px_core::InstallUserError>() {
+                Ok((
+                    info,
+                    px_core::ExecutionOutcome::user_error(
+                        user.message().to_string(),
+                        user.details().clone(),
+                    ),
+                ))
             } else {
                 Err(eyre!("{err:?}"))
             }

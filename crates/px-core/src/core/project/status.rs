@@ -128,7 +128,7 @@ fn collect_environment_status(
             }))
         }
     };
-    let state = load_project_state(ctx.fs(), &snapshot.root);
+    let state = load_project_state(ctx.fs(), &snapshot.root)?;
     let Some(env) = state.current_env.clone() else {
         return Ok(json!({
             "status": "missing",

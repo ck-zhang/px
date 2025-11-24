@@ -55,7 +55,7 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             let msg = err.to_string();
             if msg.contains("pyproject.toml not found") {
                 let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                return Ok(missing_pyproject_outcome("test", &root));
+                return Ok(missing_pyproject_outcome("run", &root));
             }
             return Err(err);
         }
@@ -173,7 +173,7 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
             let msg = err.to_string();
             if msg.contains("pyproject.toml not found") {
                 let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                return Ok(missing_pyproject_outcome("run", &root));
+                return Ok(missing_pyproject_outcome("test", &root));
             }
             return Err(err);
         }

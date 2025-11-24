@@ -2,8 +2,8 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::{
-    manifest_snapshot, progress::ProgressReporter, runtime_manager, CommandContext,
-    ExecutionOutcome, InstallUserError,
+    is_missing_project_error, manifest_snapshot, progress::ProgressReporter, runtime_manager,
+    CommandContext, ExecutionOutcome, InstallUserError,
 };
 use px_domain::ManifestEditor;
 
@@ -31,7 +31,10 @@ pub fn python_list(
     _ctx: &CommandContext,
     _request: &PythonListRequest,
 ) -> Result<ExecutionOutcome> {
-    let runtimes = runtime_manager::list_runtimes()?;
+    let runtimes = match runtime_manager::list_runtimes() {
+        Ok(runtimes) => runtimes,
+        Err(err) => return Ok(runtime_registry_error(err)),
+    };
     let details: Vec<Value> = runtimes.iter().map(runtime_to_json).collect();
     if runtimes.is_empty() {
         return Ok(ExecutionOutcome::success(
@@ -59,11 +62,14 @@ pub fn python_install(
     request: &PythonInstallRequest,
 ) -> Result<ExecutionOutcome> {
     let spinner = ProgressReporter::spinner(format!("Installing Python {}", request.version));
-    let record = runtime_manager::install_runtime(
+    let record = match runtime_manager::install_runtime(
         &request.version,
         request.path.as_deref(),
         request.set_default,
-    )?;
+    ) {
+        Ok(record) => record,
+        Err(err) => return Ok(runtime_install_error(err)),
+    };
     spinner.finish(format!(
         "Installed Python {} at {}",
         record.version, record.path
@@ -121,9 +127,21 @@ pub fn python_info(
     _ctx: &CommandContext,
     _request: &PythonInfoRequest,
 ) -> Result<ExecutionOutcome> {
-    let runtimes = runtime_manager::list_runtimes()?;
+    let runtimes = match runtime_manager::list_runtimes() {
+        Ok(runtimes) => runtimes,
+        Err(err) => return Ok(runtime_registry_error(err)),
+    };
     let default = runtimes.iter().find(|rt| rt.default).cloned();
-    let project_snapshot = manifest_snapshot().ok();
+    let project_snapshot = match manifest_snapshot() {
+        Ok(snapshot) => Some(snapshot),
+        Err(err) => {
+            if is_missing_project_error(&err) {
+                None
+            } else {
+                return Err(err);
+            }
+        }
+    };
     let project_runtime = project_snapshot.as_ref().and_then(|snapshot| {
         runtime_manager::resolve_runtime(
             snapshot.python_override.as_deref(),
@@ -176,4 +194,31 @@ fn runtime_to_json(record: &runtime_manager::RuntimeRecord) -> Value {
         "path": record.path,
         "default": record.default,
     })
+}
+
+fn registry_path_detail() -> Option<String> {
+    runtime_manager::registry_path()
+        .ok()
+        .map(|path| path.display().to_string())
+}
+
+fn runtime_registry_error(err: anyhow::Error) -> ExecutionOutcome {
+    let mut details = json!({
+        "error": err.to_string(),
+    });
+    if let Some(path) = registry_path_detail() {
+        details["registry"] = Value::String(path);
+        details["hint"] = Value::String(
+            "Repair or delete the px runtime registry file, then rerun the command.".to_string(),
+        );
+    }
+    ExecutionOutcome::user_error("unable to read px runtime registry", details)
+}
+
+fn runtime_install_error(err: anyhow::Error) -> ExecutionOutcome {
+    let mut details = json!({ "error": err.to_string() });
+    if let Some(path) = registry_path_detail() {
+        details["registry"] = Value::String(path);
+    }
+    ExecutionOutcome::user_error("px python install failed", details)
 }

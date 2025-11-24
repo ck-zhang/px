@@ -371,7 +371,7 @@ fn persist_project_state(
     project_root: &Path,
     env: StoredEnvironment,
 ) -> Result<()> {
-    let mut state = load_project_state(fs, project_root);
+    let mut state = load_project_state(fs, project_root)?;
     state.current_env = Some(env);
     write_project_state(fs, project_root, &state)
 }
@@ -379,11 +379,18 @@ fn persist_project_state(
 pub(crate) fn load_project_state(
     fs: &dyn effects::FileSystem,
     project_root: &Path,
-) -> ProjectState {
+) -> Result<ProjectState> {
     let path = project_root.join(".px").join("state.json");
     match fs.read_to_string(&path) {
-        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-        Err(_) => ProjectState::default(),
+        Ok(contents) => serde_json::from_str(&contents)
+            .with_context(|| format!("failed to parse {}", path.display())),
+        Err(err) => {
+            if fs.metadata(&path).is_ok() {
+                Err(err)
+            } else {
+                Ok(ProjectState::default())
+            }
+        }
     }
 }
 
@@ -398,19 +405,22 @@ fn write_project_state(
     fs.write(&path, &contents)
 }
 
-fn resolve_project_site(fs: &dyn effects::FileSystem, project_root: &Path) -> Option<PathBuf> {
-    let state = load_project_state(fs, project_root);
+fn resolve_project_site(
+    fs: &dyn effects::FileSystem,
+    project_root: &Path,
+) -> Result<Option<PathBuf>> {
+    let state = load_project_state(fs, project_root)?;
     if let Some(env) = state.current_env {
         let path = PathBuf::from(env.site_packages);
         if path.exists() {
-            return Some(path);
+            return Ok(Some(path));
         }
     }
     let fallback = project_root.join(".px").join("site");
     if fallback.exists() {
-        Some(fallback)
+        Ok(Some(fallback))
     } else {
-        None
+        Ok(None)
     }
 }
 
@@ -1072,7 +1082,7 @@ pub(crate) fn build_pythonpath(
     }
     paths.push(project_root.to_path_buf());
 
-    if let Some(site_dir) = resolve_project_site(fs, project_root) {
+    if let Some(site_dir) = resolve_project_site(fs, project_root)? {
         let canonical = fs.canonicalize(&site_dir).unwrap_or(site_dir.clone());
         paths.push(canonical.clone());
         let pth = canonical.join("px.pth");
@@ -1176,7 +1186,20 @@ pub fn ensure_env_matches_lock(
     snapshot: &ManifestSnapshot,
     lock_hash: &str,
 ) -> Result<()> {
-    let state = load_project_state(ctx.fs(), &snapshot.root);
+    let state = match load_project_state(ctx.fs(), &snapshot.root) {
+        Ok(state) => state,
+        Err(err) => {
+            return Err(InstallUserError::new(
+                "px state file is unreadable",
+                json!({
+                    "error": err.to_string(),
+                    "state": snapshot.root.join(".px").join("state.json"),
+                    "hint": "Repair or delete the corrupted .px/state.json file, then rerun the command.",
+                }),
+            )
+            .into());
+        }
+    };
     let Some(env) = state.current_env else {
         return Err(InstallUserError::new(
             "project environment missing",
