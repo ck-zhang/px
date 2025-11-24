@@ -17,3 +17,9 @@ This crate stays aligned with `docs/spec.md`:
 - `lib` facade: re-exports the public API used by `px-cli`; everything else stays `pub(crate)`.
 
 Future boundary checks should keep imports within these rules and avoid creating new top-level crates.
+
+Boundary tests currently enforce:
+- `store` stays out of `runtime` and `distribution`.
+- `distribution` stays out of `runtime`.
+- `python` stays out of `store`, `distribution`, and `runtime`.
+- `tooling` stays out of `runtime`.
