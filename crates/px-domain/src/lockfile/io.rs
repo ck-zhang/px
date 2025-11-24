@@ -12,7 +12,8 @@ use super::analysis::collect_resolved_dependencies;
 use super::spec::dependency_name;
 use super::types::{
     GraphArtifactEntry, GraphNode, GraphTarget, LockGraphSnapshot, LockSnapshot, LockedArtifact,
-    LockedDependency, ResolvedDependency, LOCK_MODE_PINNED, LOCK_VERSION,
+    LockedDependency, ResolvedDependency, WorkspaceLock, WorkspaceMember, WorkspaceOwner,
+    LOCK_MODE_PINNED, LOCK_VERSION,
 };
 
 pub fn load_lockfile(path: &Path) -> Result<LockSnapshot> {
@@ -35,6 +36,15 @@ pub fn render_lockfile(
     snapshot: &ProjectSnapshot,
     resolved: &[ResolvedDependency],
     px_version: &str,
+) -> Result<String> {
+    render_lockfile_with_workspace(snapshot, resolved, px_version, None)
+}
+
+pub fn render_lockfile_with_workspace(
+    snapshot: &ProjectSnapshot,
+    resolved: &[ResolvedDependency],
+    px_version: &str,
+    workspace: Option<&WorkspaceLock>,
 ) -> Result<String> {
     let mut doc = DocumentMut::new();
     doc.insert("version", Item::Value(TomlValue::from(LOCK_VERSION)));
@@ -102,6 +112,10 @@ pub fn render_lockfile(
         deps.push(table);
     }
     doc.insert("dependencies", Item::ArrayOfTables(deps));
+
+    if let Some(workspace) = workspace {
+        doc.insert("workspace", Item::Table(render_workspace(workspace)));
+    }
 
     Ok(doc.to_string())
 }
@@ -242,6 +256,11 @@ pub(crate) fn parse_lock_snapshot(doc: &DocumentMut) -> LockSnapshot {
         .and_then(Item::as_str)
         .map(std::string::ToString::to_string);
 
+    let workspace = doc
+        .get("workspace")
+        .and_then(Item::as_table)
+        .and_then(parse_workspace);
+
     if version >= 2 {
         if let Some(graph) = parse_graph_snapshot(doc) {
             let (dependencies, resolved) = normalized_from_graph(&graph);
@@ -255,6 +274,7 @@ pub(crate) fn parse_lock_snapshot(doc: &DocumentMut) -> LockSnapshot {
                 mode,
                 resolved,
                 graph: Some(graph),
+                workspace,
             };
         }
     }
@@ -319,6 +339,7 @@ pub(crate) fn parse_lock_snapshot(doc: &DocumentMut) -> LockSnapshot {
         mode,
         resolved,
         graph: None,
+        workspace,
     }
 }
 
@@ -427,6 +448,118 @@ fn render_graph(graph: &LockGraphSnapshot) -> Table {
     }
 
     table
+}
+
+fn render_workspace(workspace: &WorkspaceLock) -> Table {
+    let mut table = Table::new();
+    if !workspace.members.is_empty() {
+        let mut members = ArrayOfTables::new();
+        for member in &workspace.members {
+            let mut entry = Table::new();
+            entry.insert("name", Item::Value(TomlValue::from(member.name.clone())));
+            entry.insert("path", Item::Value(TomlValue::from(member.path.clone())));
+            entry.insert(
+                "manifest_fingerprint",
+                Item::Value(TomlValue::from(member.manifest_fingerprint.clone())),
+            );
+            if !member.dependencies.is_empty() {
+                let mut deps = Array::new();
+                for dep in &member.dependencies {
+                    deps.push(TomlValue::from(dep.as_str()));
+                }
+                entry.insert("dependencies", Item::Value(TomlValue::Array(deps)));
+            }
+            members.push(entry);
+        }
+        table.insert("members", Item::ArrayOfTables(members));
+    }
+
+    if !workspace.owners.is_empty() {
+        let mut owners = ArrayOfTables::new();
+        for owned in &workspace.owners {
+            let mut entry = Table::new();
+            entry.insert("name", Item::Value(TomlValue::from(owned.name.clone())));
+            let mut names = Array::new();
+            for owner in &owned.owners {
+                names.push(TomlValue::from(owner.as_str()));
+            }
+            entry.insert("owners", Item::Value(TomlValue::Array(names)));
+            owners.push(entry);
+        }
+        table.insert("owners", Item::ArrayOfTables(owners));
+    }
+
+    table
+}
+
+fn parse_workspace(table: &Table) -> Option<WorkspaceLock> {
+    let mut members_out = Vec::new();
+    if let Some(members) = table.get("members").and_then(Item::as_array_of_tables) {
+        for member in members {
+            let name = member
+                .get("name")
+                .and_then(Item::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let path = member
+                .get("path")
+                .and_then(Item::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let manifest_fingerprint = member
+                .get("manifest_fingerprint")
+                .and_then(Item::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let dependencies = member
+                .get("dependencies")
+                .and_then(Item::as_array)
+                .map(|array| {
+                    array
+                        .iter()
+                        .filter_map(|val| val.as_str().map(std::string::ToString::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            members_out.push(WorkspaceMember {
+                name,
+                path,
+                manifest_fingerprint,
+                dependencies,
+            });
+        }
+    }
+
+    let mut owners_out = Vec::new();
+    if let Some(owners) = table.get("owners").and_then(Item::as_array_of_tables) {
+        for owner in owners {
+            let name = owner
+                .get("name")
+                .and_then(Item::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let owners = owner
+                .get("owners")
+                .and_then(Item::as_array)
+                .map(|array| {
+                    array
+                        .iter()
+                        .filter_map(|val| val.as_str().map(std::string::ToString::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            owners_out.push(WorkspaceOwner { name, owners });
+        }
+    }
+
+    if members_out.is_empty() && owners_out.is_empty() {
+        None
+    } else {
+        Some(WorkspaceLock {
+            members: members_out,
+            owners: owners_out,
+        })
+    }
 }
 
 fn parse_artifact_table(table: &Table) -> Option<LockedArtifact> {

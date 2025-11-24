@@ -16,11 +16,15 @@ pub use analysis::{
     verify_locked_artifacts, ChangedEntry, DiffEntry, LockDiffReport, ModeMismatch,
     ProjectMismatch, PythonMismatch, VersionMismatch,
 };
-pub use io::{load_lockfile, load_lockfile_optional, render_lockfile, render_lockfile_v2};
+pub use io::{
+    load_lockfile, load_lockfile_optional, render_lockfile, render_lockfile_v2,
+    render_lockfile_with_workspace,
+};
 pub use spec::{canonical_extras, format_specifier};
 pub use types::{
     GraphArtifactEntry, GraphNode, GraphTarget, LockGraphSnapshot, LockPrefetchSpec, LockSnapshot,
-    LockedArtifact, LockedDependency, ResolvedDependency, LOCK_MODE_PINNED, LOCK_VERSION,
+    LockedArtifact, LockedDependency, ResolvedDependency, WorkspaceLock, WorkspaceMember,
+    WorkspaceOwner, LOCK_MODE_PINNED, LOCK_VERSION,
 };
 
 #[cfg(test)]
@@ -98,6 +102,7 @@ mod tests {
                 requires: Vec::new(),
             }],
             graph: None,
+            workspace: None,
         };
         let report = analyze_lock_diff(&snapshot, &lock, None);
         assert!(!report.is_clean());
@@ -135,6 +140,7 @@ mod tests {
                 source: None,
             }],
             graph: None,
+            workspace: None,
         };
         assert!(verify_locked_artifacts(&lock).is_empty());
         Ok(())
@@ -158,6 +164,7 @@ mod tests {
                 source: Some("test".into()),
             }],
             graph: None,
+            workspace: None,
         };
         let deps = collect_resolved_dependencies(&lock);
         assert_eq!(deps.len(), 1);
@@ -209,6 +216,7 @@ mod tests {
                     artifact: LockedArtifact::default(),
                 }],
             }),
+            workspace: None,
         };
         let toml = render_lockfile_v2(&snapshot, &lock, "0.2.0")?;
         let parsed: LockSnapshot = io::parse_lock_snapshot(&toml.parse::<DocumentMut>()?);

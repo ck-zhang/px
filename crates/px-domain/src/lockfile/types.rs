@@ -38,6 +38,8 @@ pub struct LockSnapshot {
     pub mode: Option<String>,
     pub resolved: Vec<LockedDependency>,
     pub graph: Option<LockGraphSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceLock>,
 }
 
 #[derive(Clone, Debug)]
@@ -90,4 +92,24 @@ pub struct GraphArtifactEntry {
     pub node: String,
     pub target: String,
     pub artifact: LockedArtifact,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct WorkspaceLock {
+    pub members: Vec<WorkspaceMember>,
+    pub owners: Vec<WorkspaceOwner>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct WorkspaceMember {
+    pub name: String,
+    pub path: String,
+    pub manifest_fingerprint: String,
+    pub dependencies: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct WorkspaceOwner {
+    pub name: String,
+    pub owners: Vec<String>,
 }
