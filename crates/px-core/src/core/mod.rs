@@ -5,5 +5,5 @@ pub mod project;
 pub mod python;
 pub mod runtime;
 pub mod store;
-pub mod tools;
 pub mod tooling;
+pub mod tools;

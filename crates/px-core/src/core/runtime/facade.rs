@@ -776,7 +776,6 @@ pub(crate) fn persist_resolved_dependencies(
     Ok(())
 }
 
-
 pub(crate) fn summarize_autopins(entries: &[AutopinEntry]) -> Option<String> {
     if entries.is_empty() {
         return None;

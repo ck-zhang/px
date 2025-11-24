@@ -13,6 +13,7 @@ use crate::state_guard::StateViolation;
 #[derive(Clone, Debug)]
 pub struct ProjectSyncRequest {
     pub frozen: bool,
+    pub dry_run: bool,
 }
 
 /// Reconciles the px environment with the lockfile.
@@ -23,7 +24,64 @@ pub fn project_sync(
     ctx: &CommandContext,
     request: &ProjectSyncRequest,
 ) -> Result<ExecutionOutcome> {
+    if request.dry_run {
+        return project_sync_dry_run(ctx, request.frozen);
+    }
     project_sync_outcome(ctx, request.frozen)
+}
+
+fn project_sync_dry_run(ctx: &CommandContext, frozen: bool) -> Result<ExecutionOutcome> {
+    let snapshot = manifest_snapshot()?;
+    let state = evaluate_project_state(ctx, &snapshot)?;
+
+    if frozen {
+        if !state.lock_exists || !state.manifest_clean {
+            if !state.lock_exists {
+                return Ok(StateViolation::MissingLock.into_outcome(&snapshot, "sync", &state));
+            }
+            return Ok(StateViolation::ManifestDrift.into_outcome(&snapshot, "sync", &state));
+        }
+        let message = if state.env_clean {
+            "environment already in sync (dry-run)"
+        } else {
+            "would refresh environment from px.lock (dry-run)"
+        };
+        return Ok(ExecutionOutcome::success(
+            message.to_string(),
+            json!({
+                "project": snapshot.name,
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "python": snapshot.python_requirement,
+                "mode": "frozen",
+                "state": state.canonical.as_str(),
+                "dry_run": true,
+            }),
+        ));
+    }
+
+    let action = if !state.lock_exists || !state.manifest_clean {
+        "resolve_lock"
+    } else if !state.env_clean {
+        "sync_env"
+    } else {
+        "noop"
+    };
+    let message = match action {
+        "resolve_lock" => "would resolve dependencies and write px.lock (dry-run)",
+        "sync_env" => "would rebuild environment from px.lock (dry-run)",
+        _ => "environment already in sync (dry-run)",
+    };
+    Ok(ExecutionOutcome::success(
+        message.to_string(),
+        json!({
+            "project": snapshot.name,
+            "lockfile": snapshot.lock_path.display().to_string(),
+            "python": snapshot.python_requirement,
+            "action": action,
+            "state": state.canonical.as_str(),
+            "dry_run": true,
+        }),
+    ))
 }
 
 fn project_sync_outcome(ctx: &CommandContext, frozen: bool) -> Result<ExecutionOutcome> {

@@ -29,6 +29,7 @@ pub fn dispatch_command(
             let info = CommandInfo::new(CommandGroup::Add, "add");
             let request = ProjectAddRequest {
                 specs: args.specs.clone(),
+                dry_run: args.common.dry_run,
             };
             core_call(info, px_core::project_add(ctx, &request))
         }
@@ -36,6 +37,7 @@ pub fn dispatch_command(
             let info = CommandInfo::new(CommandGroup::Remove, "remove");
             let request = ProjectRemoveRequest {
                 specs: args.specs.clone(),
+                dry_run: args.common.dry_run,
             };
             core_call(info, px_core::project_remove(ctx, &request))
         }
@@ -48,6 +50,7 @@ pub fn dispatch_command(
             let info = CommandInfo::new(CommandGroup::Update, "update");
             let request = ProjectUpdateRequest {
                 specs: args.specs.clone(),
+                dry_run: args.common.dry_run,
             };
             core_call(info, px_core::project_update(ctx, &request))
         }
@@ -285,6 +288,7 @@ fn publish_request_from_args(args: &PublishArgs) -> PublishRequest {
 fn project_sync_request_from_args(args: &SyncArgs) -> ProjectSyncRequest {
     ProjectSyncRequest {
         frozen: args.frozen,
+        dry_run: args.common.dry_run,
     }
 }
 

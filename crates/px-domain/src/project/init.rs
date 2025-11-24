@@ -14,7 +14,12 @@ impl ProjectInitializer {
     ///
     /// Returns an error when existing files cannot be read or the generated
     /// files cannot be written to disk.
-    pub fn scaffold(root: &Path, package: &str, python_req: &str) -> Result<Vec<String>> {
+    pub fn scaffold(
+        root: &Path,
+        package: &str,
+        python_req: &str,
+        dry_run: bool,
+    ) -> Result<Vec<String>> {
         let mut files = Vec::new();
         let pyproject_path = root.join("pyproject.toml");
         let mut doc = if pyproject_path.exists() {
@@ -32,17 +37,21 @@ impl ProjectInitializer {
         pyproject_changed |= ensure_build_system(&mut doc);
 
         if pyproject_changed {
-            fs::write(&pyproject_path, doc.to_string())?;
+            if !dry_run {
+                fs::write(&pyproject_path, doc.to_string())?;
+            }
             files.push(relative_path(root, &pyproject_path));
         }
 
         let px_root = root.join(".px");
-        ensure_dir(&px_root, root, &mut files)?;
-        ensure_dir(&px_root.join("envs"), root, &mut files)?;
-        ensure_dir(&px_root.join("logs"), root, &mut files)?;
+        ensure_dir(&px_root, root, &mut files, dry_run)?;
+        ensure_dir(&px_root.join("envs"), root, &mut files, dry_run)?;
+        ensure_dir(&px_root.join("logs"), root, &mut files, dry_run)?;
         let state_path = px_root.join("state.json");
         if !state_path.exists() {
-            fs::write(&state_path, "{}\n")?;
+            if !dry_run {
+                fs::write(&state_path, "{}\n")?;
+            }
             files.push(relative_path(root, &state_path));
         }
 
@@ -178,9 +187,13 @@ fn sanitize_package_name(raw: &str) -> String {
     result
 }
 
-fn ensure_dir(path: &Path, root: &Path, files: &mut Vec<String>) -> Result<()> {
+fn ensure_dir(path: &Path, root: &Path, files: &mut Vec<String>, dry_run: bool) -> Result<()> {
     if !path.exists() {
-        fs::create_dir_all(path)?;
+        if !dry_run {
+            fs::create_dir_all(path)?;
+        }
+        files.push(relative_path(root, path));
+    } else if dry_run {
         files.push(relative_path(root, path));
     }
     Ok(())

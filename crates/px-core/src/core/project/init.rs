@@ -59,7 +59,28 @@ pub fn project_init(
     let (package, inferred) = infer_package_name(package_arg, &root)?;
     let python_req = resolve_python_requirement_arg(request.python.as_deref());
 
-    let mut files = ProjectInitializer::scaffold(&root, &package, &python_req)?;
+    let mut files = ProjectInitializer::scaffold(&root, &package, &python_req, request.dry_run)?;
+    if request.dry_run {
+        let package_name = package.clone();
+        let mut details = json!({
+            "package": package_name.clone(),
+            "python": python_req,
+            "files_created": files,
+            "project_root": root.display().to_string(),
+            "lockfile": root.join("px.lock").display().to_string(),
+            "dry_run": true,
+        });
+        if inferred && !pyproject_preexisting {
+            details["inferred_package"] = Value::Bool(true);
+            details["hint"] = Value::String(
+                "Pass --package <name> to override the inferred module name.".to_string(),
+            );
+        }
+        return Ok(ExecutionOutcome::success(
+            format!("initialized project {package_name} (dry-run)"),
+            details,
+        ));
+    }
     let snapshot = manifest_snapshot_at(&root)?;
     let actual_name = snapshot.name.clone();
     let lock_existed = snapshot.lock_path.exists();
@@ -99,7 +120,10 @@ fn resolve_python_requirement_arg(raw: Option<&str>) -> String {
     raw.map(str::trim).filter(|s| !s.is_empty()).map_or_else(
         || ">=3.11".to_string(),
         |s| {
-            if s.starts_with('>') {
+            if s.chars()
+                .next()
+                .is_some_and(|ch| matches!(ch, '>' | '<' | '=' | '~' | '!'))
+            {
                 s.to_string()
             } else {
                 format!(">={s}")

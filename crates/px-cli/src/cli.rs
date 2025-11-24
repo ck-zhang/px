@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use clap::{value_parser, ArgAction, Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
-pub const PX_HELP_TEMPLATE: &str = "{before-help}\nUsage:\n    {usage}\n\nGlobal options:\n{options}\n";
+pub const PX_HELP_TEMPLATE: &str =
+    "{before-help}\nUsage:\n    {usage}\n\nGlobal options:\n{options}\n";
 
 pub const PX_BEFORE_HELP: &str = concat!(
     "px ",

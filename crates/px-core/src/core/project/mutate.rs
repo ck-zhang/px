@@ -20,16 +20,19 @@ use super::{ensure_mutation_allowed, evaluate_project_state};
 #[derive(Clone, Debug)]
 pub struct ProjectAddRequest {
     pub specs: Vec<String>,
+    pub dry_run: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct ProjectRemoveRequest {
     pub specs: Vec<String>,
+    pub dry_run: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct ProjectUpdateRequest {
     pub specs: Vec<String>,
+    pub dry_run: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -81,10 +84,25 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
         let report = editor.add_specs(&cleaned_specs)?;
 
         if report.added.is_empty() && report.updated.is_empty() {
-            needs_restore = false;
+            needs_restore = request.dry_run;
             return Ok(ExecutionOutcome::success(
                 "dependencies already satisfied",
-                json!({ "pyproject": pyproject_path.display().to_string() }),
+                json!({
+                    "pyproject": pyproject_path.display().to_string(),
+                    "dry_run": request.dry_run,
+                }),
+            ));
+        }
+
+        if request.dry_run {
+            return Ok(ExecutionOutcome::success(
+                "planned dependency changes (dry-run)",
+                json!({
+                    "pyproject": pyproject_path.display().to_string(),
+                    "added": report.added,
+                    "updated": report.updated,
+                    "dry_run": true,
+                }),
             ));
         }
 
@@ -166,12 +184,23 @@ pub fn project_remove(
                 .map(|spec| dependency_name(spec))
                 .filter(|name| !name.is_empty())
                 .collect();
-            needs_restore = false;
+            needs_restore = request.dry_run;
             return Ok(ExecutionOutcome::user_error(
                 "package is not a direct dependency",
                 json!({
                     "packages": names,
                     "hint": "Use `px why <package>` to inspect transitive requirements.",
+                }),
+            ));
+        }
+
+        if request.dry_run {
+            return Ok(ExecutionOutcome::success(
+                "planned dependency removals (dry-run)",
+                json!({
+                    "pyproject": pyproject_path.display().to_string(),
+                    "removed": report.removed,
+                    "dry_run": true,
                 }),
             ));
         }
@@ -285,6 +314,7 @@ pub fn project_update(
     if ready.is_empty() {
         let mut details = json!({
             "pyproject": pyproject_path.display().to_string(),
+            "dry_run": request.dry_run,
         });
         if !unsupported.is_empty() {
             details["unsupported"] = json!(unsupported);
@@ -296,6 +326,24 @@ pub fn project_update(
             "px update: requested packages cannot be updated"
         };
         return Ok(ExecutionOutcome::user_error(message, details));
+    }
+
+    if request.dry_run {
+        let mut details = json!({
+            "pyproject": pyproject_path.display().to_string(),
+            "targets": ready,
+            "dry_run": true,
+        });
+        if !unsupported.is_empty() {
+            details["skipped"] = json!(unsupported);
+            details["hint"] = json!("Dependencies pinned via direct URLs must be updated manually");
+        }
+        let message = if update_all {
+            "planned dependency updates (dry-run)".to_string()
+        } else {
+            "planned targeted updates (dry-run)".to_string()
+        };
+        return Ok(ExecutionOutcome::success(message, details));
     }
 
     let mut override_snapshot = snapshot.clone();

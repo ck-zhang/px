@@ -24,16 +24,23 @@ impl StateViolation {
     ) -> ExecutionOutcome {
         match self {
             StateViolation::MissingManifest => missing_project_outcome(),
-            StateViolation::MissingLock => ExecutionOutcome::user_error(
-                "px.lock not found",
-                json!({
-                    "pyproject": snapshot.manifest_path.display().to_string(),
-                    "lockfile": snapshot.lock_path.display().to_string(),
-                    "hint": format!("Run `px sync` before `px {command}`."),
-                    "code": "PX120",
-                    "reason": "missing_lock",
-                }),
-            ),
+            StateViolation::MissingLock => {
+                let hint = if command == "sync" {
+                    "Run `px sync` without --frozen to generate px.lock before syncing.".to_string()
+                } else {
+                    format!("Run `px sync` before `px {command}`.")
+                };
+                ExecutionOutcome::user_error(
+                    "px.lock not found",
+                    json!({
+                        "pyproject": snapshot.manifest_path.display().to_string(),
+                        "lockfile": snapshot.lock_path.display().to_string(),
+                        "hint": hint,
+                        "code": "PX120",
+                        "reason": "missing_lock",
+                    }),
+                )
+            }
             StateViolation::ManifestDrift => {
                 let mut details = json!({
                     "pyproject": snapshot.manifest_path.display().to_string(),

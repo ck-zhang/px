@@ -122,6 +122,52 @@ fn project_init_refuses_when_pyproject_exists() {
 }
 
 #[test]
+fn project_init_respects_python_operator() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("py-req");
+    fs::create_dir_all(&project_dir).expect("create project dir");
+
+    cargo_bin_cmd!("px")
+        .current_dir(&project_dir)
+        .args(["init", "--py", "~=3.11"])
+        .assert()
+        .success();
+
+    let contents = fs::read_to_string(project_dir.join("pyproject.toml")).expect("read pyproject");
+    let doc: DocumentMut = contents.parse().expect("valid pyproject");
+    let requirement = doc["project"]["requires-python"]
+        .as_str()
+        .unwrap_or_default();
+    assert_eq!(requirement, "~=3.11");
+}
+
+#[test]
+fn project_init_dry_run_writes_nothing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("dry-init");
+    fs::create_dir_all(&project_dir).expect("create project dir");
+
+    cargo_bin_cmd!("px")
+        .current_dir(&project_dir)
+        .args(["init", "--dry-run"])
+        .assert()
+        .success();
+
+    assert!(
+        !project_dir.join("pyproject.toml").exists(),
+        "pyproject.toml should not be created during dry-run"
+    );
+    assert!(
+        !project_dir.join("px.lock").exists(),
+        "px.lock should not be created during dry-run"
+    );
+    assert!(
+        !project_dir.join(".px").exists(),
+        ".px directory should not be created during dry-run"
+    );
+}
+
+#[test]
 fn project_init_json_reports_details() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path().join("json-demo");
@@ -250,6 +296,34 @@ fn project_add_inserts_dependency() {
 
     let deps = read_dependencies(project_dir.join("pyproject.toml"));
     assert!(deps.iter().any(|dep| dep == "requests==2.32.3"));
+}
+
+#[test]
+fn project_add_dry_run_leaves_project_unchanged() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    scaffold_demo(&temp, "demo_add_dry_run");
+    let project_dir = temp.path();
+    let pyproject = project_dir.join("pyproject.toml");
+    let lock = project_dir.join("px.lock");
+    let pyproject_before = fs::read_to_string(&pyproject).expect("read pyproject");
+    let lock_before = fs::read_to_string(&lock).expect("read lockfile");
+
+    cargo_bin_cmd!("px")
+        .current_dir(project_dir)
+        .args(["add", "requests", "--dry-run"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(&pyproject).expect("read pyproject after"),
+        pyproject_before,
+        "pyproject.toml should remain unchanged after dry-run add"
+    );
+    assert_eq!(
+        fs::read_to_string(&lock).expect("read lock after"),
+        lock_before,
+        "px.lock should remain unchanged after dry-run add"
+    );
 }
 
 #[test]
@@ -408,6 +482,40 @@ fn px_commands_walk_up_to_project_root() {
     assert!(
         deps.iter().any(|dep| dep == "requests==2.32.3"),
         "dependency should be added from nested directory: {deps:?}"
+    );
+}
+
+#[test]
+fn sync_frozen_missing_lock_hint_is_clear() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path();
+    cargo_bin_cmd!("px")
+        .current_dir(project_dir)
+        .args(["init", "--package", "sync_hint_demo"])
+        .assert()
+        .success();
+    fs::remove_file(project_dir.join("px.lock")).expect("remove px.lock");
+
+    let Some(python) = find_python() else {
+        eprintln!("skipping sync hint test (python binary not found)");
+        return;
+    };
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(project_dir)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["--json", "sync", "--frozen"])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    let hint = payload["details"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("generate px.lock"),
+        "hint should direct users to create px.lock: {hint:?}"
+    );
+    assert!(
+        !hint.contains("before `px sync`"),
+        "hint should avoid circular wording: {hint:?}"
     );
 }
 

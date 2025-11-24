@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
 use std::str::FromStr;
+use std::sync::{mpsc, Arc, Mutex};
 use std::{thread, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
