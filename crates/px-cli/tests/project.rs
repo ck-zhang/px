@@ -150,6 +150,39 @@ fn project_init_reports_orphaned_lockfile() {
 }
 
 #[test]
+fn project_init_cleans_up_when_runtime_missing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("no_runtime");
+    fs::create_dir_all(&project_dir).expect("create project dir");
+    let registry = temp.path().join("runtimes.json");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project_dir)
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .args(["init"])
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("python runtime unavailable"),
+        "expected runtime error message, got {stdout:?}"
+    );
+    assert!(
+        !project_dir.join("pyproject.toml").exists(),
+        "pyproject.toml should not be written when init fails"
+    );
+    assert!(
+        !project_dir.join("px.lock").exists(),
+        "px.lock should not be created when init fails"
+    );
+    assert!(
+        !project_dir.join(".px").exists(),
+        ".px directory should not be created when init fails"
+    );
+}
+
+#[test]
 fn project_surfaces_invalid_pyproject_without_trace() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path();
@@ -414,6 +447,49 @@ fn project_add_dry_run_leaves_project_unchanged() {
         fs::read_to_string(&lock).expect("read lock after"),
         lock_before,
         "px.lock should remain unchanged after dry-run add"
+    );
+}
+
+#[test]
+fn project_update_restores_manifest_on_failure() {
+    let (_temp, root) = common::init_empty_project("px-update-restore");
+    cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .args(["add", "packaging==23.0"])
+        .assert()
+        .success();
+
+    let lockfile = root.join("px.lock");
+    let mut perms = fs::metadata(&lockfile)
+        .expect("lock metadata")
+        .permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&lockfile, perms).expect("set readonly lockfile");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .args(["--json", "update", "packaging"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "error");
+    let message = payload["message"].as_str().unwrap_or_default().to_ascii_lowercase();
+    assert!(
+        message.contains("px update"),
+        "expected px update failure message, got {message:?}"
+    );
+
+    let deps = read_dependencies(root.join("pyproject.toml"));
+    assert_eq!(
+        deps,
+        vec!["packaging==23.0"],
+        "pyproject should be restored when update fails"
+    );
+    let lock_contents = fs::read_to_string(&lockfile).expect("read lockfile");
+    assert!(
+        lock_contents.contains("packaging==23.0"),
+        "lockfile should remain untouched on failure"
     );
 }
 

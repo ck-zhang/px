@@ -1,5 +1,6 @@
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::fs;
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -40,6 +41,11 @@ pub fn project_init(
     let root = cwd;
     let pyproject_path = root.join("pyproject.toml");
     let pyproject_preexisting = pyproject_path.exists();
+    let pyproject_backup = if pyproject_preexisting {
+        Some(fs::read_to_string(&pyproject_path)?)
+    } else {
+        None
+    };
 
     if pyproject_preexisting {
         if let Some(conflict) = detect_init_conflict(&pyproject_path)? {
@@ -88,14 +94,29 @@ pub fn project_init(
     let snapshot = manifest_snapshot_at(&root)?;
     let actual_name = snapshot.name.clone();
     let lock_existed = snapshot.lock_path.exists();
+    let rollback = InitRollback::new(
+        &root,
+        files.clone(),
+        &pyproject_path,
+        &snapshot.lock_path,
+        pyproject_backup,
+        pyproject_preexisting,
+        lock_existed,
+    );
     match install_snapshot(ctx, &snapshot, false, None) {
         Ok(_) => {}
-        Err(err) => match err.downcast::<InstallUserError>() {
-            Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
-            Err(err) => return Err(err),
-        },
+        Err(err) => {
+            rollback.rollback();
+            match err.downcast::<InstallUserError>() {
+                Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                Err(err) => return Err(err),
+            }
+        }
     }
-    refresh_project_site(&snapshot, ctx)?;
+    if let Err(err) = refresh_project_site(&snapshot, ctx) {
+        rollback.rollback();
+        return Err(err);
+    }
     if !lock_existed {
         files.push(relative_path_str(&snapshot.lock_path, &snapshot.root));
     }
@@ -231,6 +252,63 @@ fn incomplete_project_response(root: &Path) -> ExecutionOutcome {
             "hint": "Restore pyproject.toml or remove px.lock before re-running `px init`.",
         }),
     )
+}
+
+struct InitRollback {
+    created: Vec<PathBuf>,
+    pyproject_path: PathBuf,
+    pyproject_backup: Option<String>,
+    pyproject_preexisting: bool,
+    lock_path: PathBuf,
+    lock_preexisting: bool,
+}
+
+impl InitRollback {
+    fn new(
+        root: &Path,
+        created: Vec<String>,
+        pyproject_path: &Path,
+        lock_path: &Path,
+        pyproject_backup: Option<String>,
+        pyproject_preexisting: bool,
+        lock_preexisting: bool,
+    ) -> Self {
+        let mut created_paths: Vec<PathBuf> = created.iter().map(|entry| root.join(entry)).collect();
+        created_paths.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+        Self {
+            created: created_paths,
+            pyproject_path: pyproject_path.to_path_buf(),
+            pyproject_backup,
+            pyproject_preexisting,
+            lock_path: lock_path.to_path_buf(),
+            lock_preexisting,
+        }
+    }
+
+    fn rollback(&self) {
+        if let Some(contents) = &self.pyproject_backup {
+            let _ = fs::write(&self.pyproject_path, contents);
+        } else if !self.pyproject_preexisting && self.created_pyproject() {
+            let _ = fs::remove_file(&self.pyproject_path);
+        }
+        if !self.lock_preexisting && self.lock_path.exists() {
+            let _ = fs::remove_file(&self.lock_path);
+        }
+        for path in &self.created {
+            if path == &self.pyproject_path {
+                continue;
+            }
+            let _ = if path.is_dir() {
+                fs::remove_dir_all(path)
+            } else {
+                fs::remove_file(path)
+            };
+        }
+    }
+
+    fn created_pyproject(&self) -> bool {
+        self.created.iter().any(|path| path == &self.pyproject_path)
+    }
 }
 
 fn dirty_worktree_response(changes: &[String]) -> ExecutionOutcome {

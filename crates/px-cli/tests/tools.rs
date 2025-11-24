@@ -32,6 +32,28 @@ fn tool_install_rejects_requirement_like_name() {
 }
 
 #[test]
+fn tool_install_without_runtime_does_not_scaffold() {
+    let tools_dir = tempdir().expect("tools dir");
+    let store_dir = tempdir().expect("tool store");
+    let registry = tempdir().expect("registry").path().join("runtimes.json");
+
+    let assert = cargo_bin_cmd!("px")
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .env("PX_TOOLS_DIR", tools_dir.path())
+        .env("PX_TOOL_STORE", store_dir.path())
+        .args(["--json", "tool", "install", "ruff"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert!(
+        !tools_dir.path().join("ruff").exists(),
+        "tool directory should not be created when runtime is missing"
+    );
+}
+
+#[test]
 fn tool_run_requires_install_and_guides_user() {
     let tools_dir = tempdir().expect("tools dir");
     let store_dir = tempdir().expect("tool store");

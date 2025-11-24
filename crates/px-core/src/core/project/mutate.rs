@@ -3,6 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use anyhow::{anyhow, Result};
 use pep508_rs::{Requirement as PepRequirement, VersionOrUrl};
 use serde_json::json;
@@ -243,170 +246,201 @@ pub fn project_update(
         return Ok(outcome);
     }
     let pyproject_path = snapshot.manifest_path.clone();
+    let backup = ManifestLockBackup::capture(&pyproject_path, &snapshot.lock_path)?;
+    let mut needs_restore = true;
 
-    if snapshot.dependencies.is_empty() {
-        return Ok(ExecutionOutcome::user_error(
-            "px update: no dependencies declared",
-            json!({
-                "pyproject": pyproject_path.display().to_string(),
-                "hint": "add dependencies with `px add` before running update",
-            }),
-        ));
-    }
-
-    let targets: HashSet<String> = request
-        .specs
-        .iter()
-        .map(|spec| dependency_name(spec))
-        .filter(|name| !name.is_empty())
-        .collect();
-    let update_all = targets.is_empty();
-
-    let mut override_specs = snapshot.dependencies.clone();
-    let mut ready = Vec::new();
-    let mut ready_seen = HashSet::new();
-    let mut unsupported = Vec::new();
-    let mut unsupported_seen = HashSet::new();
-    let mut observed = HashSet::new();
-
-    for spec in &mut override_specs {
-        let name = dependency_name(spec);
-        if name.is_empty() {
-            continue;
-        }
-        if !update_all && !targets.contains(&name) {
-            continue;
-        }
-        observed.insert(name.clone());
-        match loosen_dependency_spec(spec)? {
-            LoosenOutcome::Modified(rewritten) => {
-                *spec = rewritten;
-                if ready_seen.insert(name.clone()) {
-                    ready.push(name.clone());
-                }
-            }
-            LoosenOutcome::AlreadyLoose => {
-                if ready_seen.insert(name.clone()) {
-                    ready.push(name.clone());
-                }
-            }
-            LoosenOutcome::Unsupported => {
-                if unsupported_seen.insert(name.clone()) {
-                    unsupported.push(name.clone());
-                }
-            }
-        }
-    }
-
-    if !update_all {
-        let missing: Vec<String> = targets.difference(&observed).cloned().collect();
-        if !missing.is_empty() {
+    let outcome = (|| -> Result<ExecutionOutcome> {
+        if snapshot.dependencies.is_empty() {
             return Ok(ExecutionOutcome::user_error(
-                "package is not a direct dependency",
+                "px update: no dependencies declared",
                 json!({
-                    "packages": missing,
-                    "hint": "use `px add` to declare dependencies before updating",
+                    "pyproject": pyproject_path.display().to_string(),
+                    "hint": "add dependencies with `px add` before running update",
                 }),
             ));
         }
-    }
 
-    if ready.is_empty() {
-        let mut details = json!({
-            "pyproject": pyproject_path.display().to_string(),
-            "dry_run": request.dry_run,
-        });
-        if !unsupported.is_empty() {
-            details["unsupported"] = json!(unsupported);
-            details["hint"] = json!("Dependencies pinned via direct URLs must be updated manually");
+        let targets: HashSet<String> = request
+            .specs
+            .iter()
+            .map(|spec| dependency_name(spec))
+            .filter(|name| !name.is_empty())
+            .collect();
+        let update_all = targets.is_empty();
+
+        let mut override_specs = snapshot.dependencies.clone();
+        let mut ready = Vec::new();
+        let mut ready_seen = HashSet::new();
+        let mut unsupported = Vec::new();
+        let mut unsupported_seen = HashSet::new();
+        let mut observed = HashSet::new();
+
+        for spec in &mut override_specs {
+            let name = dependency_name(spec);
+            if name.is_empty() {
+                continue;
+            }
+            if !update_all && !targets.contains(&name) {
+                continue;
+            }
+            observed.insert(name.clone());
+            match loosen_dependency_spec(spec)? {
+                LoosenOutcome::Modified(rewritten) => {
+                    *spec = rewritten;
+                    if ready_seen.insert(name.clone()) {
+                        ready.push(name.clone());
+                    }
+                }
+                LoosenOutcome::AlreadyLoose => {
+                    if ready_seen.insert(name.clone()) {
+                        ready.push(name.clone());
+                    }
+                }
+                LoosenOutcome::Unsupported => {
+                    if unsupported_seen.insert(name.clone()) {
+                        unsupported.push(name.clone());
+                    }
+                }
+            }
         }
-        let message = if update_all {
-            "no dependencies eligible for px update"
-        } else {
-            "px update: requested packages cannot be updated"
-        };
-        return Ok(ExecutionOutcome::user_error(message, details));
-    }
 
-    if request.dry_run {
+        if !update_all {
+            let missing: Vec<String> = targets.difference(&observed).cloned().collect();
+            if !missing.is_empty() {
+                return Ok(ExecutionOutcome::user_error(
+                    "package is not a direct dependency",
+                    json!({
+                        "packages": missing,
+                        "hint": "use `px add` to declare dependencies before updating",
+                    }),
+                ));
+            }
+        }
+
+        if ready.is_empty() {
+            let mut details = json!({
+                "pyproject": pyproject_path.display().to_string(),
+                "dry_run": request.dry_run,
+            });
+            if !unsupported.is_empty() {
+                details["unsupported"] = json!(unsupported);
+                details["hint"] =
+                    json!("Dependencies pinned via direct URLs must be updated manually");
+            }
+            let message = if update_all {
+                "no dependencies eligible for px update"
+            } else {
+                "px update: requested packages cannot be updated"
+            };
+            return Ok(ExecutionOutcome::user_error(message, details));
+        }
+
+        if request.dry_run {
+            let mut details = json!({
+                "pyproject": pyproject_path.display().to_string(),
+                "targets": ready,
+                "dry_run": true,
+            });
+            if !unsupported.is_empty() {
+                details["skipped"] = json!(unsupported);
+                details["hint"] =
+                    json!("Dependencies pinned via direct URLs must be updated manually");
+            }
+            let message = if update_all {
+                "planned dependency updates (dry-run)".to_string()
+            } else {
+                "planned targeted updates (dry-run)".to_string()
+            };
+            return Ok(ExecutionOutcome::success(message, details));
+        }
+
+        let mut override_snapshot = snapshot.clone();
+        override_snapshot.dependencies = override_specs;
+        let resolved =
+            match resolve_dependencies_with_effects(ctx.effects(), &override_snapshot, true) {
+                Ok(resolved) => resolved,
+                Err(err) => match err.downcast::<InstallUserError>() {
+                    Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                    Err(err) => {
+                        return Ok(ExecutionOutcome::failure(
+                            "px update failed",
+                            json!({ "error": err.to_string() }),
+                        ))
+                    }
+                },
+            };
+
+        persist_resolved_dependencies(&snapshot, &resolved.specs)?;
+        let updated_snapshot = manifest_snapshot()?;
+        let override_data = InstallOverride {
+            dependencies: resolved.specs.clone(),
+            pins: resolved.pins.clone(),
+        };
+
+        let install_outcome =
+            match install_snapshot(ctx, &updated_snapshot, false, Some(&override_data)) {
+                Ok(result) => result,
+                Err(err) => match err.downcast::<InstallUserError>() {
+                    Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                    Err(err) => {
+                        return Ok(ExecutionOutcome::failure(
+                            "px update failed",
+                            json!({
+                                "error": err.to_string(),
+                                "lockfile": snapshot.lock_path.display().to_string(),
+                            }),
+                        ))
+                    }
+                },
+            };
+
+        if let Err(err) = refresh_project_site(&updated_snapshot, ctx) {
+            return Ok(ExecutionOutcome::failure(
+                "px update failed to refresh environment",
+                json!({ "error": err.to_string() }),
+            ));
+        }
+
+        let updated_count = ready.len();
+        let primary_label = ready.first().cloned();
         let mut details = json!({
             "pyproject": pyproject_path.display().to_string(),
+            "lockfile": updated_snapshot.lock_path.display().to_string(),
             "targets": ready,
-            "dry_run": true,
         });
         if !unsupported.is_empty() {
             details["skipped"] = json!(unsupported);
             details["hint"] = json!("Dependencies pinned via direct URLs must be updated manually");
         }
+
         let message = if update_all {
-            "planned dependency updates (dry-run)".to_string()
+            "updated project dependencies".to_string()
+        } else if updated_count == 1 {
+            format!(
+                "updated {}",
+                primary_label.unwrap_or_else(|| "dependency".to_string())
+            )
         } else {
-            "planned targeted updates (dry-run)".to_string()
-        };
-        return Ok(ExecutionOutcome::success(message, details));
-    }
-
-    let mut override_snapshot = snapshot.clone();
-    override_snapshot.dependencies = override_specs;
-    let resolved = match resolve_dependencies_with_effects(ctx.effects(), &override_snapshot, true)
-    {
-        Ok(resolved) => resolved,
-        Err(err) => match err.downcast::<InstallUserError>() {
-            Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
-            Err(err) => return Err(err),
-        },
-    };
-
-    persist_resolved_dependencies(&snapshot, &resolved.specs)?;
-    let updated_snapshot = manifest_snapshot()?;
-    let override_data = InstallOverride {
-        dependencies: resolved.specs.clone(),
-        pins: resolved.pins.clone(),
-    };
-
-    let install_outcome =
-        match install_snapshot(ctx, &updated_snapshot, false, Some(&override_data)) {
-            Ok(result) => result,
-            Err(err) => match err.downcast::<InstallUserError>() {
-                Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
-                Err(err) => return Err(err),
-            },
+            format!("updated {updated_count} dependencies")
         };
 
-    refresh_project_site(&updated_snapshot, ctx)?;
-
-    let updated_count = ready.len();
-    let primary_label = ready.first().cloned();
-    let mut details = json!({
-        "pyproject": pyproject_path.display().to_string(),
-        "lockfile": updated_snapshot.lock_path.display().to_string(),
-        "targets": ready,
-    });
-    if !unsupported.is_empty() {
-        details["skipped"] = json!(unsupported);
-        details["hint"] = json!("Dependencies pinned via direct URLs must be updated manually");
-    }
-
-    let message = if update_all {
-        "updated project dependencies".to_string()
-    } else if updated_count == 1 {
-        format!(
-            "updated {}",
-            primary_label.unwrap_or_else(|| "dependency".to_string())
-        )
-    } else {
-        format!("updated {updated_count} dependencies")
-    };
-
-    match install_outcome.state {
-        InstallState::Installed | InstallState::UpToDate => {
-            Ok(ExecutionOutcome::success(message, details))
+        match install_outcome.state {
+            InstallState::Installed | InstallState::UpToDate => {
+                needs_restore = false;
+                Ok(ExecutionOutcome::success(message, details))
+            }
+            InstallState::Drift | InstallState::MissingLock => Ok(ExecutionOutcome::failure(
+                "px update failed to refresh px.lock",
+                json!({ "lockfile": snapshot.lock_path.display().to_string() }),
+            )),
         }
-        InstallState::Drift | InstallState::MissingLock => Ok(ExecutionOutcome::failure(
-            "px update failed to refresh px.lock",
-            json!({ "lockfile": snapshot.lock_path.display().to_string() }),
-        )),
+    })();
+
+    if needs_restore {
+        backup.restore()?;
     }
+
+    outcome
 }
 
 #[derive(Debug)]
@@ -437,14 +471,22 @@ struct ManifestLockBackup {
     pyproject_contents: String,
     lock_contents: Option<String>,
     lock_preexisting: bool,
+    pyproject_permissions: fs::Permissions,
+    lock_permissions: Option<fs::Permissions>,
 }
 
 impl ManifestLockBackup {
     fn capture(pyproject_path: &Path, lock_path: &Path) -> Result<Self> {
         let pyproject_contents = fs::read_to_string(pyproject_path)?;
+        let pyproject_permissions = fs::metadata(pyproject_path)?.permissions();
         let lock_preexisting = lock_path.exists();
         let lock_contents = if lock_preexisting {
             Some(fs::read_to_string(lock_path)?)
+        } else {
+            None
+        };
+        let lock_permissions = if lock_preexisting {
+            Some(fs::metadata(lock_path)?.permissions())
         } else {
             None
         };
@@ -454,18 +496,29 @@ impl ManifestLockBackup {
             pyproject_contents,
             lock_contents,
             lock_preexisting,
+            pyproject_permissions,
+            lock_permissions,
         })
     }
 
     fn restore(&self) -> Result<()> {
-        fs::write(&self.pyproject_path, &self.pyproject_contents)?;
+        self.write_with_permissions(
+            &self.pyproject_path,
+            &self.pyproject_contents,
+            &self.pyproject_permissions,
+        )?;
         match (&self.lock_contents, self.lock_preexisting) {
             (Some(contents), _) => {
-                fs::write(&self.lock_path, contents)?;
+                let permissions = if let Some(perms) = &self.lock_permissions {
+                    perms.clone()
+                } else {
+                    fs::metadata(&self.lock_path)?.permissions()
+                };
+                self.write_with_permissions(&self.lock_path, contents, &permissions)?;
             }
             (None, false) => {
                 if self.lock_path.exists() {
-                    fs::remove_file(&self.lock_path)?;
+                    self.remove_with_permissions(&self.lock_path)?;
                 }
             }
             (None, true) => {
@@ -476,6 +529,39 @@ impl ManifestLockBackup {
             }
         }
         Ok(())
+    }
+
+    fn write_with_permissions(
+        &self,
+        path: &Path,
+        contents: &str,
+        original: &fs::Permissions,
+    ) -> Result<()> {
+        let writable = Self::writable_permissions(original);
+        fs::set_permissions(path, writable)?;
+        fs::write(path, contents)?;
+        fs::set_permissions(path, original.clone())?;
+        Ok(())
+    }
+
+    fn remove_with_permissions(&self, path: &Path) -> Result<()> {
+        let original = fs::metadata(path)?.permissions();
+        let writable = Self::writable_permissions(&original);
+        fs::set_permissions(path, writable)?;
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn writable_permissions(original: &fs::Permissions) -> fs::Permissions {
+        fs::Permissions::from_mode(original.mode() | 0o200)
+    }
+
+    #[cfg(not(unix))]
+    fn writable_permissions(original: &fs::Permissions) -> fs::Permissions {
+        let mut perms = original.clone();
+        perms.set_readonly(false);
+        perms
     }
 }
 

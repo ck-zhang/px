@@ -66,10 +66,10 @@ pub fn tool_install(
     }
     let spec = request.spec.clone().unwrap_or_else(|| request.name.clone());
     let entry = request.entry.clone().unwrap_or_else(|| normalized.clone());
+    let runtime_selection = resolve_runtime(request.python.as_deref())?;
     let tool_root = tool_root_dir(&normalized)?;
     fs::create_dir_all(&tool_root)?;
     scaffold_tool_pyproject(&tool_root, &normalized)?;
-    let runtime_selection = resolve_runtime(request.python.as_deref())?;
     env::set_var("PX_RUNTIME_PYTHON", &runtime_selection.record.path);
 
     let pyproject = tool_root.join("pyproject.toml");
