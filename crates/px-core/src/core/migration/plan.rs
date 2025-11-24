@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::fs;
+use std::str::FromStr;
 
 use anyhow::Result;
+use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement, StringVersion};
 use toml_edit::{DocumentMut, Item};
 
 use px_domain::{OnboardPackagePlan, PyprojectPlan};
@@ -67,11 +69,15 @@ pub(crate) fn apply_precedence(
     source_override: &Option<String>,
     dev_override: &Option<String>,
 ) -> (Vec<OnboardPackagePlan>, Vec<PackageConflict>) {
-    let mut selected = HashMap::new();
+    type PackageKey = (String, String);
+    type PackageEntry = (usize, OnboardPackagePlan, u8);
+    type PackageBuckets = HashMap<PackageKey, Vec<PackageEntry>>;
+
+    let mut grouped: PackageBuckets = HashMap::new();
     let mut order = Vec::new();
     let mut conflicts = Vec::new();
 
-    for pkg in packages {
+    for (idx, pkg) in packages.iter().enumerate() {
         let priority = package_priority(
             pkg,
             requirements_rel,
@@ -80,57 +86,159 @@ pub(crate) fn apply_precedence(
             dev_override,
         );
         let key = (pkg.name.clone(), pkg.scope.clone());
-        match selected.get(&key) {
-            None => {
-                selected.insert(key.clone(), (priority, pkg.clone()));
-                order.push(key);
-            }
-            Some((existing_pri, existing_pkg)) => {
-                if *existing_pri > priority {
-                    if existing_pkg.requested != pkg.requested {
-                        conflicts.push(PackageConflict {
-                            name: pkg.name.clone(),
-                            scope: pkg.scope.clone(),
-                            kept_source: existing_pkg.source.clone(),
-                            kept_spec: existing_pkg.requested.clone(),
-                            dropped_source: pkg.source.clone(),
-                            dropped_spec: pkg.requested.clone(),
-                        });
-                    }
-                } else if *existing_pri < priority {
-                    if existing_pkg.requested != pkg.requested {
-                        conflicts.push(PackageConflict {
-                            name: pkg.name.clone(),
-                            scope: pkg.scope.clone(),
-                            kept_source: pkg.source.clone(),
-                            kept_spec: pkg.requested.clone(),
-                            dropped_source: existing_pkg.source.clone(),
-                            dropped_spec: existing_pkg.requested.clone(),
-                        });
-                    }
-                    selected.insert(key.clone(), (priority, pkg.clone()));
-                    if !order.contains(&key) {
-                        order.push(key);
-                    }
-                } else if existing_pkg.requested != pkg.requested {
-                    conflicts.push(PackageConflict {
-                        name: pkg.name.clone(),
-                        scope: pkg.scope.clone(),
-                        kept_source: existing_pkg.source.clone(),
-                        kept_spec: existing_pkg.requested.clone(),
-                        dropped_source: pkg.source.clone(),
-                        dropped_spec: pkg.requested.clone(),
-                    });
-                }
-            }
+        if !grouped.contains_key(&key) {
+            order.push(key.clone());
         }
+        grouped
+            .entry(key)
+            .or_default()
+            .push((idx, pkg.clone(), priority));
     }
 
     let mut final_packages = Vec::new();
     for key in order {
-        if let Some((_, pkg)) = selected.remove(&key) {
+        let Some(entries) = grouped.remove(&key) else {
+            continue;
+        };
+        let max_priority = entries.iter().map(|(_, _, pri)| *pri).max().unwrap_or(0);
+
+        let mut kept: Vec<(usize, OnboardPackagePlan)> = Vec::new();
+        for (idx, pkg, _) in entries
+            .iter()
+            .filter(|(_, _, pri)| *pri == max_priority)
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            let mut duplicate = false;
+            let mut conflict_with: Option<OnboardPackagePlan> = None;
+            for (_, existing) in &kept {
+                if !requirements_overlap(&pkg, existing) {
+                    continue;
+                }
+                if pkg.requested == existing.requested {
+                    duplicate = true;
+                    break;
+                } else {
+                    conflict_with = Some(existing.clone());
+                    break;
+                }
+            }
+            if duplicate {
+                continue;
+            }
+            if let Some(conflict) = conflict_with {
+                conflicts.push(PackageConflict {
+                    name: pkg.name.clone(),
+                    scope: pkg.scope.clone(),
+                    kept_source: conflict.source.clone(),
+                    kept_spec: conflict.requested.clone(),
+                    dropped_source: pkg.source.clone(),
+                    dropped_spec: pkg.requested.clone(),
+                });
+                continue;
+            }
+            kept.push((idx, pkg));
+        }
+
+        for (_, pkg, _) in entries.iter().filter(|(_, _, pri)| *pri < max_priority) {
+            for (_, existing) in &kept {
+                if requirements_overlap(pkg, existing) && pkg.requested != existing.requested {
+                    conflicts.push(PackageConflict {
+                        name: pkg.name.clone(),
+                        scope: pkg.scope.clone(),
+                        kept_source: existing.source.clone(),
+                        kept_spec: existing.requested.clone(),
+                        dropped_source: pkg.source.clone(),
+                        dropped_spec: pkg.requested.clone(),
+                    });
+                    break;
+                }
+            }
+        }
+
+        kept.sort_by_key(|(idx, _)| *idx);
+        for (_, pkg) in kept {
             final_packages.push(pkg);
         }
     }
     (final_packages, conflicts)
+}
+
+fn requirements_overlap(a: &OnboardPackagePlan, b: &OnboardPackagePlan) -> bool {
+    if a.source == b.source && a.requested == b.requested {
+        return true;
+    }
+    let req_a = PepRequirement::from_str(a.requested.trim());
+    let req_b = PepRequirement::from_str(b.requested.trim());
+    let (Ok(req_a), Ok(req_b)) = (req_a, req_b) else {
+        return true;
+    };
+
+    markers_overlap(&req_a, &req_b)
+}
+
+fn markers_overlap(a: &PepRequirement, b: &PepRequirement) -> bool {
+    let marker_a = a
+        .marker
+        .as_ref()
+        .map(|m| canonicalize_marker(&m.to_string()));
+    let marker_b = b
+        .marker
+        .as_ref()
+        .map(|m| canonicalize_marker(&m.to_string()));
+
+    if marker_a.is_none() || marker_b.is_none() {
+        return true;
+    }
+    if marker_a == marker_b {
+        return true;
+    }
+    if marker_a.as_ref().is_some_and(|m| m.contains("extra"))
+        || marker_b.as_ref().is_some_and(|m| m.contains("extra"))
+    {
+        return true;
+    }
+
+    for env in marker_scenarios() {
+        if a.evaluate_markers(&env, &[]) && b.evaluate_markers(&env, &[]) {
+            return true;
+        }
+    }
+    false
+}
+
+fn marker_scenarios() -> Vec<MarkerEnvironment> {
+    let mut scenarios = Vec::new();
+    let matrix = [
+        ("3.11", "linux", "posix", "Linux"),
+        ("3.12", "linux", "posix", "Linux"),
+        ("3.13", "linux", "posix", "Linux"),
+        ("3.12", "win32", "nt", "Windows"),
+        ("3.12", "darwin", "posix", "Darwin"),
+    ];
+    for (python_version, sys_platform, os_name, platform_system) in matrix {
+        let python_full = format!("{python_version}.0");
+        scenarios.push(MarkerEnvironment {
+            implementation_name: "cpython".into(),
+            implementation_version: StringVersion::from_str(&python_full)
+                .expect("valid implementation version"),
+            os_name: os_name.into(),
+            platform_machine: "x86_64".into(),
+            platform_python_implementation: "CPython".into(),
+            platform_release: "6.0".into(),
+            platform_system: platform_system.into(),
+            platform_version: "6.0".into(),
+            python_full_version: StringVersion::from_str(&python_full)
+                .expect("valid python_full_version"),
+            python_version: StringVersion::from_str(python_version).expect("valid python_version"),
+            sys_platform: sys_platform.into(),
+        });
+    }
+    scenarios
+}
+
+fn canonicalize_marker(raw: &str) -> String {
+    raw.split_whitespace()
+        .collect::<String>()
+        .to_ascii_lowercase()
 }

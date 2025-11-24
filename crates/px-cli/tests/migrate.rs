@@ -633,6 +633,37 @@ build-backend = "setuptools.build_meta"
 }
 
 #[test]
+fn migrate_allows_marker_split_specs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(
+        &temp,
+        "requirements.txt",
+        "setuptools==65.5.1 ; python_version < '3.12'\nsetuptools ; python_version >= '3.12'\n",
+    );
+
+    let assert = px_command(&temp)
+        .args([
+            "--json",
+            "migrate",
+            "--source",
+            "requirements.txt",
+            "--no-input",
+        ])
+        .assert()
+        .success();
+    let payload: Value = serde_json::from_slice(&assert.get_output().stdout).expect("json");
+    assert_eq!(payload["status"], "ok");
+    let packages = payload["details"]["packages"]
+        .as_array()
+        .expect("packages array");
+    assert_eq!(
+        packages.len(),
+        2,
+        "marker-split dependencies should be preserved during migration"
+    );
+}
+
+#[test]
 fn migrate_crash_restores_backup() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_file(&temp, "requirements.txt", "rich==13.7.1\n");
