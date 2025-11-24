@@ -31,7 +31,9 @@ impl ProjectSnapshot {
         let manifest_path = root.join("pyproject.toml");
         ensure_pyproject_exists(&manifest_path)?;
         let contents = fs::read_to_string(&manifest_path)?;
-        let doc: DocumentMut = contents.parse()?;
+        let doc: DocumentMut = contents
+            .parse()
+            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
         let project = project_table(&doc)?;
         let name = project
             .get("name")
@@ -93,7 +95,9 @@ pub fn discover_project_root() -> Result<Option<PathBuf>> {
 
 fn pyproject_has_tool_px(path: &Path) -> Result<bool> {
     let contents = fs::read_to_string(path)?;
-    let doc: DocumentMut = contents.parse()?;
+    let doc: DocumentMut = contents
+        .parse()
+        .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(doc
         .get("tool")
         .and_then(|item| item.as_table())
@@ -106,7 +110,9 @@ pub fn project_name_from_pyproject(path: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
     let contents = fs::read_to_string(path)?;
-    let doc: DocumentMut = contents.parse()?;
+    let doc: DocumentMut = contents
+        .parse()
+        .with_context(|| format!("failed to parse {}", path.display()))?;
     let name = doc
         .get("project")
         .and_then(|item| item.as_table())

@@ -151,6 +151,8 @@ fn core_call(
         Err(err) => {
             if let Some(outcome) = missing_project_outcome(&err) {
                 Ok((info, outcome))
+            } else if let Some(outcome) = px_core::manifest_error_outcome(&err) {
+                Ok((info, outcome))
             } else {
                 Err(eyre!("{err:?}"))
             }

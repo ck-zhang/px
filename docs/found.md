@@ -47,3 +47,45 @@
 - Expected vs actual: Expected a hint to generate the lockfile with a non-frozen sync; instead the hint repeated the same command.
 - Root cause: The missing-lock diagnostic used a generic hint string for all commands, so `sync` produced a self-referential message.
 - Fix summary: Tailored the missing-lock hint for `px sync` to direct users to run a non-frozen sync, and added a regression test.
+
+## Broken pyproject/px.lock crashed with backtraces
+
+- Description: If `pyproject.toml` or `px.lock` contained invalid TOML (or `pyproject.toml` was missing while `px.lock` existed), commands failed with an eyre backtrace pointing into `dispatch.rs` instead of a user-actionable error.
+- Repro:
+  ```sh
+  tmp=$(mktemp -d)
+  cd "$tmp"
+  printf '[project\nname="broken"\n' > pyproject.toml
+  /home/toxictoast/Documents/0-Code/px/target/debug/px --json status
+
+  tmp=$(mktemp -d)
+  cd "$tmp"
+  cat > pyproject.toml <<'EOF'
+  [project]
+  name = "demo"
+  version = "0.1.0"
+  requires-python = ">=3.11"
+  dependencies = []
+  [tool]
+  [tool.px]
+  [build-system]
+  requires = ["setuptools>=70", "wheel"]
+  build-backend = "setuptools.build_meta"
+  EOF
+  echo "not toml" > px.lock
+  /home/toxictoast/Documents/0-Code/px/target/debug/px --json status
+  ```
+- Expected vs actual: Expected a clear user-error pointing to the bad file with a hint to fix/regenerate; instead px crashed with a backtrace.
+- Root cause: TOML parse errors and missing-manifest errors bubbled to the CLI as uncaught anyhow errors with no friendly mapping.
+- Fix summary: Added contextual error handling for manifest/lock parsing and missing manifest detection, converting them into `user-error` outcomes with actionable hints; added tests to lock the behavior.
+
+## No-op dry-run/force flags leaked into run/test/fmt
+
+- Description: `px run`, `px test`, and `px fmt` accepted `--dry-run`/`--force` in their help/CLI even though the flags were ignored, making it look like you could preview commands without running them.
+- Repro:
+  ```sh
+  /home/toxictoast/Documents/0-Code/px/target/debug/px run --dry-run
+  ```
+- Expected vs actual: Expected the flags to be rejected (or to actually skip execution); instead they were silently accepted then the command proceeded normally.
+- Root cause: A shared flag struct was flattened into read-only commands even though the options weren't implemented there.
+- Fix summary: Removed the mutation-only flags from run/test/fmt so unsupported options are rejected early; added a regression test to ensure the parser stops on the unused flag.

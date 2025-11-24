@@ -448,6 +448,26 @@ fn run_frozen_handles_large_dependency_graph() {
     assert!(lock.exists(), "sync should emit px.lock");
 }
 
+#[test]
+fn run_rejects_dry_run_flag() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(temp.path())
+        .args(["run", "--dry-run"])
+        .assert()
+        .failure();
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(assert.get_output().stdout.as_slice()),
+        String::from_utf8_lossy(assert.get_output().stderr.as_slice())
+    );
+    assert!(
+        output.contains("Found argument '--dry-run'")
+            || output.contains("unexpected argument '--dry-run'"),
+        "run should reject unsupported dry-run flag, got output: {output:?}"
+    );
+}
+
 fn set_px_scripts(project: &Path, entries: &[(&str, &str)]) {
     let pyproject = project.join("pyproject.toml");
     let contents = fs::read_to_string(&pyproject).expect("read pyproject");

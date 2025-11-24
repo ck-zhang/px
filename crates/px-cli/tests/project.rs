@@ -122,6 +122,69 @@ fn project_init_refuses_when_pyproject_exists() {
 }
 
 #[test]
+fn project_surfaces_invalid_pyproject_without_trace() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path();
+    fs::write(
+        project_dir.join("pyproject.toml"),
+        "[project\nname = 'broken'\n",
+    )
+    .expect("write invalid pyproject");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(project_dir)
+        .args(["--json", "status"])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(payload["details"]["reason"], "invalid_manifest");
+    let hint = payload["details"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.to_ascii_lowercase().contains("pyproject.toml"),
+        "hint should direct user to fix pyproject: {hint:?}"
+    );
+}
+
+#[test]
+fn project_surfaces_invalid_lockfile_without_trace() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path();
+    fs::write(
+        project_dir.join("pyproject.toml"),
+        r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool]
+[tool.px]
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#,
+    )
+    .expect("write pyproject");
+    fs::write(project_dir.join("px.lock"), "not toml").expect("write lockfile");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(project_dir)
+        .args(["--json", "status"])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(payload["details"]["reason"], "invalid_lock");
+    let hint = payload["details"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.to_ascii_lowercase().contains("px sync"),
+        "hint should suggest regenerating the lockfile: {hint:?}"
+    );
+}
+
+#[test]
 fn project_init_respects_python_operator() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path().join("py-req");

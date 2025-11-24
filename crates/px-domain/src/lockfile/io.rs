@@ -2,7 +2,7 @@ use std::convert::TryFrom;
 use std::fs;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value as TomlValue};
 
@@ -17,7 +17,9 @@ use super::types::{
 
 pub fn load_lockfile(path: &Path) -> Result<LockSnapshot> {
     let contents = fs::read_to_string(path)?;
-    let doc: DocumentMut = contents.parse()?;
+    let doc: DocumentMut = contents
+        .parse()
+        .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(parse_lock_snapshot(&doc))
 }
 

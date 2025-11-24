@@ -303,8 +303,6 @@ pub struct SyncArgs {
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
-    #[command(flatten)]
-    pub common: CommonFlags,
     #[arg(
         value_name = "ENTRY",
         help = "Module or script name (omit to use the inferred default)"
@@ -328,8 +326,6 @@ pub struct RunArgs {
 
 #[derive(Args, Debug)]
 pub struct TestArgs {
-    #[command(flatten)]
-    pub common: CommonFlags,
     #[arg(
         long,
         help = "Fail if px.lock is missing or the environment is out of sync"
@@ -341,8 +337,6 @@ pub struct TestArgs {
 
 #[derive(Args, Debug)]
 pub struct FmtArgs {
-    #[command(flatten)]
-    pub common: CommonFlags,
     #[arg(
         long,
         help = "Fail if px.lock is missing or the environment is out of sync"

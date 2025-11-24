@@ -25,7 +25,7 @@ use px_domain::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
+use toml_edit::{Array, DocumentMut, Item, Table, TomlError, Value as TomlValue};
 
 use super::artifacts::{ensure_exact_pins, parse_exact_pin, resolve_pins};
 use crate::effects::Effects;
@@ -1334,6 +1334,60 @@ pub fn missing_project_outcome() -> ExecutionOutcome {
 pub fn is_missing_project_error(err: &anyhow::Error) -> bool {
     err.chain()
         .any(|cause| cause.to_string().contains("No px project found"))
+}
+
+pub fn manifest_error_outcome(err: &anyhow::Error) -> Option<ExecutionOutcome> {
+    if err
+        .chain()
+        .any(|cause| cause.to_string().contains("pyproject.toml not found"))
+    {
+        return Some(ExecutionOutcome::user_error(
+            "pyproject.toml not found",
+            json!({
+                "reason": "missing_manifest",
+                "hint": "Run `px init` to create pyproject.toml, or restore it from version control.",
+            }),
+        ));
+    }
+
+    let parse_error = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<TomlError>().map(ToString::to_string))?;
+
+    let mut target = "pyproject.toml";
+    for cause in err.chain() {
+        let msg = cause.to_string();
+        if msg.contains("px.lock") {
+            target = "px.lock";
+            break;
+        }
+        if msg.contains("pyproject.toml") {
+            target = "pyproject.toml";
+            break;
+        }
+    }
+
+    let (reason, hint) = if target == "px.lock" {
+        (
+            "invalid_lock",
+            "Delete or fix px.lock, then run `px sync` to regenerate it.",
+        )
+    } else {
+        (
+            "invalid_manifest",
+            "Fix pyproject.toml syntax and rerun the command.",
+        )
+    };
+
+    Some(ExecutionOutcome::user_error(
+        format!("{target} is not valid TOML"),
+        json!({
+            "reason": reason,
+            "target": target,
+            "error": parse_error,
+            "hint": hint,
+        }),
+    ))
 }
 
 #[must_use]
