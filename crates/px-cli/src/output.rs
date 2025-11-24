@@ -229,7 +229,10 @@ fn error_code(info: CommandInfo) -> &'static str {
 }
 
 fn collect_why_bullets(details: &Value, fallback: &str) -> Vec<String> {
+    use std::collections::HashSet;
+
     let mut bullets = Vec::new();
+    let mut seen_messages = HashSet::new();
     if let Some(reason) = details.get("reason").and_then(Value::as_str) {
         push_unique(
             &mut bullets,
@@ -242,13 +245,20 @@ fn collect_why_bullets(details: &Value, fallback: &str) -> Vec<String> {
     if let Some(issues) = details.get("issues").and_then(Value::as_array) {
         for entry in issues {
             match entry {
-                Value::String(message) => push_unique(&mut bullets, message.to_string()),
+                Value::String(message) => {
+                    if seen_messages.insert(message.clone()) {
+                        push_unique(&mut bullets, message.to_string())
+                    }
+                }
                 Value::Object(map) => {
                     let message = map
                         .get("message")
                         .and_then(Value::as_str)
                         .unwrap_or_default();
                     if message.is_empty() {
+                        continue;
+                    }
+                    if !seen_messages.insert(message.to_string()) {
                         continue;
                     }
                     if let Some(id) = map.get("id").and_then(Value::as_str) {
