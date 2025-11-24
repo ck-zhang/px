@@ -19,10 +19,9 @@ fn dir_contains_rs(dir: &str, needle: &str) -> bool {
         } else if path
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+            && file_contains(path.to_str().unwrap_or_default(), needle)
         {
-            if file_contains(path.to_str().unwrap_or_default(), needle) {
-                return true;
-            }
+            return true;
         }
     }
     false

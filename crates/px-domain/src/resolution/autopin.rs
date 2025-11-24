@@ -5,14 +5,14 @@ use pep508_rs::MarkerEnvironment;
 use serde_json::{json, Value};
 use toml_edit::DocumentMut;
 
-use crate::manifest::{
+use crate::project::manifest::{
     overwrite_dependency_specs, overwrite_dev_dependency_specs, read_dependencies_from_doc,
     read_optional_dependency_group, requirement_display_name,
 };
-use crate::project_resolver::{
+use crate::project::snapshot::ProjectSnapshot;
+use crate::resolution::project_resolver::{
     autopin_pin_key, autopin_spec_key, marker_applies, spec_requires_pin, InstallOverride, PinSpec,
 };
-use crate::snapshot::ProjectSnapshot;
 
 pub type ResolvePinsFn = dyn Fn(&ProjectSnapshot, &[String]) -> Result<Vec<PinSpec>>;
 

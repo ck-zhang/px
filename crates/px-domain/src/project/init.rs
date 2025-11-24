@@ -3,7 +3,7 @@ use std::{fs, path::Path};
 use anyhow::{bail, Result};
 use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 
-use crate::manifest::{ensure_dependencies_array_mut, relative_path};
+use super::manifest::{ensure_dependencies_array_mut, relative_path};
 
 pub struct ProjectInitializer;
 

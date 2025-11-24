@@ -5,7 +5,7 @@ use anyhow::{bail, Result};
 use pep508_rs::MarkerEnvironment;
 use serde_json::Value;
 
-use crate::snapshot::ProjectSnapshot;
+use crate::project::snapshot::ProjectSnapshot;
 
 use super::spec::{compute_file_sha256, dependency_name, spec_map, version_from_specifier};
 use super::types::{

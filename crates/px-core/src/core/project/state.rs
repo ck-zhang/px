@@ -4,7 +4,7 @@ use crate::{
     compute_lock_hash, ensure_env_matches_lock, load_project_state, marker_env_for_snapshot,
     CommandContext, ExecutionOutcome, InstallUserError, ManifestSnapshot,
 };
-use px_domain::{detect_lock_drift, load_lockfile_optional, state::ProjectStateReport};
+use px_domain::{detect_lock_drift, load_lockfile_optional, ProjectStateReport};
 
 use super::MutationCommand;
 
@@ -79,7 +79,7 @@ pub(crate) fn ensure_mutation_allowed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use px_domain::state::ProjectStateReport;
+    use px_domain::ProjectStateReport;
     use std::path::PathBuf;
 
     #[test]

@@ -6,7 +6,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use toml_edit::{DocumentMut, Item};
 
-use crate::manifest::{manifest_fingerprint, project_table, read_dependencies_from_doc};
+use super::manifest::{manifest_fingerprint, project_table, read_dependencies_from_doc};
 
 #[derive(Clone, Debug)]
 pub struct ProjectSnapshot {

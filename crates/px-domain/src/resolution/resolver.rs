@@ -33,7 +33,7 @@ use uv_resolver::{
 use uv_types::{BuildIsolation, EmptyInstalledPackages, HashStrategy};
 use uv_workspace::WorkspaceCache;
 
-use crate::manifest::dependency_name;
+use crate::project::manifest::dependency_name;
 
 pub fn resolve(request: &ResolveRequest) -> Result<Vec<ResolvedSpecifier>> {
     if request.requirements.is_empty() {

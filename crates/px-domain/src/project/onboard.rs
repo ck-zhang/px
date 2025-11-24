@@ -7,14 +7,12 @@ use anyhow::{bail, Result};
 use time::{format_description, OffsetDateTime};
 use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 
-use crate::{
-    init::sanitize_package_candidate,
-    manifest::{
-        merge_dependency_specs, merge_dev_dependency_specs, normalize_onboard_path, relative_path,
-        OnboardPackagePlan,
-    },
-    snapshot::ensure_pyproject_exists,
+use super::init::sanitize_package_candidate;
+use super::manifest::{
+    merge_dependency_specs, merge_dev_dependency_specs, normalize_onboard_path, relative_path,
+    OnboardPackagePlan,
 };
+use super::snapshot::ensure_pyproject_exists;
 
 #[derive(Clone)]
 pub struct PyprojectPlan {
@@ -246,7 +244,7 @@ fn ensure_project_metadata(doc: &mut DocumentMut, root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{
+    use crate::project::manifest::{
         read_dependencies_from_doc, read_optional_dependency_group, requirement_display_name,
     };
     use tempfile::tempdir;

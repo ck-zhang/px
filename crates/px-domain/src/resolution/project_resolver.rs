@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement};
 
-use crate::manifest::{canonicalize_marker, dependency_name, strip_wrapping_quotes};
+use crate::project::manifest::{canonicalize_marker, dependency_name, strip_wrapping_quotes};
 
 #[derive(Clone, Debug)]
 pub struct PinSpec {

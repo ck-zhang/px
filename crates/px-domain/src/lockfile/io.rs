@@ -6,7 +6,7 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value as TomlValue};
 
-use crate::snapshot::ProjectSnapshot;
+use crate::project::snapshot::ProjectSnapshot;
 
 use super::analysis::collect_resolved_dependencies;
 use super::spec::dependency_name;

@@ -5,7 +5,7 @@ use crate::{
     project::{evaluate_project_state, MutationCommand},
     ExecutionOutcome,
 };
-use px_domain::{state::ProjectStateReport, ProjectSnapshot};
+use px_domain::{ProjectSnapshot, ProjectStateReport};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum StateViolation {

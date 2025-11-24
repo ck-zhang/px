@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::str::FromStr;
 use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 
-use crate::snapshot::ensure_pyproject_exists;
+use super::snapshot::ensure_pyproject_exists;
 
 #[derive(Debug)]
 pub struct ManifestEditor {

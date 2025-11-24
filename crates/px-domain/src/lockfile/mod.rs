@@ -26,7 +26,7 @@ pub use types::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::ProjectSnapshot;
+    use crate::project::snapshot::ProjectSnapshot;
     use tempfile::tempdir;
     use toml_edit::DocumentMut;
 
