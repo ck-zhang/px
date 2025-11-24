@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 
 use anyhow::Result;
 
+use crate::workspace::{discover_workspace_scope, workspace_status};
 use crate::{
     compute_lock_hash, detect_runtime_metadata, ensure_env_matches_lock, install_snapshot,
     load_project_state, manifest_snapshot, CommandContext, ExecutionOutcome, InstallState,
@@ -19,6 +20,10 @@ use super::evaluate_project_state;
 /// # Errors
 /// Returns an error if project metadata cannot be read or dependency verification fails.
 pub fn project_status(ctx: &CommandContext) -> Result<ExecutionOutcome> {
+    if let Some(scope) = discover_workspace_scope()? {
+        return workspace_status(ctx, scope);
+    }
+
     let snapshot = manifest_snapshot()?;
     let state_report = evaluate_project_state(ctx, &snapshot)?;
     let outcome = match install_snapshot(ctx, &snapshot, true, None) {

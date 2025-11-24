@@ -11,7 +11,7 @@ pub(crate) mod traceback;
 mod facade;
 
 pub(crate) use artifacts::{
-    build_http_client, dependency_name, fetch_release, strip_wrapping_quotes,
+    build_http_client, dependency_name, fetch_release, resolve_pins, strip_wrapping_quotes,
 };
 pub use facade::*;
 

@@ -7,3 +7,4 @@ pub mod runtime;
 pub mod store;
 pub mod tooling;
 pub mod tools;
+pub mod workspace;

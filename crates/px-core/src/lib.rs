@@ -4,6 +4,10 @@ mod core;
 
 pub(crate) use px_domain::{discover_project_root, InstallOverride};
 
+pub mod workspace {
+    pub use crate::core::workspace::*;
+}
+
 pub(crate) use crate::core::config;
 pub(crate) use crate::core::config::{context, state_guard};
 pub(crate) use crate::core::python::{python_build, python_sys};
@@ -45,6 +49,10 @@ pub use crate::core::runtime::run::{run_project, test_project, RunRequest, TestR
 pub use crate::core::tools::{
     tool_install, tool_list, tool_remove, tool_run, tool_upgrade, ToolInstallRequest,
     ToolListRequest, ToolRemoveRequest, ToolRunRequest, ToolUpgradeRequest,
+};
+pub use crate::core::workspace::{
+    discover_workspace_scope, prepare_workspace_run_context, workspace_add, workspace_remove,
+    workspace_status, workspace_sync, workspace_update, WorkspaceScope, WorkspaceSyncRequest,
 };
 
 pub(crate) use crate::core::runtime::PX_VERSION;

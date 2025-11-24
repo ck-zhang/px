@@ -504,7 +504,7 @@ pub(crate) struct RuntimeMetadata {
     pub(crate) platform: String,
 }
 
-fn prepare_project_runtime(
+pub(crate) fn prepare_project_runtime(
     snapshot: &ManifestSnapshot,
 ) -> Result<runtime_manager::RuntimeSelection> {
     if let Ok(explicit) = env::var("PX_RUNTIME_PYTHON") {
@@ -1092,7 +1092,7 @@ impl PythonContext {
         let runtime = prepare_project_runtime(&snapshot)?;
         let sync_report = ensure_environment_with_guard(ctx, &snapshot, guard)?;
         let python = runtime.record.path.clone();
-        let (pythonpath, allowed_paths) = build_pythonpath(ctx.fs(), &project_root)?;
+        let (pythonpath, allowed_paths) = build_pythonpath(ctx.fs(), &project_root, None)?;
         Ok((
             Self {
                 project_root,
@@ -1126,6 +1126,7 @@ impl PythonContext {
 pub(crate) fn build_pythonpath(
     fs: &dyn effects::FileSystem,
     project_root: &Path,
+    site_override: Option<PathBuf>,
 ) -> Result<(String, Vec<PathBuf>)> {
     let mut paths = Vec::new();
     let src = project_root.join("src");
@@ -1134,7 +1135,9 @@ pub(crate) fn build_pythonpath(
     }
     paths.push(project_root.to_path_buf());
 
-    if let Some(site_dir) = resolve_project_site(fs, project_root)? {
+    if let Some(site_dir) =
+        site_override.or_else(|| resolve_project_site(fs, project_root).ok().flatten())
+    {
         let canonical = fs.canonicalize(&site_dir).unwrap_or(site_dir.clone());
         paths.push(canonical.clone());
         let pth = canonical.join("px.pth");

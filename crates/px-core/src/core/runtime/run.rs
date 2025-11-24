@@ -8,6 +8,7 @@ use crate::run_plan::{
     plan_run_target, PassthroughReason, PassthroughTarget, ResolvedEntry, RunTargetPlan,
 };
 use crate::tooling::{missing_pyproject_outcome, run_target_required_outcome};
+use crate::workspace::prepare_workspace_run_context;
 use crate::{
     attach_autosync_details, is_missing_project_error, manifest_snapshot, missing_project_outcome,
     outcome_from_output, python_context_with_mode, state_guard::guard_for_execution,
@@ -46,6 +47,42 @@ pub fn run_project(ctx: &CommandContext, request: &RunRequest) -> Result<Executi
 
 fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<ExecutionOutcome> {
     let strict = request.frozen || ctx.env_flag_enabled("CI");
+
+    if let Some(ws_ctx) = match prepare_workspace_run_context(ctx, strict) {
+        Ok(result) => result,
+        Err(outcome) => return Ok(outcome),
+    } {
+        let target = request
+            .entry
+            .clone()
+            .or_else(|| request.target.clone())
+            .unwrap_or_default();
+        if target.trim().is_empty() {
+            return Ok(run_target_required_outcome());
+        }
+        let command_args = json!({
+            "target": &target,
+            "args": &request.args,
+        });
+        let plan = plan_run_target(&ws_ctx.py_ctx, &ws_ctx.manifest_path, &target)?;
+        let mut outcome = match plan {
+            RunTargetPlan::PxScript(resolved) => {
+                run_module_entry(ctx, &ws_ctx.py_ctx, resolved, &request.args, &command_args)?
+            }
+            RunTargetPlan::Script(path) => {
+                run_project_script(ctx, &ws_ctx.py_ctx, &path, &request.args, &command_args)?
+            }
+            RunTargetPlan::Passthrough(target) => {
+                run_passthrough(ctx, &ws_ctx.py_ctx, target, &request.args, &command_args)?
+            }
+            RunTargetPlan::Executable(program) => {
+                run_executable(ctx, &ws_ctx.py_ctx, &program, &request.args, &command_args)?
+            }
+        };
+        attach_autosync_details(&mut outcome, ws_ctx.sync_report);
+        return Ok(outcome);
+    }
+
     let snapshot = match manifest_snapshot() {
         Ok(snapshot) => snapshot,
         Err(err) => {
@@ -164,6 +201,47 @@ fn run_executable(
 
 fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<ExecutionOutcome> {
     let strict = request.frozen || ctx.env_flag_enabled("CI");
+
+    if let Some(ws_ctx) = match prepare_workspace_run_context(ctx, strict) {
+        Ok(result) => result,
+        Err(outcome) => return Ok(outcome),
+    } {
+        let command_args = json!({ "pytest_args": request.pytest_args });
+        let mut envs = ws_ctx.py_ctx.base_env(&command_args)?;
+        envs.push(("PX_TEST_RUNNER".into(), "pytest".into()));
+
+        if ctx.config().test.fallback_builtin {
+            let mut outcome = run_builtin_tests("test", ctx, &ws_ctx.py_ctx, envs)?;
+            attach_autosync_details(&mut outcome, ws_ctx.sync_report);
+            return Ok(outcome);
+        }
+
+        let mut pytest_cmd = vec!["-m".to_string(), "pytest".to_string(), "tests".to_string()];
+        pytest_cmd.extend(request.pytest_args.iter().cloned());
+
+        let output = ctx.python_runtime().run_command(
+            &ws_ctx.py_ctx.python,
+            &pytest_cmd,
+            &envs,
+            &ws_ctx.py_ctx.project_root,
+        )?;
+        if output.code == 0 {
+            let mut outcome = outcome_from_output("test", "pytest", &output, "px test", None);
+            attach_autosync_details(&mut outcome, ws_ctx.sync_report);
+            return Ok(outcome);
+        }
+
+        if missing_pytest(&output.stderr) {
+            let mut outcome = run_builtin_tests("test", ctx, &ws_ctx.py_ctx, envs)?;
+            attach_autosync_details(&mut outcome, ws_ctx.sync_report);
+            return Ok(outcome);
+        }
+
+        let mut outcome = outcome_from_output("test", "pytest", &output, "px test", None);
+        attach_autosync_details(&mut outcome, ws_ctx.sync_report);
+        return Ok(outcome);
+    }
+
     let snapshot = match manifest_snapshot() {
         Ok(snapshot) => snapshot,
         Err(err) => {

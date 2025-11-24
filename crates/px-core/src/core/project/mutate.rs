@@ -18,6 +18,11 @@ use crate::{
 };
 use px_domain::ManifestEditor;
 
+use crate::workspace::WorkspaceScope;
+use crate::workspace::{
+    discover_workspace_scope, workspace_add, workspace_remove, workspace_update,
+};
+
 use super::{ensure_mutation_allowed, evaluate_project_state};
 
 #[derive(Clone, Debug)]
@@ -55,6 +60,12 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
             "provide at least one dependency",
             json!({ "hint": "run `px add name==version`" }),
         ));
+    }
+
+    if let Some(scope) = discover_workspace_scope()? {
+        if let WorkspaceScope::Member { .. } = scope {
+            return workspace_add(ctx, request, scope);
+        }
     }
 
     let snapshot = manifest_snapshot()?;
@@ -152,6 +163,12 @@ pub fn project_remove(
         ));
     }
 
+    if let Some(scope) = discover_workspace_scope()? {
+        if let WorkspaceScope::Member { .. } = scope {
+            return workspace_remove(ctx, request, scope);
+        }
+    }
+
     let snapshot = manifest_snapshot()?;
     let state_report = evaluate_project_state(ctx, &snapshot)?;
     if let Err(outcome) = ensure_mutation_allowed(&snapshot, &state_report, MutationCommand::Remove)
@@ -239,6 +256,12 @@ pub fn project_update(
     ctx: &CommandContext,
     request: &ProjectUpdateRequest,
 ) -> Result<ExecutionOutcome> {
+    if let Some(scope) = discover_workspace_scope()? {
+        if let WorkspaceScope::Member { .. } = scope {
+            return workspace_update(ctx, request, scope);
+        }
+    }
+
     let snapshot = manifest_snapshot()?;
     let state_report = evaluate_project_state(ctx, &snapshot)?;
     if let Err(outcome) = ensure_mutation_allowed(&snapshot, &state_report, MutationCommand::Update)

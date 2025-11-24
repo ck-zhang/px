@@ -71,7 +71,7 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
         script_name = Some(metadata.name.clone());
     }
     let script_target = script_name.as_deref();
-    let (pythonpath, allowed_paths) = build_pythonpath(ctx.fs(), &tool_root)?;
+    let (pythonpath, allowed_paths) = build_pythonpath(ctx.fs(), &tool_root, None)?;
     let mut args = if let Some(script) = script_target {
         match metadata.console_scripts.get(script) {
             Some(entrypoint) => vec!["-c".to_string(), console_entry_invoke(script, entrypoint)?],

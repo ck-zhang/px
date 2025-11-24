@@ -238,7 +238,7 @@ fn prepare_tool_run(
         };
     }
 
-    let (pythonpath, mut allowed_paths) = build_pythonpath(env.ctx.fs(), &descriptor.root)
+    let (pythonpath, mut allowed_paths) = build_pythonpath(env.ctx.fs(), &descriptor.root, None)
         .map_err(|err| {
             ExecutionOutcome::failure(
                 "failed to prepare formatter environment variables",

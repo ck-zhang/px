@@ -39,7 +39,10 @@ fn fmt_bypasses_project_lock_env_gating() {
         .success();
 
     let payload = parse_json(&assert);
-    assert_eq!(payload["status"], "ok", "fmt should succeed without px.lock");
+    assert_eq!(
+        payload["status"], "ok",
+        "fmt should succeed without px.lock"
+    );
 }
 
 #[test]

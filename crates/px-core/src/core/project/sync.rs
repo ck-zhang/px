@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 
 use anyhow::Result;
 
+use crate::workspace::{discover_workspace_scope, workspace_sync, WorkspaceSyncRequest};
 use crate::{
     install_snapshot, manifest_snapshot, refresh_project_site, resolve_dependencies_with_effects,
     CommandContext, ExecutionOutcome, InstallState, InstallUserError,
@@ -25,6 +26,18 @@ pub fn project_sync(
     ctx: &CommandContext,
     request: &ProjectSyncRequest,
 ) -> Result<ExecutionOutcome> {
+    if let Some(scope) = discover_workspace_scope()? {
+        return workspace_sync(
+            ctx,
+            scope,
+            &WorkspaceSyncRequest {
+                frozen: request.frozen,
+                dry_run: request.dry_run,
+                force_resolve: false,
+            },
+        );
+    }
+
     if request.dry_run {
         return project_sync_dry_run(ctx, request.frozen);
     }

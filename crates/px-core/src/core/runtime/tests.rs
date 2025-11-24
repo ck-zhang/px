@@ -165,6 +165,7 @@ fn materialize_project_site_writes_cached_paths() {
             source: None,
         }],
         graph: None,
+        workspace: None,
     };
 
     let effects = SystemEffects::new();
@@ -228,6 +229,7 @@ fn materialize_project_site_skips_missing_artifacts() {
             source: None,
         }],
         graph: None,
+        workspace: None,
     };
 
     let effects = SystemEffects::new();
