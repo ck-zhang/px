@@ -1,6 +1,6 @@
 use std::env;
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -273,7 +273,8 @@ impl InitRollback {
         pyproject_preexisting: bool,
         lock_preexisting: bool,
     ) -> Self {
-        let mut created_paths: Vec<PathBuf> = created.iter().map(|entry| root.join(entry)).collect();
+        let mut created_paths: Vec<PathBuf> =
+            created.iter().map(|entry| root.join(entry)).collect();
         created_paths.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
         Self {
             created: created_paths,

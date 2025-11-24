@@ -48,6 +48,9 @@ pub fn project_status(ctx: &CommandContext) -> Result<ExecutionOutcome> {
     if let Some(id) = state_report.lock_id.clone() {
         details["lock_id"] = Value::String(id);
     }
+    if let Some(lock_issue) = state_report.lock_issue.clone() {
+        details["lock_issue"] = json!(lock_issue);
+    }
     if let Some(issue) = state_report.env_issue.clone() {
         details["environment_issue"] = issue;
     }
@@ -136,7 +139,7 @@ fn collect_environment_status(
             "hint": "Run `px sync` to build the px environment.",
         }));
     };
-    let lock_hash = match lock.lock_id.clone() {
+    let lock_id = match lock.lock_id.clone() {
         Some(value) => value,
         None => compute_lock_hash(&snapshot.lock_path)?,
     };
@@ -149,7 +152,7 @@ fn collect_environment_status(
             "platform": env.platform,
         },
     });
-    match ensure_env_matches_lock(ctx, snapshot, &lock_hash) {
+    match ensure_env_matches_lock(ctx, snapshot, &lock_id) {
         Ok(()) => Ok(details),
         Err(err) => match err.downcast::<InstallUserError>() {
             Ok(user) => {

@@ -474,7 +474,10 @@ fn project_update_restores_manifest_on_failure() {
 
     let payload = parse_json(&assert);
     assert_eq!(payload["status"], "error");
-    let message = payload["message"].as_str().unwrap_or_default().to_ascii_lowercase();
+    let message = payload["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     assert!(
         message.contains("px update"),
         "expected px update failure message, got {message:?}"

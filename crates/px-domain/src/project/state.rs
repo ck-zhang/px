@@ -22,6 +22,28 @@ impl ProjectStateKind {
     }
 }
 
+#[must_use]
+pub fn canonical_state(
+    manifest_exists: bool,
+    lock_exists: bool,
+    manifest_clean: bool,
+    lock_issue: bool,
+    env_clean: bool,
+    deps_empty: bool,
+) -> ProjectStateKind {
+    if !manifest_exists {
+        ProjectStateKind::Uninitialized
+    } else if !lock_exists || !manifest_clean || lock_issue {
+        ProjectStateKind::NeedsLock
+    } else if !env_clean {
+        ProjectStateKind::NeedsEnv
+    } else if deps_empty {
+        ProjectStateKind::InitializedEmpty
+    } else {
+        ProjectStateKind::Consistent
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ProjectStateReport {
     pub manifest_exists: bool,
@@ -29,10 +51,12 @@ pub struct ProjectStateReport {
     pub env_exists: bool,
     pub manifest_clean: bool,
     pub env_clean: bool,
+    pub deps_empty: bool,
     pub canonical: ProjectStateKind,
     pub manifest_fingerprint: Option<String>,
     pub lock_fingerprint: Option<String>,
     pub lock_id: Option<String>,
+    pub lock_issue: Option<Vec<String>>,
     pub env_issue: Option<Value>,
 }
 
@@ -49,19 +73,17 @@ impl ProjectStateReport {
         manifest_fingerprint: Option<String>,
         lock_fingerprint: Option<String>,
         lock_id: Option<String>,
+        lock_issue: Option<Vec<String>>,
         env_issue: Option<Value>,
     ) -> Self {
-        let canonical = if !manifest_exists {
-            ProjectStateKind::Uninitialized
-        } else if !lock_exists || !manifest_clean {
-            ProjectStateKind::NeedsLock
-        } else if !env_clean {
-            ProjectStateKind::NeedsEnv
-        } else if deps_empty {
-            ProjectStateKind::InitializedEmpty
-        } else {
-            ProjectStateKind::Consistent
-        };
+        let canonical = canonical_state(
+            manifest_exists,
+            lock_exists,
+            manifest_clean,
+            lock_issue.is_some(),
+            env_clean,
+            deps_empty,
+        );
 
         Self {
             manifest_exists,
@@ -69,10 +91,12 @@ impl ProjectStateReport {
             env_exists,
             manifest_clean,
             env_clean,
+            deps_empty,
             canonical,
             manifest_fingerprint,
             lock_fingerprint,
             lock_id,
+            lock_issue,
             env_issue,
         }
     }
@@ -93,7 +117,69 @@ impl ProjectStateReport {
             "env_exists": self.env_exists,
             "manifest_clean": self.manifest_clean,
             "env_clean": self.env_clean,
+            "deps_empty": self.deps_empty,
+            "lock_issue": self.lock_issue.is_some(),
             "consistent": self.is_consistent(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lock_issue_forces_needs_lock() {
+        let report = ProjectStateReport::new(
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            Some("mf".into()),
+            Some("lf".into()),
+            Some("lid".into()),
+            Some(vec!["mode mismatch".into()]),
+            None,
+        );
+        assert_eq!(report.canonical, ProjectStateKind::NeedsLock);
+    }
+
+    #[test]
+    fn env_drift_marks_needs_env() {
+        let report = ProjectStateReport::new(
+            true,
+            true,
+            true,
+            true,
+            false,
+            false,
+            Some("mf".into()),
+            Some("lf".into()),
+            Some("lid".into()),
+            None,
+            None,
+        );
+        assert_eq!(report.canonical, ProjectStateKind::NeedsEnv);
+    }
+
+    #[test]
+    fn initialized_empty_is_consistent_variant() {
+        let report = ProjectStateReport::new(
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            Some("mf".into()),
+            Some("mf".into()),
+            Some("lid".into()),
+            None,
+            None,
+        );
+        assert_eq!(report.canonical, ProjectStateKind::InitializedEmpty);
+        assert!(report.is_consistent());
     }
 }

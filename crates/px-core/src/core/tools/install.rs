@@ -248,7 +248,7 @@ fn finalize_tool_environment(
             snapshot.name
         )
     })?;
-    let lock_hash = match lock.lock_id.clone() {
+    let lock_id = match lock.lock_id.clone() {
         Some(value) => value,
         None => compute_lock_hash(&snapshot.lock_path)?,
     };
@@ -256,7 +256,7 @@ fn finalize_tool_environment(
         "tool-{}-{}-{}",
         normalize_tool_name(&snapshot.name),
         runtime.record.version.replace('.', "_"),
-        &lock_hash[..lock_hash.len().min(12)]
+        &lock_id[..lock_id.len().min(12)]
     );
     let env_root = tools_env_store_root()?.join(&env_id);
     let site_path = env_root.join("site");

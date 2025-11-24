@@ -360,7 +360,9 @@ pub fn project_update(
             match resolve_dependencies_with_effects(ctx.effects(), &override_snapshot, true) {
                 Ok(resolved) => resolved,
                 Err(err) => match err.downcast::<InstallUserError>() {
-                    Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                    Ok(user) => {
+                        return Ok(ExecutionOutcome::user_error(user.message, user.details))
+                    }
                     Err(err) => {
                         return Ok(ExecutionOutcome::failure(
                             "px update failed",
@@ -381,7 +383,9 @@ pub fn project_update(
             match install_snapshot(ctx, &updated_snapshot, false, Some(&override_data)) {
                 Ok(result) => result,
                 Err(err) => match err.downcast::<InstallUserError>() {
-                    Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                    Ok(user) => {
+                        return Ok(ExecutionOutcome::user_error(user.message, user.details))
+                    }
                     Err(err) => {
                         return Ok(ExecutionOutcome::failure(
                             "px update failed",

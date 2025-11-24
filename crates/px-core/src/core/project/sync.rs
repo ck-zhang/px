@@ -9,6 +9,7 @@ use crate::{
 
 use super::evaluate_project_state;
 use crate::state_guard::StateViolation;
+use px_domain::ProjectStateKind;
 
 #[derive(Clone, Debug)]
 pub struct ProjectSyncRequest {
@@ -33,13 +34,17 @@ pub fn project_sync(
 fn project_sync_dry_run(ctx: &CommandContext, frozen: bool) -> Result<ExecutionOutcome> {
     let snapshot = manifest_snapshot()?;
     let state = evaluate_project_state(ctx, &snapshot)?;
+    let needs_lock = matches!(state.canonical, ProjectStateKind::NeedsLock);
+    let needs_env = matches!(state.canonical, ProjectStateKind::NeedsEnv);
 
     if frozen {
-        if !state.lock_exists || !state.manifest_clean {
-            if !state.lock_exists {
-                return Ok(StateViolation::MissingLock.into_outcome(&snapshot, "sync", &state));
-            }
-            return Ok(StateViolation::ManifestDrift.into_outcome(&snapshot, "sync", &state));
+        if !state.lock_exists || needs_lock {
+            let violation = if !state.lock_exists {
+                StateViolation::MissingLock
+            } else {
+                StateViolation::LockDrift
+            };
+            return Ok(violation.into_outcome(&snapshot, "sync", &state));
         }
         let message = if state.env_clean {
             "environment already in sync (dry-run)"
@@ -59,9 +64,9 @@ fn project_sync_dry_run(ctx: &CommandContext, frozen: bool) -> Result<ExecutionO
         ));
     }
 
-    let action = if !state.lock_exists || !state.manifest_clean {
+    let action = if !state.lock_exists || needs_lock {
         "resolve_lock"
-    } else if !state.env_clean {
+    } else if needs_env {
         "sync_env"
     } else {
         "noop"
@@ -100,13 +105,15 @@ fn project_sync_dry_run(ctx: &CommandContext, frozen: bool) -> Result<ExecutionO
 
 fn project_sync_outcome(ctx: &CommandContext, frozen: bool) -> Result<ExecutionOutcome> {
     let snapshot = manifest_snapshot()?;
+    let state = evaluate_project_state(ctx, &snapshot)?;
     if frozen {
-        let state = evaluate_project_state(ctx, &snapshot)?;
-        if !state.lock_exists || !state.manifest_clean {
-            if !state.lock_exists {
-                return Ok(StateViolation::MissingLock.into_outcome(&snapshot, "sync", &state));
-            }
-            return Ok(StateViolation::ManifestDrift.into_outcome(&snapshot, "sync", &state));
+        if !state.lock_exists || matches!(state.canonical, ProjectStateKind::NeedsLock) {
+            let violation = if !state.lock_exists {
+                StateViolation::MissingLock
+            } else {
+                StateViolation::LockDrift
+            };
+            return Ok(violation.into_outcome(&snapshot, "sync", &state));
         }
         refresh_project_site(&snapshot, ctx)?;
         return Ok(ExecutionOutcome::success(
@@ -132,7 +139,11 @@ fn project_sync_outcome(ctx: &CommandContext, frozen: bool) -> Result<ExecutionO
         "lockfile": outcome.lockfile,
         "project": snapshot.name,
         "python": snapshot.python_requirement,
+        "state": state.canonical.as_str(),
     });
+    if let Some(issue) = state.lock_issue.clone() {
+        details["lock_issue"] = json!(issue);
+    }
     // Sync is required to end in Consistent; reflect state in outcome.
     match outcome.state {
         InstallState::Installed => {

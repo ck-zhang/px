@@ -111,7 +111,7 @@ px may create/modify only:
 
     * `.px/envs/` – project envs (venv-like, but px-owned).
     * `.px/logs/` – logs.
-    * `.px/state.json` – metadata (current env ID, lock hash, runtime, etc.).
+    * `.px/state.json` – metadata (current env ID derived from lock_id + runtime, stored lock_id, runtime/platform fingerprints; validated and rewritten atomically).
 
 px **must not** create other top-level files or directories.
 
@@ -1031,7 +1031,7 @@ For a given project, define these booleans:
 
 Assuming all three parse cleanly, define:
 
-* `manifest_clean` := `lock_exists` and `L.mfingerprint == mfingerprint(M)`.
+* `manifest_clean` := `lock_exists` and `L.mfingerprint == mfingerprint(M)` **and** `detect_lock_drift` reports no drift (version/mode/project/python mismatches are NeedsLock even when fingerprints match).
 * `env_clean` := `env_exists` and `E.l_id == L.l_id`.
 
 Then the **core invariant**:
@@ -1047,6 +1047,8 @@ That’s the single boolean everything else should talk about.
 ### 10.4 Canonical project states
 
 You can classify a project into a small set of states:
+
+*Every* state report must carry the drift details that led to `NeedsLock` (e.g., `lock_issue: detect_lock_drift(...)`) so commands and diagnostics can surface the exact reason without recomputing.
 
 #### 10.4.1 `Uninitialized`
 
@@ -1274,6 +1276,7 @@ Treat `px run` and `px test` as **readers** over M/L with **optional env repair*
 * Does **not** read or modify L or E for decision-making.
 * Does **not** resolve or rebuild E, in dev or CI.
 * Runs only via tool envs (§6), which have their own isolated lifecycle.
+* If `px.lock` or the project env is missing/drifted, `px fmt` still runs (or fails only on tool issues); state gates must not block it.
 
 **End state**
 
@@ -1426,3 +1429,13 @@ Legend:
 | `px why`    | Any with `manifest_exists` | Any with `manifest_exists`           | No        | No        | No                  | Unchanged                       | Purely introspective.                                     |
 
 This table is a testing and implementation aid: if an implementation observes behavior outside these invariants (e.g. `px fmt` rebuilding E, `px run` updating L, or `px tool run` switching runtimes), that behavior is a spec violation.
+
+---
+
+## 11. Troubleshooting (error codes → required transitions)
+
+* `missing_lock` (`PX120`): run `px sync` (without `--frozen`) to create or refresh `px.lock`.
+* `lock_drift` (`PX120`): run `px sync` to realign `px.lock` with the manifest/runtime; frozen commands must refuse.
+* `missing_env` / `env_outdated` (`PX201`): run `px sync` to (re)build the project env; `--frozen` refuses to repair.
+* `runtime_mismatch`: run `px sync` after activating the desired Python, or pin `tool.px.python`.
+* `invalid_state`: delete or repair `.px/state.json` and retry; state is validated and rewritten atomically.

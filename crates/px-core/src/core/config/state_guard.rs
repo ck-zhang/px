@@ -5,13 +5,13 @@ use crate::{
     project::{evaluate_project_state, MutationCommand},
     ExecutionOutcome,
 };
-use px_domain::{ProjectSnapshot, ProjectStateReport};
+use px_domain::{ProjectSnapshot, ProjectStateKind, ProjectStateReport};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum StateViolation {
     MissingManifest,
     MissingLock,
-    ManifestDrift,
+    LockDrift,
     EnvDrift,
 }
 
@@ -22,6 +22,11 @@ impl StateViolation {
         command: &str,
         state_report: &ProjectStateReport,
     ) -> ExecutionOutcome {
+        let mut base = json!({
+            "pyproject": snapshot.manifest_path.display().to_string(),
+            "lockfile": snapshot.lock_path.display().to_string(),
+            "state": state_report.canonical.as_str(),
+        });
         match self {
             StateViolation::MissingManifest => missing_project_outcome(),
             StateViolation::MissingLock => {
@@ -30,50 +35,50 @@ impl StateViolation {
                 } else {
                     format!("Run `px sync` before `px {command}`.")
                 };
-                ExecutionOutcome::user_error(
-                    "px.lock not found",
-                    json!({
-                        "pyproject": snapshot.manifest_path.display().to_string(),
-                        "lockfile": snapshot.lock_path.display().to_string(),
-                        "hint": hint,
-                        "code": "PX120",
-                        "reason": "missing_lock",
-                    }),
-                )
+                base["hint"] = json!(hint);
+                base["code"] = json!("PX120");
+                base["reason"] = json!("missing_lock");
+                ExecutionOutcome::user_error("px.lock not found", base)
             }
-            StateViolation::ManifestDrift => {
-                let mut details = json!({
-                    "pyproject": snapshot.manifest_path.display().to_string(),
-                    "lockfile": snapshot.lock_path.display().to_string(),
-                    "hint": "Run `px sync` to update px.lock and the environment.",
-                    "code": "PX120",
-                    "reason": "lock_drift",
-                });
+            StateViolation::LockDrift => {
+                let mut details = base;
+                details["hint"] = json!("Run `px sync` to update px.lock and the environment.");
+                details["code"] = json!("PX120");
+                details["reason"] = json!("lock_drift");
                 if let Some(fp) = &state_report.lock_fingerprint {
                     details["lock_fingerprint"] = json!(fp);
                 }
                 if let Some(fp) = &state_report.manifest_fingerprint {
                     details["manifest_fingerprint"] = json!(fp);
                 }
-                ExecutionOutcome::user_error(
-                    "Project manifest has changed since px.lock was created",
-                    details,
-                )
+                if let Some(lock_id) = &state_report.lock_id {
+                    details["lock_id"] = json!(lock_id);
+                }
+                if let Some(issues) = &state_report.lock_issue {
+                    details["lock_issue"] = json!(issues);
+                }
+                let message = if !state_report.manifest_clean {
+                    "Project manifest has changed since px.lock was created"
+                } else {
+                    "px.lock is out of date for this project"
+                };
+                ExecutionOutcome::user_error(message, details)
             }
             StateViolation::EnvDrift => {
                 let mut reason = "env_outdated".to_string();
-                let mut details = json!({
-                    "lockfile": snapshot.lock_path.display().to_string(),
-                    "hint": format!(
-                        "Run `px sync` before `px {command}` (environment is out of sync)."
-                    ),
-                    "code": "PX201",
-                });
+                let mut details = base;
+                details["hint"] = json!(format!(
+                    "Run `px sync` before `px {command}` (environment is out of sync)."
+                ));
+                details["code"] = json!("PX201");
                 if let Some(issue) = &state_report.env_issue {
                     details["environment_issue"] = issue.clone();
                     if let Some(r) = issue.get("reason").and_then(serde_json::Value::as_str) {
                         reason = r.to_string();
                     }
+                }
+                if let Some(lock_id) = &state_report.lock_id {
+                    details["lock_id"] = json!(lock_id);
                 }
                 details["reason"] = json!(reason);
                 let message = if reason == "missing_env" {
@@ -97,12 +102,12 @@ pub(crate) fn guard_for_execution(
         return Err(StateViolation::MissingLock.into_outcome(snapshot, command, state_report));
     }
 
-    if !state_report.manifest_clean {
-        return Err(StateViolation::ManifestDrift.into_outcome(snapshot, command, state_report));
+    if matches!(state_report.canonical, ProjectStateKind::NeedsLock) {
+        return Err(StateViolation::LockDrift.into_outcome(snapshot, command, state_report));
     }
 
     if strict {
-        if !state_report.env_clean {
+        if matches!(state_report.canonical, ProjectStateKind::NeedsEnv) {
             return Err(StateViolation::EnvDrift.into_outcome(snapshot, command, state_report));
         }
         return Ok(crate::EnvGuard::Strict);
@@ -123,14 +128,13 @@ pub(crate) fn ensure_mutation_allowed(
     if !state_report.manifest_exists {
         return Err(missing_project_outcome());
     }
-    if matches!(command, MutationCommand::Update) && !state_report.lock_exists {
-        return Err(StateViolation::MissingLock.into_outcome(snapshot, "update", state_report));
-    }
-    if matches!(command, MutationCommand::Update)
-        && state_report.lock_exists
-        && !state_report.manifest_clean
-    {
-        return Err(StateViolation::ManifestDrift.into_outcome(snapshot, "update", state_report));
+    if matches!(command, MutationCommand::Update) {
+        if !state_report.lock_exists {
+            return Err(StateViolation::MissingLock.into_outcome(snapshot, "update", state_report));
+        }
+        if matches!(state_report.canonical, ProjectStateKind::NeedsLock) {
+            return Err(StateViolation::LockDrift.into_outcome(snapshot, "update", state_report));
+        }
     }
     Ok(())
 }
@@ -157,6 +161,7 @@ pub(crate) fn state_or_violation(
 mod tests {
     use super::*;
     use crate::CommandStatus;
+    use px_domain::ProjectStateKind;
 
     fn dummy_snapshot() -> ProjectSnapshot {
         ProjectSnapshot {
@@ -188,6 +193,7 @@ mod tests {
             Some("mf".into()),
             Some("lf".into()),
             Some("lid".into()),
+            None,
             None,
         )
     }
@@ -227,5 +233,34 @@ mod tests {
         let rpt = report(true, true, true, true, true);
         ensure_mutation_allowed(&snap, &rpt, MutationCommand::Update)
             .expect("update allowed when manifest/lock clean");
+    }
+
+    #[test]
+    fn guard_allows_autosync_for_needs_env_in_dev() {
+        let snap = dummy_snapshot();
+        let rpt = report(true, true, true, true, false);
+        let guard = guard_for_execution(false, &snap, &rpt, "run").expect("auto-sync allowed");
+        assert!(matches!(guard, crate::EnvGuard::AutoSync));
+    }
+
+    #[test]
+    fn guard_rejects_lock_issue_even_when_clean() {
+        let snap = dummy_snapshot();
+        let rpt = ProjectStateReport::new(
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            Some("mf".into()),
+            Some("mf".into()),
+            Some("lid".into()),
+            Some(vec!["mode mismatch".into()]),
+            None,
+        );
+        assert_eq!(rpt.canonical, ProjectStateKind::NeedsLock);
+        let outcome = guard_for_execution(false, &snap, &rpt, "run").unwrap_err();
+        assert_eq!(outcome.status, CommandStatus::UserError);
     }
 }
