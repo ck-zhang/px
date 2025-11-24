@@ -1,6 +1,9 @@
 pub mod config;
 pub mod distribution;
+pub mod migration;
+pub mod project;
 pub mod python;
 pub mod runtime;
 pub mod store;
+pub mod tools;
 pub mod tooling;

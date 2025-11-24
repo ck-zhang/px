@@ -8,9 +8,8 @@ pub(crate) use crate::core::config;
 pub(crate) use crate::core::config::{context, state_guard};
 pub(crate) use crate::core::python::{python_build, python_sys};
 pub(crate) use crate::core::runtime::*;
-pub(crate) use crate::core::runtime::{
-    effects, fmt_plan, process, run_plan, runtime_manager, traceback,
-};
+pub(crate) use crate::core::runtime::{effects, fmt_plan, process, run_plan, runtime_manager, traceback};
+pub(crate) use crate::core::{project, tools};
 pub(crate) use crate::core::store;
 pub(crate) use crate::core::store::pypi;
 pub(crate) use crate::core::tooling;
@@ -32,16 +31,16 @@ pub use crate::core::python::python_cli::{
     PythonListRequest, PythonUseRequest,
 };
 pub use crate::core::runtime::fmt_runner::{run_fmt, FmtRequest};
-pub use crate::core::runtime::migration::{
+pub use crate::core::migration::{
     migrate, AutopinPreference, LockBehavior, MigrateRequest, MigrationMode, WorkspacePolicy,
 };
-pub use crate::core::runtime::project::{
+pub use crate::core::project::{
     project_add, project_init, project_remove, project_status, project_sync, project_update,
     project_why, ProjectAddRequest, ProjectInitRequest, ProjectRemoveRequest, ProjectSyncRequest,
     ProjectUpdateRequest, ProjectWhyRequest,
 };
 pub use crate::core::runtime::run::{run_project, test_project, RunRequest, TestRequest};
-pub use crate::core::runtime::tools::{
+pub use crate::core::tools::{
     tool_install, tool_list, tool_remove, tool_run, tool_upgrade, ToolInstallRequest,
     ToolListRequest, ToolRemoveRequest, ToolRunRequest, ToolUpgradeRequest,
 };
