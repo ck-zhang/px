@@ -129,6 +129,92 @@ mod tests {
     use super::*;
 
     #[test]
+    fn canonical_state_matrix() {
+        struct Case {
+            manifest_exists: bool,
+            lock_exists: bool,
+            manifest_clean: bool,
+            lock_issue: bool,
+            env_clean: bool,
+            deps_empty: bool,
+            expected: ProjectStateKind,
+        }
+
+        let cases = [
+            Case {
+                manifest_exists: false,
+                lock_exists: false,
+                manifest_clean: false,
+                lock_issue: false,
+                env_clean: false,
+                deps_empty: false,
+                expected: ProjectStateKind::Uninitialized,
+            },
+            Case {
+                manifest_exists: true,
+                lock_exists: false,
+                manifest_clean: false,
+                lock_issue: false,
+                env_clean: false,
+                deps_empty: false,
+                expected: ProjectStateKind::NeedsLock,
+            },
+            Case {
+                manifest_exists: true,
+                lock_exists: true,
+                manifest_clean: true,
+                lock_issue: true,
+                env_clean: true,
+                deps_empty: false,
+                expected: ProjectStateKind::NeedsLock,
+            },
+            Case {
+                manifest_exists: true,
+                lock_exists: true,
+                manifest_clean: true,
+                lock_issue: false,
+                env_clean: false,
+                deps_empty: false,
+                expected: ProjectStateKind::NeedsEnv,
+            },
+            Case {
+                manifest_exists: true,
+                lock_exists: true,
+                manifest_clean: true,
+                lock_issue: false,
+                env_clean: true,
+                deps_empty: true,
+                expected: ProjectStateKind::InitializedEmpty,
+            },
+            Case {
+                manifest_exists: true,
+                lock_exists: true,
+                manifest_clean: true,
+                lock_issue: false,
+                env_clean: true,
+                deps_empty: false,
+                expected: ProjectStateKind::Consistent,
+            },
+        ];
+
+        for case in cases {
+            let actual = canonical_state(
+                case.manifest_exists,
+                case.lock_exists,
+                case.manifest_clean,
+                case.lock_issue,
+                case.env_clean,
+                case.deps_empty,
+            );
+            assert_eq!(
+                actual, case.expected,
+                "unexpected state for manifest_exists={}, lock_exists={}, manifest_clean={}, lock_issue={}, env_clean={}, deps_empty={}",
+                case.manifest_exists, case.lock_exists, case.manifest_clean, case.lock_issue, case.env_clean, case.deps_empty
+            );
+        }
+    }
+
+    #[test]
     fn lock_issue_forces_needs_lock() {
         let report = ProjectStateReport::new(
             true,

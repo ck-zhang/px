@@ -244,6 +244,39 @@ mod tests {
     }
 
     #[test]
+    fn guard_requires_env_in_frozen_mode() {
+        let snap = dummy_snapshot();
+        let rpt = report(true, true, true, true, false);
+        let outcome = guard_for_execution(true, &snap, &rpt, "test").unwrap_err();
+        assert_eq!(outcome.status, CommandStatus::UserError);
+        let guard = guard_for_execution(false, &snap, &rpt, "test").expect("dev accepts autosync");
+        assert!(matches!(guard, crate::EnvGuard::AutoSync));
+    }
+
+    #[test]
+    fn guard_rejects_needs_lock_for_run_and_test() {
+        let snap = dummy_snapshot();
+        let rpt = ProjectStateReport::new(
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            Some("mf".into()),
+            Some("mf".into()),
+            Some("lid".into()),
+            Some(vec!["mode mismatch".into()]),
+            None,
+        );
+        assert_eq!(rpt.canonical, ProjectStateKind::NeedsLock);
+        let run_outcome = guard_for_execution(false, &snap, &rpt, "run").unwrap_err();
+        assert_eq!(run_outcome.status, CommandStatus::UserError);
+        let test_outcome = guard_for_execution(true, &snap, &rpt, "test").unwrap_err();
+        assert_eq!(test_outcome.status, CommandStatus::UserError);
+    }
+
+    #[test]
     fn guard_rejects_lock_issue_even_when_clean() {
         let snap = dummy_snapshot();
         let rpt = ProjectStateReport::new(
