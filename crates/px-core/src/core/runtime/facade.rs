@@ -160,7 +160,7 @@ pub(crate) enum InstallState {
     MissingLock,
 }
 
-pub(crate) fn lock_is_fresh(snapshot: &ManifestSnapshot) -> Result<bool> {
+pub fn lock_is_fresh(snapshot: &ManifestSnapshot) -> Result<bool> {
     let marker_env = marker_env_for_snapshot(snapshot);
     match load_lockfile_optional(&snapshot.lock_path)? {
         Some(lock) => {
@@ -195,7 +195,7 @@ fn runtime_marker_environment(snapshot: &ManifestSnapshot) -> Result<MarkerEnvir
     resolver_env.to_marker_environment()
 }
 
-pub(crate) fn marker_env_for_snapshot(snapshot: &ManifestSnapshot) -> Option<MarkerEnvironment> {
+pub fn marker_env_for_snapshot(snapshot: &ManifestSnapshot) -> Option<MarkerEnvironment> {
     runtime_marker_environment(snapshot).ok().or_else(|| {
         detect_interpreter()
             .ok()
@@ -325,7 +325,7 @@ pub(crate) fn refresh_project_site(
     persist_project_state(ctx.fs(), &snapshot.root, env_state)
 }
 
-fn materialize_project_site(
+pub fn materialize_project_site(
     site_dir: &Path,
     lock: &LockSnapshot,
     fs: &dyn effects::FileSystem,
@@ -797,7 +797,7 @@ fn ensure_exact_pins(marker_env: &MarkerEnvironment, specs: &[String]) -> Result
     Ok(pins)
 }
 
-fn parse_exact_pin(spec: &str) -> Result<PinSpec> {
+pub fn parse_exact_pin(spec: &str) -> Result<PinSpec> {
     let trimmed_raw = spec.trim();
     let trimmed = strip_wrapping_quotes(trimmed_raw);
     if trimmed.is_empty() {
@@ -1104,16 +1104,16 @@ pub(crate) fn fetch_release(
 }
 
 #[derive(Clone, Debug)]
-struct WheelCandidate {
-    filename: String,
-    url: String,
-    sha256: String,
-    python_tag: String,
-    abi_tag: String,
-    platform_tag: String,
+pub struct WheelCandidate {
+    pub filename: String,
+    pub url: String,
+    pub sha256: String,
+    pub python_tag: String,
+    pub abi_tag: String,
+    pub platform_tag: String,
 }
 
-fn select_wheel(
+pub fn select_wheel(
     files: &[PypiFile],
     tags: &InterpreterTags,
     specifier: &str,
@@ -1770,7 +1770,7 @@ pub(crate) fn ensure_project_environment_synced(
     ensure_env_matches_lock(ctx, snapshot, &lock_hash)
 }
 
-pub(crate) fn ensure_env_matches_lock(
+pub fn ensure_env_matches_lock(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
     lock_hash: &str,

@@ -1,13 +1,17 @@
 use super::*;
-use crate::config::EnvSnapshot;
-use crate::pypi::{PypiDigests, PypiFile};
-use crate::python_sys::{current_marker_environment, InterpreterSupportedTag};
-use crate::run_plan::python_script_target;
-use px_domain::lockfile::LockedDependency;
+use crate::Config;
+use crate::SystemEffects;
+use crate::core::runtime::effects::Effects;
+use crate::core::runtime::run_plan::python_script_target;
+use crate::core::runtime::facade::{materialize_project_site, parse_exact_pin, select_wheel};
+use crate::core::python::python_sys::{current_marker_environment, InterpreterSupportedTag, InterpreterTags};
+use crate::core::config::settings::EnvSnapshot;
+use crate::core::store::pypi::{PypiDigests, PypiFile};
+use px_domain::marker_applies;
+use px_domain::lockfile::{LockSnapshot, LockedArtifact, LockedDependency};
+use std::fs;
 use std::path::PathBuf;
 use tempfile::tempdir;
-
-use crate::SystemEffects;
 
 #[test]
 fn config_respects_env_flags() {
