@@ -1,3 +1,5 @@
+> Legacy: this is the original monolithic spec. Current, modular docs live under `docs/index.md`.
+
 # px Spec (Authoritative, state-machine focused)
 
 ---
