@@ -2790,6 +2790,7 @@ dependencies = [
  "time",
  "tokio",
  "toml_edit 0.22.27",
+ "tracing",
  "url",
  "uv-cache",
  "uv-client",

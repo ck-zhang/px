@@ -427,6 +427,11 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         let resolver = move |snap: &ManifestSnapshot, specs: &[String]| -> Result<Vec<PinSpec>> {
             let mut override_snapshot = snap.clone();
             override_snapshot.dependencies = specs.to_vec();
+            override_snapshot.dependency_groups.clear();
+            override_snapshot.declared_dependency_groups.clear();
+            override_snapshot.dependency_group_source = px_domain::DependencyGroupSource::None;
+            override_snapshot.group_dependencies.clear();
+            override_snapshot.requirements = override_snapshot.dependencies.clone();
             let resolved =
                 resolve_dependencies_with_effects(effects.as_ref(), &override_snapshot, false)?;
             Ok(resolved.pins)

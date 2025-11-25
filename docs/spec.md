@@ -303,6 +303,13 @@ For a fixed px version, runtime set, platform, and index configuration, the foll
 
 The project state machine in §10 and the workspace state machine in §11 are the reference models tying all of this together.
 
+### 3.6 Dependency groups (canonical selection)
+
+* Active dependency groups are controlled by `[tool.px.dependencies].include-groups` (PEP 503–normalized names). This list is authoritative for resolution, locking, and env sync.
+* If `include-groups` is absent, px enables all declared groups: entries under `[dependency-groups]` and common dev-style optional deps (`dev`, `test`, `doc`, `px-dev`, etc.). `PX_GROUPS` can extend this set at runtime.
+* The selected groups are part of the manifest fingerprint and lock drift detection for both projects and workspaces, keeping state transitions deterministic.
+* `px migrate --apply` writes `include-groups` covering all declared groups so migrated projects get dev/test/doc dependencies without extra setup.
+
 ---
 
 ## 4. Command surface

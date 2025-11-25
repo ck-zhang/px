@@ -9,8 +9,8 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 
 use super::init::sanitize_package_candidate;
 use super::manifest::{
-    merge_dependency_specs, merge_dev_dependency_specs, normalize_onboard_path, relative_path,
-    OnboardPackagePlan,
+    ensure_dependency_group_config, merge_dependency_specs, merge_dev_dependency_specs,
+    normalize_onboard_path, relative_path, OnboardPackagePlan,
 };
 use super::snapshot::ensure_pyproject_exists;
 
@@ -164,6 +164,7 @@ pub fn prepare_pyproject_plan(
     let mut changed = false;
     changed |= merge_dependency_specs(&mut doc, &prod_specs);
     changed |= merge_dev_dependency_specs(&mut doc, &dev_specs);
+    changed |= ensure_dependency_group_config(&mut doc);
 
     if changed || created {
         Ok(PyprojectPlan {

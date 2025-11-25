@@ -1,13 +1,17 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use anyhow::{bail, Result};
-use pep508_rs::MarkerEnvironment;
+use pep440_rs::{Version, VersionSpecifiers};
+use pep508_rs::{MarkerEnvironment, VersionOrUrl};
 use serde_json::Value;
 
 use crate::project::snapshot::ProjectSnapshot;
 
-use super::spec::{compute_file_sha256, dependency_name, spec_map, version_from_specifier};
+use super::spec::{
+    compute_file_sha256, dependency_name, spec_map, strip_wrapping_quotes, version_from_specifier,
+};
 use super::types::{
     LockPrefetchSpec, LockSnapshot, LockedArtifact, ResolvedDependency, LOCK_MODE_PINNED,
     LOCK_VERSION,
@@ -83,7 +87,7 @@ pub fn analyze_lock_diff(
     marker_env: Option<&MarkerEnvironment>,
 ) -> LockDiffReport {
     let mut report = LockDiffReport::default();
-    let manifest_map = spec_map(&snapshot.dependencies, marker_env);
+    let manifest_map = spec_map(&snapshot.requirements, marker_env);
     let direct_specs: Vec<String> = lock
         .resolved
         .iter()
@@ -91,12 +95,12 @@ pub fn analyze_lock_diff(
         .filter(|(entry, _)| entry.direct)
         .map(|(_, spec)| spec.clone())
         .collect();
-    let lock_map = spec_map(&direct_specs, None);
+    let lock_map = spec_map(&direct_specs, marker_env);
 
     for (name, spec) in &manifest_map {
         match lock_map.get(name) {
             Some(lock_spec) => {
-                if *lock_spec != *spec {
+                if *lock_spec != *spec && !spec_satisfied(spec, lock_spec, marker_env) {
                     report.changed.push(ChangedEntry {
                         name: name.clone(),
                         from: (*lock_spec).clone(),
@@ -171,6 +175,45 @@ pub fn analyze_lock_diff(
     }
 
     report
+}
+
+fn spec_satisfied(
+    manifest_spec: &str,
+    lock_spec: &str,
+    marker_env: Option<&MarkerEnvironment>,
+) -> bool {
+    let manifest_req = pep508_rs::Requirement::from_str(strip_wrapping_quotes(manifest_spec));
+    let lock_req = pep508_rs::Requirement::from_str(strip_wrapping_quotes(lock_spec));
+    let (Ok(manifest), Ok(lock)) = (manifest_req, lock_req) else {
+        return false;
+    };
+    if !manifest
+        .name
+        .as_ref()
+        .eq_ignore_ascii_case(lock.name.as_ref())
+    {
+        return false;
+    }
+    if let Some(env) = marker_env {
+        if !manifest.evaluate_markers(env, &[]) {
+            return true;
+        }
+    }
+    let Some(VersionOrUrl::VersionSpecifier(specifiers)) = manifest.version_or_url.as_ref() else {
+        return true;
+    };
+    let Ok(specs) = VersionSpecifiers::from_str(&specifiers.to_string()) else {
+        return false;
+    };
+    let Some(lock_version) = super::spec::version_from_specifier(lock_spec)
+        .and_then(|value| value.split(';').next().map(str::trim))
+    else {
+        return false;
+    };
+    let Ok(version) = Version::from_str(lock_version) else {
+        return false;
+    };
+    specs.contains(&version)
 }
 
 pub fn detect_lock_drift(
@@ -407,5 +450,51 @@ impl LockDiffReport {
             ));
         }
         messages
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lockfile::types::{LockSnapshot, LOCK_MODE_PINNED, LOCK_VERSION};
+    use crate::{DependencyGroupSource, ProjectSnapshot};
+
+    #[test]
+    fn drift_detects_missing_dependency_group_entries() {
+        let snapshot = ProjectSnapshot {
+            root: PathBuf::from("/proj"),
+            manifest_path: PathBuf::from("/proj/pyproject.toml"),
+            lock_path: PathBuf::from("/proj/px.lock"),
+            name: "demo".into(),
+            python_requirement: ">=3.11".into(),
+            dependencies: Vec::new(),
+            dependency_groups: vec!["dev".to_string()],
+            declared_dependency_groups: vec!["dev".to_string()],
+            dependency_group_source: DependencyGroupSource::DeclaredDefault,
+            group_dependencies: vec!["pytest==8.3.3".to_string()],
+            requirements: vec!["pytest==8.3.3".to_string()],
+            python_override: None,
+            manifest_fingerprint: "mf".into(),
+        };
+        let lock = LockSnapshot {
+            version: LOCK_VERSION,
+            project_name: Some("demo".into()),
+            python_requirement: Some(">=3.11".into()),
+            manifest_fingerprint: Some("mf".into()),
+            lock_id: Some("lock-demo".into()),
+            dependencies: Vec::new(),
+            mode: Some(LOCK_MODE_PINNED.into()),
+            resolved: Vec::new(),
+            graph: None,
+            workspace: None,
+        };
+
+        let drift = detect_lock_drift(&snapshot, &lock, None);
+        assert!(
+            drift
+                .iter()
+                .any(|entry| entry.contains("pytest") || entry.contains("added")),
+            "dependency group entries should participate in lock drift detection"
+        );
     }
 }

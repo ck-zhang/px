@@ -6,7 +6,10 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use toml_edit::{DocumentMut, Item};
 
-use super::manifest::{manifest_fingerprint, project_table, read_dependencies_from_doc};
+use super::manifest::{
+    manifest_fingerprint, project_table, read_dependencies_from_doc, resolve_dependency_groups,
+    select_dependency_groups, DependencyGroupSource,
+};
 
 #[derive(Clone, Debug)]
 pub struct ProjectSnapshot {
@@ -16,6 +19,11 @@ pub struct ProjectSnapshot {
     pub name: String,
     pub python_requirement: String,
     pub dependencies: Vec<String>,
+    pub dependency_groups: Vec<String>,
+    pub declared_dependency_groups: Vec<String>,
+    pub dependency_group_source: DependencyGroupSource,
+    pub group_dependencies: Vec<String>,
+    pub requirements: Vec<String>,
     pub python_override: Option<String>,
     pub manifest_fingerprint: String,
 }
@@ -45,6 +53,13 @@ impl ProjectSnapshot {
             .and_then(|item| item.as_str())
             .map_or_else(|| ">=3.11".to_string(), std::string::ToString::to_string);
         let dependencies = read_dependencies_from_doc(&doc);
+        let selection = select_dependency_groups(&doc);
+        let dependency_groups = selection.active.clone();
+        let declared_dependency_groups = selection.declared.clone();
+        let group_dependencies = resolve_dependency_groups(&doc, &dependency_groups)?;
+        let mut requirements = dependencies.clone();
+        requirements.extend(group_dependencies.clone());
+        super::manifest::sort_and_dedupe(&mut requirements);
         let python_override = doc
             .get("tool")
             .and_then(Item::as_table)
@@ -53,7 +68,7 @@ impl ProjectSnapshot {
             .and_then(|px| px.get("python"))
             .and_then(Item::as_str)
             .map(std::string::ToString::to_string);
-        let manifest_fingerprint = manifest_fingerprint(&doc)?;
+        let manifest_fingerprint = manifest_fingerprint(&doc, &requirements, &dependency_groups)?;
         Ok(Self {
             root: root.to_path_buf(),
             manifest_path,
@@ -61,6 +76,11 @@ impl ProjectSnapshot {
             name,
             python_requirement,
             dependencies,
+            dependency_groups,
+            declared_dependency_groups,
+            dependency_group_source: selection.source,
+            group_dependencies,
+            requirements,
             python_override,
             manifest_fingerprint,
         })
@@ -156,8 +176,127 @@ dependencies = ["requests==2.32.3"]
         assert_eq!(snapshot.name, "demo");
         assert_eq!(snapshot.python_requirement, ">=3.11");
         assert_eq!(snapshot.dependencies, vec!["requests==2.32.3".to_string()]);
+        assert!(snapshot.dependency_groups.is_empty());
+        assert!(snapshot.declared_dependency_groups.is_empty());
+        assert_eq!(
+            snapshot.dependency_group_source,
+            crate::project::manifest::DependencyGroupSource::None
+        );
+        assert!(snapshot.group_dependencies.is_empty());
+        assert_eq!(snapshot.requirements, snapshot.dependencies);
         assert_eq!(snapshot.manifest_path, pyproject);
         assert_eq!(snapshot.lock_path, root.join("px.lock"));
+        Ok(())
+    }
+
+    #[test]
+    fn dependency_groups_are_resolved_with_includes() -> Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path();
+        let pyproject = root.join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[dependency-groups]
+extra = ["click==8.1.7"]
+test = ["pytest>=7", {include-group = "extra"}]
+
+[tool.px]
+"#,
+        )?;
+
+        let snapshot = ProjectSnapshot::read_from(root)?;
+        assert_eq!(snapshot.dependency_groups, vec!["extra", "test"]);
+        assert_eq!(
+            snapshot.declared_dependency_groups,
+            vec!["extra".to_string(), "test".to_string()]
+        );
+        assert_eq!(
+            snapshot.dependency_group_source,
+            crate::project::manifest::DependencyGroupSource::DeclaredDefault
+        );
+        assert_eq!(
+            snapshot.group_dependencies,
+            vec!["click==8.1.7", "pytest>=7"]
+        );
+        assert_eq!(snapshot.requirements, vec!["click==8.1.7", "pytest>=7"]);
+        Ok(())
+    }
+
+    #[test]
+    fn optional_dependencies_with_dev_names_are_selected_by_default() -> Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path();
+        let pyproject = root.join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+doc = ["sphinx>=7"]
+
+[tool.px]
+"#,
+        )?;
+
+        let snapshot = ProjectSnapshot::read_from(root)?;
+        assert_eq!(snapshot.dependency_groups, vec!["doc", "test"]);
+        assert_eq!(
+            snapshot.declared_dependency_groups,
+            vec!["doc".to_string(), "test".to_string()]
+        );
+        assert_eq!(
+            snapshot.dependency_group_source,
+            crate::project::manifest::DependencyGroupSource::DeclaredDefault
+        );
+        assert_eq!(snapshot.group_dependencies, vec!["pytest>=7", "sphinx>=7"]);
+        assert_eq!(snapshot.requirements, vec!["pytest>=7", "sphinx>=7"]);
+        Ok(())
+    }
+
+    #[test]
+    fn include_groups_config_overrides_declared_defaults() -> Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path();
+        let pyproject = root.join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[dependency-groups]
+dev = ["ruff==0.6.8"]
+test = ["pytest==8.3.3"]
+
+[tool.px]
+
+[tool.px.dependencies]
+include-groups = ["test"]
+"#,
+        )?;
+
+        let snapshot = ProjectSnapshot::read_from(root)?;
+        assert_eq!(snapshot.dependency_groups, vec!["test"]);
+        assert_eq!(
+            snapshot.declared_dependency_groups,
+            vec!["dev".to_string(), "test".to_string()]
+        );
+        assert_eq!(
+            snapshot.dependency_group_source,
+            crate::project::manifest::DependencyGroupSource::IncludeConfig
+        );
+        assert_eq!(snapshot.group_dependencies, vec!["pytest==8.3.3"]);
+        assert_eq!(snapshot.requirements, vec!["pytest==8.3.3"]);
         Ok(())
     }
 }

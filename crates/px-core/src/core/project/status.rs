@@ -41,6 +41,11 @@ pub fn project_status(ctx: &CommandContext) -> Result<ExecutionOutcome> {
             "name": snapshot.name.clone(),
             "python_requirement": snapshot.python_requirement.clone(),
         },
+        "dependency_groups": {
+            "active": snapshot.dependency_groups.clone(),
+            "declared": snapshot.declared_dependency_groups.clone(),
+            "source": snapshot.dependency_group_source.as_str(),
+        },
     });
     details["state"] = Value::String(state_report.canonical.as_str().to_string());
     details["flags"] = state_report.flags_json();

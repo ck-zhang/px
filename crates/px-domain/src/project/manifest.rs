@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -268,12 +268,8 @@ pub(crate) fn read_dependencies_from_doc(doc: &DocumentMut) -> Vec<String> {
 }
 
 pub(crate) fn read_optional_dependency_group(doc: &DocumentMut, group: &str) -> Vec<String> {
-    doc.get("project")
-        .and_then(Item::as_table)
-        .and_then(|project| project.get("optional-dependencies"))
-        .and_then(Item::as_table)
-        .and_then(|table| table.get(group))
-        .and_then(Item::as_array)
+    let normalized = normalize_dependency_group_name(group);
+    find_optional_dependency_group(doc, &normalized)
         .map(|array| {
             array
                 .iter()
@@ -333,8 +329,7 @@ pub(crate) fn upsert_dependency(deps: &mut Vec<String>, spec: &str) -> InsertOut
 
 pub(crate) fn sort_and_dedupe(specs: &mut Vec<String>) {
     specs.sort_by(|a, b| dependency_name(a).cmp(&dependency_name(b)).then(a.cmp(b)));
-    let mut seen = HashSet::new();
-    specs.retain(|spec| seen.insert(dependency_name(spec)));
+    specs.dedup();
 }
 
 pub(crate) fn dependency_name(spec: &str) -> String {
@@ -347,8 +342,11 @@ pub(crate) fn dependency_name(spec: &str) -> String {
         }
     }
     let head = &trimmed[..end];
-    let base = head.split('[').next().unwrap_or(head);
-    base.to_lowercase()
+    head.split('[')
+        .next()
+        .unwrap_or(head)
+        .to_ascii_lowercase()
+        .replace(['_', '.'], "-")
 }
 
 pub(crate) fn strip_wrapping_quotes(input: &str) -> &str {
@@ -386,15 +384,169 @@ pub(crate) fn project_identity(doc: &DocumentMut) -> Result<(String, String)> {
     Ok((name, python_requirement))
 }
 
-pub(crate) fn manifest_fingerprint(doc: &DocumentMut) -> Result<String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DependencyGroupSource {
+    IncludeConfig,
+    LegacyConfig,
+    DeclaredDefault,
+    None,
+}
+
+impl DependencyGroupSource {
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DependencyGroupSource::IncludeConfig => "include-groups",
+            DependencyGroupSource::LegacyConfig => "legacy",
+            DependencyGroupSource::DeclaredDefault => "declared",
+            DependencyGroupSource::None => "none",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DependencyGroupSelection {
+    pub active: Vec<String>,
+    pub declared: Vec<String>,
+    pub source: DependencyGroupSource,
+}
+
+fn normalize_dependency_group_name(name: &str) -> String {
+    dependency_name(name.trim())
+}
+
+fn normalize_group_list(groups: Vec<String>) -> Vec<String> {
+    let mut normalized: Vec<String> = groups
+        .into_iter()
+        .map(|name| normalize_dependency_group_name(&name))
+        .filter(|name| !name.is_empty())
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn parse_env_groups(raw: &str) -> Vec<String> {
+    raw.split(|ch: char| ch == ',' || ch.is_whitespace() || ch == ';')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::string::ToString::to_string)
+        .collect()
+}
+
+fn declared_dependency_groups(doc: &DocumentMut) -> Vec<String> {
+    let mut groups = Vec::new();
+    if let Some(table) = doc.get("dependency-groups").and_then(Item::as_table) {
+        for (name, _item) in table.iter() {
+            groups.push(name.to_string());
+        }
+    }
+    if let Some(table) = doc
+        .get("project")
+        .and_then(Item::as_table)
+        .and_then(|project| project.get("optional-dependencies"))
+        .and_then(Item::as_table)
+    {
+        for (name, entry) in table.iter() {
+            if entry.is_array() && is_common_dev_group(name) {
+                groups.push(name.to_string());
+            }
+        }
+    }
+    normalize_group_list(groups)
+}
+
+fn include_group_config(doc: &DocumentMut) -> Option<Vec<String>> {
+    doc.get("tool")
+        .and_then(Item::as_table)
+        .and_then(|tool| tool.get("px"))
+        .and_then(Item::as_table)
+        .and_then(|px| px.get("dependencies"))
+        .and_then(Item::as_table)
+        .and_then(|deps| deps.get("include-groups"))
+        .and_then(Item::as_array)
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|value| value.as_str().map(std::string::ToString::to_string))
+                .collect()
+        })
+}
+
+fn legacy_dependency_group_config(doc: &DocumentMut) -> Vec<String> {
+    doc.get("tool")
+        .and_then(Item::as_table)
+        .and_then(|tool| tool.get("px"))
+        .and_then(Item::as_table)
+        .and_then(|px| px.get("dependency-groups"))
+        .and_then(Item::as_array)
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|value| value.as_str().map(std::string::ToString::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn configured_dependency_groups(doc: &DocumentMut) -> (Vec<String>, DependencyGroupSource) {
+    if let Some(include) = include_group_config(doc) {
+        return (
+            normalize_group_list(include),
+            DependencyGroupSource::IncludeConfig,
+        );
+    }
+    let legacy = legacy_dependency_group_config(doc);
+    if !legacy.is_empty() {
+        return (
+            normalize_group_list(legacy),
+            DependencyGroupSource::LegacyConfig,
+        );
+    }
+    (Vec::new(), DependencyGroupSource::None)
+}
+
+pub(crate) fn select_dependency_groups(doc: &DocumentMut) -> DependencyGroupSelection {
+    let declared = declared_dependency_groups(doc);
+    let (mut active, mut source) = configured_dependency_groups(doc);
+    if active.is_empty() && !declared.is_empty() {
+        active = declared.clone();
+        source = DependencyGroupSource::DeclaredDefault;
+    }
+    if let Ok(raw) = env::var("PX_GROUPS") {
+        active.extend(parse_env_groups(&raw));
+    }
+    DependencyGroupSelection {
+        active: normalize_group_list(active),
+        declared,
+        source,
+    }
+}
+
+pub(crate) fn manifest_fingerprint(
+    doc: &DocumentMut,
+    requirements: &[String],
+    groups: &[String],
+) -> Result<String> {
     let (name, python_requirement) = project_identity(doc)?;
-    let mut deps = read_dependencies_from_doc(doc);
+    let mut deps = requirements.to_vec();
     sort_and_dedupe(&mut deps);
     let mut hasher = Sha256::new();
     hasher.update(name.trim().to_lowercase().as_bytes());
     hasher.update(python_requirement.trim().as_bytes());
     for dep in deps {
         hasher.update(dep.trim().as_bytes());
+        hasher.update(b"\n");
+    }
+    let mut group_names = groups
+        .iter()
+        .map(|name| normalize_dependency_group_name(name))
+        .collect::<Vec<_>>();
+    group_names.sort();
+    group_names.dedup();
+    for group in group_names {
+        hasher.update(b"group:");
+        hasher.update(group.trim().as_bytes());
         hasher.update(b"\n");
     }
     if let Some(tool_python) = doc
@@ -408,6 +560,153 @@ pub(crate) fn manifest_fingerprint(doc: &DocumentMut) -> Result<String> {
         hasher.update(tool_python.trim().as_bytes());
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Resolves dependency specifications for the selected groups, supporting `include-group` entries.
+pub(crate) fn resolve_dependency_groups(
+    doc: &DocumentMut,
+    groups: &[String],
+) -> Result<Vec<String>> {
+    let mut collected = Vec::new();
+    let mut visiting = HashSet::new();
+    for group in groups {
+        collect_group_dependencies(doc, group, &mut visiting, &mut collected)?;
+    }
+    sort_and_dedupe(&mut collected);
+    Ok(collected)
+}
+
+fn collect_group_dependencies(
+    doc: &DocumentMut,
+    group: &str,
+    visiting: &mut HashSet<String>,
+    collected: &mut Vec<String>,
+) -> Result<()> {
+    let normalized = normalize_dependency_group_name(group);
+    if !visiting.insert(normalized.clone()) {
+        return Err(anyhow!("dependency group cycle detected at `{group}`"));
+    }
+
+    let mut handled = collect_dependency_group_entries(doc, &normalized, visiting, collected)?;
+    if let Some(array) = find_optional_dependency_group(doc, &normalized) {
+        handled = true;
+        for value in array.iter() {
+            if let Some(spec) = value.as_str() {
+                collected.push(spec.to_string());
+            }
+        }
+    }
+
+    if !handled {
+        tracing::debug!("requested dependency group `{group}` not found in manifest");
+    }
+
+    visiting.remove(&normalized);
+    Ok(())
+}
+
+fn collect_dependency_group_entries(
+    doc: &DocumentMut,
+    normalized_group: &str,
+    visiting: &mut HashSet<String>,
+    collected: &mut Vec<String>,
+) -> Result<bool> {
+    if let Some(table) = doc.get("dependency-groups").and_then(Item::as_table) {
+        for (name, item) in table.iter() {
+            if normalize_dependency_group_name(name) != normalized_group {
+                continue;
+            }
+            if let Some(array) = item.as_array() {
+                for value in array.iter() {
+                    if let Some(inline) = value.as_inline_table() {
+                        if let Some(target) = inline
+                            .get("include-group")
+                            .and_then(TomlValue::as_str)
+                            .map(str::to_string)
+                        {
+                            collect_group_dependencies(doc, &target, visiting, collected)?;
+                            continue;
+                        }
+                    }
+                    if let Some(spec) = value.as_str() {
+                        collected.push(spec.to_string());
+                    }
+                }
+            }
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn find_optional_dependency_group<'a>(
+    doc: &'a DocumentMut,
+    normalized_group: &str,
+) -> Option<&'a Array> {
+    doc.get("project")
+        .and_then(Item::as_table)
+        .and_then(|project| project.get("optional-dependencies"))
+        .and_then(Item::as_table)
+        .and_then(|table| {
+            table.iter().find_map(|(name, entry)| {
+                if normalize_dependency_group_name(name) == normalized_group {
+                    entry.as_array()
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+fn is_common_dev_group(name: &str) -> bool {
+    let lowered = name.to_ascii_lowercase();
+    matches!(
+        lowered.as_str(),
+        "dev"
+            | "test"
+            | "tests"
+            | "doc"
+            | "docs"
+            | "lint"
+            | "format"
+            | "fmt"
+            | "typing"
+            | "mypy"
+            | "px-dev"
+    )
+}
+
+pub(crate) fn ensure_dependency_group_config(doc: &mut DocumentMut) -> bool {
+    if include_group_config(doc).is_some() {
+        return false;
+    }
+    let declared = declared_dependency_groups(doc);
+    if declared.is_empty() {
+        return false;
+    }
+    let deps_entry = doc
+        .entry("tool")
+        .or_insert(Item::Table(Table::default()))
+        .as_table_mut()
+        .expect("tool table")
+        .entry("px")
+        .or_insert(Item::Table(Table::default()))
+        .as_table_mut()
+        .expect("px table")
+        .entry("dependencies")
+        .or_insert(Item::Table(Table::default()));
+    if !deps_entry.is_table() {
+        *deps_entry = Item::Table(Table::default());
+    }
+    let deps_table = deps_entry
+        .as_table_mut()
+        .expect("[tool.px.dependencies] must be a table");
+    let mut array = Array::new();
+    for group in declared {
+        array.push(group.as_str());
+    }
+    deps_table.insert("include-groups", Item::Value(TomlValue::Array(array)));
+    true
 }
 
 pub(crate) fn requirement_display_name(spec: &str) -> String {
@@ -625,6 +924,39 @@ mod tests {
 
         let contents = fs::read_to_string(&pyproject)?;
         assert!(contents.contains("requests==2.32.3"));
+        Ok(())
+    }
+
+    #[test]
+    fn dependency_group_config_defaults_to_declared_groups() -> Result<()> {
+        let mut doc: DocumentMut = r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+docs = ["sphinx==7.0.0"]
+
+[project.optional-dependencies]
+PX-DEV = ["pytest==8.3.3"]
+Test = ["hypothesis==6.0.0"]
+"#
+        .parse()?;
+
+        let changed = ensure_dependency_group_config(&mut doc);
+        assert!(changed, "include-groups should be written when absent");
+        let groups = doc["tool"]["px"]["dependencies"]["include-groups"]
+            .as_array()
+            .expect("include-groups array");
+        let values: Vec<_> = groups.iter().filter_map(|val| val.as_str()).collect();
+        assert_eq!(
+            values,
+            vec!["docs", "px-dev", "test"],
+            "declared dependency groups should be normalized and sorted"
+        );
+        // Should be a no-op on subsequent calls.
+        assert!(!ensure_dependency_group_config(&mut doc));
         Ok(())
     }
 }

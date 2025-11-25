@@ -272,6 +272,29 @@ fn migrate_autopins_only_loose_specs() {
 }
 
 #[test]
+fn migrate_sets_dependency_group_config() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(&temp, "requirements.txt", "packaging==23.2\n");
+    write_file(&temp, "requirements-dev.txt", "pytest==8.3.3\n");
+
+    run_migrate_json(&temp, &["--apply"]);
+
+    let pyproject = fs::read_to_string(temp.path().join("pyproject.toml")).expect("pyproject");
+    let doc: DocumentMut = pyproject.parse().expect("pyproject toml");
+    let include = doc["tool"]["px"]["dependencies"]["include-groups"]
+        .as_array()
+        .expect("include-groups array");
+    let groups: Vec<_> = include.iter().filter_map(|item| item.as_str()).collect();
+    assert!(
+        groups.contains(&"px-dev"),
+        "px migrate should activate dev dependency groups by default"
+    );
+}
+
+#[test]
 fn migrate_no_autopin_flag_errors() {
     if !require_online() {
         return;

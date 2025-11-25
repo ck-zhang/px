@@ -76,7 +76,7 @@ pub(crate) fn evaluate_project_state(
         env_exists,
         manifest_clean,
         env_clean,
-        snapshot.dependencies.is_empty(),
+        snapshot.requirements.is_empty(),
         manifest_fingerprint,
         lock_fingerprint,
         lock_id,
@@ -96,7 +96,7 @@ pub(crate) fn ensure_mutation_allowed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use px_domain::ProjectStateReport;
+    use px_domain::{DependencyGroupSource, ProjectStateReport};
     use std::path::PathBuf;
 
     #[test]
@@ -108,6 +108,11 @@ mod tests {
             name: "demo".into(),
             python_requirement: ">=3.11".into(),
             dependencies: vec![],
+            dependency_groups: vec![],
+            declared_dependency_groups: vec![],
+            dependency_group_source: DependencyGroupSource::None,
+            group_dependencies: vec![],
+            requirements: vec![],
             python_override: None,
             manifest_fingerprint: "mf".into(),
         };
@@ -139,6 +144,11 @@ mod tests {
             name: "demo".into(),
             python_requirement: ">=3.11".into(),
             dependencies: vec![],
+            dependency_groups: vec![],
+            declared_dependency_groups: vec![],
+            dependency_group_source: DependencyGroupSource::None,
+            group_dependencies: vec![],
+            requirements: vec![],
             python_override: None,
             manifest_fingerprint: "mf".into(),
         };
@@ -170,6 +180,11 @@ mod tests {
             name: "demo".into(),
             python_requirement: ">=3.11".into(),
             dependencies: vec![],
+            dependency_groups: vec![],
+            declared_dependency_groups: vec![],
+            dependency_group_source: DependencyGroupSource::None,
+            group_dependencies: vec![],
+            requirements: vec![],
             python_override: None,
             manifest_fingerprint: "mf".into(),
         };
@@ -199,6 +214,11 @@ mod tests {
             name: "demo".into(),
             python_requirement: ">=3.11".into(),
             dependencies: vec![],
+            dependency_groups: vec![],
+            declared_dependency_groups: vec![],
+            dependency_group_source: DependencyGroupSource::None,
+            group_dependencies: vec![],
+            requirements: vec![],
             python_override: None,
             manifest_fingerprint: "mf".into(),
         };
@@ -228,6 +248,11 @@ mod tests {
             name: "demo".into(),
             python_requirement: ">=3.11".into(),
             dependencies: vec!["demo==1.0".into()],
+            dependency_groups: vec![],
+            declared_dependency_groups: vec![],
+            dependency_group_source: DependencyGroupSource::None,
+            group_dependencies: vec![],
+            requirements: vec!["demo==1.0".into()],
             python_override: None,
             manifest_fingerprint: "mf".into(),
         };

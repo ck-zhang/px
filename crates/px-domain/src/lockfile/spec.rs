@@ -71,7 +71,11 @@ pub(crate) fn dependency_name(spec: &str) -> String {
         }
     }
     let head = &trimmed[..end];
-    head.split('[').next().unwrap_or(head).to_lowercase()
+    head.split('[')
+        .next()
+        .unwrap_or(head)
+        .to_ascii_lowercase()
+        .replace(['_', '.'], "-")
 }
 
 pub(crate) fn strip_wrapping_quotes(input: &str) -> &str {

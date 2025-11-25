@@ -59,6 +59,11 @@ impl WorkspaceSnapshot {
             name: self.name.clone(),
             python_requirement: self.python_requirement.clone(),
             dependencies: self.dependencies.clone(),
+            dependency_groups: Vec::new(),
+            declared_dependency_groups: Vec::new(),
+            dependency_group_source: px_domain::DependencyGroupSource::None,
+            group_dependencies: Vec::new(),
+            requirements: self.dependencies.clone(),
             python_override: self.python_override.clone(),
             manifest_fingerprint: self.manifest_fingerprint.clone(),
         }
@@ -163,7 +168,7 @@ fn load_workspace_snapshot(root: &Path) -> Result<WorkspaceSnapshot> {
     )?;
     let mut dependencies = Vec::new();
     for member in &members {
-        dependencies.extend(member.snapshot.dependencies.clone());
+        dependencies.extend(member.snapshot.requirements.clone());
     }
     dependencies.retain(|dep| !dep.trim().is_empty());
 
@@ -616,7 +621,7 @@ fn build_workspace_lock(
         .members
         .iter()
         .map(|member| {
-            let mut deps = member.snapshot.dependencies.clone();
+            let mut deps = member.snapshot.requirements.clone();
             deps.sort();
             for dep in &deps {
                 let name = dependency_name(dep);
@@ -788,6 +793,11 @@ pub fn workspace_status(ctx: &CommandContext, scope: WorkspaceScope) -> Result<E
             json!({
                 "path": m.rel_path,
                 "manifest_fingerprint": m.snapshot.manifest_fingerprint,
+                "dependency_groups": {
+                    "active": m.snapshot.dependency_groups.clone(),
+                    "declared": m.snapshot.declared_dependency_groups.clone(),
+                    "source": m.snapshot.dependency_group_source.as_str(),
+                },
             })
         }).collect::<Vec<_>>(),
     });
@@ -1215,6 +1225,56 @@ members = ["apps/a", "libs/b"]
     }
 
     #[test]
+    fn workspace_snapshot_collects_member_dependency_groups() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let ws_manifest = root.join("pyproject.toml");
+        let manifest = r#"[project]
+name = "ws"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[tool.px.workspace]
+members = ["apps/a"]
+"#;
+        fs::write(&ws_manifest, manifest).unwrap();
+
+        let member_root = root.join("apps/a");
+        fs::create_dir_all(&member_root).unwrap();
+        fs::write(
+            member_root.join("pyproject.toml"),
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest==8.3.3"]
+
+[tool.px]
+
+[tool.px.dependencies]
+include-groups = ["dev"]
+"#,
+        )
+        .unwrap();
+
+        let workspace = load_workspace_snapshot(root).unwrap();
+        assert_eq!(
+            workspace.dependencies,
+            vec!["pytest==8.3.3".to_string()],
+            "workspace dependencies should include member dependency groups"
+        );
+        let member = workspace.members.first().expect("workspace member");
+        assert_eq!(member.snapshot.dependency_groups, vec!["dev".to_string()]);
+        assert_eq!(
+            member.snapshot.requirements,
+            vec!["pytest==8.3.3".to_string()]
+        );
+    }
+
+    #[test]
     fn workspace_status_reports_missing_lock() {
         let tmp = tempdir().unwrap();
         let root = tmp.path();
@@ -1227,6 +1287,17 @@ members = ["apps/a", "libs/b"]
         assert_eq!(
             flags.get("lock_exists").and_then(Value::as_bool),
             Some(false)
+        );
+        let members = outcome
+            .details
+            .get("members")
+            .and_then(Value::as_array)
+            .expect("members list");
+        assert!(
+            members
+                .iter()
+                .all(|member| member.get("dependency_groups").is_some()),
+            "workspace status should surface dependency group info for members"
         );
     }
 

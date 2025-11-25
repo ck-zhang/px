@@ -161,7 +161,7 @@ pub(crate) fn state_or_violation(
 mod tests {
     use super::*;
     use crate::CommandStatus;
-    use px_domain::ProjectStateKind;
+    use px_domain::{DependencyGroupSource, ProjectStateKind};
 
     fn dummy_snapshot() -> ProjectSnapshot {
         ProjectSnapshot {
@@ -171,6 +171,11 @@ mod tests {
             name: "demo".into(),
             python_requirement: ">=3.11".into(),
             dependencies: vec![],
+            dependency_groups: vec![],
+            declared_dependency_groups: vec![],
+            dependency_group_source: DependencyGroupSource::None,
+            group_dependencies: vec![],
+            requirements: vec![],
             python_override: None,
             manifest_fingerprint: "mf".into(),
         }

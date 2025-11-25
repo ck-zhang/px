@@ -12,6 +12,7 @@ use crate::Config;
 use crate::SystemEffects;
 use px_domain::lockfile::{LockSnapshot, LockedArtifact, LockedDependency};
 use px_domain::marker_applies;
+use px_domain::DependencyGroupSource;
 use std::fs;
 use std::path::PathBuf;
 use tempfile::tempdir;
@@ -136,6 +137,11 @@ fn materialize_project_site_writes_cached_paths() {
         name: "demo".into(),
         python_requirement: ">=3.11".into(),
         dependencies: Vec::new(),
+        dependency_groups: Vec::new(),
+        declared_dependency_groups: Vec::new(),
+        dependency_group_source: DependencyGroupSource::None,
+        group_dependencies: Vec::new(),
+        requirements: Vec::new(),
         python_override: None,
         manifest_fingerprint: "demo-fingerprint".into(),
     };
@@ -200,6 +206,11 @@ fn materialize_project_site_skips_missing_artifacts() {
         name: "demo".into(),
         python_requirement: ">=3.11".into(),
         dependencies: Vec::new(),
+        dependency_groups: Vec::new(),
+        declared_dependency_groups: Vec::new(),
+        dependency_group_source: DependencyGroupSource::None,
+        group_dependencies: Vec::new(),
+        requirements: Vec::new(),
         python_override: None,
         manifest_fingerprint: "demo-fingerprint".into(),
     };

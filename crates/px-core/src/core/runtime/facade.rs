@@ -223,20 +223,27 @@ pub(crate) fn install_snapshot(
             fs::create_dir_all(parent)?;
         }
         let mut manifest_updated = false;
-        let mut dependencies = if let Some(override_data) = override_pins {
+        let mut manifest_dependencies = if let Some(override_data) = override_pins {
             override_data.dependencies.clone()
         } else {
             snapshot.dependencies.clone()
         };
+        let mut requirements =
+            merge_requirements(&manifest_dependencies, &snapshot.group_dependencies);
         let marker_env = ctx.marker_environment()?;
         let mut resolved_override = None;
         if override_pins.is_none() && ctx.config().resolver.enabled {
             let resolved = resolve_dependencies(ctx, &snapshot)?;
             if !resolved.specs.is_empty() {
-                dependencies =
-                    merge_resolved_dependencies(&dependencies, &resolved.specs, &marker_env);
-                persist_resolved_dependencies(&snapshot, &dependencies)?;
+                manifest_dependencies = merge_resolved_dependencies(
+                    &manifest_dependencies,
+                    &resolved.specs,
+                    &marker_env,
+                );
+                persist_resolved_dependencies(&snapshot, &manifest_dependencies)?;
                 manifest_updated = true;
+                requirements =
+                    merge_requirements(&manifest_dependencies, &snapshot.group_dependencies);
             }
             resolved_override = Some(resolved.pins);
         }
@@ -248,7 +255,7 @@ pub(crate) fn install_snapshot(
                 .cloned()
                 .collect();
             if pins.is_empty() {
-                for spec in &dependencies {
+                for spec in &requirements {
                     if !marker_applies(spec, &marker_env) {
                         continue;
                     }
@@ -259,7 +266,7 @@ pub(crate) fn install_snapshot(
         } else {
             match resolved_override {
                 Some(pins) => pins,
-                None => ensure_exact_pins(&marker_env, &dependencies)?,
+                None => ensure_exact_pins(&marker_env, &requirements)?,
             }
         };
         if manifest_updated {
@@ -280,6 +287,14 @@ pub(crate) fn install_snapshot(
             verified: false,
         })
     }
+}
+
+fn merge_requirements(base: &[String], groups: &[String]) -> Vec<String> {
+    let mut merged = base.to_vec();
+    merged.extend(groups.iter().cloned());
+    merged.sort();
+    merged.dedup();
+    merged
 }
 
 pub(crate) fn refresh_project_site(
@@ -674,9 +689,16 @@ pub(crate) fn resolve_dependencies_with_effects(
         .to_marker_environment()
         .map_err(|err| anyhow!("invalid marker environment: {err}"))?;
     let cache_dir = effects.cache().resolve_store_path()?.path;
+    let requirements: Vec<String> = snapshot
+        .requirements
+        .iter()
+        .filter(|spec| marker_applies(spec, &marker_env))
+        .cloned()
+        .collect();
+    tracing::debug!(?requirements, "resolver_requirements");
     let request = ResolverRequest {
         project: snapshot.name.clone(),
-        requirements: snapshot.dependencies.clone(),
+        requirements,
         tags: ResolverTags {
             python: tags.python.clone(),
             abi: tags.abi.clone(),

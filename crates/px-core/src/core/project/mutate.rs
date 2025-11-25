@@ -379,6 +379,16 @@ pub fn project_update(
 
         let mut override_snapshot = snapshot.clone();
         override_snapshot.dependencies = override_specs;
+        override_snapshot.group_dependencies = snapshot.group_dependencies.clone();
+        override_snapshot.dependency_groups = snapshot.dependency_groups.clone();
+        override_snapshot.declared_dependency_groups = snapshot.declared_dependency_groups.clone();
+        override_snapshot.dependency_group_source = snapshot.dependency_group_source;
+        override_snapshot.requirements = override_snapshot.dependencies.clone();
+        override_snapshot
+            .requirements
+            .extend(override_snapshot.group_dependencies.clone());
+        override_snapshot.requirements.sort();
+        override_snapshot.requirements.dedup();
         let resolved =
             match resolve_dependencies_with_effects(ctx.effects(), &override_snapshot, true) {
                 Ok(resolved) => resolved,

@@ -30,7 +30,7 @@ pub use types::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::snapshot::ProjectSnapshot;
+    use crate::project::{manifest::DependencyGroupSource, snapshot::ProjectSnapshot};
     use tempfile::tempdir;
     use toml_edit::DocumentMut;
 
@@ -42,6 +42,11 @@ mod tests {
             name: "demo".into(),
             python_requirement: ">=3.11".into(),
             dependencies: vec!["demo==1.0.0".into()],
+            dependency_groups: Vec::new(),
+            declared_dependency_groups: Vec::new(),
+            dependency_group_source: DependencyGroupSource::None,
+            group_dependencies: Vec::new(),
+            requirements: vec!["demo==1.0.0".into()],
             python_override: None,
             manifest_fingerprint: "demo-fingerprint".into(),
         }
@@ -86,6 +91,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut snapshot = sample_snapshot(dir.path());
         snapshot.dependencies.push("extra==2.0.0".into());
+        snapshot.requirements.push("extra==2.0.0".into());
         let lock = LockSnapshot {
             version: LOCK_VERSION,
             project_name: Some("demo".into()),
