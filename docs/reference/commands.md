@@ -119,6 +119,8 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 
 * **Behavior (dev)**: if env missing/stale, rebuild from `px.lock` (no resolution) before running.
 * **Behavior (CI/`--frozen`)**: fail if lock drifted or env stale; never repairs.
+* **Env prep**: PATH is rebuilt with the px env’s `site/bin` first (px materializes console/gui scripts there from wheels); exports `PYAPP_COMMAND_NAME` when `[tool.px].manage-command` is set; runs a lightweight import check for `[tool.px].plugin-imports` and sets `PX_PLUGIN_PREFLIGHT` to `1`/`0`; clears proxy env vars.
+* **VCS version files**: if `[tool.hatch.build.hooks.vcs].version-file` points to a missing file, px writes one using `git describe --tags --dirty --long` (fallback `git rev-parse --short HEAD`); if git metadata is unavailable, px writes `0.0.0+unknown` as a safe fallback.
 * **Failure hints**: missing module during execution → if dep absent in M/L suggest `px add <pkg>`; if present suggest `px sync`.
 
 ### `px test`
@@ -146,7 +148,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 ### `px migrate` / `px migrate --apply`
 
 * `px migrate` – reads legacy inputs (requirements.txt, Pipfile, poetry.lock, existing venv) and prints a proposed manifest/lock/env plan; no writes.
-* `px migrate --apply` – applies the plan: updates `pyproject.toml`, writes `px.lock`, builds env under `.px/`; leaves legacy files untouched; must not leave partial state on failure.
+* `px migrate --apply` – applies the plan: updates `pyproject.toml`, writes `px.lock`, builds env under `.px/`; leaves legacy files untouched; must not leave partial state on failure. When px scaffolds or migrates a Hatch/Hatchling project and writes `pyproject.toml`, it ensures the `px-dev` group includes `tomli-w>=1.0.0` so px can emit TOML; expect that dev helper to be added if it was missing.
 
 ### Workspace-aware semantics
 

@@ -7,8 +7,8 @@ use anyhow::{anyhow, Context, Result};
 use toml_edit::{DocumentMut, Item};
 
 use super::manifest::{
-    manifest_fingerprint, project_table, read_dependencies_from_doc, resolve_dependency_groups,
-    select_dependency_groups, DependencyGroupSource,
+    manifest_fingerprint, project_table, px_options_from_doc, read_dependencies_from_doc,
+    resolve_dependency_groups, select_dependency_groups, DependencyGroupSource, PxOptions,
 };
 
 #[derive(Clone, Debug)]
@@ -25,6 +25,7 @@ pub struct ProjectSnapshot {
     pub group_dependencies: Vec<String>,
     pub requirements: Vec<String>,
     pub python_override: Option<String>,
+    pub px_options: PxOptions,
     pub manifest_fingerprint: String,
 }
 
@@ -60,6 +61,7 @@ impl ProjectSnapshot {
         let mut requirements = dependencies.clone();
         requirements.extend(group_dependencies.clone());
         super::manifest::sort_and_dedupe(&mut requirements);
+        let px_options = px_options_from_doc(&doc);
         let python_override = doc
             .get("tool")
             .and_then(Item::as_table)
@@ -68,7 +70,8 @@ impl ProjectSnapshot {
             .and_then(|px| px.get("python"))
             .and_then(Item::as_str)
             .map(std::string::ToString::to_string);
-        let manifest_fingerprint = manifest_fingerprint(&doc, &requirements, &dependency_groups)?;
+        let manifest_fingerprint =
+            manifest_fingerprint(&doc, &requirements, &dependency_groups, &px_options)?;
         Ok(Self {
             root: root.to_path_buf(),
             manifest_path,
@@ -82,6 +85,7 @@ impl ProjectSnapshot {
             group_dependencies,
             requirements,
             python_override,
+            px_options,
             manifest_fingerprint,
         })
     }

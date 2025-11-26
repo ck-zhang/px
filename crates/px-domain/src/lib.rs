@@ -22,7 +22,8 @@ pub use project::{
     project_name_from_pyproject, read_requirements_file, resolve_onboard_path,
     sanitize_package_candidate, BackupManager, BackupSummary, DependencyGroupSource,
     ManifestAddReport, ManifestEditor, ManifestRemoveReport, OnboardPackagePlan,
-    ProjectInitializer, ProjectSnapshot, ProjectStateKind, ProjectStateReport, PyprojectPlan,
+    ProjectInitializer, ProjectSnapshot, ProjectStateKind, ProjectStateReport, PxOptions,
+    PyprojectPlan,
 };
 pub use resolution::{
     autopin_pin_key, autopin_spec_key, marker_applies, merge_resolved_dependencies,

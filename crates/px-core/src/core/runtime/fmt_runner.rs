@@ -238,16 +238,16 @@ fn prepare_tool_run(
         };
     }
 
-    let (pythonpath, mut allowed_paths) = build_pythonpath(env.ctx.fs(), &descriptor.root, None)
-        .map_err(|err| {
-            ExecutionOutcome::failure(
-                "failed to prepare formatter environment variables",
-                json!({
-                    "tool": descriptor.name,
-                    "error": err.to_string(),
-                }),
-            )
-        })?;
+    let paths = build_pythonpath(env.ctx.fs(), &descriptor.root, None).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to prepare formatter environment variables",
+            json!({
+                "tool": descriptor.name,
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    let mut allowed_paths = paths.allowed_paths;
     let project_src = env.project_root.join("src");
     if project_src.exists() {
         allowed_paths.push(project_src);
@@ -275,7 +275,7 @@ fn prepare_tool_run(
         })?;
 
     let mut envs = vec![
-        ("PYTHONPATH".into(), pythonpath),
+        ("PYTHONPATH".into(), paths.pythonpath),
         ("PYTHONUNBUFFERED".into(), "1".into()),
         ("PX_ALLOWED_PATHS".into(), allowed),
         ("PX_TOOL_ROOT".into(), descriptor.root.display().to_string()),

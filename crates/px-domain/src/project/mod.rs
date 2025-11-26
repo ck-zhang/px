@@ -8,7 +8,7 @@ pub use init::{infer_package_name, sanitize_package_candidate, ProjectInitialize
 pub use manifest::{
     collect_pyproject_packages, collect_requirement_packages, read_requirements_file,
     DependencyGroupSource, ManifestAddReport, ManifestEditor, ManifestRemoveReport,
-    OnboardPackagePlan,
+    OnboardPackagePlan, PxOptions,
 };
 pub use onboard::{
     prepare_pyproject_plan, resolve_onboard_path, BackupManager, BackupSummary, PyprojectPlan,

@@ -114,6 +114,7 @@ mod tests {
             group_dependencies: vec![],
             requirements: vec![],
             python_override: None,
+            px_options: px_domain::PxOptions::default(),
             manifest_fingerprint: "mf".into(),
         };
         let state = ProjectStateReport::new(
@@ -150,6 +151,7 @@ mod tests {
             group_dependencies: vec![],
             requirements: vec![],
             python_override: None,
+            px_options: px_domain::PxOptions::default(),
             manifest_fingerprint: "mf".into(),
         };
         let state = ProjectStateReport::new(
@@ -186,6 +188,7 @@ mod tests {
             group_dependencies: vec![],
             requirements: vec![],
             python_override: None,
+            px_options: px_domain::PxOptions::default(),
             manifest_fingerprint: "mf".into(),
         };
         let state = ProjectStateReport::new(
@@ -220,6 +223,7 @@ mod tests {
             group_dependencies: vec![],
             requirements: vec![],
             python_override: None,
+            px_options: px_domain::PxOptions::default(),
             manifest_fingerprint: "mf".into(),
         };
         let state = ProjectStateReport::new(
@@ -254,6 +258,7 @@ mod tests {
             group_dependencies: vec![],
             requirements: vec!["demo==1.0".into()],
             python_override: None,
+            px_options: px_domain::PxOptions::default(),
             manifest_fingerprint: "mf".into(),
         };
         let state = ProjectStateReport::new(

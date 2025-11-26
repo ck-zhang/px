@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde_json::{json, Value};
+use tracing::debug;
 
 use crate::run_plan::{
     plan_run_target, PassthroughReason, PassthroughTarget, ResolvedEntry, RunTargetPlan,
@@ -28,6 +29,8 @@ pub struct RunRequest {
     pub args: Vec<String>,
     pub frozen: bool,
 }
+
+type EnvPairs = Vec<(String, String)>;
 
 /// Runs the project's tests using either pytest or px's fallback runner.
 ///
@@ -149,7 +152,7 @@ fn run_project_script(
     extra_args: &[String],
     command_args: &Value,
 ) -> Result<ExecutionOutcome> {
-    let envs = py_ctx.base_env(command_args)?;
+    let (envs, _) = build_env_with_preflight(core_ctx, py_ctx, command_args)?;
     let mut args = Vec::with_capacity(extra_args.len() + 1);
     args.push(script.display().to_string());
     args.extend(extra_args.iter().cloned());
@@ -180,7 +183,7 @@ fn run_executable(
     extra_args: &[String],
     command_args: &Value,
 ) -> Result<ExecutionOutcome> {
-    let envs = py_ctx.base_env(command_args)?;
+    let (envs, _) = build_env_with_preflight(core_ctx, py_ctx, command_args)?;
     let output =
         core_ctx
             .python_runtime()
@@ -207,7 +210,7 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
         Err(outcome) => return Ok(outcome),
     } {
         let command_args = json!({ "pytest_args": request.pytest_args });
-        let mut envs = ws_ctx.py_ctx.base_env(&command_args)?;
+        let (mut envs, _) = build_env_with_preflight(ctx, &ws_ctx.py_ctx, &command_args)?;
         envs.push(("PX_TEST_RUNNER".into(), "pytest".into()));
 
         if ctx.config().test.fallback_builtin {
@@ -269,7 +272,7 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
         Err(outcome) => return Ok(outcome),
     };
     let command_args = json!({ "pytest_args": request.pytest_args });
-    let mut envs = py_ctx.base_env(&command_args)?;
+    let (mut envs, _preflight) = build_env_with_preflight(ctx, &py_ctx, &command_args)?;
     envs.push(("PX_TEST_RUNNER".into(), "pytest".into()));
 
     if ctx.config().test.fallback_builtin {
@@ -352,7 +355,7 @@ fn run_module_entry(
         .script_name()
         .map(std::string::ToString::to_string)
         .unwrap_or_else(|| entry.clone());
-    let mut envs = py_ctx.base_env(command_args)?;
+    let (mut envs, _) = build_env_with_preflight(core_ctx, py_ctx, command_args)?;
     if let Some(call_name) = call.as_ref() {
         mode = "console-script";
         env_entry = format!("{entry}:{call_name}");
@@ -425,7 +428,7 @@ fn run_passthrough(
         reason,
         resolved,
     } = target;
-    let envs = py_ctx.base_env(command_args)?;
+    let (envs, _) = build_env_with_preflight(core_ctx, py_ctx, command_args)?;
     let program_args = match &reason {
         PassthroughReason::PythonScript { script_arg, .. } => {
             let mut args = Vec::with_capacity(extra_args.len() + 1);
@@ -471,4 +474,125 @@ fn run_passthrough(
 
 fn missing_pytest(stderr: &str) -> bool {
     stderr.contains("No module named") && stderr.contains("pytest")
+}
+
+fn build_env_with_preflight(
+    ctx: &CommandContext,
+    py_ctx: &PythonContext,
+    command_args: &Value,
+) -> Result<(EnvPairs, Option<bool>)> {
+    let mut envs = py_ctx.base_env(command_args)?;
+    let preflight = preflight_plugins(ctx, py_ctx, &envs)?;
+    if let Some(ok) = preflight {
+        envs.push((
+            "PX_PLUGIN_PREFLIGHT".into(),
+            if ok { "1".into() } else { "0".into() },
+        ));
+    }
+    Ok((envs, preflight))
+}
+
+fn preflight_plugins(
+    ctx: &CommandContext,
+    py_ctx: &PythonContext,
+    envs: &[(String, String)],
+) -> Result<Option<bool>> {
+    if py_ctx.px_options.plugin_imports.is_empty() {
+        return Ok(None);
+    }
+    let imports = py_ctx
+        .px_options
+        .plugin_imports
+        .iter()
+        .map(|name| format!("{name:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let script = format!(
+        "import importlib.util, sys\nmissing=[name for name in [{imports}] if importlib.util.find_spec(name) is None]\nsys.exit(1 if missing else 0)"
+    );
+    let args = vec!["-c".to_string(), script];
+    match ctx
+        .python_runtime()
+        .run_command(&py_ctx.python, &args, envs, &py_ctx.project_root)
+    {
+        Ok(output) => Ok(Some(output.code == 0)),
+        Err(err) => {
+            debug!(error = ?err, "plugin preflight failed");
+            Ok(Some(false))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{GlobalOptions, SystemEffects};
+    use px_domain::PxOptions;
+    use serde_json::json;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    fn ctx_with_defaults() -> CommandContext<'static> {
+        static GLOBAL: GlobalOptions = GlobalOptions {
+            quiet: false,
+            verbose: 0,
+            trace: false,
+            json: false,
+            config: None,
+        };
+        CommandContext::new(&GLOBAL, Arc::new(SystemEffects::new())).expect("ctx")
+    }
+
+    #[test]
+    fn build_env_marks_available_plugins() -> Result<()> {
+        let ctx = ctx_with_defaults();
+        let python = ctx.python_runtime().detect_interpreter()?;
+        let temp = tempdir()?;
+        let py_ctx = PythonContext {
+            project_root: temp.path().to_path_buf(),
+            python,
+            pythonpath: String::new(),
+            allowed_paths: vec![temp.path().to_path_buf()],
+            site_bin: None,
+            px_options: PxOptions {
+                manage_command: Some("self".into()),
+                plugin_imports: vec!["json".into()],
+            },
+        };
+
+        let (envs, preflight) = build_env_with_preflight(&ctx, &py_ctx, &json!({}))?;
+        assert_eq!(preflight, Some(true));
+        assert!(envs
+            .iter()
+            .any(|(key, value)| key == "PYAPP_COMMAND_NAME" && value == "self"));
+        assert!(envs
+            .iter()
+            .any(|(key, value)| key == "PX_PLUGIN_PREFLIGHT" && value == "1"));
+        Ok(())
+    }
+
+    #[test]
+    fn build_env_marks_missing_plugins() -> Result<()> {
+        let ctx = ctx_with_defaults();
+        let python = ctx.python_runtime().detect_interpreter()?;
+        let temp = tempdir()?;
+        let py_ctx = PythonContext {
+            project_root: temp.path().to_path_buf(),
+            python,
+            pythonpath: String::new(),
+            allowed_paths: vec![temp.path().to_path_buf()],
+            site_bin: None,
+            px_options: PxOptions {
+                manage_command: None,
+                plugin_imports: vec!["px_missing_plugin_mod".into()],
+            },
+        };
+
+        let (envs, preflight) = build_env_with_preflight(&ctx, &py_ctx, &json!({}))?;
+        assert_eq!(preflight, Some(false));
+        assert!(envs
+            .iter()
+            .any(|(key, value)| key == "PX_PLUGIN_PREFLIGHT" && value == "0"));
+        Ok(())
+    }
 }

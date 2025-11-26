@@ -177,6 +177,7 @@ mod tests {
             group_dependencies: vec![],
             requirements: vec![],
             python_override: None,
+            px_options: px_domain::PxOptions::default(),
             manifest_fingerprint: "mf".into(),
         }
     }

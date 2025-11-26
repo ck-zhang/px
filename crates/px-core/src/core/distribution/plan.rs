@@ -208,6 +208,8 @@ mod tests {
             python: "/usr/bin/python".to_string(),
             pythonpath: String::new(),
             allowed_paths: Vec::new(),
+            site_bin: None,
+            px_options: px_domain::PxOptions::default(),
         };
 
         let rel = PathBuf::from("custom/dist");

@@ -474,6 +474,7 @@ mod tests {
             group_dependencies: vec!["pytest==8.3.3".to_string()],
             requirements: vec!["pytest==8.3.3".to_string()],
             python_override: None,
+            px_options: crate::project::manifest::PxOptions::default(),
             manifest_fingerprint: "mf".into(),
         };
         let lock = LockSnapshot {

@@ -10,9 +10,11 @@ use crate::core::runtime::run_plan::python_script_target;
 use crate::core::store::pypi::{PypiDigests, PypiFile};
 use crate::Config;
 use crate::SystemEffects;
+use anyhow::Result;
 use px_domain::lockfile::{LockSnapshot, LockedArtifact, LockedDependency};
 use px_domain::marker_applies;
-use px_domain::DependencyGroupSource;
+use px_domain::{DependencyGroupSource, PxOptions};
+use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
 use tempfile::tempdir;
@@ -65,6 +67,59 @@ fn resolver_can_be_disabled_via_env() {
     let effects = SystemEffects::new();
     let config = Config::from_snapshot(&snapshot, effects.cache()).expect("config");
     assert!(!config.resolver.enabled);
+}
+
+#[test]
+fn base_env_exports_manage_command_alias() -> Result<()> {
+    let temp = tempdir()?;
+    let python =
+        crate::python_sys::detect_interpreter().unwrap_or_else(|_| "/usr/bin/python3".to_string());
+    let site_bin = temp.path().join("site-bin");
+    fs::create_dir_all(&site_bin)?;
+    let ctx = PythonContext {
+        project_root: temp.path().to_path_buf(),
+        python,
+        pythonpath: String::new(),
+        allowed_paths: vec![temp.path().to_path_buf()],
+        site_bin: Some(site_bin.clone()),
+        px_options: PxOptions {
+            manage_command: Some("self".to_string()),
+            plugin_imports: Vec::new(),
+        },
+    };
+    // Seed existing PATH and proxy vars to verify overrides
+    let original_path = std::env::var("PATH").ok();
+    let original_proxy = std::env::var("HTTPS_PROXY").ok();
+    std::env::set_var("PATH", "/usr/local/bin");
+    std::env::set_var("HTTPS_PROXY", "http://proxy");
+    let envs = ctx.base_env(&json!({}))?;
+    if let Some(val) = original_path {
+        std::env::set_var("PATH", val);
+    }
+    if let Some(val) = original_proxy {
+        std::env::set_var("HTTPS_PROXY", val);
+    } else {
+        std::env::remove_var("HTTPS_PROXY");
+    }
+    assert!(envs
+        .iter()
+        .any(|(key, value)| key == "PYAPP_COMMAND_NAME" && value == "self"));
+    let path_entry = envs
+        .iter()
+        .find(|(key, _)| key == "PATH")
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default();
+    // site/bin should be first
+    assert!(
+        path_entry.starts_with(&site_bin.display().to_string()),
+        "PATH should be rebuilt with site/bin first"
+    );
+    assert!(
+        envs.iter()
+            .any(|(k, v)| k == "HTTPS_PROXY" && v.is_empty()),
+        "proxy vars should be cleared"
+    );
+    Ok(())
 }
 
 #[test]
@@ -143,6 +198,7 @@ fn materialize_project_site_writes_cached_paths() {
         group_dependencies: Vec::new(),
         requirements: Vec::new(),
         python_override: None,
+        px_options: PxOptions::default(),
         manifest_fingerprint: "demo-fingerprint".into(),
     };
     let lock = LockSnapshot {
@@ -181,7 +237,7 @@ fn materialize_project_site_writes_cached_paths() {
         .join("envs")
         .join("test-env")
         .join("site");
-    materialize_project_site(&site_dir, &lock, effects.fs()).expect("materialize site");
+    materialize_project_site(&site_dir, &lock, None, effects.fs()).expect("materialize site");
 
     let pxpth = site_dir.join("px.pth");
     assert!(
@@ -212,6 +268,7 @@ fn materialize_project_site_skips_missing_artifacts() {
         group_dependencies: Vec::new(),
         requirements: Vec::new(),
         python_override: None,
+        px_options: PxOptions::default(),
         manifest_fingerprint: "demo-fingerprint".into(),
     };
     let lock = LockSnapshot {
@@ -250,7 +307,8 @@ fn materialize_project_site_skips_missing_artifacts() {
         .join("envs")
         .join("test-env")
         .join("site");
-    materialize_project_site(&site_dir, &lock, effects.fs()).expect("materialize site with gap");
+    materialize_project_site(&site_dir, &lock, None, effects.fs())
+        .expect("materialize site with gap");
     let pxpth = site_dir.join("px.pth");
     assert!(pxpth.exists(), "px.pth should still be created");
     let contents = fs::read_to_string(pxpth).expect("read px.pth");

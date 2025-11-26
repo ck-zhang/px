@@ -71,7 +71,8 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
         script_name = Some(metadata.name.clone());
     }
     let script_target = script_name.as_deref();
-    let (pythonpath, allowed_paths) = build_pythonpath(ctx.fs(), &tool_root, None)?;
+    let paths = build_pythonpath(ctx.fs(), &tool_root, None)?;
+    let allowed_paths = paths.allowed_paths;
     let mut args = if let Some(script) = script_target {
         match metadata.console_scripts.get(script) {
             Some(entrypoint) => vec!["-c".to_string(), console_entry_invoke(script, entrypoint)?],
@@ -118,12 +119,18 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
         "args": request.args,
     });
     let mut envs = vec![
-        ("PYTHONPATH".into(), pythonpath),
+        ("PYTHONPATH".into(), paths.pythonpath),
         ("PYTHONUNBUFFERED".into(), "1".into()),
         ("PX_ALLOWED_PATHS".into(), allowed),
         ("PX_TOOL_ROOT".into(), tool_root.display().to_string()),
         ("PX_COMMAND_JSON".into(), env_payload.to_string()),
     ];
+    if let Some(alias) = snapshot.px_options.manage_command.as_ref() {
+        let trimmed = alias.trim();
+        if !trimmed.is_empty() {
+            envs.push(("PYAPP_COMMAND_NAME".into(), trimmed.to_string()));
+        }
+    }
     disable_proxy_env(&mut envs);
     let output = if passthrough {
         run_command_passthrough(&runtime_selection.record.path, &args, &envs, &cwd)?

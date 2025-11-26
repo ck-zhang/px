@@ -92,7 +92,7 @@ Two lockfile types:
 
   * Authoritative description of that project’s environment when the project is not governed by a workspace.
   * Exact versions, hashes, markers, index URLs, platform tags.
-  * A fingerprint of `[project].dependencies` (and any px-specific dep config).
+  * A fingerprint of `[project].dependencies` (and any px-specific dep config, including `[tool.px].manage-command` and `[tool.px].plugin-imports`).
 
 * **Workspace lockfile** – `px.workspace.lock` in a workspace root:
 

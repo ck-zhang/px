@@ -13,6 +13,14 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 
 use super::snapshot::ensure_pyproject_exists;
 
+pub(crate) const TOMLI_W_REQUIREMENT: &str = "tomli-w>=1.0.0";
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PxOptions {
+    pub manage_command: Option<String>,
+    pub plugin_imports: Vec<String>,
+}
+
 #[derive(Debug)]
 pub struct ManifestEditor {
     path: PathBuf,
@@ -527,6 +535,7 @@ pub(crate) fn manifest_fingerprint(
     doc: &DocumentMut,
     requirements: &[String],
     groups: &[String],
+    options: &PxOptions,
 ) -> Result<String> {
     let (name, python_requirement) = project_identity(doc)?;
     let mut deps = requirements.to_vec();
@@ -559,7 +568,132 @@ pub(crate) fn manifest_fingerprint(
     {
         hasher.update(tool_python.trim().as_bytes());
     }
+    if let Some(manage) = options.manage_command.as_ref() {
+        let trimmed = manage.trim();
+        if !trimmed.is_empty() {
+            hasher.update(b"manage:");
+            hasher.update(trimmed.as_bytes());
+        }
+    }
+    if !options.plugin_imports.is_empty() {
+        let mut imports = options.plugin_imports.clone();
+        imports.sort();
+        imports.dedup();
+        for name in imports {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            hasher.update(b"plugin:");
+            hasher.update(trimmed.as_bytes());
+            hasher.update(b"\n");
+        }
+    }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn manifest_has_dependency(doc: &DocumentMut, needle: &str) -> bool {
+    let target = dependency_name(needle);
+    for spec in read_dependencies_from_doc(doc) {
+        if dependency_name(&spec) == target {
+            return true;
+        }
+    }
+    if let Some(table) = doc
+        .get("project")
+        .and_then(Item::as_table)
+        .and_then(|project| project.get("optional-dependencies"))
+        .and_then(Item::as_table)
+    {
+        for (_, entry) in table.iter() {
+            if let Some(array) = entry.as_array() {
+                for val in array.iter().filter_map(|v| v.as_str()) {
+                    if dependency_name(val) == target {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(table) = doc.get("dependency-groups").and_then(Item::as_table) {
+        for (_, entry) in table.iter() {
+            if let Some(array) = entry.as_array() {
+                for val in array.iter().filter_map(|v| v.as_str()) {
+                    if dependency_name(val) == target {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn uses_hatch(doc: &DocumentMut) -> bool {
+    if doc
+        .get("tool")
+        .and_then(Item::as_table)
+        .and_then(|tool| tool.get("hatch"))
+        .and_then(Item::as_table)
+        .is_some()
+    {
+        return true;
+    }
+    doc.get("build-system")
+        .and_then(Item::as_table)
+        .and_then(|table| table.get("requires"))
+        .and_then(Item::as_array)
+        .map(|requires| {
+            requires.iter().any(|entry| {
+                entry
+                    .as_str()
+                    .map(|value| dependency_name(value) == "hatchling")
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn ensure_tooling_requirements(doc: &mut DocumentMut) -> bool {
+    if !uses_hatch(doc) {
+        return false;
+    }
+    if manifest_has_dependency(doc, "tomli-w") {
+        return false;
+    }
+    merge_dev_dependency_specs(doc, &[TOMLI_W_REQUIREMENT.to_string()])
+}
+
+pub fn px_options_from_doc(doc: &DocumentMut) -> PxOptions {
+    let px_table = doc
+        .get("tool")
+        .and_then(Item::as_table)
+        .and_then(|tool| tool.get("px"))
+        .and_then(Item::as_table);
+    let mut options = PxOptions::default();
+    if let Some(px) = px_table {
+        if let Some(value) = px.get("manage-command").and_then(Item::as_str) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                options.manage_command = Some(trimmed.to_string());
+            }
+        }
+        if let Some(array) = px.get("plugin-imports").and_then(Item::as_array) {
+            let mut imports = Vec::new();
+            for entry in array.iter() {
+                if let Some(value) = entry.as_str() {
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        imports.push(trimmed.to_string());
+                    }
+                }
+            }
+            imports.sort();
+            imports.dedup();
+            options.plugin_imports = imports;
+        }
+    }
+    options
 }
 
 /// Resolves dependency specifications for the selected groups, supporting `include-group` entries.
@@ -847,6 +981,7 @@ pub(crate) enum InsertOutcome {
     Unchanged,
 }
 
+#[allow(dead_code)]
 pub(crate) fn canonicalize_marker(raw: &str) -> String {
     raw.split_whitespace()
         .collect::<String>()
@@ -957,6 +1092,116 @@ Test = ["hypothesis==6.0.0"]
         );
         // Should be a no-op on subsequent calls.
         assert!(!ensure_dependency_group_config(&mut doc));
+        Ok(())
+    }
+
+    #[test]
+    fn px_options_parse_and_normalize() -> Result<()> {
+        let doc: DocumentMut = r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.px]
+manage-command = " self "
+plugin-imports = ["tomli_w", " tomli_w ", "hatchling.builders.plugin"]
+"#
+        .parse()?;
+
+        let options = px_options_from_doc(&doc);
+        assert_eq!(options.manage_command.as_deref(), Some("self"));
+        assert_eq!(
+            options.plugin_imports,
+            vec![
+                "hatchling.builders.plugin".to_string(),
+                "tomli_w".to_string()
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_fingerprint_reflects_px_options() -> Result<()> {
+        let base: DocumentMut = r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+"#
+        .parse()?;
+        let requirements = Vec::new();
+        let groups = Vec::new();
+        let base_options = px_options_from_doc(&base);
+        let base_fp = manifest_fingerprint(&base, &requirements, &groups, &base_options)?;
+
+        let with_opts: DocumentMut = r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.px]
+manage-command = "self"
+plugin-imports = ["tomli_w"]
+"#
+        .parse()?;
+        let options = px_options_from_doc(&with_opts);
+        let updated_fp = manifest_fingerprint(&with_opts, &requirements, &groups, &options)?;
+        assert_ne!(
+            base_fp, updated_fp,
+            "px options should affect manifest fingerprint"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_tooling_requirements_adds_tomli_w_for_hatch() -> Result<()> {
+        let mut doc: DocumentMut = r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+"#
+        .parse()?;
+
+        let changed = ensure_tooling_requirements(&mut doc);
+        assert!(changed, "tomli-w should be added when hatchling is used");
+        let dev = doc
+            .get("project")
+            .and_then(Item::as_table)
+            .and_then(|project| project.get("optional-dependencies"))
+            .and_then(Item::as_table)
+            .and_then(|table| table.get("px-dev"))
+            .and_then(Item::as_array)
+            .expect("px-dev group written");
+        let mut entries: Vec<_> = dev.iter().filter_map(|val| val.as_str()).collect();
+        entries.sort();
+        assert!(
+            entries.contains(&TOMLI_W_REQUIREMENT),
+            "px-dev should include tomli-w"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_tooling_requirements_skips_when_present() -> Result<()> {
+        let mut doc: DocumentMut = r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["tomli-w==1.0.0"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+"#
+        .parse()?;
+
+        let changed = ensure_tooling_requirements(&mut doc);
+        assert!(!changed, "no-op when tomli-w already present");
         Ok(())
     }
 }

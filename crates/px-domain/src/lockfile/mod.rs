@@ -48,6 +48,7 @@ mod tests {
             group_dependencies: Vec::new(),
             requirements: vec!["demo==1.0.0".into()],
             python_override: None,
+            px_options: crate::project::manifest::PxOptions::default(),
             manifest_fingerprint: "demo-fingerprint".into(),
         }
     }

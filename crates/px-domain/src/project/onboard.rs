@@ -9,8 +9,8 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 
 use super::init::sanitize_package_candidate;
 use super::manifest::{
-    ensure_dependency_group_config, merge_dependency_specs, merge_dev_dependency_specs,
-    normalize_onboard_path, relative_path, OnboardPackagePlan,
+    ensure_dependency_group_config, ensure_tooling_requirements, merge_dependency_specs,
+    merge_dev_dependency_specs, normalize_onboard_path, relative_path, OnboardPackagePlan,
 };
 use super::snapshot::ensure_pyproject_exists;
 
@@ -165,6 +165,7 @@ pub fn prepare_pyproject_plan(
     changed |= merge_dependency_specs(&mut doc, &prod_specs);
     changed |= merge_dev_dependency_specs(&mut doc, &dev_specs);
     changed |= ensure_dependency_group_config(&mut doc);
+    changed |= ensure_tooling_requirements(&mut doc);
 
     if changed || created {
         Ok(PyprojectPlan {
@@ -247,6 +248,7 @@ mod tests {
     use super::*;
     use crate::project::manifest::{
         read_dependencies_from_doc, read_optional_dependency_group, requirement_display_name,
+        TOMLI_W_REQUIREMENT,
     };
     use tempfile::tempdir;
     use toml_edit::DocumentMut;
@@ -399,6 +401,35 @@ build-backend = "hatchling.build"
             "no backup needed when no contents are written"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn prepare_plan_adds_tomli_w_for_hatch_projects() -> Result<()> {
+        let dir = tempdir()?;
+        let pyproject_path = dir.path().join("pyproject.toml");
+        fs::write(
+            &pyproject_path,
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["hatchling>=1.22"]
+build-backend = "hatchling.build"
+"#,
+        )?;
+
+        let plan = prepare_pyproject_plan(dir.path(), &pyproject_path, false, &[])?;
+        let contents = plan.contents.expect("pyproject should be updated");
+        let doc: DocumentMut = contents.parse()?;
+        let dev_specs = read_optional_dependency_group(&doc, "px-dev");
+        assert!(
+            dev_specs.contains(&TOMLI_W_REQUIREMENT.to_string()),
+            "hatch projects should record tomli-w"
+        );
         Ok(())
     }
 }

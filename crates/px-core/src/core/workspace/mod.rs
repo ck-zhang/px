@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,8 +19,8 @@ use crate::{
 use px_domain::{
     detect_lock_drift, discover_workspace_root, load_lockfile_optional, read_workspace_config,
     workspace_manifest_fingerprint, workspace_member_for_path, ManifestEditor, ProjectSnapshot,
-    ResolvedDependency, WorkspaceConfig, WorkspaceLock, WorkspaceMember as WorkspaceLockMember,
-    WorkspaceOwner,
+    PxOptions, ResolvedDependency, WorkspaceConfig, WorkspaceLock,
+    WorkspaceMember as WorkspaceLockMember, WorkspaceOwner,
 };
 
 #[derive(Clone, Debug)]
@@ -65,6 +66,7 @@ impl WorkspaceSnapshot {
             group_dependencies: Vec::new(),
             requirements: self.dependencies.clone(),
             python_override: self.python_override.clone(),
+            px_options: PxOptions::default(),
             manifest_fingerprint: self.manifest_fingerprint.clone(),
         }
     }
@@ -511,7 +513,7 @@ fn refresh_workspace_site(ctx: &CommandContext, workspace: &WorkspaceSnapshot) -
     ctx.fs().create_dir_all(&env_root)?;
     let site_dir = env_root.join("site");
     ctx.fs().create_dir_all(&site_dir)?;
-    materialize_project_site(&site_dir, &lock, ctx.fs())?;
+    materialize_project_site(&site_dir, &lock, Some(Path::new(&runtime.path)), ctx.fs())?;
     let canonical_site = ctx.fs().canonicalize(&site_dir).unwrap_or(site_dir.clone());
     let runtime_state = StoredRuntime {
         path: runtime.path.clone(),
@@ -1104,18 +1106,74 @@ pub fn prepare_workspace_run_context(
         )
     })?;
     let site_dir = PathBuf::from(&env.site_packages);
-    let (pythonpath, allowed_paths) =
+    let manifest_path = member_root.join("pyproject.toml");
+    if manifest_path.exists() {
+        if let Err(err) = crate::ensure_version_file(&manifest_path) {
+            return Err(ExecutionOutcome::failure(
+                "failed to prepare workspace version file",
+                json!({ "error": err.to_string() }),
+            ));
+        }
+    }
+    let paths =
         crate::build_pythonpath(ctx.fs(), &member_root, Some(site_dir.clone())).map_err(|err| {
             ExecutionOutcome::failure(
                 "failed to build workspace PYTHONPATH",
                 json!({ "error": err.to_string() }),
             )
         })?;
+    let mut combined = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let push_unique =
+        |paths: &mut Vec<PathBuf>, seen: &mut std::collections::HashSet<PathBuf>, path: PathBuf| {
+            if seen.insert(path.clone()) {
+                paths.push(path);
+            }
+        };
+    let current_src = member_root.join("src");
+    if current_src.exists() {
+        push_unique(&mut combined, &mut seen, current_src);
+    }
+    push_unique(&mut combined, &mut seen, member_root.clone());
+    for member in &workspace.config.members {
+        let abs = workspace.config.root.join(member);
+        let src = abs.join("src");
+        if src.exists() {
+            push_unique(&mut combined, &mut seen, src);
+        }
+        push_unique(&mut combined, &mut seen, abs);
+    }
+    for path in paths.allowed_paths {
+        push_unique(&mut combined, &mut seen, path);
+    }
+    let allowed_paths = combined;
+    let pythonpath = env::join_paths(&allowed_paths)
+        .map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to assemble workspace PYTHONPATH",
+                json!({ "error": err.to_string() }),
+            )
+        })?
+        .into_string()
+        .map_err(|_| {
+            ExecutionOutcome::failure(
+                "failed to assemble workspace PYTHONPATH",
+                json!({ "error": "contains non-utf8 data" }),
+            )
+        })?;
+    let px_options = workspace
+        .members
+        .iter()
+        .find(|member| member.root == member_root)
+        .map(|member| member.snapshot.px_options.clone())
+        .unwrap_or_default();
     let py_ctx = PythonContext {
         project_root: member_root.clone(),
         python: runtime.record.path.clone(),
         pythonpath,
         allowed_paths,
+        site_bin: paths.site_bin,
+        px_options,
     };
     Ok(Some(WorkspaceRunContext {
         py_ctx,
