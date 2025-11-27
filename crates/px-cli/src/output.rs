@@ -73,6 +73,16 @@ pub fn emit_output(
                     println!("{}", style.fix_bullet(&format!("  • {fix}")));
                 }
             }
+            if let Some(stdout) = output_from_details(&outcome.details, "stdout") {
+                println!();
+                println!("stdout:");
+                println!("{stdout}");
+            }
+            if let Some(stderr) = output_from_details(&outcome.details, "stderr") {
+                println!();
+                println!("stderr:");
+                println!("{stderr}");
+            }
             if let Some(trace) = traceback_from_details(&style, &outcome.details) {
                 println!();
                 println!("{}", trace.body);
@@ -94,6 +104,14 @@ fn hint_from_details(details: &Value) -> Option<&str> {
         .as_object()
         .and_then(|map| map.get("hint"))
         .and_then(Value::as_str)
+}
+
+fn output_from_details<'a>(details: &'a Value, key: &str) -> Option<&'a str> {
+    details
+        .as_object()
+        .and_then(|map| map.get(key))
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
 }
 
 fn traceback_from_details(style: &Style, details: &Value) -> Option<traceback::TracebackDisplay> {

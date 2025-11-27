@@ -310,6 +310,14 @@ pub struct RunArgs {
     pub entry: Option<String>,
     #[arg(long)]
     pub target: Option<String>,
+    #[arg(long, help = "Force interactive stdio (inherit stdin/stdout/stderr)")]
+    pub interactive: bool,
+    #[arg(
+        long,
+        help = "Force non-interactive stdio (capture stdout/stderr; stdin disabled)",
+        conflicts_with = "interactive"
+    )]
+    pub non_interactive: bool,
     #[arg(
         long,
         help = "Fail if px.lock is missing or the environment is out of sync"

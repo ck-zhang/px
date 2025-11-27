@@ -1132,7 +1132,10 @@ mypy = "^1.11.0"
         .parse()?;
 
         let changed = ensure_dependency_group_config(&mut doc);
-        assert!(changed, "include-groups should be written for poetry groups");
+        assert!(
+            changed,
+            "include-groups should be written for poetry groups"
+        );
         let groups = doc["tool"]["px"]["dependencies"]["include-groups"]
             .as_array()
             .expect("include-groups array");

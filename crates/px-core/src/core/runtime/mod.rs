@@ -16,4 +16,6 @@ pub(crate) use artifacts::{
 pub use facade::*;
 
 #[cfg(test)]
+mod run_plan_tests;
+#[cfg(test)]
 mod tests;

@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
-use toml_edit::{DocumentMut, Item};
+use toml_edit::{DocumentMut, Item, Value};
 
 use crate::PythonContext;
 
@@ -16,18 +16,21 @@ pub(crate) struct ResolvedEntry {
 #[derive(Debug, Clone)]
 pub(crate) enum EntrySource {
     PxScript { script: String },
+    ProjectScript { script: String },
 }
 
 impl EntrySource {
     pub(crate) fn label(&self) -> &'static str {
         match self {
             EntrySource::PxScript { .. } => "px-scripts",
+            EntrySource::ProjectScript { .. } => "project-scripts",
         }
     }
 
     pub(crate) fn script_name(&self) -> Option<&str> {
         match self {
             EntrySource::PxScript { script } => Some(script.as_str()),
+            EntrySource::ProjectScript { script } => Some(script.as_str()),
         }
     }
 }
@@ -67,12 +70,20 @@ pub(crate) fn plan_run_target(
         return Ok(RunTargetPlan::PxScript(resolved));
     }
 
+    if let Some(resolved) = resolve_project_script(manifest, target)? {
+        return Ok(RunTargetPlan::PxScript(resolved));
+    }
+
     if let Some(script_path) = script_under_project_root(&py_ctx.project_root, target) {
         return Ok(RunTargetPlan::Script(script_path));
     }
 
     if let Some(target) = detect_passthrough_target(target, py_ctx) {
         return Ok(RunTargetPlan::Passthrough(target));
+    }
+
+    if let Some(resolved) = detect_console_script(target, py_ctx) {
+        return Ok(RunTargetPlan::Executable(resolved));
     }
 
     Ok(RunTargetPlan::Executable(target.to_string()))
@@ -107,6 +118,54 @@ fn resolve_px_script(manifest: &Path, target: &str) -> Result<Option<ResolvedEnt
         entry,
         call,
         source: EntrySource::PxScript {
+            script: target.to_string(),
+        },
+    }))
+}
+
+fn resolve_project_script(manifest: &Path, target: &str) -> Result<Option<ResolvedEntry>> {
+    if !manifest.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(manifest)?;
+    let doc: DocumentMut = contents.parse()?;
+    let Some(project_table) = doc.get("project").and_then(Item::as_table) else {
+        return Ok(None);
+    };
+
+    let from_table = |name: &str| {
+        project_table.get(name).and_then(|item| {
+            item.as_table()
+                .and_then(|table| table.get(target).and_then(Item::as_str))
+                .or_else(|| {
+                    item.as_inline_table()
+                        .and_then(|table| table.get(target).and_then(Value::as_str))
+                })
+                .map(|raw| (name.to_string(), raw.to_string()))
+        })
+    };
+    let candidate = from_table("scripts")
+        .or_else(|| from_table("gui-scripts"))
+        .or_else(|| {
+            project_table
+                .get("entry-points")
+                .and_then(Item::as_table)
+                .and_then(|entry_points| entry_points.get("console_scripts"))
+                .and_then(Item::as_table)
+                .and_then(|table| table.get(target))
+                .and_then(Item::as_str)
+                .map(|raw| ("entry-points.console_scripts".to_string(), raw.to_string()))
+        });
+
+    let Some((table, raw)) = candidate else {
+        return Ok(None);
+    };
+    let (entry, call) = parse_entry_value(&raw)
+        .ok_or_else(|| anyhow!("invalid script entry for `{target}` in [{table}]"))?;
+    Ok(Some(ResolvedEntry {
+        entry,
+        call,
+        source: EntrySource::ProjectScript {
             script: target.to_string(),
         },
     }))
@@ -200,10 +259,30 @@ fn resolve_script_path(entry: &str, root: &Path) -> String {
     }
 }
 
+fn detect_console_script(entry: &str, ctx: &PythonContext) -> Option<String> {
+    let site_bin = ctx.site_bin.as_ref()?;
+    let mut candidates = vec![site_bin.join(entry)];
+    if let Ok(pathext) = std::env::var("PATHEXT") {
+        for ext in pathext.split(';').filter(|ext| !ext.is_empty()) {
+            candidates.push(site_bin.join(format!("{entry}{ext}")));
+        }
+    }
+    for candidate in candidates {
+        if candidate.exists() {
+            if let Ok(path) = candidate.canonicalize() {
+                return Some(path.display().to_string());
+            }
+            return Some(candidate.display().to_string());
+        }
+    }
+    None
+}
+
 fn resolve_executable_path(entry: &str, root: &Path) -> (String, Option<String>) {
     let path = Path::new(entry);
     if path.is_absolute() {
-        (entry.to_string(), Some(entry.to_string()))
+        let display = path.display().to_string();
+        (display.clone(), Some(display))
     } else {
         let resolved = root.join(path);
         let display = resolved.display().to_string();

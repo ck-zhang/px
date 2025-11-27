@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::process::{run_command, RunOutput};
+use crate::process::{run_command, run_command_passthrough, RunOutput};
 use crate::python_sys::detect_interpreter;
 use crate::store::{
     cache_wheel, collect_cache_walk, compute_cache_usage, ensure_sdist_build, prefetch_artifacts,
@@ -17,6 +17,13 @@ use crate::pypi::PypiReleaseResponse;
 pub trait PythonRuntime: Send + Sync {
     fn detect_interpreter(&self) -> Result<String>;
     fn run_command(
+        &self,
+        python: &str,
+        args: &[String],
+        env: &[(String, String)],
+        cwd: &Path,
+    ) -> Result<RunOutput>;
+    fn run_command_passthrough(
         &self,
         python: &str,
         args: &[String],
@@ -137,6 +144,16 @@ impl PythonRuntime for SystemPythonRuntime {
         cwd: &Path,
     ) -> Result<RunOutput> {
         run_command(python, args, env, cwd)
+    }
+
+    fn run_command_passthrough(
+        &self,
+        python: &str,
+        args: &[String],
+        env: &[(String, String)],
+        cwd: &Path,
+    ) -> Result<RunOutput> {
+        run_command_passthrough(python, args, env, cwd)
     }
 }
 

@@ -295,16 +295,25 @@ fn ensure_build_bootstrap(python: &str) -> Result<()> {
 }
 
 fn discover_project_dir(root: &Path) -> Result<PathBuf> {
+    if is_project_dir(root) {
+        return Ok(root.to_path_buf());
+    }
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             let path = entry.path();
-            if path.join("pyproject.toml").exists() {
+            if is_project_dir(&path) {
                 return Ok(path);
             }
         }
     }
     Err(anyhow!("unable to find project dir in {}", root.display()))
+}
+
+fn is_project_dir(path: &Path) -> bool {
+    path.join("pyproject.toml").exists()
+        || path.join("setup.py").exists()
+        || path.join("setup.cfg").exists()
 }
 
 fn find_wheel(dist_dir: &Path) -> Result<PathBuf> {
@@ -322,4 +331,46 @@ fn find_wheel(dist_dir: &Path) -> Result<PathBuf> {
         }
     }
     found.ok_or_else(|| anyhow!("wheel not found in {}", dist_dir.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn detects_project_at_root_with_pyproject() -> Result<()> {
+        let dir = tempdir()?;
+        let pyproject = dir.path().join("pyproject.toml");
+        fs::write(&pyproject, b"[project]\nname = \"demo\"")?;
+
+        let detected = discover_project_dir(dir.path())?;
+
+        assert_eq!(detected, dir.path());
+        Ok(())
+    }
+
+    #[test]
+    fn detects_project_in_subdir_with_setup_py() -> Result<()> {
+        let dir = tempdir()?;
+        let nested = dir.path().join("pkg");
+        fs::create_dir_all(&nested)?;
+        fs::write(
+            nested.join("setup.py"),
+            b"from setuptools import setup\nsetup()",
+        )?;
+
+        let detected = discover_project_dir(dir.path())?;
+
+        assert_eq!(detected, nested);
+        Ok(())
+    }
+
+    #[test]
+    fn errors_when_project_files_missing() {
+        let dir = tempdir().unwrap();
+        let result = discover_project_dir(dir.path());
+        assert!(result.is_err());
+    }
 }

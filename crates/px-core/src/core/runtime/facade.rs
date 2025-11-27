@@ -28,8 +28,8 @@ use px_domain::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tracing::warn;
 use toml_edit::{Array, DocumentMut, Item, Table, TomlError, Value as TomlValue};
+use tracing::warn;
 
 use super::artifacts::{ensure_exact_pins, parse_exact_pin, resolve_pins};
 use crate::effects::Effects;
@@ -70,15 +70,15 @@ def _allow(path):
 
 _new_path = []
 _seen = set()
+_script_dir = sys.path[0] if sys.path else ""
 
 def _push(path):
+    if not path:
+        return
     if path in _seen:
         return
     _seen.add(path)
     _new_path.append(path)
-
-if sys.path:
-    _push(sys.path[0])
 
 for path in _ALLOWED:
     _push(path)
@@ -87,9 +87,12 @@ for path in sys.path:
     if _allow(path):
         _push(path)
 
+if _script_dir:
+    _push(_script_dir)
+
 sys.path[:] = _new_path
-# Drop PYTHONPATH after bootstrapping so child processes don't inherit px paths
-os.environ.pop("PYTHONPATH", None)
+# Ensure child processes inherit the px path set instead of a mutated sys.path
+os.environ["PYTHONPATH"] = os.environ.get("PX_ALLOWED_PATHS", "")
 
 _SITE_BIN = Path(__file__).resolve().parent / "bin"
 if _SITE_BIN.exists():
@@ -1508,20 +1511,15 @@ pub(crate) fn build_pythonpath(
     project_root: &Path,
     site_override: Option<PathBuf>,
 ) -> Result<PythonPathInfo> {
-    let mut paths = Vec::new();
-    let src = project_root.join("src");
-    if src.exists() {
-        paths.push(src);
-    }
-    paths.push(project_root.to_path_buf());
+    let mut site_paths = Vec::new();
     let mut site_dir_used = None;
 
     if let Some(site_dir) =
         site_override.or_else(|| resolve_project_site(fs, project_root).ok().flatten())
     {
         let canonical = fs.canonicalize(&site_dir).unwrap_or(site_dir.clone());
-        paths.push(canonical.clone());
         site_dir_used = Some(canonical.clone());
+        site_paths.push(canonical.clone());
         let pth = canonical.join("px.pth");
         if pth.exists() {
             if let Ok(contents) = fs.read_to_string(&pth) {
@@ -1532,13 +1530,49 @@ pub(crate) fn build_pythonpath(
                     }
                     let entry_path = PathBuf::from(trimmed);
                     if entry_path.exists() {
-                        paths.push(entry_path);
+                        site_paths.push(entry_path);
                     }
                 }
             }
         }
     }
 
+    let mut project_paths = Vec::new();
+    let src = project_root.join("src");
+    if src.exists() {
+        project_paths.push(src);
+    }
+    let mut child_projects = Vec::new();
+    if let Ok(entries) = fs.read_dir(project_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let manifest = path.join("pyproject.toml");
+            if fs.metadata(&manifest).is_ok() {
+                child_projects.push(path);
+            }
+        }
+    }
+    child_projects.sort();
+    for path in child_projects {
+        if path != project_root {
+            project_paths.push(path);
+        }
+    }
+    project_paths.push(project_root.to_path_buf());
+
+    let mut paths = Vec::new();
+    if let Some(dir) = site_dir_used.as_ref() {
+        paths.push(dir.clone());
+    }
+    paths.extend(project_paths);
+    for path in site_paths {
+        if Some(&path) != site_dir_used.as_ref() {
+            paths.push(path);
+        }
+    }
     paths.retain(|p| p.exists());
     if paths.is_empty() {
         paths.push(project_root.to_path_buf());
@@ -1897,7 +1931,10 @@ pub fn format_status_message(info: CommandInfo, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SystemEffects;
     use anyhow::Result;
+    use serde_json::Value;
+    use std::env;
     use std::fs;
     use std::io::Write;
     use std::path::Path;
@@ -1923,7 +1960,10 @@ mod tests {
         materialize_wheel_scripts(&artifact, &bin_dir, Some(Path::new("/custom/python")))?;
 
         let alpha = fs::read_to_string(bin_dir.join("alpha"))?;
-        assert!(alpha.starts_with("#!/custom/python"), "shebang honors python");
+        assert!(
+            alpha.starts_with("#!/custom/python"),
+            "shebang honors python"
+        );
         assert!(alpha.contains("demo.cli"));
         let beta = fs::read_to_string(bin_dir.join("beta"))?;
         assert!(beta.contains("demo.gui"));
@@ -1957,7 +1997,95 @@ mod tests {
     }
 
     #[test]
+    fn site_dir_precedes_project_root_in_sys_path() -> Result<()> {
+        let temp = tempdir()?;
+        let project_root = temp.path();
+        let site_dir = project_root.join("site");
+        fs::create_dir_all(&site_dir)?;
+        fs::write(site_dir.join("sitecustomize.py"), SITE_CUSTOMIZE)?;
+
+        let dep_pkg = site_dir.join("deps");
+        let dep_mod = dep_pkg.join("dep");
+        fs::create_dir_all(&dep_mod)?;
+        fs::write(dep_mod.join("__init__.py"), "VALUE = 'site'\n")?;
+        fs::write(site_dir.join("px.pth"), format!("{}\n", dep_pkg.display()))?;
+
+        // Namespace-like directory at the project root should not shadow site packages
+        fs::create_dir_all(project_root.join("dep"))?;
+
+        let effects = SystemEffects::new();
+        let paths = build_pythonpath(effects.fs(), project_root, Some(site_dir.clone()))?;
+        let allowed = env::join_paths(&paths.allowed_paths)
+            .expect("allowed paths")
+            .into_string()
+            .expect("utf8 allowed paths");
+        let allowed_env = allowed.clone();
+        let python = match effects.python().detect_interpreter() {
+            Ok(path) => path,
+            Err(_) => return Ok(()),
+        };
+
+        let mut cmd = Command::new(&python);
+        cmd.current_dir(project_root);
+        cmd.env("PYTHONPATH", paths.pythonpath.clone());
+        cmd.env("PX_ALLOWED_PATHS", allowed_env.clone());
+        cmd.arg("-c").arg(
+            "import importlib, json, os, sys; mod = importlib.import_module('dep'); \
+             print(json.dumps({'file': getattr(mod, '__file__', ''), 'value': getattr(mod, 'VALUE', ''), 'prefix': sys.path[:3], 'env_py': os.environ.get('PYTHONPATH')}))",
+        );
+        let output = cmd.output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "python exited with {}: {}\n{}",
+            output.status,
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let payload: Value = serde_json::from_str(stdout.trim())?;
+        let prefix: Vec<String> = payload
+            .get("prefix")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(std::string::ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let canonical_site = effects.fs().canonicalize(&site_dir)?;
+        let canonical_site_str = canonical_site.display().to_string();
+        let first_nonempty = if prefix.first().is_some_and(|entry| entry.is_empty()) {
+            prefix.get(1).map(String::as_str)
+        } else {
+            prefix.first().map(String::as_str)
+        };
+        assert_eq!(first_nonempty, Some(canonical_site_str.as_str()));
+        let value = payload
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert_eq!(value, "site");
+        let env_py = payload
+            .get("env_py")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert_eq!(env_py, allowed_env);
+        let file = payload.get("file").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            file.contains(dep_mod.to_string_lossy().as_ref()),
+            "expected module to load from site packages, got {file}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn ensure_version_file_populates_missing_file_from_git() -> Result<()> {
+        if Command::new("git").arg("--version").status().is_err() {
+            return Ok(());
+        }
         let temp = tempdir()?;
         let manifest = temp.path().join("pyproject.toml");
         fs::write(
@@ -1975,11 +2103,7 @@ version-file = "demo/_version.py"
         fs::create_dir_all(&demo_dir)?;
         fs::write(demo_dir.join("__init__.py"), "")?;
 
-        if Command::new("git")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
+        if Command::new("git").arg("--version").output().is_err() {
             eprintln!("skipping version file test (git not available)");
             return Ok(());
         }

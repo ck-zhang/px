@@ -190,6 +190,13 @@ fn run_request_from_args(args: &RunArgs) -> RunRequest {
         target: args.target.clone(),
         args: forwarded_args,
         frozen: args.frozen,
+        interactive: if args.interactive {
+            Some(true)
+        } else if args.non_interactive {
+            Some(false)
+        } else {
+            None
+        },
     }
 }
 

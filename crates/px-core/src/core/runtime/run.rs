@@ -1,4 +1,5 @@
 use std::env;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -28,6 +29,7 @@ pub struct RunRequest {
     pub target: Option<String>,
     pub args: Vec<String>,
     pub frozen: bool,
+    pub interactive: Option<bool>,
 }
 
 type EnvPairs = Vec<(String, String)>;
@@ -67,20 +69,43 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             "target": &target,
             "args": &request.args,
         });
+        let interactive = request.interactive.unwrap_or_else(|| {
+            !strict && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+        });
         let plan = plan_run_target(&ws_ctx.py_ctx, &ws_ctx.manifest_path, &target)?;
         let mut outcome = match plan {
-            RunTargetPlan::PxScript(resolved) => {
-                run_module_entry(ctx, &ws_ctx.py_ctx, resolved, &request.args, &command_args)?
-            }
-            RunTargetPlan::Script(path) => {
-                run_project_script(ctx, &ws_ctx.py_ctx, &path, &request.args, &command_args)?
-            }
-            RunTargetPlan::Passthrough(target) => {
-                run_passthrough(ctx, &ws_ctx.py_ctx, target, &request.args, &command_args)?
-            }
-            RunTargetPlan::Executable(program) => {
-                run_executable(ctx, &ws_ctx.py_ctx, &program, &request.args, &command_args)?
-            }
+            RunTargetPlan::PxScript(resolved) => run_module_entry(
+                ctx,
+                &ws_ctx.py_ctx,
+                resolved,
+                &request.args,
+                &command_args,
+                interactive,
+            )?,
+            RunTargetPlan::Script(path) => run_project_script(
+                ctx,
+                &ws_ctx.py_ctx,
+                &path,
+                &request.args,
+                &command_args,
+                interactive,
+            )?,
+            RunTargetPlan::Passthrough(target) => run_passthrough(
+                ctx,
+                &ws_ctx.py_ctx,
+                target,
+                &request.args,
+                &command_args,
+                interactive,
+            )?,
+            RunTargetPlan::Executable(program) => run_executable(
+                ctx,
+                &ws_ctx.py_ctx,
+                &program,
+                &request.args,
+                &command_args,
+                interactive,
+            )?,
         };
         attach_autosync_details(&mut outcome, ws_ctx.sync_report);
         return Ok(outcome);
@@ -126,20 +151,43 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
     });
     let manifest = py_ctx.project_root.join("pyproject.toml");
 
+    let interactive = request.interactive.unwrap_or_else(|| {
+        !strict && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+    });
     let plan = plan_run_target(&py_ctx, &manifest, &target)?;
     let mut outcome = match plan {
-        RunTargetPlan::PxScript(resolved) => {
-            run_module_entry(ctx, &py_ctx, resolved, &request.args, &command_args)?
-        }
-        RunTargetPlan::Script(path) => {
-            run_project_script(ctx, &py_ctx, &path, &request.args, &command_args)?
-        }
-        RunTargetPlan::Passthrough(target) => {
-            run_passthrough(ctx, &py_ctx, target, &request.args, &command_args)?
-        }
-        RunTargetPlan::Executable(program) => {
-            run_executable(ctx, &py_ctx, &program, &request.args, &command_args)?
-        }
+        RunTargetPlan::PxScript(resolved) => run_module_entry(
+            ctx,
+            &py_ctx,
+            resolved,
+            &request.args,
+            &command_args,
+            interactive,
+        )?,
+        RunTargetPlan::Script(path) => run_project_script(
+            ctx,
+            &py_ctx,
+            &path,
+            &request.args,
+            &command_args,
+            interactive,
+        )?,
+        RunTargetPlan::Passthrough(target) => run_passthrough(
+            ctx,
+            &py_ctx,
+            target,
+            &request.args,
+            &command_args,
+            interactive,
+        )?,
+        RunTargetPlan::Executable(program) => run_executable(
+            ctx,
+            &py_ctx,
+            &program,
+            &request.args,
+            &command_args,
+            interactive,
+        )?,
     };
     attach_autosync_details(&mut outcome, sync_report);
     Ok(outcome)
@@ -151,21 +199,23 @@ fn run_project_script(
     script: &Path,
     extra_args: &[String],
     command_args: &Value,
+    interactive: bool,
 ) -> Result<ExecutionOutcome> {
     let (envs, _) = build_env_with_preflight(core_ctx, py_ctx, command_args)?;
     let mut args = Vec::with_capacity(extra_args.len() + 1);
     args.push(script.display().to_string());
     args.extend(extra_args.iter().cloned());
-    let output = core_ctx.python_runtime().run_command(
-        &py_ctx.python,
-        &args,
-        &envs,
-        &py_ctx.project_root,
-    )?;
+    let runtime = core_ctx.python_runtime();
+    let output = if interactive {
+        runtime.run_command_passthrough(&py_ctx.python, &args, &envs, &py_ctx.project_root)?
+    } else {
+        runtime.run_command(&py_ctx.python, &args, &envs, &py_ctx.project_root)?
+    };
     let details = json!({
         "mode": "script",
         "script": script.display().to_string(),
         "args": extra_args,
+        "interactive": interactive,
     });
     Ok(outcome_from_output(
         "run",
@@ -182,16 +232,20 @@ fn run_executable(
     program: &str,
     extra_args: &[String],
     command_args: &Value,
+    interactive: bool,
 ) -> Result<ExecutionOutcome> {
     let (envs, _) = build_env_with_preflight(core_ctx, py_ctx, command_args)?;
-    let output =
-        core_ctx
-            .python_runtime()
-            .run_command(program, extra_args, &envs, &py_ctx.project_root)?;
+    let runtime = core_ctx.python_runtime();
+    let output = if interactive {
+        runtime.run_command_passthrough(program, extra_args, &envs, &py_ctx.project_root)?
+    } else {
+        runtime.run_command(program, extra_args, &envs, &py_ctx.project_root)?
+    };
     let details = json!({
         "mode": "executable",
         "program": program,
         "args": extra_args,
+        "interactive": interactive,
     });
     Ok(outcome_from_output(
         "run",
@@ -366,6 +420,7 @@ fn run_module_entry(
     resolved: ResolvedEntry,
     extra_args: &[String],
     command_args: &Value,
+    interactive: bool,
 ) -> Result<ExecutionOutcome> {
     let ResolvedEntry {
         entry,
@@ -394,17 +449,23 @@ fn run_module_entry(
     }
     envs.push(("PX_RUN_ENTRY".into(), env_entry.clone()));
 
-    let output = core_ctx.python_runtime().run_command(
-        &py_ctx.python,
-        &python_args,
-        &envs,
-        &py_ctx.project_root,
-    )?;
+    let runtime = core_ctx.python_runtime();
+    let output = if interactive {
+        runtime.run_command_passthrough(
+            &py_ctx.python,
+            &python_args,
+            &envs,
+            &py_ctx.project_root,
+        )?
+    } else {
+        runtime.run_command(&py_ctx.python, &python_args, &envs, &py_ctx.project_root)?
+    };
     let mut details = json!({
         "mode": mode,
         "entry": env_entry.clone(),
         "args": extra_args,
         "source": source.label(),
+        "interactive": interactive,
     });
     if let Some(script) = source.script_name() {
         details["script"] = Value::String(script.to_string());
@@ -445,6 +506,7 @@ fn run_passthrough(
     target: PassthroughTarget,
     extra_args: &[String],
     command_args: &Value,
+    interactive: bool,
 ) -> Result<ExecutionOutcome> {
     let PassthroughTarget {
         program,
@@ -462,16 +524,17 @@ fn run_passthrough(
         }
         _ => extra_args.to_vec(),
     };
-    let output = core_ctx.python_runtime().run_command(
-        &program,
-        &program_args,
-        &envs,
-        &py_ctx.project_root,
-    )?;
+    let runtime = core_ctx.python_runtime();
+    let output = if interactive {
+        runtime.run_command_passthrough(&program, &program_args, &envs, &py_ctx.project_root)?
+    } else {
+        runtime.run_command(&program, &program_args, &envs, &py_ctx.project_root)?
+    };
     let mut details = json!({
         "mode": "passthrough",
         "program": display.clone(),
         "args": extra_args,
+        "interactive": interactive,
     });
     if let Some(resolved_path) = resolved {
         details["resolved_program"] = Value::String(resolved_path);
@@ -570,7 +633,10 @@ mod tests {
     #[test]
     fn build_env_marks_available_plugins() -> Result<()> {
         let ctx = ctx_with_defaults();
-        let python = ctx.python_runtime().detect_interpreter()?;
+        let python = match ctx.python_runtime().detect_interpreter() {
+            Ok(path) => path,
+            Err(_) => return Ok(()),
+        };
         let temp = tempdir()?;
         let py_ctx = PythonContext {
             project_root: temp.path().to_path_buf(),
@@ -598,7 +664,10 @@ mod tests {
     #[test]
     fn build_env_marks_missing_plugins() -> Result<()> {
         let ctx = ctx_with_defaults();
-        let python = ctx.python_runtime().detect_interpreter()?;
+        let python = match ctx.python_runtime().detect_interpreter() {
+            Ok(path) => path,
+            Err(_) => return Ok(()),
+        };
         let temp = tempdir()?;
         let py_ctx = PythonContext {
             project_root: temp.path().to_path_buf(),

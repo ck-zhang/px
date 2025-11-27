@@ -398,10 +398,10 @@ fn classify_artifact(filename: &str) -> Result<ArtifactUploadKind> {
 
 #[cfg(test)]
 mod tests {
-    use std::panic;
     use super::super::artifacts::compute_file_sha256;
     use super::*;
     use httptest::{matchers::*, responders::*, Expectation, Server};
+    use std::panic;
     use tempfile::tempdir;
 
     fn sample_metadata() -> PublishMetadata {
@@ -454,7 +454,9 @@ mod tests {
         let server = match panic::catch_unwind(Server::run) {
             Ok(server) => server,
             Err(_) => {
-                eprintln!("skipping publish forbidden-credentials test (httptest server unavailable)");
+                eprintln!(
+                    "skipping publish forbidden-credentials test (httptest server unavailable)"
+                );
                 return Ok(());
             }
         };

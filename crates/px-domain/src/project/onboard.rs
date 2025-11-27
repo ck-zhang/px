@@ -220,19 +220,31 @@ fn ensure_project_metadata(doc: &mut DocumentMut, root: &Path) {
         .or_insert(Item::Table(Table::new()))
         .as_table_mut()
         .expect("project table");
-    if !project.contains_key("name") {
+    let dynamic_fields: Vec<String> = project
+        .get("dynamic")
+        .and_then(Item::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(toml_edit::Value::as_str)
+                .map(std::string::ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let is_dynamic = |field: &str| dynamic_fields.iter().any(|entry| entry == field);
+    if !is_dynamic("name") && !project.contains_key("name") {
         project.insert(
             "name",
             Item::Value(TomlValue::from(sanitize_package_candidate(root))),
         );
     }
-    if !project.contains_key("version") {
+    if !is_dynamic("version") && !project.contains_key("version") {
         project.insert("version", Item::Value(TomlValue::from("0.1.0")));
     }
-    if !project.contains_key("requires-python") {
+    if !is_dynamic("requires-python") && !project.contains_key("requires-python") {
         project.insert("requires-python", Item::Value(TomlValue::from(">=3.11")));
     }
-    if !project.contains_key("dependencies") {
+    if !is_dynamic("dependencies") && !project.contains_key("dependencies") {
         project.insert("dependencies", Item::Value(TomlValue::Array(Array::new())));
     }
     let tool = doc
@@ -368,6 +380,40 @@ build-backend = "pdm.backend"
             );
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_metadata_respects_dynamic_version() -> Result<()> {
+        let dir = tempdir()?;
+        let mut doc: DocumentMut = r#"[project]
+name = "flit"
+dynamic = ["version", "description"]
+requires-python = ">=3.8"
+dependencies = ["flit_core>=3.11,<4"]
+
+[build-system]
+requires = ["flit_core>=3.11,<4"]
+build-backend = "flit_core.buildapi"
+"#
+        .parse()?;
+
+        ensure_project_metadata(&mut doc, dir.path());
+
+        let project = doc["project"].as_table().expect("project table");
+        assert!(
+            project.get("version").is_none(),
+            "version should remain dynamic"
+        );
+        let dynamic = project["dynamic"]
+            .as_array()
+            .expect("dynamic should remain an array");
+        assert!(
+            dynamic
+                .iter()
+                .any(|item| item.as_str().is_some_and(|value| value == "version")),
+            "dynamic version entry should be preserved"
+        );
         Ok(())
     }
 
