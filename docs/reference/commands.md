@@ -122,6 +122,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 * **Env prep**: PATH is rebuilt with the px env’s `site/bin` first (px materializes console/gui scripts there from wheels); exports `PYAPP_COMMAND_NAME` when `[tool.px].manage-command` is set; runs a lightweight import check for `[tool.px].plugin-imports` and sets `PX_PLUGIN_PREFLIGHT` to `1`/`0`; clears proxy env vars.
 * **VCS version files**: if `[tool.hatch.build.hooks.vcs].version-file` points to a missing file, px writes one using `git describe --tags --dirty --long` (fallback `git rev-parse --short HEAD`); if git metadata is unavailable, px writes `0.0.0+unknown` as a safe fallback.
 * **Failure hints**: missing module during execution → if dep absent in M/L suggest `px add <pkg>`; if present suggest `px sync`.
+* **Stdin**: passthrough targets using `python -` keep stdin attached so piped scripts can run; other non-interactive runs keep stdin closed to avoid blocking.
 
 ### `px test`
 

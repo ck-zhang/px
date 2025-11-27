@@ -26,13 +26,33 @@ pub fn run_command(
     envs: &[(String, String)],
     cwd: &Path,
 ) -> Result<RunOutput> {
+    run_command_with_stdin(program, args, envs, cwd, false)
+}
+
+/// Execute a program and capture stdout/stderr, optionally inheriting stdin.
+///
+/// # Errors
+///
+/// Returns an error when the program cannot be spawned or the I/O streams cannot
+/// be read entirely.
+pub fn run_command_with_stdin(
+    program: &str,
+    args: &[String],
+    envs: &[(String, String)],
+    cwd: &Path,
+    inherit_stdin: bool,
+) -> Result<RunOutput> {
     let mut command = Command::new(program);
     command.args(args);
     for (key, value) in envs {
         command.env(key, value);
     }
     command.current_dir(cwd);
-    command.stdin(Stdio::null());
+    if inherit_stdin {
+        command.stdin(Stdio::inherit());
+    } else {
+        command.stdin(Stdio::null());
+    }
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 

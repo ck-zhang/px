@@ -524,8 +524,26 @@ fn run_passthrough(
         }
         _ => extra_args.to_vec(),
     };
+    let needs_stdin = match &reason {
+        PassthroughReason::PythonScript { script_arg, .. } => script_arg == "-",
+        PassthroughReason::PythonAlias => program_args.first().map(String::as_str) == Some("-"),
+        _ => false,
+    };
+    let mut interactive = interactive;
+    if needs_stdin {
+        // `python -` needs stdin; treat it as interactive even when not attached to a TTY.
+        interactive = true;
+    }
     let runtime = core_ctx.python_runtime();
-    let output = if interactive {
+    let output = if needs_stdin {
+        runtime.run_command_with_stdin(
+            &program,
+            &program_args,
+            &envs,
+            &py_ctx.project_root,
+            true,
+        )?
+    } else if interactive {
         runtime.run_command_passthrough(&program, &program_args, &envs, &py_ctx.project_root)?
     } else {
         runtime.run_command(&program, &program_args, &envs, &py_ctx.project_root)?

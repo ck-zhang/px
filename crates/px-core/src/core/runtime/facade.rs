@@ -1705,6 +1705,10 @@ pub(crate) fn build_pythonpath(
     if src.exists() {
         project_paths.push(src);
     }
+    let python_dir = project_root.join("python");
+    if python_dir.exists() {
+        project_paths.push(python_dir);
+    }
     let mut child_projects = Vec::new();
     if let Ok(entries) = fs.read_dir(project_root) {
         for entry in entries.flatten() {

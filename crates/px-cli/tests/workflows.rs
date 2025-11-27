@@ -107,6 +107,33 @@ fn run_supports_python_passthrough_invocations() {
 }
 
 #[test]
+fn run_reads_stdin_and_python_source_dirs() {
+    let (_tmp, project) = prepare_fixture("run-python-stdin");
+    let package = project.join("sample_px_app");
+    let relocated = project.join("python").join("sample_px_app");
+    fs::create_dir_all(relocated.parent().expect("parent dir")).expect("create python dir");
+    fs::rename(&package, &relocated).expect("move package into python/");
+
+    let Some(python) = find_python() else {
+        eprintln!("skipping stdin/path test (python binary not found)");
+        return;
+    };
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["run", "python", "-"])
+        .write_stdin("from sample_px_app import cli\nprint(cli.greet('PxStdin'))\n")
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("Hello, PxStdin!"),
+        "px run should consume stdin and locate packages under python/: {stdout:?}"
+    );
+}
+
+#[test]
 fn run_respects_explicit_entry_even_with_other_defaults() {
     let (_tmp, project) = prepare_fixture("run-explicit-entry");
     set_px_scripts(
