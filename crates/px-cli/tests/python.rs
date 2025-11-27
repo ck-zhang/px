@@ -80,9 +80,11 @@ fn python_list_reports_corrupt_registry() {
 fn python_info_surfaces_manifest_errors() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path();
+    let registry = temp.path().join("runtimes.json");
     fs::write(root.join("pyproject.toml"), "[project\nname='broken'").expect("write pyproject");
     let assert = cargo_bin_cmd!("px")
         .current_dir(root)
+        .env("PX_RUNTIME_REGISTRY", registry.to_str().unwrap())
         .args(["--json", "python", "info"])
         .assert()
         .failure();

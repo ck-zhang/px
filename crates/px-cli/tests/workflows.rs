@@ -6,7 +6,7 @@ use toml_edit::{value, DocumentMut, Item, Table};
 
 mod common;
 
-use common::{parse_json, prepare_fixture};
+use common::{parse_json, prepare_fixture, require_online};
 
 #[test]
 fn run_prints_fixture_output() {
@@ -427,10 +427,14 @@ fn run_emits_hint_when_requests_socks_missing_under_proxy() {
 
 #[test]
 fn run_frozen_handles_large_dependency_graph() {
+    if !require_online() {
+        return;
+    }
     use common::prepare_named_fixture;
     let (_tmp, project) = prepare_named_fixture("large_graph", "large-graph");
     let lock = project.join("px.lock");
     std::fs::remove_file(&lock).ok(); // force sync to write a fresh lock
+    let cache = project.join(".px-cache");
     let Some(python) = find_python() else {
         eprintln!("skipping large graph test (python binary not found)");
         return;
@@ -439,6 +443,7 @@ fn run_frozen_handles_large_dependency_graph() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
         .args(["--json", "sync"])
         .assert()
         .success();

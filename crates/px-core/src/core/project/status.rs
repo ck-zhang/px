@@ -101,9 +101,9 @@ pub fn project_status(ctx: &CommandContext) -> Result<ExecutionOutcome> {
         InstallState::Drift => {
             details["status"] = Value::String("drift".to_string());
             details["issues"] = issue_values(outcome.drift);
-            details["hint"] = Value::String("Run `px sync` to refresh px.lock".to_string());
+            details["hint"] = Value::String("Run `px sync` to regenerate px.lock".to_string());
             Ok(ExecutionOutcome::user_error(
-                "Environment is out of sync with px.lock",
+                "px.lock is out of date",
                 details,
             ))
         }

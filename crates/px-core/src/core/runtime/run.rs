@@ -235,7 +235,19 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
         }
 
         if missing_pytest(&output.stderr) {
-            let mut outcome = run_builtin_tests("test", ctx, &ws_ctx.py_ctx, envs)?;
+            let mut outcome = if ctx.config().test.fallback_builtin {
+                run_builtin_tests("test", ctx, &ws_ctx.py_ctx, envs)?
+            } else {
+                ExecutionOutcome::user_error(
+                    "pytest is not available in the project environment",
+                    json!({
+                        "stdout": output.stdout,
+                        "stderr": output.stderr,
+                        "hint": "Add pytest to your project (for example `px add --dev pytest` or enable your test dependency group), then rerun `px test`.",
+                        "reason": "missing_pytest",
+                    }),
+                )
+            };
             attach_autosync_details(&mut outcome, ws_ctx.sync_report);
             return Ok(outcome);
         }
@@ -297,7 +309,19 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
     }
 
     if missing_pytest(&output.stderr) {
-        let mut outcome = run_builtin_tests("test", ctx, &py_ctx, envs)?;
+        let mut outcome = if ctx.config().test.fallback_builtin {
+            run_builtin_tests("test", ctx, &py_ctx, envs)?
+        } else {
+            ExecutionOutcome::user_error(
+                "pytest is not available in the project environment",
+                json!({
+                    "stdout": output.stdout,
+                    "stderr": output.stderr,
+                    "hint": "Add pytest to your project (for example `px add --dev pytest` or enable your test dependency group), then rerun `px test`.",
+                    "reason": "missing_pytest",
+                }),
+            )
+        };
         attach_autosync_details(&mut outcome, sync_report);
         return Ok(outcome);
     }

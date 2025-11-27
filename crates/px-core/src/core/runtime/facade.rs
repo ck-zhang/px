@@ -831,9 +831,10 @@ struct RuntimeProbe {
 
 fn verify_lock(snapshot: &ManifestSnapshot) -> Result<InstallOutcome> {
     let lockfile = snapshot.lock_path.display().to_string();
+    let marker_env = marker_env_for_snapshot(snapshot);
     match load_lockfile_optional(&snapshot.lock_path)? {
         Some(lock) => {
-            let report = analyze_lock_diff(snapshot, &lock, None);
+            let report = analyze_lock_diff(snapshot, &lock, marker_env.as_ref());
             let mut drift = report.to_messages();
             if drift.is_empty() {
                 drift = verify_locked_artifacts(&lock);
@@ -1900,6 +1901,7 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::path::Path;
+    use std::process::Command;
     use tempfile::tempdir;
     use zip::write::FileOptions;
 
@@ -1972,6 +1974,15 @@ version-file = "demo/_version.py"
         let demo_dir = temp.path().join("demo");
         fs::create_dir_all(&demo_dir)?;
         fs::write(demo_dir.join("__init__.py"), "")?;
+
+        if Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping version file test (git not available)");
+            return Ok(());
+        }
 
         assert!(
             Command::new("git")

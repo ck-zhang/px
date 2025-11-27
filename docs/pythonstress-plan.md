@@ -1,5 +1,11 @@
 # px pythonstress set
 
+Global goal for all pythonstress repos:
+
+- Treat each target repo purely as a px-managed project (px owns `pyproject.toml`/`px.lock`/`.px`), not as a px tool integration.
+- The success criteria per repo are: “can we drive its normal dev / test workflow smoothly via px?” — i.e. `px sync`, `px status`, `px run`/`px test` (and any repo-specific scripts) behave as expected.
+- We do **not** require the repo’s own CLI to be available as a px tool; pythonstress is about exercising px on real-world projects, not extending px’s command surface.
+
 Repos to exercise with px under `/home/toxictoast/test/pythonstress`, grouped and ordered:
 
 ## Core packaging / build tools
@@ -67,3 +73,10 @@ Repos to exercise with px under `/home/toxictoast/test/pythonstress`, grouped an
 - https://github.com/Azure/azure-sdk-for-python.git
 - https://github.com/boto/boto3.git
 - https://github.com/boto/botocore.git
+
+## Workflow notes: poetry (python-poetry/poetry)
+- Location: `/home/toxictoast/test/pythonstress/poetry` (requires Python >=3.9,<4.0).
+- For pythonstress, we treat Poetry as a px project and configure `[tool.px.dependencies].include-groups = ["dev", "test", "typing"]` in its `pyproject.toml` so pytest and typing/test deps are part of the px lock/env.
+- With that config in place, px status is clean after the marker-aware drift fix (tomli/importlib-metadata/xattr no longer flagged); `px sync` reports `px.lock` already up to date.
+- `px test` then runs Poetry’s tests under px; use `px test -- -k version` (or similar selectors) to keep the run lightweight in the stress suite.
+- We do not require the Poetry CLI itself to be runnable inside px for this scenario; the goal is that `px sync`, `px status`, and `px test` all behave correctly on the repo.

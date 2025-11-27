@@ -452,9 +452,14 @@ fn project_add_dry_run_leaves_project_unchanged() {
 
 #[test]
 fn project_update_restores_manifest_on_failure() {
+    if !require_online() {
+        return;
+    }
     let (_temp, root) = common::init_empty_project("px-update-restore");
+    let cache = root.join(".px-cache");
     cargo_bin_cmd!("px")
         .current_dir(&root)
+        .env("PX_CACHE_PATH", &cache)
         .args(["add", "packaging==23.0"])
         .assert()
         .success();
@@ -468,6 +473,7 @@ fn project_update_restores_manifest_on_failure() {
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&root)
+        .env("PX_CACHE_PATH", &cache)
         .args(["--json", "update", "packaging"])
         .assert()
         .failure();
@@ -794,6 +800,50 @@ fn project_status_detects_manifest_drift() {
 }
 
 #[test]
+fn project_status_ignores_dependencies_filtered_by_markers() {
+    let (_tmp, project) = common::init_empty_project("px-status-markers");
+    let pyproject = project.join("pyproject.toml");
+    let mut doc: DocumentMut = fs::read_to_string(&pyproject)
+        .expect("read pyproject")
+        .parse()
+        .expect("parse pyproject");
+    let deps = doc["project"]["dependencies"]
+        .as_array_mut()
+        .expect("dependencies array");
+    deps.push("tomli>=2.0.1,<3.0.0 ; python_version < '3.11'");
+    fs::write(&pyproject, doc.to_string()).expect("write pyproject");
+
+    let Some(python) = find_python() else {
+        eprintln!("skipping status marker test (python binary not found)");
+        return;
+    };
+
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["--json", "status"])
+        .assert()
+        .success();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["details"]["status"], "in-sync");
+    assert!(
+        payload["details"]["issues"].is_null()
+            || payload["details"]["issues"]
+                .as_array()
+                .is_none_or(|issues| issues.is_empty()),
+        "status should not report drift when marker-filtered dependencies are omitted: {payload:?}"
+    );
+}
+
+#[test]
 fn run_and_test_report_missing_manifest_command() {
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path();
@@ -814,6 +864,38 @@ fn run_and_test_report_missing_manifest_command() {
         .failure();
     let payload = parse_json(&test);
     assert_eq!(payload["details"]["command"], json!("test"));
+}
+
+#[test]
+fn project_test_surfaces_missing_pytest() {
+    let (_temp, root) = common::init_empty_project("px-missing-pytest");
+
+    let Some(python) = find_python() else {
+        eprintln!("skipping missing pytest test (python binary not found)");
+        return;
+    };
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["--json", "test"])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    let message = payload["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    assert!(
+        message.contains("pytest is not available"),
+        "expected pytest missing message, got {message:?}"
+    );
+    let hint = payload["details"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("pytest"),
+        "hint should suggest installing pytest: {hint:?}"
+    );
 }
 
 #[test]

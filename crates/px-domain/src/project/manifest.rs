@@ -461,6 +461,24 @@ fn declared_dependency_groups(doc: &DocumentMut) -> Vec<String> {
             }
         }
     }
+    if let Some(table) = doc
+        .get("tool")
+        .and_then(Item::as_table)
+        .and_then(|tool| tool.get("poetry"))
+        .and_then(Item::as_table)
+        .and_then(|poetry| poetry.get("group"))
+        .and_then(Item::as_table)
+    {
+        for (name, entry) in table.iter() {
+            let dependencies = entry
+                .as_table()
+                .and_then(|group| group.get("dependencies"))
+                .and_then(Item::as_table);
+            if dependencies.is_some() {
+                groups.push(name.to_string());
+            }
+        }
+    }
     normalize_group_list(groups)
 }
 
@@ -1092,6 +1110,34 @@ Test = ["hypothesis==6.0.0"]
         );
         // Should be a no-op on subsequent calls.
         assert!(!ensure_dependency_group_config(&mut doc));
+        Ok(())
+    }
+
+    #[test]
+    fn dependency_group_config_handles_poetry_groups() -> Result<()> {
+        let mut doc: DocumentMut = r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.3"
+
+[tool.poetry.group.test.dependencies]
+pytest-cov = "^5.0.0"
+
+[tool.poetry.group.typing.dependencies]
+mypy = "^1.11.0"
+"#
+        .parse()?;
+
+        let changed = ensure_dependency_group_config(&mut doc);
+        assert!(changed, "include-groups should be written for poetry groups");
+        let groups = doc["tool"]["px"]["dependencies"]["include-groups"]
+            .as_array()
+            .expect("include-groups array");
+        let values: Vec<_> = groups.iter().filter_map(|val| val.as_str()).collect();
+        assert_eq!(values, vec!["dev", "test", "typing"]);
         Ok(())
     }
 
