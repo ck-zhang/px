@@ -209,6 +209,7 @@ mod tests {
             pythonpath: String::new(),
             allowed_paths: Vec::new(),
             site_bin: None,
+            pep582_bin: Vec::new(),
             px_options: px_domain::PxOptions::default(),
         };
 

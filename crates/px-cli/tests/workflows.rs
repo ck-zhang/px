@@ -295,7 +295,7 @@ fn run_frozen_errors_when_env_outdated() {
 fn run_frozen_errors_on_runtime_mismatch() {
     let (_tmp, project) = prepare_fixture("run-json-flag");
     let lock = project.join("px.lock");
-    let lock_id = "52d10cf2634c5817f0e9937a63201c8bc279c9a4e4083e9120a1504afd2a5674";
+    let lock_id = "b0e3d49bac8025c47d3794eaf7e54f74d8b21d357aead0bd433a14e810b4c07f";
     let px_dir = project.join(".px");
     fs::create_dir_all(&px_dir).expect("px dir");
     fs::create_dir_all(px_dir.join("site")).expect("site dir");

@@ -13,8 +13,9 @@ use sha2::{Digest, Sha256};
 use crate::{
     compute_lock_hash, dependency_name, detect_runtime_metadata, effects::FileSystem,
     materialize_project_site, prepare_project_runtime, resolve_dependencies_with_effects,
-    resolve_pins, CommandContext, ExecutionOutcome, InstallUserError, ManifestSnapshot,
-    PythonContext, RuntimeMetadata, StoredEnvironment, StoredRuntime, PX_VERSION,
+    resolve_pins, site_packages_dir, write_python_environment_markers, CommandContext,
+    ExecutionOutcome, InstallUserError, ManifestSnapshot, PythonContext, RuntimeMetadata,
+    StoredEnvironment, StoredRuntime, PX_VERSION,
 };
 use px_domain::{
     detect_lock_drift, discover_workspace_root, load_lockfile_optional, read_workspace_config,
@@ -513,7 +514,17 @@ fn refresh_workspace_site(ctx: &CommandContext, workspace: &WorkspaceSnapshot) -
     ctx.fs().create_dir_all(&env_root)?;
     let site_dir = env_root.join("site");
     ctx.fs().create_dir_all(&site_dir)?;
-    materialize_project_site(&site_dir, &lock, Some(Path::new(&runtime.path)), ctx.fs())?;
+    let site_packages = site_packages_dir(&site_dir, &runtime.version);
+    ctx.fs().create_dir_all(&site_packages)?;
+    let env_python = site_dir.join("bin").join("python");
+    materialize_project_site(
+        &site_dir,
+        &site_packages,
+        &lock,
+        Some(&env_python),
+        ctx.fs(),
+    )?;
+    let env_python = write_python_environment_markers(&site_dir, &runtime, ctx.fs())?;
     let canonical_site = ctx.fs().canonicalize(&site_dir).unwrap_or(site_dir.clone());
     let runtime_state = StoredRuntime {
         path: runtime.path.clone(),
@@ -526,7 +537,7 @@ fn refresh_workspace_site(ctx: &CommandContext, workspace: &WorkspaceSnapshot) -
         platform: runtime.platform.clone(),
         site_packages: canonical_site.display().to_string(),
         python: crate::StoredPython {
-            path: runtime.path.clone(),
+            path: env_python.display().to_string(),
             version: runtime.version.clone(),
         },
     };
@@ -1099,7 +1110,7 @@ pub fn prepare_workspace_run_context(
             StateViolation::EnvDrift,
         ));
     };
-    let runtime = prepare_project_runtime(&workspace.lock_snapshot()).map_err(|err| {
+    let _runtime = prepare_project_runtime(&workspace.lock_snapshot()).map_err(|err| {
         ExecutionOutcome::failure(
             "workspace runtime unavailable",
             json!({ "error": err.to_string() }),
@@ -1167,12 +1178,14 @@ pub fn prepare_workspace_run_context(
         .find(|member| member.root == member_root)
         .map(|member| member.snapshot.px_options.clone())
         .unwrap_or_default();
+    let python_path = env.python.path.clone();
     let py_ctx = PythonContext {
         project_root: member_root.clone(),
-        python: runtime.record.path.clone(),
+        python: python_path,
         pythonpath,
         allowed_paths,
         site_bin: paths.site_bin,
+        pep582_bin: paths.pep582_bin,
         px_options,
     };
     Ok(Some(WorkspaceRunContext {

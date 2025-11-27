@@ -76,7 +76,7 @@ fn frozen_sync_reports_lock_drift() {
     let lock_path = project.join("px.lock");
     let contents = fs::read_to_string(&lock_path).expect("read lock");
     let rewritten = contents.replace(
-        "manifest_fingerprint = \"4bdc6fb9f7598b76b914257792db035bfb9745bbbcbe0cd351117bbd3e324e6a\"",
+        "manifest_fingerprint = \"2838da4467b85c6e6f67355fc3fa7c216562c042b38910144021cd2b13c8d072\"",
         "manifest_fingerprint = \"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"",
     );
     fs::write(&lock_path, rewritten).expect("write drifted lock");

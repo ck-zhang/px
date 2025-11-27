@@ -2,10 +2,10 @@ version = 1
 
 [metadata]
 px_version = "0.1.0"
-created_at = "2025-11-20T01:15:19.604585343Z"
+created_at = "2025-11-27T11:49:19.127058064Z"
 mode = "p0-pinned"
-manifest_fingerprint = "75829f016352d03c66ebe7a3b8392d3ad10fb4a529b299baccce2887b8a3285c"
-lock_id = "26d4bdb52c5f3244e98734f90888f8b3ed0b55eb56f4de84bd5a595553fb1402"
+manifest_fingerprint = "6889558ed7972f2969f8d5ba029a1fe6b38733e277f454f2121b4a137badb50c"
+lock_id = "31f4a4dcf3f3ee6a2298b98bdcf616b9457e63f16e651296a98cd3178a27f5ba"
 
 [project]
 name = "traceback_lab"

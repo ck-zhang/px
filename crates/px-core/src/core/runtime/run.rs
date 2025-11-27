@@ -644,6 +644,7 @@ mod tests {
             pythonpath: String::new(),
             allowed_paths: vec![temp.path().to_path_buf()],
             site_bin: None,
+            pep582_bin: Vec::new(),
             px_options: PxOptions {
                 manage_command: Some("self".into()),
                 plugin_imports: vec!["json".into()],
@@ -675,6 +676,7 @@ mod tests {
             pythonpath: String::new(),
             allowed_paths: vec![temp.path().to_path_buf()],
             site_bin: None,
+            pep582_bin: Vec::new(),
             px_options: PxOptions {
                 manage_command: None,
                 plugin_imports: vec!["px_missing_plugin_mod".into()],

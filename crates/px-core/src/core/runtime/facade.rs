@@ -55,64 +55,90 @@ def _stdlib_prefixes():
     return prefixes
 
 _STD_PREFIXES = _stdlib_prefixes()
-_ALLOWED = [p for p in os.environ.get("PX_ALLOWED_PATHS", "").split(os.pathsep) if p]
+_PX_ALLOWED = os.environ.get("PX_ALLOWED_PATHS", "")
+_ALLOWED = [p for p in _PX_ALLOWED.split(os.pathsep) if p]
+
+_FILTER_PATHS = True
+_target_exe = os.environ.get("PX_PYTHON")
+if _target_exe:
+    try:
+        target_real = os.path.realpath(_target_exe)
+        current_real = os.path.realpath(sys.executable)
+        if os.path.normpath(target_real) != os.path.normpath(current_real):
+            _FILTER_PATHS = False
+    except Exception:
+        _FILTER_PATHS = False
 
 def _allow(path):
     if not path:
         return False
     norm = os.path.normpath(path)
-    if "site-packages" in norm or "dist-packages" in norm:
+    if os.environ.get("NO_SITE_PACKAGES") and ("site-packages" in norm or "dist-packages" in norm):
         return False
+    if "__pypackages__" in norm:
+        return True
     for prefix in _STD_PREFIXES:
         if norm == prefix or norm.startswith(prefix + os.sep):
             return True
     return False
 
-_new_path = []
-_seen = set()
-_script_dir = sys.path[0] if sys.path else ""
+if _FILTER_PATHS:
+    _new_path = []
+    _seen = set()
+    _script_dir = sys.path[0] if sys.path else ""
 
-def _push(path):
-    if not path:
-        return
-    if path in _seen:
-        return
-    _seen.add(path)
-    _new_path.append(path)
+    def _push(path):
+        if not path:
+            return
+        if path in _seen:
+            return
+        _seen.add(path)
+        _new_path.append(path)
 
-for path in _ALLOWED:
-    _push(path)
-
-for path in sys.path:
-    if _allow(path):
+    for path in _ALLOWED:
         _push(path)
 
-if _script_dir:
-    _push(_script_dir)
+    for path in sys.path:
+        if _allow(path):
+            _push(path)
 
-sys.path[:] = _new_path
-# Ensure child processes inherit the px path set instead of a mutated sys.path
-os.environ["PYTHONPATH"] = os.environ.get("PX_ALLOWED_PATHS", "")
+    if _script_dir:
+        _push(_script_dir)
 
-_SITE_BIN = Path(__file__).resolve().parent / "bin"
-if _SITE_BIN.exists():
-    try:
-        import sysconfig as _sysconfig
-        _orig_get_path = _sysconfig.get_path
-        def _px_get_path(name, scheme=None, vars=None, expand=True):
-            if name == "scripts" and scheme is None:
-                return str(_SITE_BIN)
-            resolved_scheme = scheme or _sysconfig.get_default_scheme()
-            return _orig_get_path(name, scheme=resolved_scheme, vars=vars, expand=expand)
-        _sysconfig.get_path = _px_get_path
-    except Exception:
-        pass
-    try:
-        current = os.environ.get("PATH", "")
-        entries = [str(_SITE_BIN)] + [p for p in current.split(os.pathsep) if p]
-        os.environ["PATH"] = os.pathsep.join(entries)
-    except Exception:
-        pass
+    sys.path[:] = _new_path
+    # Ensure child processes inherit the px path set instead of a mutated sys.path
+    os.environ["PYTHONPATH"] = _PX_ALLOWED
+
+    _SITE_BIN = Path(__file__).resolve().parent / "bin"
+    if not _SITE_BIN.exists():
+        current = Path(__file__).resolve().parent
+        for _ in range(4):
+            candidate = current.parent / "bin"
+            if candidate.exists():
+                _SITE_BIN = candidate
+                break
+            current = current.parent
+    if _SITE_BIN.exists():
+        try:
+            import sysconfig as _sysconfig
+            _orig_get_path = _sysconfig.get_path
+            def _px_get_path(name, scheme=None, vars=None, expand=True):
+                if name == "scripts" and scheme is None:
+                    return str(_SITE_BIN)
+                resolved_scheme = scheme or _sysconfig.get_default_scheme()
+                return _orig_get_path(name, scheme=resolved_scheme, vars=vars, expand=expand)
+            _sysconfig.get_path = _px_get_path
+        except Exception:
+            pass
+        try:
+            current = os.environ.get("PATH", "")
+            entries = [str(_SITE_BIN)] + [p for p in current.split(os.pathsep) if p]
+            os.environ["PATH"] = os.pathsep.join(entries)
+        except Exception:
+            pass
+else:
+    px_allowed = set(_ALLOWED)
+    sys.path[:] = [path for path in sys.path if path not in px_allowed]
 
 "#;
 
@@ -360,7 +386,17 @@ pub(crate) fn refresh_project_site(
     ctx.fs().create_dir_all(&env_root)?;
     let site_dir = env_root.join("site");
     ctx.fs().create_dir_all(&site_dir)?;
-    materialize_project_site(&site_dir, &lock, Some(Path::new(&runtime.path)), ctx.fs())?;
+    let site_packages = site_packages_dir(&site_dir, &runtime.version);
+    ctx.fs().create_dir_all(&site_packages)?;
+    let env_python = site_dir.join("bin").join("python");
+    materialize_project_site(
+        &site_dir,
+        &site_packages,
+        &lock,
+        Some(&env_python),
+        ctx.fs(),
+    )?;
+    let env_python = write_python_environment_markers(&site_dir, &runtime, ctx.fs())?;
     let canonical_site = ctx.fs().canonicalize(&site_dir).unwrap_or(site_dir.clone());
     let runtime_state = StoredRuntime {
         path: runtime.path.clone(),
@@ -373,7 +409,7 @@ pub(crate) fn refresh_project_site(
         platform: runtime.platform.clone(),
         site_packages: canonical_site.display().to_string(),
         python: StoredPython {
-            path: runtime.path.clone(),
+            path: env_python.display().to_string(),
             version: runtime.version.clone(),
         },
     };
@@ -382,12 +418,15 @@ pub(crate) fn refresh_project_site(
 
 pub fn materialize_project_site(
     site_dir: &Path,
+    site_packages: &Path,
     lock: &LockSnapshot,
     python: Option<&Path>,
     fs: &dyn effects::FileSystem,
 ) -> Result<()> {
     fs.create_dir_all(site_dir)?;
+    fs.create_dir_all(site_packages)?;
     let pth_path = site_dir.join("px.pth");
+    let pth_copy_path = site_packages.join("px.pth");
     let bin_dir = site_dir.join("bin");
     fs.create_dir_all(&bin_dir)?;
     let mut entries = Vec::new();
@@ -425,7 +464,8 @@ pub fn materialize_project_site(
         contents.push('\n');
     }
     fs.write(&pth_path, contents.as_bytes())?;
-    write_sitecustomize(site_dir, fs)?;
+    fs.write(&pth_copy_path, contents.as_bytes())?;
+    write_sitecustomize(site_dir, Some(site_packages), fs)?;
     Ok(())
 }
 
@@ -586,9 +626,115 @@ fn materialize_wheel_scripts(
     Ok(())
 }
 
-fn write_sitecustomize(site_dir: &Path, fs: &dyn effects::FileSystem) -> Result<()> {
+fn write_sitecustomize(
+    site_dir: &Path,
+    extra_dir: Option<&Path>,
+    fs: &dyn effects::FileSystem,
+) -> Result<()> {
     let path = site_dir.join("sitecustomize.py");
-    fs.write(&path, SITE_CUSTOMIZE.as_bytes())
+    fs.write(&path, SITE_CUSTOMIZE.as_bytes())?;
+    if let Some(extra) = extra_dir {
+        fs.create_dir_all(extra)?;
+        fs.write(&extra.join("sitecustomize.py"), SITE_CUSTOMIZE.as_bytes())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn write_python_environment_markers(
+    site_dir: &Path,
+    runtime: &RuntimeMetadata,
+    fs: &dyn effects::FileSystem,
+) -> Result<PathBuf> {
+    let bin_dir = site_dir.join("bin");
+    fs.create_dir_all(&bin_dir)?;
+
+    let runtime_path = PathBuf::from(&runtime.path);
+    let canonical_runtime = fs
+        .canonicalize(&runtime_path)
+        .unwrap_or_else(|_| runtime_path.clone());
+    let home = canonical_runtime
+        .parent()
+        .and_then(|parent| parent.parent())
+        .unwrap_or_else(|| canonical_runtime.parent().unwrap_or(Path::new("")));
+    let pyvenv_cfg = format!(
+        "home = {}\ninclude-system-site-packages = false\nversion = {}\n",
+        home.display(),
+        runtime.version
+    );
+    fs.write(&site_dir.join("pyvenv.cfg"), pyvenv_cfg.as_bytes())?;
+
+    let mut names = vec!["python".to_string(), "python3".to_string()];
+    if let Some((major, minor)) = parse_python_version(&runtime.version) {
+        names.push(format!("python{major}"));
+        names.push(format!("python{major}.{minor}"));
+    }
+    for name in names {
+        let dest = bin_dir.join(&name);
+        install_python_link(&canonical_runtime, &dest)?;
+    }
+    Ok(bin_dir.join("python"))
+}
+
+fn parse_python_version(version: &str) -> Option<(String, String)> {
+    let mut parts = version.split('.');
+    let major = parts.next()?.to_string();
+    let minor = parts.next().unwrap_or_default().to_string();
+    if major.is_empty() || minor.is_empty() {
+        None
+    } else {
+        Some((major, minor))
+    }
+}
+
+pub(crate) fn site_packages_dir(site_dir: &Path, runtime_version: &str) -> PathBuf {
+    if let Some((major, minor)) = parse_python_version(runtime_version) {
+        site_dir
+            .join("lib")
+            .join(format!("python{major}.{minor}"))
+            .join("site-packages")
+    } else {
+        site_dir.join("site-packages")
+    }
+}
+
+fn install_python_link(source: &Path, dest: &Path) -> Result<()> {
+    if dest.exists() {
+        let _ = fs::remove_file(dest);
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        if symlink(source, dest).is_ok() {
+            return Ok(());
+        }
+    }
+    if std::fs::hard_link(source, dest).is_ok() {
+        return Ok(());
+    }
+    fs::copy(source, dest)?;
+    set_exec_permissions(dest);
+    Ok(())
+}
+
+fn select_python_from_site(
+    site_bin: &Option<PathBuf>,
+    runtime_path: &str,
+    runtime_version: &str,
+) -> String {
+    if let Some(bin) = site_bin {
+        let mut candidates = vec![bin.join("python"), bin.join("python3")];
+        if let Some((major, minor)) = parse_python_version(runtime_version) {
+            candidates.push(bin.join(format!("python{major}")));
+            candidates.push(bin.join(format!("python{major}.{minor}")));
+        }
+        if let Some(found) = candidates.into_iter().find(|path| path.exists()) {
+            return found.display().to_string();
+        }
+    }
+    runtime_path.to_string()
 }
 
 fn persist_project_state(
@@ -1194,6 +1340,7 @@ pub(crate) struct PythonContext {
     pub(crate) pythonpath: String,
     pub(crate) allowed_paths: Vec<PathBuf>,
     pub(crate) site_bin: Option<PathBuf>,
+    pub(crate) pep582_bin: Vec<PathBuf>,
     pub(crate) px_options: PxOptions,
 }
 
@@ -1319,8 +1466,12 @@ impl PythonContext {
         let snapshot = manifest_snapshot_at(&project_root)?;
         let runtime = prepare_project_runtime(&snapshot)?;
         let sync_report = ensure_environment_with_guard(ctx, &snapshot, guard)?;
-        let python = runtime.record.path.clone();
         let paths = build_pythonpath(ctx.fs(), &project_root, None)?;
+        let python = select_python_from_site(
+            &paths.site_bin,
+            &runtime.record.path,
+            &runtime.record.full_version,
+        );
         Ok((
             Self {
                 project_root,
@@ -1328,6 +1479,7 @@ impl PythonContext {
                 pythonpath: paths.pythonpath,
                 allowed_paths: paths.allowed_paths,
                 site_bin: paths.site_bin,
+                pep582_bin: paths.pep582_bin,
                 px_options: snapshot.px_options.clone(),
             },
             sync_report,
@@ -1348,6 +1500,7 @@ impl PythonContext {
             "PX_PROJECT_ROOT".into(),
             self.project_root.display().to_string(),
         ));
+        envs.push(("PX_PYTHON".into(), self.python.clone()));
         envs.push(("PX_COMMAND_JSON".into(), command_args.to_string()));
         if let Some(alias) = self.px_options.manage_command.as_ref() {
             let trimmed = alias.trim();
@@ -1355,10 +1508,19 @@ impl PythonContext {
                 envs.push(("PYAPP_COMMAND_NAME".into(), trimmed.to_string()));
             }
         }
+        if let Some(bin) = &self.site_bin {
+            if let Some(site_dir) = bin.parent() {
+                let virtual_env = site_dir
+                    .canonicalize()
+                    .unwrap_or_else(|_| site_dir.to_path_buf());
+                envs.push(("VIRTUAL_ENV".into(), virtual_env.display().to_string()));
+            }
+        }
         let mut path_entries = Vec::new();
         if let Some(bin) = &self.site_bin {
             path_entries.push(bin.clone());
         }
+        path_entries.extend(self.pep582_bin.iter().cloned());
         if let Some(python_dir) = Path::new(&self.python).parent() {
             path_entries.push(python_dir.to_path_buf());
         }
@@ -1504,6 +1666,7 @@ pub(crate) struct PythonPathInfo {
     pub(crate) pythonpath: String,
     pub(crate) allowed_paths: Vec<PathBuf>,
     pub(crate) site_bin: Option<PathBuf>,
+    pub(crate) pep582_bin: Vec<PathBuf>,
 }
 
 pub(crate) fn build_pythonpath(
@@ -1563,11 +1726,36 @@ pub(crate) fn build_pythonpath(
     }
     project_paths.push(project_root.to_path_buf());
 
+    let mut pep582_libs = Vec::new();
+    let mut pep582_bins = Vec::new();
+    let pep582_root = project_root.join("__pypackages__");
+    if pep582_root.exists() {
+        if let Ok(entries) = fs.read_dir(&pep582_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let lib = path.join("lib");
+                if lib.exists() {
+                    pep582_libs.push(lib);
+                } else {
+                    pep582_libs.push(path.clone());
+                }
+                let bin = path.join("bin");
+                if bin.exists() {
+                    pep582_bins.push(bin);
+                }
+            }
+        }
+    }
+
     let mut paths = Vec::new();
     if let Some(dir) = site_dir_used.as_ref() {
         paths.push(dir.clone());
     }
     paths.extend(project_paths);
+    paths.extend(pep582_libs);
     for path in site_paths {
         if Some(&path) != site_dir_used.as_ref() {
             paths.push(path);
@@ -1589,6 +1777,7 @@ pub(crate) fn build_pythonpath(
         pythonpath,
         allowed_paths: paths,
         site_bin,
+        pep582_bin: pep582_bins,
     })
 }
 

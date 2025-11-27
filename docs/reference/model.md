@@ -109,6 +109,7 @@ Both lockfiles are machine-generated only; direct edits are unsupported.
 
 * px-managed environment under `.px/envs/...` tied to a project lock (`px.lock`) and a runtime/platform.
 * Contains exactly the packages described by that project’s lock.
+* Materializes a venv-like layout (`site/lib/pythonX.Y/site-packages`) with `px.pth`/`sitecustomize.py` and python shims under `site/bin` so tools that expect VIRTUAL_ENV-style markers behave consistently.
 * Used only when the project is not governed by a workspace. In a workspace, member projects use the workspace env.
 
 **Workspace environment**

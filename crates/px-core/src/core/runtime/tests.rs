@@ -16,6 +16,8 @@ use px_domain::marker_applies;
 use px_domain::{DependencyGroupSource, PxOptions};
 use serde_json::json;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use tempfile::tempdir;
 
@@ -82,6 +84,7 @@ fn base_env_exports_manage_command_alias() -> Result<()> {
         pythonpath: String::new(),
         allowed_paths: vec![temp.path().to_path_buf()],
         site_bin: Some(site_bin.clone()),
+        pep582_bin: Vec::new(),
         px_options: PxOptions {
             manage_command: Some("self".to_string()),
             plugin_imports: Vec::new(),
@@ -114,9 +117,76 @@ fn base_env_exports_manage_command_alias() -> Result<()> {
         path_entry.starts_with(&site_bin.display().to_string()),
         "PATH should be rebuilt with site/bin first"
     );
+    let virtual_env = envs
+        .iter()
+        .find(|(key, _)| key == "VIRTUAL_ENV")
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default();
+    assert_eq!(
+        virtual_env,
+        site_bin
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .display()
+            .to_string(),
+        "VIRTUAL_ENV should point to the site parent"
+    );
     assert!(
         envs.iter().any(|(k, v)| k == "HTTPS_PROXY" && v.is_empty()),
         "proxy vars should be cleared"
+    );
+    Ok(())
+}
+
+#[test]
+fn python_environment_markers_create_pyvenv_and_shims() -> Result<()> {
+    let temp = tempdir()?;
+    let site_dir = temp.path().join("env").join("site");
+    fs::create_dir_all(site_dir.join("bin"))?;
+
+    let runtime_dir = temp.path().join("runtime").join("bin");
+    fs::create_dir_all(&runtime_dir)?;
+    let runtime_python = runtime_dir.join("python3.11");
+    fs::write(&runtime_python, b"stub")?;
+    #[cfg(unix)]
+    {
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(&runtime_python, perms)?;
+    }
+
+    let runtime = RuntimeMetadata {
+        path: runtime_python.display().to_string(),
+        version: "3.11.4".into(),
+        platform: "linux_x86_64".into(),
+    };
+    let effects = SystemEffects::new();
+    let env_python =
+        write_python_environment_markers(&site_dir, &runtime, effects.fs()).expect("markers");
+
+    let pyvenv_cfg = site_dir.join("pyvenv.cfg");
+    assert!(pyvenv_cfg.exists(), "pyvenv.cfg should be written");
+    let cfg_contents = fs::read_to_string(pyvenv_cfg)?;
+    assert!(
+        cfg_contents.contains("include-system-site-packages = false"),
+        "pyvenv.cfg should disable system site packages"
+    );
+    assert!(
+        cfg_contents.contains("version = 3.11.4"),
+        "pyvenv.cfg should record runtime version"
+    );
+    assert!(
+        site_dir.join("bin/python").exists(),
+        "python shim should be created"
+    );
+    assert!(
+        site_dir.join("bin/python3").exists(),
+        "python3 shim should be created"
+    );
+    assert!(
+        env_python.starts_with(site_dir.join("bin")),
+        "primary python should live under the site bin dir"
     );
     Ok(())
 }
@@ -239,7 +309,9 @@ fn materialize_project_site_writes_cached_paths() {
         .join("envs")
         .join("test-env")
         .join("site");
-    materialize_project_site(&site_dir, &lock, None, effects.fs()).expect("materialize site");
+    let site_packages = site_packages_dir(&site_dir, "3.11.0");
+    materialize_project_site(&site_dir, &site_packages, &lock, None, effects.fs())
+        .expect("materialize site");
 
     let pxpth = site_dir.join("px.pth");
     assert!(
@@ -309,7 +381,8 @@ fn materialize_project_site_skips_missing_artifacts() {
         .join("envs")
         .join("test-env")
         .join("site");
-    materialize_project_site(&site_dir, &lock, None, effects.fs())
+    let site_packages = site_packages_dir(&site_dir, "3.11.0");
+    materialize_project_site(&site_dir, &site_packages, &lock, None, effects.fs())
         .expect("materialize site with gap");
     let pxpth = site_dir.join("px.pth");
     assert!(pxpth.exists(), "px.pth should still be created");

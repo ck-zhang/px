@@ -275,6 +275,20 @@ pub(crate) fn read_dependencies_from_doc(doc: &DocumentMut) -> Vec<String> {
         .unwrap_or_default()
 }
 
+pub(crate) fn read_build_system_requires(doc: &DocumentMut) -> Vec<String> {
+    doc.get("build-system")
+        .and_then(Item::as_table)
+        .and_then(|table| table.get("requires"))
+        .and_then(Item::as_array)
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|val| val.as_str().map(std::string::ToString::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) fn read_optional_dependency_group(doc: &DocumentMut, group: &str) -> Vec<String> {
     let normalized = normalize_dependency_group_name(group);
     find_optional_dependency_group(doc, &normalized)

@@ -7,8 +7,9 @@ use anyhow::{anyhow, Context, Result};
 use toml_edit::{DocumentMut, Item};
 
 use super::manifest::{
-    manifest_fingerprint, project_table, px_options_from_doc, read_dependencies_from_doc,
-    resolve_dependency_groups, select_dependency_groups, DependencyGroupSource, PxOptions,
+    manifest_fingerprint, project_table, px_options_from_doc, read_build_system_requires,
+    read_dependencies_from_doc, resolve_dependency_groups, select_dependency_groups,
+    DependencyGroupSource, PxOptions,
 };
 
 #[derive(Clone, Debug)]
@@ -58,6 +59,7 @@ impl ProjectSnapshot {
         let dependency_groups = selection.active.clone();
         let declared_dependency_groups = selection.declared.clone();
         let group_dependencies = resolve_dependency_groups(&doc, &dependency_groups)?;
+        let build_requires = read_build_system_requires(&doc);
         let mut requirements = dependencies.clone();
         requirements.extend(group_dependencies.clone());
         super::manifest::sort_and_dedupe(&mut requirements);
@@ -70,8 +72,15 @@ impl ProjectSnapshot {
             .and_then(|px| px.get("python"))
             .and_then(Item::as_str)
             .map(std::string::ToString::to_string);
-        let manifest_fingerprint =
-            manifest_fingerprint(&doc, &requirements, &dependency_groups, &px_options)?;
+        let mut fingerprint_requirements = requirements.clone();
+        fingerprint_requirements.extend(build_requires.clone());
+        super::manifest::sort_and_dedupe(&mut fingerprint_requirements);
+        let manifest_fingerprint = manifest_fingerprint(
+            &doc,
+            &fingerprint_requirements,
+            &dependency_groups,
+            &px_options,
+        )?;
         Ok(Self {
             root: root.to_path_buf(),
             manifest_path,
@@ -190,6 +199,56 @@ dependencies = ["requests==2.32.3"]
         assert_eq!(snapshot.requirements, snapshot.dependencies);
         assert_eq!(snapshot.manifest_path, pyproject);
         assert_eq!(snapshot.lock_path, root.join("px.lock"));
+        Ok(())
+    }
+
+    #[test]
+    fn build_system_requires_affect_fingerprint() -> Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path();
+        let pyproject = root.join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            r#"[build-system]
+requires = ["pdm-backend>=2", "setuptools"]
+build-backend = "pdm.backend"
+
+[project]
+name = "demo-build"
+version = "0.2.0"
+requires-python = ">=3.11"
+dependencies = ["requests==2.32.3"]
+"#,
+        )?;
+
+        let snapshot = ProjectSnapshot::read_from(root)?;
+        assert!(
+            snapshot
+                .requirements
+                .iter()
+                .all(|req| !req.contains("pdm-backend")),
+            "build-system requirements should not be installed automatically"
+        );
+        let base_fingerprint = snapshot.manifest_fingerprint.clone();
+
+        fs::write(
+            &pyproject,
+            r#"[build-system]
+requires = ["flit_core>=3.8.0"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "demo-build"
+version = "0.2.0"
+requires-python = ">=3.11"
+dependencies = ["requests==2.32.3"]
+"#,
+        )?;
+        let updated_snapshot = ProjectSnapshot::read_from(root)?;
+        assert_ne!(
+            base_fingerprint, updated_snapshot.manifest_fingerprint,
+            "build-system requirements should influence the manifest fingerprint"
+        );
         Ok(())
     }
 
