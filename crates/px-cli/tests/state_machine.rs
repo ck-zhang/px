@@ -71,6 +71,58 @@ fn frozen_test_refuses_autosync_for_missing_env() {
 }
 
 #[test]
+fn test_repairs_missing_env_in_dev_mode() {
+    let (_tmp, project) = prepare_fixture("dev-missing-env");
+    fs::remove_dir_all(project.join(".px")).ok();
+    let Some(python) = find_python() else {
+        eprintln!("skipping dev env repair test (python binary not found)");
+        return;
+    };
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_TEST_FALLBACK_STD", "1")
+        .args(["--json", "test"])
+        .assert()
+        .success();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    let autosync = payload["details"]
+        .get("autosync")
+        .and_then(serde_json::Value::as_object)
+        .expect("autosync details present");
+    assert_eq!(
+        autosync.get("action").and_then(serde_json::Value::as_str),
+        Some("env-recreate"),
+        "expected env recreation autosync"
+    );
+}
+
+#[test]
+fn test_requires_lock_before_running_tests() {
+    let (_tmp, project) = prepare_fixture("test-missing-lock");
+    let lock = project.join("px.lock");
+    if lock.exists() {
+        fs::remove_file(&lock).expect("remove px.lock");
+    }
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["--json", "test"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(
+        payload["details"].get("reason"),
+        Some(&serde_json::Value::String("missing_lock".into()))
+    );
+}
+
+#[test]
 fn frozen_sync_reports_lock_drift() {
     let (_tmp, project) = prepare_fixture("drifted-lock");
     let lock_path = project.join("px.lock");

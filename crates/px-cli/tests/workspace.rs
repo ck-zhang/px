@@ -96,3 +96,53 @@ members = []
         "empty workspace should report missing lock, not crash"
     );
 }
+
+#[test]
+fn workspace_test_routes_through_workspace_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let workspace_manifest = r#"[project]
+name = "ws"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[tool.px.workspace]
+members = ["apps/app"]
+"#;
+    fs::write(root.join("pyproject.toml"), workspace_manifest).expect("write workspace manifest");
+    let app_root = root.join("apps").join("app");
+    fs::create_dir_all(&app_root).expect("create app root");
+    fs::write(
+        app_root.join("pyproject.toml"),
+        r#"[project]
+name = "member"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.px]
+"#,
+    )
+    .expect("write member manifest");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&app_root)
+        .args(["--json", "test"])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["details"]["reason"], "missing_lock");
+    let hint = payload["details"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("px test"),
+        "workspace missing lock hint should mention the invoking command: {hint:?}"
+    );
+    let lockfile = payload["details"]["lockfile"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        lockfile.contains("px.workspace.lock"),
+        "error should point at workspace lockfile, got {lockfile:?}"
+    );
+}

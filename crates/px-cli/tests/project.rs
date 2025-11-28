@@ -893,8 +893,17 @@ fn project_test_surfaces_missing_pytest() {
     );
     let hint = payload["details"]["hint"].as_str().unwrap_or_default();
     assert!(
-        hint.contains("pytest"),
-        "hint should suggest installing pytest: {hint:?}"
+        hint.contains("px add pytest"),
+        "hint should suggest installing pytest via px add: {hint:?}"
+    );
+    assert!(
+        !hint.contains("--dev"),
+        "hint must not suggest --dev flag: {hint:?}"
+    );
+    assert_eq!(
+        payload["details"]["code"].as_str(),
+        Some("PX202"),
+        "expected PX202 code for missing pytest"
     );
 }
 

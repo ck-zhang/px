@@ -127,6 +127,41 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 ### `px test`
 
 * Same consistency semantics as `px run`. Discovers and runs the configured test runner (e.g. `pytest`) inside the project env.
+* Output style (default): px streams the runner stdout/stderr live and renders a compact report:
+
+  ```
+  px test  •  Python 3.x.y  •  pytest <version>
+  root:   /path/to/project
+  config: pyproject.toml
+
+  collected N tests from M files in 0.00s
+
+  tests/test_example.py
+    ✓ test_happy_path                   0.00s
+    ✗ test_failure_case                 0.00s
+
+
+  FAILURES (1)
+  -----------
+
+  1) tests/test_example.py::test_failure_case
+
+     AssertionError: expected X, got Y
+
+     tests/test_example.py:10
+       8   def test_failure_case():
+       9       ...
+     →10       assert something == expected
+
+  RESULT   ✗ FAILED (exit code 1)
+  TOTAL    N tests in 0.00s
+  PASSED   ...
+  FAILED   ...
+  SKIPPED  ...
+  ERRORS   ...
+  ```
+
+  The default reporter groups tests by file, aligns names/durations, numbers failures, and shows a short code excerpt. Set `PX_TEST_REPORTER=pytest` to use the native pytest reporter with px’s trimmed defaults (`--color=yes --tb=short --disable-warnings -q`).
 
 ### `px fmt`
 

@@ -1,8 +1,10 @@
 #![deny(clippy::all, warnings)]
 
 use std::{
+    io::{self, Read, Write},
     path::Path,
     process::{Command, Stdio},
+    thread,
 };
 
 const PROXY_VARS: [&str; 8] = [
@@ -57,16 +59,7 @@ pub fn run_command_with_stdin(
     cwd: &Path,
     inherit_stdin: bool,
 ) -> Result<RunOutput> {
-    let mut command = Command::new(program);
-    command.args(args);
-    for (key, value) in envs {
-        if value.is_empty() && is_proxy_env(key) {
-            command.env_remove(key);
-            continue;
-        }
-        command.env(key, value);
-    }
-    command.current_dir(cwd);
+    let mut command = configured_command(program, args, envs, cwd);
     if inherit_stdin {
         command.stdin(Stdio::inherit());
     } else {
@@ -88,6 +81,75 @@ pub fn run_command_with_stdin(
     })
 }
 
+/// Execute a program while streaming stdout/stderr to the parent process.
+///
+/// # Errors
+///
+/// Returns an error when the program cannot be spawned or its output streams
+/// cannot be read.
+pub fn run_command_streaming(
+    program: &str,
+    args: &[String],
+    envs: &[(String, String)],
+    cwd: &Path,
+) -> Result<RunOutput> {
+    let mut command = configured_command(program, args, envs, cwd);
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to start {program}"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("stdout missing for {program}"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("stderr missing for {program}"))?;
+
+    let stdout_handle = thread::spawn(move || tee_to_string(&mut stdout, io::stdout()));
+    let stderr_handle = thread::spawn(move || tee_to_string(&mut stderr, io::stderr()));
+
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to wait for {program}"))?;
+    let code = status.code().unwrap_or(-1);
+    let stdout = stdout_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("stdout thread panicked"))??;
+    let stderr = stderr_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("stderr thread panicked"))??;
+
+    Ok(RunOutput {
+        code,
+        stdout,
+        stderr,
+    })
+}
+
+fn configured_command(
+    program: &str,
+    args: &[String],
+    envs: &[(String, String)],
+    cwd: &Path,
+) -> Command {
+    let mut command = Command::new(program);
+    command.args(args);
+    for (key, value) in envs {
+        if value.is_empty() && is_proxy_env(key) {
+            command.env_remove(key);
+            continue;
+        }
+        command.env(key, value);
+    }
+    command.current_dir(cwd);
+    command
+}
+
 /// Execute a program with inherited stdio for interactive tools.
 ///
 /// # Errors
@@ -99,16 +161,7 @@ pub fn run_command_passthrough(
     envs: &[(String, String)],
     cwd: &Path,
 ) -> Result<RunOutput> {
-    let mut command = Command::new(program);
-    command.args(args);
-    for (key, value) in envs {
-        if value.is_empty() && is_proxy_env(key) {
-            command.env_remove(key);
-            continue;
-        }
-        command.env(key, value);
-    }
-    command.current_dir(cwd);
+    let mut command = configured_command(program, args, envs, cwd);
     command.stdin(Stdio::inherit());
     command.stdout(Stdio::inherit());
     command.stderr(Stdio::inherit());
@@ -122,6 +175,21 @@ pub fn run_command_passthrough(
         stdout: String::new(),
         stderr: String::new(),
     })
+}
+
+fn tee_to_string(reader: &mut dyn Read, mut writer: impl Write) -> Result<String> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        writer.write_all(&chunk[..read])?;
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    writer.flush().ok();
+    Ok(String::from_utf8_lossy(&buffer).to_string())
 }
 
 #[cfg(test)]
@@ -177,6 +245,20 @@ mod tests {
         assert_eq!(output.code, 0);
         assert!(output.stdout.is_empty());
         assert!(output.stderr.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_streaming_captures_output_unix() -> Result<()> {
+        let output = run_command_streaming(
+            "/bin/sh",
+            &["-c".to_string(), "printf out && printf err >&2".to_string()],
+            &[],
+            Path::new("."),
+        )?;
+        assert_eq!(output.stdout, "out");
+        assert_eq!(output.stderr, "err");
         Ok(())
     }
 

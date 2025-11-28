@@ -36,6 +36,24 @@ pub fn emit_output(
             println!("{}", style.info(&line));
         }
         let migrate_table = render_migrate_table(&style, info, &outcome.details);
+        let reporter_rendered = outcome
+            .details
+            .as_object()
+            .and_then(|map| map.get("reporter_rendered"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if info.group == CommandGroup::Test && reporter_rendered {
+            return Ok(code);
+        }
+        if info.group == CommandGroup::Test
+            && outcome.status == CommandStatus::Failure
+            && render_test_failure(&style, info, outcome)
+        {
+            if let Some(table) = migrate_table {
+                println!("{table}");
+            }
+            return Ok(code);
+        }
         if let CommandStatus::Ok = outcome.status {
             if is_passthrough(&outcome.details) {
                 println!("{}", outcome.message);
@@ -58,6 +76,16 @@ pub fn emit_output(
                 }
             }
         } else {
+            if info.group == CommandGroup::Test
+                && outcome
+                    .details
+                    .as_object()
+                    .and_then(|map| map.get("suppress_cli_frame"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+            {
+                return Ok(code);
+            }
             let header = format!("{}  {}", error_code(info), outcome.message);
             println!("{}", style.error_header(&header));
             println!();
@@ -224,6 +252,32 @@ fn format_package_table(style: &Style, rows: &[PackageRow]) -> String {
     }
 
     lines.join("\n")
+}
+
+fn render_test_failure(style: &Style, info: CommandInfo, outcome: &ExecutionOutcome) -> bool {
+    let reason = outcome
+        .details
+        .as_object()
+        .and_then(|map| map.get("reason"))
+        .and_then(Value::as_str);
+    if reason != Some("tests_failed") {
+        return false;
+    }
+    if outcome
+        .details
+        .as_object()
+        .and_then(|map| map.get("suppress_cli_frame"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return true;
+    }
+    let message = px_core::format_status_message(info, &outcome.message);
+    println!("{}", style.status(&outcome.status, &message));
+    if let Some(hint) = hint_from_details(&outcome.details) {
+        println!("{}", style.info(&format!("Hint: {hint}")));
+    }
+    true
 }
 
 fn error_code(info: CommandInfo) -> &'static str {

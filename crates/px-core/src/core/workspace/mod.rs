@@ -1041,6 +1041,7 @@ pub struct WorkspaceRunContext {
 pub fn prepare_workspace_run_context(
     ctx: &CommandContext,
     strict: bool,
+    command: &str,
 ) -> Result<Option<WorkspaceRunContext>, ExecutionOutcome> {
     let scope = discover_workspace_scope().map_err(|err| {
         ExecutionOutcome::failure(
@@ -1063,7 +1064,7 @@ pub fn prepare_workspace_run_context(
     })?;
     if !state.lock_exists {
         return Err(workspace_violation(
-            "run",
+            command,
             &workspace,
             &state,
             StateViolation::MissingLock,
@@ -1071,7 +1072,7 @@ pub fn prepare_workspace_run_context(
     }
     if matches!(state.canonical, WorkspaceStateKind::NeedsLock) {
         return Err(workspace_violation(
-            "run",
+            command,
             &workspace,
             &state,
             StateViolation::LockDrift,
@@ -1080,14 +1081,14 @@ pub fn prepare_workspace_run_context(
 
     if strict && !state.env_clean {
         return Err(workspace_violation(
-            "run",
+            command,
             &workspace,
             &state,
             StateViolation::EnvDrift,
         ));
     }
 
-    let sync_report = None;
+    let mut sync_report = None;
     if !strict && !state.env_clean {
         refresh_workspace_site(ctx, &workspace).map_err(|err| {
             ExecutionOutcome::failure(
@@ -1095,6 +1096,12 @@ pub fn prepare_workspace_run_context(
                 json!({ "error": err.to_string() }),
             )
         })?;
+        let issue = state
+            .env_issue
+            .as_ref()
+            .and_then(crate::issue_from_details)
+            .unwrap_or(crate::EnvironmentIssue::EnvOutdated);
+        sync_report = Some(crate::EnvironmentSyncReport::new(issue));
     }
     let state_file = load_workspace_state(ctx.fs(), &workspace.config.root).map_err(|err| {
         ExecutionOutcome::failure(
@@ -1104,7 +1111,7 @@ pub fn prepare_workspace_run_context(
     })?;
     let Some(env) = state_file.current_env else {
         return Err(workspace_violation(
-            "run",
+            command,
             &workspace,
             &state,
             StateViolation::EnvDrift,

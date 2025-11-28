@@ -2,7 +2,7 @@ use std::env;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use tracing::debug;
 
@@ -34,6 +34,12 @@ pub struct RunRequest {
 
 type EnvPairs = Vec<(String, String)>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TestReporter {
+    Px,
+    Pytest,
+}
+
 /// Runs the project's tests using either pytest or px's fallback runner.
 ///
 /// # Errors
@@ -53,7 +59,7 @@ pub fn run_project(ctx: &CommandContext, request: &RunRequest) -> Result<Executi
 fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<ExecutionOutcome> {
     let strict = request.frozen || ctx.env_flag_enabled("CI");
 
-    if let Some(ws_ctx) = match prepare_workspace_run_context(ctx, strict) {
+    if let Some(ws_ctx) = match prepare_workspace_run_context(ctx, strict, "run") {
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
     } {
@@ -193,6 +199,129 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
     Ok(outcome)
 }
 
+fn run_pytest_runner(
+    ctx: &CommandContext,
+    py_ctx: &PythonContext,
+    envs: EnvPairs,
+    pytest_args: &[String],
+    stream_runner: bool,
+) -> Result<ExecutionOutcome> {
+    let reporter = test_reporter_from_env();
+    let (envs, pytest_cmd) = build_pytest_invocation(ctx, py_ctx, envs, pytest_args, reporter)?;
+    let output = run_python_command(ctx, py_ctx, &pytest_cmd, &envs, stream_runner)?;
+    if output.code == 0 {
+        let mut outcome = test_success("pytest", output, stream_runner, pytest_args);
+        if let TestReporter::Px = reporter {
+            mark_reporter_rendered(&mut outcome);
+        }
+        return Ok(outcome);
+    }
+    if missing_pytest(&output.stderr) {
+        if ctx.config().test.fallback_builtin {
+            return run_builtin_tests(ctx, py_ctx, envs, stream_runner);
+        }
+        return Ok(missing_pytest_outcome(output, pytest_args));
+    }
+    let mut outcome = test_failure("pytest", output, stream_runner, pytest_args);
+    if let TestReporter::Px = reporter {
+        mark_reporter_rendered(&mut outcome);
+    }
+    Ok(outcome)
+}
+
+fn build_pytest_invocation(
+    ctx: &CommandContext,
+    py_ctx: &PythonContext,
+    mut envs: EnvPairs,
+    pytest_args: &[String],
+    reporter: TestReporter,
+) -> Result<(EnvPairs, Vec<String>)> {
+    let mut defaults = default_pytest_flags(reporter);
+    if let TestReporter::Px = reporter {
+        let plugin_path = ensure_px_pytest_plugin(ctx, py_ctx)?;
+        append_pythonpath(
+            &mut envs,
+            plugin_path
+                .parent()
+                .unwrap_or(py_ctx.project_root.as_path()),
+        );
+        defaults.extend_from_slice(&["-p".to_string(), "px_pytest_plugin".to_string()]);
+    }
+    let pytest_cmd =
+        build_pytest_command_with_defaults(&py_ctx.project_root, pytest_args, &defaults);
+    Ok((envs, pytest_cmd))
+}
+
+fn default_pytest_flags(reporter: TestReporter) -> Vec<String> {
+    let mut flags = vec![
+        "--color=yes".to_string(),
+        "--tb=short".to_string(),
+        "--disable-warnings".to_string(),
+    ];
+    if matches!(reporter, TestReporter::Px | TestReporter::Pytest) {
+        flags.push("-q".to_string());
+    }
+    flags
+}
+
+fn test_reporter_from_env() -> TestReporter {
+    match std::env::var("PX_TEST_REPORTER")
+        .ok()
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("pytest") => TestReporter::Pytest,
+        Some("px") | None => TestReporter::Px,
+        _ => TestReporter::Px,
+    }
+}
+
+fn append_pythonpath(envs: &mut EnvPairs, plugin_dir: &Path) {
+    let plugin_entry = plugin_dir.display().to_string();
+    if let Some((_, value)) = envs.iter_mut().find(|(key, _)| key == "PYTHONPATH") {
+        let mut parts: Vec<_> = env::split_paths(value).collect();
+        if !parts.iter().any(|p| p == plugin_dir) {
+            parts.insert(0, plugin_dir.to_path_buf());
+            if let Ok(joined) = env::join_paths(parts) {
+                if let Ok(strval) = joined.into_string() {
+                    *value = strval;
+                }
+            }
+        }
+    } else {
+        envs.push(("PYTHONPATH".into(), plugin_entry));
+    }
+}
+
+fn ensure_px_pytest_plugin(ctx: &CommandContext, py_ctx: &PythonContext) -> Result<PathBuf> {
+    let plugin_dir = py_ctx.project_root.join(".px").join("plugins");
+    ctx.fs()
+        .create_dir_all(&plugin_dir)
+        .context("creating px plugin dir")?;
+    let plugin_path = plugin_dir.join("px_pytest_plugin.py");
+    ctx.fs()
+        .write(&plugin_path, PX_PYTEST_PLUGIN.as_bytes())
+        .context("writing pytest reporter plugin")?;
+    Ok(plugin_path)
+}
+
+fn run_python_command(
+    ctx: &CommandContext,
+    py_ctx: &PythonContext,
+    args: &[String],
+    envs: &[(String, String)],
+    stream_runner: bool,
+) -> Result<crate::RunOutput> {
+    if stream_runner {
+        ctx.python_runtime()
+            .run_command_streaming(&py_ctx.python, args, envs, &py_ctx.project_root)
+    } else {
+        ctx.python_runtime()
+            .run_command(&py_ctx.python, args, envs, &py_ctx.project_root)
+    }
+}
+
 fn run_project_script(
     core_ctx: &CommandContext,
     py_ctx: &PythonContext,
@@ -259,55 +388,11 @@ fn run_executable(
 fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<ExecutionOutcome> {
     let strict = request.frozen || ctx.env_flag_enabled("CI");
 
-    if let Some(ws_ctx) = match prepare_workspace_run_context(ctx, strict) {
+    if let Some(ws_ctx) = match prepare_workspace_run_context(ctx, strict, "test") {
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
     } {
-        let command_args = json!({ "pytest_args": request.pytest_args });
-        let (mut envs, _) = build_env_with_preflight(ctx, &ws_ctx.py_ctx, &command_args)?;
-        envs.push(("PX_TEST_RUNNER".into(), "pytest".into()));
-
-        if ctx.config().test.fallback_builtin {
-            let mut outcome = run_builtin_tests("test", ctx, &ws_ctx.py_ctx, envs)?;
-            attach_autosync_details(&mut outcome, ws_ctx.sync_report);
-            return Ok(outcome);
-        }
-
-        let pytest_cmd = build_pytest_command(&ws_ctx.py_ctx.project_root, &request.pytest_args);
-
-        let output = ctx.python_runtime().run_command(
-            &ws_ctx.py_ctx.python,
-            &pytest_cmd,
-            &envs,
-            &ws_ctx.py_ctx.project_root,
-        )?;
-        if output.code == 0 {
-            let mut outcome = outcome_from_output("test", "pytest", &output, "px test", None);
-            attach_autosync_details(&mut outcome, ws_ctx.sync_report);
-            return Ok(outcome);
-        }
-
-        if missing_pytest(&output.stderr) {
-            let mut outcome = if ctx.config().test.fallback_builtin {
-                run_builtin_tests("test", ctx, &ws_ctx.py_ctx, envs)?
-            } else {
-                ExecutionOutcome::user_error(
-                    "pytest is not available in the project environment",
-                    json!({
-                        "stdout": output.stdout,
-                        "stderr": output.stderr,
-                        "hint": "Add pytest to your project (for example `px add --dev pytest` or enable your test dependency group), then rerun `px test`.",
-                        "reason": "missing_pytest",
-                    }),
-                )
-            };
-            attach_autosync_details(&mut outcome, ws_ctx.sync_report);
-            return Ok(outcome);
-        }
-
-        let mut outcome = outcome_from_output("test", "pytest", &output, "px test", None);
-        attach_autosync_details(&mut outcome, ws_ctx.sync_report);
-        return Ok(outcome);
+        return run_tests_for_context(ctx, &ws_ctx.py_ctx, request, ws_ctx.sync_report);
     }
 
     let snapshot = match manifest_snapshot() {
@@ -336,80 +421,120 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
     };
+    run_tests_for_context(ctx, &py_ctx, request, sync_report)
+}
+
+fn run_tests_for_context(
+    ctx: &CommandContext,
+    py_ctx: &PythonContext,
+    request: &TestRequest,
+    sync_report: Option<crate::EnvironmentSyncReport>,
+) -> Result<ExecutionOutcome> {
     let command_args = json!({ "pytest_args": request.pytest_args });
-    let (mut envs, _preflight) = build_env_with_preflight(ctx, &py_ctx, &command_args)?;
+    let (mut envs, _preflight) = build_env_with_preflight(ctx, py_ctx, &command_args)?;
     envs.push(("PX_TEST_RUNNER".into(), "pytest".into()));
+    let stream_runner = !ctx.global.json;
 
-    if ctx.config().test.fallback_builtin {
-        let mut outcome = run_builtin_tests("test", ctx, &py_ctx, envs)?;
-        attach_autosync_details(&mut outcome, sync_report);
-        return Ok(outcome);
-    }
-
-    let pytest_cmd = build_pytest_command(&py_ctx.project_root, &request.pytest_args);
-
-    let output = ctx.python_runtime().run_command(
-        &py_ctx.python,
-        &pytest_cmd,
-        &envs,
-        &py_ctx.project_root,
-    )?;
-    if output.code == 0 {
-        let mut outcome = outcome_from_output("test", "pytest", &output, "px test", None);
-        attach_autosync_details(&mut outcome, sync_report);
-        return Ok(outcome);
-    }
-
-    if missing_pytest(&output.stderr) {
-        let mut outcome = if ctx.config().test.fallback_builtin {
-            run_builtin_tests("test", ctx, &py_ctx, envs)?
-        } else {
-            ExecutionOutcome::user_error(
-                "pytest is not available in the project environment",
-                json!({
-                    "stdout": output.stdout,
-                    "stderr": output.stderr,
-                    "hint": "Add pytest to your project (for example `px add --dev pytest` or enable your test dependency group), then rerun `px test`.",
-                    "reason": "missing_pytest",
-                }),
-            )
-        };
-        attach_autosync_details(&mut outcome, sync_report);
-        return Ok(outcome);
-    }
-
-    let mut outcome = ExecutionOutcome::failure(
-        format!("px test failed (exit {})", output.code),
-        json!({
-            "stdout": output.stdout,
-            "stderr": output.stderr,
-            "code": output.code,
-        }),
-    );
+    let mut outcome = if ctx.config().test.fallback_builtin {
+        run_builtin_tests(ctx, py_ctx, envs, stream_runner)?
+    } else {
+        run_pytest_runner(ctx, py_ctx, envs, &request.pytest_args, stream_runner)?
+    };
     attach_autosync_details(&mut outcome, sync_report);
     Ok(outcome)
 }
 
 fn run_builtin_tests(
-    command_name: &str,
     core_ctx: &CommandContext,
     ctx: &PythonContext,
     mut envs: Vec<(String, String)>,
+    stream_runner: bool,
 ) -> Result<ExecutionOutcome> {
     envs.push(("PX_TEST_RUNNER".into(), "builtin".into()));
     let script = "from sample_px_app import cli\nassert cli.greet() == 'Hello, World!'\nprint('px fallback test passed')";
     let args = vec!["-c".to_string(), script.to_string()];
-    let output =
-        core_ctx
-            .python_runtime()
-            .run_command(&ctx.python, &args, &envs, &ctx.project_root)?;
-    Ok(outcome_from_output(
-        command_name,
-        "builtin",
-        &output,
-        "px test",
-        None,
-    ))
+    let output = run_python_command(core_ctx, ctx, &args, &envs, stream_runner)?;
+    let runner_args: Vec<String> = Vec::new();
+    Ok(test_success("builtin", output, stream_runner, &runner_args))
+}
+
+fn test_success(
+    runner: &str,
+    output: crate::RunOutput,
+    stream_runner: bool,
+    args: &[String],
+) -> ExecutionOutcome {
+    ExecutionOutcome::success(
+        format!("{runner} ok"),
+        test_details(runner, output, stream_runner, args, None),
+    )
+}
+
+fn test_failure(
+    runner: &str,
+    output: crate::RunOutput,
+    stream_runner: bool,
+    args: &[String],
+) -> ExecutionOutcome {
+    let code = output.code;
+    let mut details = test_details(runner, output, stream_runner, args, Some("tests_failed"));
+    if let Value::Object(map) = &mut details {
+        map.insert("suppress_cli_frame".into(), Value::Bool(true));
+    }
+    ExecutionOutcome::failure(format!("{runner} failed (exit {code})"), details)
+}
+
+fn missing_pytest_outcome(output: crate::RunOutput, args: &[String]) -> ExecutionOutcome {
+    ExecutionOutcome::user_error(
+        "pytest is not available in the project environment",
+        json!({
+            "stdout": output.stdout,
+            "stderr": output.stderr,
+            "hint": "Add pytest to your project with `px add pytest`, then rerun `px test`.",
+            "reason": "missing_pytest",
+            "code": crate::diag_commands::TEST,
+            "runner": "pytest",
+            "args": args,
+        }),
+    )
+}
+
+fn test_details(
+    runner: &str,
+    output: crate::RunOutput,
+    stream_runner: bool,
+    args: &[String],
+    reason: Option<&str>,
+) -> serde_json::Value {
+    let mut details = json!({
+        "runner": runner,
+        "stdout": output.stdout,
+        "stderr": output.stderr,
+        "code": output.code,
+        "args": args,
+        "streamed": stream_runner,
+    });
+    if let Some(reason) = reason {
+        if let Some(map) = details.as_object_mut() {
+            map.insert("reason".to_string(), json!(reason));
+        }
+    }
+    details
+}
+
+fn mark_reporter_rendered(outcome: &mut ExecutionOutcome) {
+    match &mut outcome.details {
+        Value::Object(map) => {
+            map.insert("reporter_rendered".into(), Value::Bool(true));
+        }
+        Value::Null => {
+            outcome.details = json!({ "reporter_rendered": true });
+        }
+        other => {
+            let prev = other.take();
+            outcome.details = json!({ "value": prev, "reporter_rendered": true });
+        }
+    }
 }
 
 fn run_module_entry(
@@ -579,8 +704,18 @@ fn missing_pytest(stderr: &str) -> bool {
     stderr.contains("No module named") && stderr.contains("pytest")
 }
 
+#[cfg(test)]
 fn build_pytest_command(project_root: &Path, extra_args: &[String]) -> Vec<String> {
+    build_pytest_command_with_defaults(project_root, extra_args, &[])
+}
+
+fn build_pytest_command_with_defaults(
+    project_root: &Path,
+    extra_args: &[String],
+    defaults: &[String],
+) -> Vec<String> {
     let mut pytest_cmd = vec!["-m".to_string(), "pytest".to_string()];
+    pytest_cmd.extend(defaults.iter().cloned());
     if extra_args.is_empty() {
         for candidate in ["tests", "test"] {
             if project_root.join(candidate).exists() {
@@ -639,6 +774,223 @@ fn preflight_plugins(
         }
     }
 }
+
+const PX_PYTEST_PLUGIN: &str = r#"import sys
+import time
+import pytest
+from _pytest._io.terminalwriter import TerminalWriter
+
+
+class PxTerminalReporter:
+    def __init__(self, config):
+        self.config = config
+        self._tw = TerminalWriter(file=sys.stdout)
+        self._tw.hasmarkup = True
+        self.session_start = time.time()
+        self.collection_start = None
+        self.collection_duration = 0.0
+        self.collected = 0
+        self.files = []
+        self._current_file = None
+        self.failures = []
+        self.stats = {"passed": 0, "failed": 0, "skipped": 0, "error": 0, "xfailed": 0, "xpassed": 0}
+        self.exitstatus = 0
+
+    def pytest_sessionstart(self, session):
+        import platform
+
+        py_ver = platform.python_version()
+        root = str(self.config.rootpath)
+        cfg = self.config.inifile or "auto-detected"
+        self._tw.line(f"px test  •  Python {py_ver}  •  pytest {pytest.__version__}", cyan=True, bold=True)
+        self._tw.line(f"root:   {root}")
+        self._tw.line(f"config: {cfg}")
+        self.collection_start = time.time()
+
+    def pytest_collection_finish(self, session):
+        self.collected = len(session.items)
+        files = {str(item.fspath) for item in session.items}
+        self.files = sorted(files)
+        self.collection_duration = time.time() - (self.collection_start or self.session_start)
+        label = "tests" if self.collected != 1 else "test"
+        file_label = "files" if len(self.files) != 1 else "file"
+        self._tw.line(f"collected {self.collected} {label} from {len(self.files)} {file_label} in {self.collection_duration:.2f}s")
+        self._tw.line("")
+
+    def pytest_runtest_logreport(self, report):
+        if report.when not in ("setup", "call", "teardown"):
+            return
+        status = None
+        if report.passed and report.when == "call":
+            status = "passed"
+            self.stats["passed"] += 1
+        elif report.skipped:
+            status = "skipped"
+            self.stats["skipped"] += 1
+        elif report.failed:
+            status = "failed" if report.when == "call" else "error"
+            self.stats[status] += 1
+
+        if status:
+            file_path = str(report.location[0])
+            name = report.location[2]
+            duration = getattr(report, "duration", 0.0)
+            self._print_test_result(file_path, name, status, duration)
+
+        if report.failed:
+            self.failures.append(report)
+
+    def pytest_sessionfinish(self, session, exitstatus):
+        self.exitstatus = exitstatus
+        if self.failures:
+            self._render_failures()
+        self._render_summary(exitstatus)
+
+    # --- rendering helpers ---
+    def _print_test_result(self, file_path, name, status, duration):
+        if self._current_file != file_path:
+            self._current_file = file_path
+            self._tw.line("")
+            self._tw.line(file_path)
+        icon, color = self._status_icon(status)
+        dur = f"{duration:.2f}s"
+        line = f"  {icon} {name}  {dur}"
+        self._tw.line(line, **color)
+
+    def _render_failures(self):
+        self._tw.line(f"FAILURES ({len(self.failures)})", red=True, bold=True)
+        self._tw.line("-" * 11)
+        for idx, report in enumerate(self.failures, start=1):
+            self._render_single_failure(idx, report)
+
+    def _render_single_failure(self, idx, report):
+        path, lineno = self._failure_lineno(report)
+        self._tw.line("")
+        self._tw.line(f"{idx}) {report.nodeid}", bold=True)
+        self._tw.line("")
+        message = self._failure_message(report)
+        if message:
+            self._tw.line(f"   {message}", red=True)
+            self._tw.line("")
+        snippet = self._load_snippet(path, lineno)
+        if snippet:
+            file_line = f"   {path}:{lineno}"
+            self._tw.line(file_line)
+            for i, text in snippet:
+                pointer = "→" if i == lineno else " "
+                self._tw.line(f"  {pointer}{i:>4}  {text}")
+            self._tw.line("")
+        explanation = self._assertion_explanation(report)
+        if explanation:
+            self._tw.line("   Explanation:")
+            for line in explanation:
+                self._tw.line(f"     {line}")
+
+    def _render_summary(self, exitstatus):
+        total = sum(self.stats.values())
+        duration = time.time() - self.session_start
+        status_label = "✓ PASSED" if exitstatus == 0 else "✗ FAILED"
+        status_color = {"green": exitstatus == 0, "red": exitstatus != 0, "bold": True}
+        self._tw.line("")
+        self._tw.line(f"RESULT   {status_label} (exit code {exitstatus})", **status_color)
+        self._tw.line(f"TOTAL    {total} tests in {duration:.2f}s")
+        self._tw.line(f"PASSED   {self.stats['passed']}")
+        self._tw.line(f"FAILED   {self.stats['failed']}")
+        self._tw.line(f"SKIPPED  {self.stats['skipped']}")
+        self._tw.line(f"ERRORS   {self.stats['error']}")
+
+    # --- utility helpers ---
+    def _status_icon(self, status):
+        if status in ("passed", "xpassed"):
+            return "✓", {"green": True}
+        if status in ("skipped", "xfailed"):
+            return "∙", {"yellow": True}
+        return "✗", {"red": True, "bold": True}
+
+    def _failure_message(self, report):
+        longrepr = getattr(report, "longrepr", None)
+        if hasattr(longrepr, "reprcrash") and longrepr.reprcrash:
+            return longrepr.reprcrash.message
+        if hasattr(report, "longreprtext"):
+            return report.longreprtext.splitlines()[0]
+        return str(longrepr) if longrepr else "test failed"
+
+    def _load_snippet(self, path, lineno, context=2):
+        path = str(path)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError:
+            return None
+        start = max(0, lineno - context - 1)
+        end = min(len(lines), lineno + context)
+        snippet = []
+        for idx in range(start, end):
+            text = lines[idx].rstrip("\n")
+            snippet.append((idx + 1, text))
+        return snippet
+
+    def _failure_lineno(self, report):
+        longrepr = getattr(report, "longrepr", None)
+        if hasattr(longrepr, "reprcrash") and longrepr.reprcrash:
+            return str(longrepr.reprcrash.path), longrepr.reprcrash.lineno
+        path, lineno, _ = report.location
+        return str(path), lineno + 1
+
+    def _assertion_explanation(self, report):
+        longrepr = getattr(report, "longrepr", None)
+        summary = None
+        if hasattr(longrepr, "reprcrash") and longrepr.reprcrash:
+            summary = longrepr.reprcrash.message or ""
+        if summary:
+            lowered = summary.lower()
+            if "did not raise" in lowered:
+                expected = summary.split("DID NOT RAISE")[-1].strip()
+                expected = expected or "expected exception"
+                summary = f"Expected {expected} to be raised, but none was."
+            elif "assert" in lowered and "==" in summary:
+                parts = summary.split("==", 1)
+                left = parts[0].replace("AssertionError:", "").replace("assert", "", 1).strip()
+                right = parts[1].strip()
+                summary = f"Expected: {right}"
+                if left:
+                    summary += f"\n     Actual:   {left}"
+            else:
+                summary = summary.replace("AssertionError:", "").strip()
+        if not summary:
+            return None
+        parts = summary.split("\n")
+        return [part for part in parts if part.strip()]
+
+
+def pytest_configure(config):
+    config.option.color = "yes"
+    pm = config.pluginmanager
+    reporter = PxTerminalReporter(config)
+    default = pm.getplugin("terminalreporter")
+    if default:
+        pm.unregister(default)
+        pm.register(reporter, "terminalreporter")
+        config._px_reporter_registered = True
+    else:
+        config._px_reporter_registered = False
+    config._px_reporter = reporter
+
+
+def pytest_sessionstart(session):
+    config = session.config
+    reporter = getattr(config, "_px_reporter", None)
+    if reporter is None:
+        return
+    if not getattr(config, "_px_reporter_registered", False):
+        pm = config.pluginmanager
+        default = pm.getplugin("terminalreporter")
+        if default and default is not reporter:
+            pm.unregister(default)
+        pm.register(reporter, "terminalreporter")
+        config._px_reporter_registered = True
+    reporter.pytest_sessionstart(session)
+"#;
 
 #[cfg(test)]
 mod tests {

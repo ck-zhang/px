@@ -1358,7 +1358,7 @@ pub(crate) struct EnvironmentSyncReport {
 }
 
 impl EnvironmentSyncReport {
-    fn new(issue: EnvironmentIssue) -> Self {
+    pub(crate) fn new(issue: EnvironmentIssue) -> Self {
         Self {
             action: issue.action_key(),
             note: issue.note().to_string(),
