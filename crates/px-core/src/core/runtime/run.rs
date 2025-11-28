@@ -273,8 +273,7 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
             return Ok(outcome);
         }
 
-        let mut pytest_cmd = vec!["-m".to_string(), "pytest".to_string(), "tests".to_string()];
-        pytest_cmd.extend(request.pytest_args.iter().cloned());
+        let pytest_cmd = build_pytest_command(&ws_ctx.py_ctx.project_root, &request.pytest_args);
 
         let output = ctx.python_runtime().run_command(
             &ws_ctx.py_ctx.python,
@@ -347,8 +346,7 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
         return Ok(outcome);
     }
 
-    let mut pytest_cmd = vec!["-m".to_string(), "pytest".to_string(), "tests".to_string()];
-    pytest_cmd.extend(request.pytest_args.iter().cloned());
+    let pytest_cmd = build_pytest_command(&py_ctx.project_root, &request.pytest_args);
 
     let output = ctx.python_runtime().run_command(
         &py_ctx.python,
@@ -581,6 +579,20 @@ fn missing_pytest(stderr: &str) -> bool {
     stderr.contains("No module named") && stderr.contains("pytest")
 }
 
+fn build_pytest_command(project_root: &Path, extra_args: &[String]) -> Vec<String> {
+    let mut pytest_cmd = vec!["-m".to_string(), "pytest".to_string()];
+    if extra_args.is_empty() {
+        for candidate in ["tests", "test"] {
+            if project_root.join(candidate).exists() {
+                pytest_cmd.push(candidate.to_string());
+                break;
+            }
+        }
+    }
+    pytest_cmd.extend(extra_args.iter().cloned());
+    pytest_cmd
+}
+
 fn build_env_with_preflight(
     ctx: &CommandContext,
     py_ctx: &PythonContext,
@@ -634,6 +646,7 @@ mod tests {
     use crate::{GlobalOptions, SystemEffects};
     use px_domain::PxOptions;
     use serde_json::json;
+    use std::fs;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -707,5 +720,37 @@ mod tests {
             .iter()
             .any(|(key, value)| key == "PX_PLUGIN_PREFLIGHT" && value == "0"));
         Ok(())
+    }
+
+    #[test]
+    fn pytest_command_prefers_tests_dir() -> Result<()> {
+        let temp = tempdir()?;
+        fs::create_dir_all(temp.path().join("tests"))?;
+
+        let cmd = build_pytest_command(temp.path(), &[]);
+        assert_eq!(cmd, vec!["-m", "pytest", "tests"]);
+        Ok(())
+    }
+
+    #[test]
+    fn pytest_command_falls_back_to_test_dir() -> Result<()> {
+        let temp = tempdir()?;
+        fs::create_dir_all(temp.path().join("test"))?;
+
+        let cmd = build_pytest_command(temp.path(), &[]);
+        assert_eq!(cmd, vec!["-m", "pytest", "test"]);
+        Ok(())
+    }
+
+    #[test]
+    fn pytest_command_respects_user_args() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("test")).expect("create test dir");
+
+        let cmd = build_pytest_command(
+            temp.path(),
+            &["-k".to_string(), "unit".to_string(), "extra".to_string()],
+        );
+        assert_eq!(cmd, vec!["-m", "pytest", "-k", "unit", "extra"]);
     }
 }
