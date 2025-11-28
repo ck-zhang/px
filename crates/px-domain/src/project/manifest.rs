@@ -542,7 +542,15 @@ fn declared_dependency_groups(doc: &DocumentMut) -> Vec<String> {
         .and_then(Item::as_table)
     {
         for (name, entry) in table.iter() {
-            if entry.is_array() && is_common_dev_group(name) {
+            let Some(array) = entry.as_array() else {
+                continue;
+            };
+            if is_common_dev_group(name)
+                || array
+                    .iter()
+                    .filter_map(|val| val.as_str())
+                    .any(is_dev_tool_spec)
+            {
                 groups.push(name.to_string());
             }
         }
@@ -914,6 +922,29 @@ fn is_common_dev_group(name: &str) -> bool {
     )
 }
 
+fn is_dev_tool_spec(spec: &str) -> bool {
+    let name = requirement_display_name(spec).to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "pytest"
+            | "pytest-cov"
+            | "pytest-xdist"
+            | "hypothesis"
+            | "ruff"
+            | "flake8"
+            | "mypy"
+            | "coverage"
+            | "tox"
+            | "nox"
+            | "black"
+            | "isort"
+            | "sphinx"
+            | "pylint"
+            | "bandit"
+            | "pre-commit"
+    )
+}
+
 pub(crate) fn ensure_dependency_group_config(doc: &mut DocumentMut) -> bool {
     if include_group_config(doc).is_some() {
         return false;
@@ -1228,6 +1259,35 @@ Test = ["hypothesis==6.0.0"]
         );
         // Should be a no-op on subsequent calls.
         assert!(!ensure_dependency_group_config(&mut doc));
+        Ok(())
+    }
+
+    #[test]
+    fn optional_groups_with_dev_tools_are_declared() -> Result<()> {
+        let mut doc: DocumentMut = r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+all = ["pytest>=8.3.2", "ruff>=0.6.2"]
+"#
+        .parse()?;
+
+        let declared = declared_dependency_groups(&doc);
+        assert_eq!(declared, vec!["all"]);
+
+        let changed = ensure_dependency_group_config(&mut doc);
+        assert!(
+            changed,
+            "include-groups should be added for dev-like extras"
+        );
+        let groups = doc["tool"]["px"]["dependencies"]["include-groups"]
+            .as_array()
+            .expect("include-groups array");
+        let values: Vec<_> = groups.iter().filter_map(|val| val.as_str()).collect();
+        assert_eq!(values, vec!["all"]);
+
         Ok(())
     }
 

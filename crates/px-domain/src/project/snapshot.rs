@@ -326,6 +326,40 @@ doc = ["sphinx>=7"]
     }
 
     #[test]
+    fn optional_dependencies_with_dev_tools_are_selected_by_default() -> Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path();
+        let pyproject = root.join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+all = ["pytest>=8.3.2", "ruff>=0.6.2"]
+
+[tool.px]
+"#,
+        )?;
+
+        let snapshot = ProjectSnapshot::read_from(root)?;
+        assert_eq!(snapshot.dependency_groups, vec!["all"]);
+        assert_eq!(snapshot.declared_dependency_groups, vec!["all".to_string()]);
+        assert_eq!(
+            snapshot.dependency_group_source,
+            crate::project::manifest::DependencyGroupSource::DeclaredDefault
+        );
+        assert_eq!(
+            snapshot.group_dependencies,
+            vec!["pytest>=8.3.2", "ruff>=0.6.2"]
+        );
+        assert_eq!(snapshot.requirements, vec!["pytest>=8.3.2", "ruff>=0.6.2"]);
+        Ok(())
+    }
+
+    #[test]
     fn include_groups_config_overrides_declared_defaults() -> Result<()> {
         let dir = tempdir()?;
         let root = dir.path();
