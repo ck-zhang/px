@@ -133,10 +133,21 @@ fn base_env_exports_manage_command_alias() -> Result<()> {
             .to_string(),
         "VIRTUAL_ENV should point to the site parent"
     );
-    assert!(
-        envs.iter().any(|(k, v)| k == "HTTPS_PROXY" && v.is_empty()),
-        "proxy vars should be cleared"
-    );
+    for key in [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ] {
+        assert!(
+            envs.iter().any(|(k, v)| k == key && v.is_empty()),
+            "{key} should be cleared from the project env"
+        );
+    }
     Ok(())
 }
 

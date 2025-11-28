@@ -157,9 +157,6 @@ pub fn prepare_pyproject_plan(
             prod_specs.push(pkg.requested.clone());
         }
     }
-    if prod_specs.is_empty() && !dev_specs.is_empty() {
-        prod_specs.append(&mut dev_specs);
-    }
 
     let mut changed = false;
     changed |= merge_dependency_specs(&mut doc, &prod_specs);

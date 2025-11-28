@@ -295,6 +295,94 @@ fn migrate_sets_dependency_group_config() {
 }
 
 #[test]
+fn migrate_keeps_dev_requirements_out_of_prod() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(&temp, "requirements-dev.txt", "pytest>=8.3\n");
+
+    px_command(&temp)
+        .args(["--json", "migrate", "--apply", "--allow-dirty"])
+        .assert()
+        .success();
+
+    let pyproject = fs::read_to_string(temp.path().join("pyproject.toml")).expect("pyproject");
+    let doc: DocumentMut = pyproject.parse().expect("pyproject toml");
+    let deps = doc["project"]["dependencies"]
+        .as_array()
+        .expect("dependencies array");
+    assert!(
+        deps.is_empty(),
+        "prod dependencies should remain empty when only dev requirements are present"
+    );
+
+    let dev_array = doc["project"]["optional-dependencies"]["px-dev"]
+        .as_array()
+        .expect("px-dev optional deps");
+    assert!(
+        dev_array
+            .iter()
+            .filter_map(|item| item.as_str())
+            .any(|spec| spec.starts_with("pytest==")),
+        "dev requirements should be pinned into px-dev"
+    );
+
+    let include = doc["tool"]["px"]["dependencies"]["include-groups"]
+        .as_array()
+        .expect("include-groups array");
+    let groups: Vec<_> = include.iter().filter_map(|item| item.as_str()).collect();
+    assert!(
+        groups.contains(&"px-dev"),
+        "px-dev group should be auto-included when dev requirements exist"
+    );
+}
+
+#[test]
+fn migrate_reads_setup_cfg_requires_dist() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(
+        &temp,
+        "setup.cfg",
+        r#"[metadata]
+requires-dist =
+  idna>=3.6
+  urllib3>=2.0,<3
+[options]
+install_requires =
+  certifi>=2024.0.0
+"#,
+    );
+
+    px_command(&temp)
+        .args(["--json", "migrate", "--apply", "--allow-dirty"])
+        .assert()
+        .success();
+
+    let pyproject = fs::read_to_string(temp.path().join("pyproject.toml")).expect("pyproject");
+    let doc: DocumentMut = pyproject.parse().expect("pyproject toml");
+    let deps = doc["project"]["dependencies"]
+        .as_array()
+        .expect("dependencies array");
+    let specs: Vec<_> = deps.iter().filter_map(|item| item.as_str()).collect();
+    assert!(
+        specs.iter().any(|spec| spec.starts_with("idna==")),
+        "setup.cfg dependencies should be pinned into prod requirements"
+    );
+    assert!(
+        specs.iter().any(|spec| spec.starts_with("urllib3==")),
+        "urllib3 requirement should be captured from setup.cfg"
+    );
+    assert!(
+        specs.iter().any(|spec| spec.starts_with("certifi==")),
+        "install_requires entries should be imported from setup.cfg"
+    );
+}
+
+#[test]
 fn migrate_no_autopin_flag_errors() {
     if !require_online() {
         return;

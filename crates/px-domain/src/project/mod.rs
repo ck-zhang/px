@@ -6,9 +6,9 @@ pub mod state;
 
 pub use init::{infer_package_name, sanitize_package_candidate, ProjectInitializer};
 pub use manifest::{
-    collect_pyproject_packages, collect_requirement_packages, read_requirements_file,
-    DependencyGroupSource, ManifestAddReport, ManifestEditor, ManifestRemoveReport,
-    OnboardPackagePlan, PxOptions,
+    collect_pyproject_packages, collect_requirement_packages, collect_setup_cfg_packages,
+    read_requirements_file, read_setup_cfg_requires, DependencyGroupSource, ManifestAddReport,
+    ManifestEditor, ManifestRemoveReport, OnboardPackagePlan, PxOptions,
 };
 pub use onboard::{
     prepare_pyproject_plan, resolve_onboard_path, BackupManager, BackupSummary, PyprojectPlan,

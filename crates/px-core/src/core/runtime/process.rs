@@ -5,6 +5,21 @@ use std::{
     process::{Command, Stdio},
 };
 
+const PROXY_VARS: [&str; 8] = [
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+];
+
+fn is_proxy_env(key: &str) -> bool {
+    PROXY_VARS.contains(&key)
+}
+
 use anyhow::{Context, Result};
 
 #[derive(Debug, Clone)]
@@ -45,6 +60,10 @@ pub fn run_command_with_stdin(
     let mut command = Command::new(program);
     command.args(args);
     for (key, value) in envs {
+        if value.is_empty() && is_proxy_env(key) {
+            command.env_remove(key);
+            continue;
+        }
         command.env(key, value);
     }
     command.current_dir(cwd);
@@ -83,6 +102,10 @@ pub fn run_command_passthrough(
     let mut command = Command::new(program);
     command.args(args);
     for (key, value) in envs {
+        if value.is_empty() && is_proxy_env(key) {
+            command.env_remove(key);
+            continue;
+        }
         command.env(key, value);
     }
     command.current_dir(cwd);
@@ -154,6 +177,23 @@ mod tests {
         assert_eq!(output.code, 0);
         assert!(output.stdout.is_empty());
         assert!(output.stderr.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_removes_proxy_vars_when_empty() -> Result<()> {
+        let script = r#"if [ -z "${HTTP_PROXY+x}" ] && [ -z "${NO_PROXY+x}" ]; then echo missing; else echo present; fi"#;
+        let output = run_command(
+            "/bin/sh",
+            &["-c".to_string(), script.to_string()],
+            &[
+                ("HTTP_PROXY".into(), String::new()),
+                ("NO_PROXY".into(), String::new()),
+            ],
+            Path::new("."),
+        )?;
+        assert_eq!(output.stdout.trim(), "missing");
         Ok(())
     }
 

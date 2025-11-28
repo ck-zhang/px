@@ -5,9 +5,9 @@ use serde_json::{json, Value};
 use toml_edit::DocumentMut;
 
 use px_domain::{
-    collect_pyproject_packages, collect_requirement_packages, plan_autopin, prepare_pyproject_plan,
-    resolve_onboard_path, AutopinEntry, AutopinPending, AutopinState, BackupManager,
-    InstallOverride, PinSpec,
+    collect_pyproject_packages, collect_requirement_packages, collect_setup_cfg_packages,
+    plan_autopin, prepare_pyproject_plan, resolve_onboard_path, AutopinEntry, AutopinPending,
+    AutopinState, BackupManager, InstallOverride, PinSpec,
 };
 
 use crate::runtime_manager;
@@ -156,6 +156,11 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         }
     };
 
+    let setup_cfg_path = {
+        let candidate = root.join("setup.cfg");
+        candidate.exists().then_some(candidate)
+    };
+
     let lock_only = request.lock_behavior.is_lock_only();
 
     if lock_only && !pyproject_exists {
@@ -167,7 +172,11 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         ));
     }
 
-    if !pyproject_exists && requirements_path.is_none() && dev_path.is_none() {
+    if !pyproject_exists
+        && requirements_path.is_none()
+        && dev_path.is_none()
+        && setup_cfg_path.is_none()
+    {
         return Ok(ExecutionOutcome::user_error(
             "px migrate: no project files found",
             json!({
@@ -198,6 +207,12 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         foreign_owners = detect_foreign_tool_conflicts(&pyproject_path)?;
     }
 
+    if let Some(path) = setup_cfg_path.as_ref() {
+        let (summary, mut rows) = collect_setup_cfg_packages(&root, path)?;
+        source_summaries.push(summary);
+        packages.append(&mut rows);
+    }
+
     if let Some(path) = requirements_path.as_ref() {
         let (summary, mut rows) =
             collect_requirement_packages(&root, path, "requirements", "prod")?;
@@ -212,16 +227,23 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         packages.append(&mut rows);
     }
 
-    let project_type = if pyproject_exists {
-        if requirements_path.is_some() || dev_path.is_some() {
-            "pyproject+requirements"
-        } else {
-            "pyproject"
-        }
-    } else if requirements_path.is_some() || dev_path.is_some() {
-        "requirements"
+    let mut project_parts = Vec::new();
+    if pyproject_exists {
+        project_parts.push("pyproject");
+    }
+    if setup_cfg_path.is_some() {
+        project_parts.push("setup.cfg");
+    }
+    if requirements_path.is_some() {
+        project_parts.push("requirements");
+    }
+    if dev_path.is_some() {
+        project_parts.push("requirements-dev");
+    }
+    let project_type = if project_parts.is_empty() {
+        "bare".to_string()
     } else {
-        "bare"
+        project_parts.join("+")
     };
 
     let (packages, conflicts) = apply_precedence(

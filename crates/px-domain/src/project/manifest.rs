@@ -216,6 +216,27 @@ pub fn collect_requirement_packages(
     ))
 }
 
+/// Convert `setup.cfg` metadata dependencies into onboarding rows.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or parsed.
+pub fn collect_setup_cfg_packages(
+    root: &Path,
+    path: &Path,
+) -> Result<(Value, Vec<OnboardPackagePlan>)> {
+    let specs = read_setup_cfg_requires(path)?;
+    let rel = relative_path(root, path);
+    let mut rows = Vec::new();
+    for spec in specs {
+        rows.push(OnboardPackagePlan::new(spec, "prod", rel.clone()));
+    }
+    Ok((
+        json!({ "kind": "setup.cfg", "path": rel, "count": rows.len() }),
+        rows,
+    ))
+}
+
 /// Read every requirement entry from `path`.
 ///
 /// # Errors
@@ -258,6 +279,57 @@ pub fn read_requirements_file(path: &Path) -> Result<Vec<String>> {
             specs.push(spec.to_string());
         }
     }
+    Ok(specs)
+}
+
+/// Read dependency entries from `setup.cfg`.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read from disk.
+pub fn read_setup_cfg_requires(path: &Path) -> Result<Vec<String>> {
+    let contents = fs::read_to_string(path)?;
+    let mut specs = Vec::new();
+    let mut section = String::new();
+    let mut collecting = false;
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            section = trimmed.trim_matches(&['[', ']'][..]).to_ascii_lowercase();
+            collecting = false;
+            continue;
+        }
+
+        if collecting {
+            if line.chars().next().is_some_and(char::is_whitespace) {
+                if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                    specs.push(trimmed.to_string());
+                }
+                continue;
+            }
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            collecting = false;
+        }
+
+        if section != "metadata" && section != "options" {
+            continue;
+        }
+
+        if let Some((raw_key, raw_value)) = line.split_once('=') {
+            let key = raw_key.trim().to_ascii_lowercase();
+            if key == "requires-dist" || key == "install_requires" {
+                let value = raw_value.trim();
+                if !value.is_empty() && !value.starts_with('#') {
+                    specs.push(value.to_string());
+                }
+                collecting = true;
+            }
+        }
+    }
+
     Ok(specs)
 }
 
@@ -1091,6 +1163,38 @@ mod tests {
 
         let contents = fs::read_to_string(&pyproject)?;
         assert!(contents.contains("requests==2.32.3"));
+        Ok(())
+    }
+
+    #[test]
+    fn setup_cfg_requires_are_parsed() -> Result<()> {
+        let dir = tempdir()?;
+        let setup_cfg = dir.path().join("setup.cfg");
+        fs::write(
+            &setup_cfg,
+            r#"[metadata]
+requires-dist =
+  idna>=3.6
+  urllib3>=2.0,<3
+[options]
+install_requires =
+  certifi>=2024.0.0
+  charset_normalizer>=3.4.0
+"#,
+        )?;
+
+        let specs = read_setup_cfg_requires(&setup_cfg)?;
+        assert!(
+            specs.contains(&"idna>=3.6".to_string())
+                && specs.contains(&"urllib3>=2.0,<3".to_string()),
+            "metadata.requires-dist entries should be collected"
+        );
+        assert!(
+            specs.contains(&"certifi>=2024.0.0".to_string())
+                && specs.contains(&"charset_normalizer>=3.4.0".to_string()),
+            "options.install_requires entries should be collected"
+        );
+
         Ok(())
     }
 

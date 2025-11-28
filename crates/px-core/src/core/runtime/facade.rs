@@ -16,6 +16,7 @@ use crate::outcome::{CommandStatus, ExecutionOutcome, InstallUserError};
 use crate::process::RunOutput;
 use crate::progress::ProgressReporter;
 use crate::python_sys::{detect_interpreter, detect_interpreter_tags, detect_marker_environment};
+use crate::tools::disable_proxy_env;
 use crate::traceback::{analyze_python_traceback, TracebackContext};
 use anyhow::{anyhow, bail, Context, Result};
 use pep508_rs::MarkerEnvironment;
@@ -1541,18 +1542,7 @@ impl PythonContext {
                 }
             }
         }
-        for key in [
-            "HTTP_PROXY",
-            "http_proxy",
-            "HTTPS_PROXY",
-            "https_proxy",
-            "ALL_PROXY",
-            "all_proxy",
-        ] {
-            envs.push((key.to_string(), String::new()));
-        }
-        envs.push(("NO_PROXY".into(), "localhost,127.0.0.1".into()));
-        envs.push(("no_proxy".into(), "localhost,127.0.0.1".into()));
+        disable_proxy_env(&mut envs);
         Ok(envs)
     }
 }

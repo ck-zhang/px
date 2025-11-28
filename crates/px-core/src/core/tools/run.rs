@@ -191,17 +191,17 @@ fn infer_grip_port(args: &[String]) -> Option<u16> {
 }
 
 pub(crate) fn disable_proxy_env(envs: &mut Vec<(String, String)>) {
-    const PROXY_VARS: [&str; 6] = [
+    const PROXY_VARS: [&str; 8] = [
         "HTTP_PROXY",
         "http_proxy",
         "HTTPS_PROXY",
         "https_proxy",
         "ALL_PROXY",
         "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
     ];
     for key in PROXY_VARS {
         envs.push((key.to_string(), String::new()));
     }
-    envs.push(("NO_PROXY".into(), "localhost,127.0.0.1".into()));
-    envs.push(("no_proxy".into(), "localhost,127.0.0.1".into()));
 }
