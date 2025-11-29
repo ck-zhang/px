@@ -55,7 +55,11 @@ pub(crate) fn evaluate_project_state(
             }),
         )
     })?;
-    let env_exists = state.current_env.is_some();
+    let env_exists = state
+        .current_env
+        .as_ref()
+        .map(|env| std::path::PathBuf::from(&env.site_packages).exists())
+        .unwrap_or(false);
     let mut env_clean = false;
     let mut env_issue = None;
     if manifest_clean && lock_issue.is_none() {

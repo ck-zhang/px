@@ -15,6 +15,14 @@ impl Style {
         }
     }
 
+    pub fn dim(&self, text: &str) -> String {
+        if self.enabled {
+            text.dimmed().to_string()
+        } else {
+            text.to_string()
+        }
+    }
+
     pub fn status(&self, status: &CommandStatus, text: &str) -> String {
         let (symbol, tone) = match status {
             CommandStatus::Ok => ("✔", Tone::Green),

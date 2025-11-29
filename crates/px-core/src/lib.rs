@@ -28,6 +28,11 @@ pub use crate::core::config::{
 pub use crate::core::runtime::effects::SystemEffects;
 pub use crate::core::runtime::process::RunOutput;
 pub use crate::core::runtime::CommandGroup;
+pub use crate::core::status::{
+    EnvHealth, EnvStatus, LockHealth, LockStatus, NextAction, NextActionKind, ProjectStatusPayload,
+    RuntimeRole, RuntimeSource, RuntimeStatus, StatusContext, StatusContextKind, StatusPayload,
+    WorkspaceMemberStatus, WorkspaceStatusPayload,
+};
 pub use crate::core::tooling::diagnostics::commands as diag_commands;
 pub use crate::core::tooling::outcome::{CommandStatus, ExecutionOutcome, InstallUserError};
 

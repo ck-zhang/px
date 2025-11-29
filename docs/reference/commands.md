@@ -177,9 +177,9 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 
 ### `px status`
 
-* **Intent**: report project health without changing anything.
-* **Behavior**: summarize project root path/name, active runtime, lock presence/health, env presence/health, derived project state.
-* **Postconditions**: read-only (except logs).
+* **Intent**: read-only snapshot of manifest/lock/env alignment plus runtime identity.
+* **Behavior**: default TTY output shows location, state bullets, runtime/env/lock lines; `--brief` emits a one-liner; `--json` returns a structured payload (context, project/workspace flags, runtime/env/lock, `next_action`).
+* **Postconditions**: read-only (except logs); never touches manifests, locks, or environments.
 
 ### `px migrate` / `px migrate --apply`
 
@@ -194,4 +194,4 @@ When a workspace root is detected above CWD and CWD is inside a member project, 
 * `px sync` (member or workspace root) – if workspace lock missing or drifted: resolve union graph and write `px.workspace.lock`; ensure workspace env matches it; never touch per-project locks for members.
 * `px update` (member or workspace root) – update workspace lock within constraints and rebuild workspace env.
 * `px run` / `px test` (member) – in dev may rebuild workspace env from lock; in CI requires workspace `Consistent`; always use workspace env.
-* `px status` – at workspace root: report workspace state plus member manifest health; in a member: report workspace state and whether that member manifest is included.
+* `px status` – at workspace root: report workspace state plus member manifest health; in a member: report workspace state and whether that member manifest is included; under the workspace root but outside members: emit a note about the non-member path.

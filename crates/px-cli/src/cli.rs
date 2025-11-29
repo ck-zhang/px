@@ -9,7 +9,7 @@ pub const PX_HELP_TEMPLATE: &str =
 pub const PX_BEFORE_HELP: &str = concat!(
     "px ",
     env!("CARGO_PKG_VERSION"),
-    " – deterministic Python project manager\n\n",
+    " – Unified Python Project Manager\n\n",
     "\x1b[1;36mCore workflow\x1b[0m\n",
     "  init             Start a px project; writes pyproject.toml, px.lock, and .px/.\n",
     "  add / remove     Declare or drop dependencies; px.lock and the env stay in sync.\n",
@@ -108,7 +108,7 @@ pub enum CommandGroupCli {
     )]
     Fmt(FmtArgs),
     #[command(about = "Report whether pyproject, px.lock, and the env are in sync (read-only).")]
-    Status,
+    Status(StatusArgs),
     #[command(
         about = "Build sdists/wheels using the px env (prep for px publish).",
         override_usage = "px build [sdist|wheel|both] [--out DIR]"
@@ -354,6 +354,12 @@ pub struct FmtArgs {
     pub json: bool,
     #[arg(last = true, value_name = "ARG")]
     pub args: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct StatusArgs {
+    #[arg(long, help = "One-line status summary (good for hooks and prompts)")]
+    pub brief: bool,
 }
 
 #[derive(Args, Debug)]

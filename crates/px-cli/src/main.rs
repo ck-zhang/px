@@ -15,7 +15,7 @@ mod traceback;
 pub(crate) use crate::cli::*;
 
 use dispatch::dispatch_command;
-use output::{emit_output, OutputOptions};
+use output::{emit_output, OutputOptions, StatusRenderOptions};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -44,7 +44,11 @@ fn main() -> Result<()> {
         json: cli.json,
         no_color: cli.no_color,
     };
-    let code = emit_output(&output_opts, subcommand_json, info, &outcome)?;
+    let status_opts = match &cli.command {
+        CommandGroupCli::Status(args) => Some(StatusRenderOptions { brief: args.brief }),
+        _ => None,
+    };
+    let code = emit_output(&output_opts, subcommand_json, status_opts, info, &outcome)?;
 
     if code == 0 {
         Ok(())

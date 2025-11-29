@@ -91,8 +91,8 @@ members = []
         .failure();
     let json = parse_json(&assert);
     assert_eq!(
-        json["details"]["state"].as_str(),
-        Some("needs-lock"),
+        json["workspace"]["state"].as_str(),
+        Some("WNeedsLock"),
         "empty workspace should report missing lock, not crash"
     );
 }

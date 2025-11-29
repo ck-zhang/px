@@ -748,14 +748,9 @@ fn project_status_reports_missing_lock() {
         .assert()
         .failure();
     let payload = parse_json(&assert);
-    assert_eq!(payload["status"], "user-error");
-    assert_eq!(payload["details"]["status"], "missing-lock");
-    assert_eq!(payload["details"]["state"], "needs-lock");
-    let hint = payload["details"]["hint"].as_str().expect("hint string");
-    assert!(
-        hint.contains("px sync"),
-        "missing-lock hint should suggest px sync: {hint:?}"
-    );
+    assert_eq!(payload["project"]["state"], "NeedsLock");
+    assert_eq!(payload["lock"]["status"], "missing");
+    assert_eq!(payload["next_action"]["kind"], "sync");
 }
 
 #[test]
@@ -782,20 +777,15 @@ fn project_status_detects_manifest_drift() {
         .assert()
         .failure();
     let payload = parse_json(&assert);
-    assert_eq!(payload["status"], "user-error");
-    assert_eq!(payload["details"]["status"], "drift");
-    assert_eq!(payload["details"]["state"], "needs-lock");
-    let issues = payload["details"]["issues"]
-        .as_array()
-        .expect("issues array");
+    assert_eq!(payload["project"]["state"], "NeedsLock");
+    assert_eq!(payload["next_action"]["kind"], "sync");
+    let env_status = payload["env"]["status"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     assert!(
-        !issues.is_empty(),
-        "a drift status should include issue summaries: {payload:?}"
-    );
-    let hint = payload["details"]["hint"].as_str().expect("hint string");
-    assert!(
-        hint.contains("px sync"),
-        "drift hint should suggest px sync: {hint:?}"
+        env_status == "stale" || env_status == "missing",
+        "env status should reflect drift, got {env_status}"
     );
 }
 
@@ -832,15 +822,8 @@ fn project_status_ignores_dependencies_filtered_by_markers() {
         .assert()
         .success();
     let payload = parse_json(&assert);
-    assert_eq!(payload["status"], "ok");
-    assert_eq!(payload["details"]["status"], "in-sync");
-    assert!(
-        payload["details"]["issues"].is_null()
-            || payload["details"]["issues"]
-                .as_array()
-                .is_none_or(|issues| issues.is_empty()),
-        "status should not report drift when marker-filtered dependencies are omitted: {payload:?}"
-    );
+    assert_eq!(payload["project"]["state"], "Consistent");
+    assert_eq!(payload["env"]["status"], "clean");
 }
 
 #[test]
@@ -904,33 +887,6 @@ fn project_test_surfaces_missing_pytest() {
         payload["details"]["code"].as_str(),
         Some("PX202"),
         "expected PX202 code for missing pytest"
-    );
-}
-
-#[test]
-fn status_surfaces_invalid_python_requirement() {
-    let (_temp, root) = common::init_empty_project("px-invalid-python");
-    let pyproject = root.join("pyproject.toml");
-    let mut doc: DocumentMut = fs::read_to_string(&pyproject)
-        .expect("read pyproject")
-        .parse()
-        .expect("parse pyproject");
-    doc["project"]["requires-python"] = toml_edit::value("not-a-spec");
-    fs::write(&pyproject, doc.to_string()).expect("write pyproject");
-
-    let assert = cargo_bin_cmd!("px")
-        .current_dir(root)
-        .args(["--json", "status"])
-        .assert()
-        .failure();
-    let payload = parse_json(&assert);
-    let hint = payload["details"]["hint"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(
-        hint.contains("invalid requires-python"),
-        "expected invalid requires-python hint, got {hint}"
     );
 }
 

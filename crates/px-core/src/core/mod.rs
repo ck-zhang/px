@@ -4,6 +4,7 @@ pub mod migration;
 pub mod project;
 pub mod python;
 pub mod runtime;
+pub mod status;
 pub mod store;
 pub mod tooling;
 pub mod tools;

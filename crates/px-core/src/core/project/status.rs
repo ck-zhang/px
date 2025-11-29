@@ -1,214 +1,286 @@
 use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
-use anyhow::Result;
-
-use crate::workspace::{discover_workspace_scope, workspace_status};
+use crate::core::status::runtime_source_for;
+use crate::workspace::workspace_status_payload;
 use crate::{
-    compute_lock_hash, detect_runtime_metadata, ensure_env_matches_lock, install_snapshot,
-    load_project_state, manifest_snapshot, CommandContext, ExecutionOutcome, InstallState,
-    InstallUserError, ManifestSnapshot,
+    compute_lock_hash, detect_runtime_metadata, load_project_state, CommandContext, CommandStatus,
+    ExecutionOutcome, InstallUserError, ManifestSnapshot, ProjectStatusPayload, RuntimeRole,
+    RuntimeSource, RuntimeStatus, StatusContext, StatusContextKind, StatusPayload,
 };
-use px_domain::load_lockfile_optional;
+use px_domain::{
+    discover_project_root, discover_workspace_root, load_lockfile_optional, ProjectStateKind,
+};
 
 use super::evaluate_project_state;
+use crate::core::runtime::{StoredEnvironment, StoredRuntime};
+use crate::{EnvHealth, EnvStatus, LockHealth, LockStatus, NextAction, NextActionKind};
 
 /// Reports whether the manifest, lockfile, and environment are consistent.
 ///
 /// # Errors
 /// Returns an error if project metadata cannot be read or dependency verification fails.
 pub fn project_status(ctx: &CommandContext) -> Result<ExecutionOutcome> {
-    if let Some(scope) = discover_workspace_scope()? {
-        return workspace_status(ctx, scope);
+    let cwd = std::env::current_dir().context("unable to determine current directory")?;
+    if let Some(root) = discover_workspace_root()? {
+        let payload = workspace_status_payload(ctx, &root, &cwd)?;
+        return Ok(outcome_from_payload(payload));
     }
 
-    let snapshot = manifest_snapshot()?;
-    let state_report = evaluate_project_state(ctx, &snapshot)?;
-    let outcome = match install_snapshot(ctx, &snapshot, true, None) {
-        Ok(outcome) => outcome,
-        Err(err) => match err.downcast::<InstallUserError>() {
-            Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
-            Err(err) => return Err(err),
-        },
+    let Some(root) = discover_project_root()? else {
+        return Ok(missing_project_status(&cwd));
     };
-    let mut details = json!({
-        "pyproject": snapshot.manifest_path.display().to_string(),
-        "lockfile": snapshot.lock_path.display().to_string(),
-        "project": {
-            "root": snapshot.root.display().to_string(),
-            "name": snapshot.name.clone(),
-            "python_requirement": snapshot.python_requirement.clone(),
-        },
-        "dependency_groups": {
-            "active": snapshot.dependency_groups.clone(),
-            "declared": snapshot.declared_dependency_groups.clone(),
-            "source": snapshot.dependency_group_source.as_str(),
-        },
-    });
-    details["state"] = Value::String(state_report.canonical.as_str().to_string());
-    details["flags"] = state_report.flags_json();
-    if let Some(fp) = state_report.manifest_fingerprint.clone() {
-        details["manifest_fingerprint"] = Value::String(fp);
-    }
-    if let Some(fp) = state_report.lock_fingerprint.clone() {
-        details["lock_fingerprint"] = Value::String(fp);
-    }
-    if let Some(id) = state_report.lock_id.clone() {
-        details["lock_id"] = Value::String(id);
-    }
-    if let Some(lock_issue) = state_report.lock_issue.clone() {
-        details["lock_issue"] = json!(lock_issue);
-    }
-    if let Some(issue) = state_report.env_issue.clone() {
-        details["environment_issue"] = issue;
-    }
-    details["runtime"] = detect_runtime_details(ctx, &snapshot);
-    let env_details =
-        collect_environment_status(ctx, &snapshot, outcome.state != InstallState::MissingLock)?;
-    details["environment"] = env_details.clone();
-    match outcome.state {
-        InstallState::UpToDate => {
-            let env_status = env_details
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            if !state_report.is_consistent() {
-                let canonical = state_report.canonical.as_str().to_string();
-                details["status"] = Value::String(canonical);
-                if let Some(reason) = env_details.get("reason") {
-                    details["reason"] = reason.clone();
-                }
-                if let Some(hint) = env_details.get("hint") {
-                    details["hint"] = hint.clone();
-                }
-                let message = match env_status {
-                    "missing" => "Project environment is missing",
-                    "out-of-sync" => "Project environment is out of sync with px.lock",
-                    "unknown" => "Project environment status is unknown",
-                    _ => "Project environment is not ready",
-                };
-                return Ok(ExecutionOutcome::user_error(message, details));
-            }
+    let payload = project_status_payload(ctx, &root)?;
+    Ok(outcome_from_payload(payload))
+}
 
-            details["status"] = Value::String("in-sync".to_string());
-            Ok(ExecutionOutcome::success(
-                "Environment is in sync with px.lock",
-                details,
-            ))
-        }
-        InstallState::Drift => {
-            details["status"] = Value::String("drift".to_string());
-            details["issues"] = issue_values(outcome.drift);
-            details["hint"] = Value::String("Run `px sync` to regenerate px.lock".to_string());
-            Ok(ExecutionOutcome::user_error(
-                "px.lock is out of date",
-                details,
-            ))
-        }
-        InstallState::MissingLock => {
-            details["status"] = Value::String("missing-lock".to_string());
-            details["hint"] = Value::String("Run `px sync` to create px.lock".to_string());
-            Ok(ExecutionOutcome::user_error("px.lock not found", details))
-        }
-        InstallState::Installed => Ok(ExecutionOutcome::failure(
-            "Unable to determine project status",
-            json!({ "status": "unknown" }),
-        )),
+fn outcome_from_payload(payload: StatusPayload) -> ExecutionOutcome {
+    let status = if payload.is_consistent() {
+        CommandStatus::Ok
+    } else {
+        CommandStatus::UserError
+    };
+    let message = match payload.context.kind {
+        StatusContextKind::Project => "project status",
+        StatusContextKind::Workspace | StatusContextKind::WorkspaceMember => "workspace status",
+        StatusContextKind::None => "no project",
+    };
+    let details = serde_json::to_value(payload).unwrap_or_else(|_| json!({}));
+    ExecutionOutcome {
+        status,
+        message: message.to_string(),
+        details,
     }
 }
 
-fn collect_environment_status(
+fn project_status_payload(ctx: &CommandContext, root: &Path) -> Result<StatusPayload> {
+    let snapshot = ManifestSnapshot::read_from(root)?;
+    let state_report = evaluate_project_state(ctx, &snapshot)?;
+    let state = load_project_state(ctx.fs(), &snapshot.root).map_err(|err| {
+        InstallUserError::new(
+            "px state file is unreadable",
+            json!({
+                "error": err.to_string(),
+                "state": snapshot.root.join(".px").join("state.json"),
+                "hint": "Remove or repair the corrupted .px/state.json file, then rerun the command.",
+                "reason": "invalid_state",
+            }),
+        )
+    })?;
+
+    let lock = load_lockfile_optional(&snapshot.lock_path)?;
+    let lock_fingerprint = lock
+        .as_ref()
+        .and_then(|lock| lock.manifest_fingerprint.clone());
+    let lock_id = lock
+        .as_ref()
+        .and_then(|lock| lock.lock_id.clone())
+        .or_else(|| {
+            if lock.is_some() {
+                compute_lock_hash(&snapshot.lock_path).ok()
+            } else {
+                None
+            }
+        });
+    let lock_health = if lock.is_none() {
+        LockHealth::Missing
+    } else if state_report.manifest_clean && state_report.lock_issue.is_none() {
+        LockHealth::Clean
+    } else {
+        LockHealth::Mismatch
+    };
+    let lock_updated_at = lock
+        .as_ref()
+        .and_then(|_| fs::metadata(&snapshot.lock_path).ok())
+        .and_then(|meta| meta.modified().ok())
+        .and_then(format_system_time);
+
+    let env_status = project_env_status(
+        &snapshot.root,
+        state.current_env.clone(),
+        lock_id.clone(),
+        state_report.env_issue.clone(),
+        state_report.env_clean,
+    );
+    let runtime_status = project_runtime_status(ctx, &snapshot, state.runtime.clone());
+    let deps_empty = state_report.deps_empty;
+    let project_state = project_state_label(state_report.canonical);
+
+    let project_payload = ProjectStatusPayload {
+        manifest_exists: state_report.manifest_exists,
+        lock_exists: state_report.lock_exists,
+        env_exists: state_report.env_exists,
+        manifest_clean: state_report.manifest_clean,
+        env_clean: state_report.env_clean,
+        deps_empty,
+        state: project_state,
+        manifest_fingerprint: state_report.manifest_fingerprint.clone(),
+        lock_fingerprint,
+        lock_id: lock_id.clone(),
+        lock_issue: state_report.lock_issue.clone(),
+        env_issue: state_report.env_issue.clone(),
+    };
+
+    let lock_status = LockStatus {
+        file: Some(snapshot.lock_path.display().to_string()),
+        updated_at: lock_updated_at,
+        mfingerprint: lock
+            .as_ref()
+            .and_then(|lock| lock.manifest_fingerprint.clone()),
+        status: lock_health,
+    };
+
+    let next_action = match state_report.canonical {
+        ProjectStateKind::Consistent | ProjectStateKind::InitializedEmpty => NextAction {
+            kind: NextActionKind::None,
+            command: None,
+            scope: None,
+        },
+        ProjectStateKind::NeedsLock | ProjectStateKind::NeedsEnv => NextAction {
+            kind: NextActionKind::Sync,
+            command: Some("px sync".to_string()),
+            scope: Some(snapshot.root.display().to_string()),
+        },
+        ProjectStateKind::Uninitialized => NextAction {
+            kind: NextActionKind::Init,
+            command: Some("px init".to_string()),
+            scope: Some(snapshot.root.display().to_string()),
+        },
+    };
+
+    Ok(StatusPayload {
+        context: StatusContext {
+            kind: StatusContextKind::Project,
+            project_name: Some(snapshot.name.clone()),
+            workspace_name: None,
+            project_root: Some(snapshot.root.display().to_string()),
+            workspace_root: None,
+            member_path: None,
+        },
+        project: Some(project_payload),
+        workspace: None,
+        runtime: Some(runtime_status),
+        lock: Some(lock_status),
+        env: Some(env_status),
+        next_action,
+    })
+}
+
+fn project_runtime_status(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
-    lock_ready: bool,
-) -> Result<Value> {
-    if !lock_ready {
-        return Ok(json!({
-            "status": "unknown",
-            "reason": "missing-lock",
-            "hint": "Run `px sync` to create px.lock before checking the environment.",
-        }));
+    stored: Option<StoredRuntime>,
+) -> RuntimeStatus {
+    if let Some(runtime) = stored {
+        return RuntimeStatus {
+            version: Some(runtime.version.clone()),
+            source: runtime_source_for(&runtime.path),
+            role: RuntimeRole::Project,
+            path: Some(runtime.path.clone()),
+            platform: Some(runtime.platform.clone()),
+        };
     }
-    let lock = match load_lockfile_optional(&snapshot.lock_path)? {
-        Some(lock) => lock,
-        None => {
-            return Ok(json!({
-                "status": "unknown",
-                "reason": "missing-lock",
-                "hint": "Run `px sync` to create px.lock before checking the environment.",
-            }))
-        }
-    };
-    let state = load_project_state(ctx.fs(), &snapshot.root)?;
-    let Some(env) = state.current_env.clone() else {
-        return Ok(json!({
-            "status": "missing",
-            "reason": "uninitialized",
-            "hint": "Run `px sync` to build the px environment.",
-        }));
-    };
-    let lock_id = match lock.lock_id.clone() {
-        Some(value) => value,
-        None => compute_lock_hash(&snapshot.lock_path)?,
-    };
-    let mut details = json!({
-        "status": "in-sync",
-        "env": {
-            "id": env.id,
-            "site": env.site_packages,
-            "python": env.python.version,
-            "platform": env.platform,
-        },
-    });
-    match ensure_env_matches_lock(ctx, snapshot, &lock_id) {
-        Ok(()) => Ok(details),
-        Err(err) => match err.downcast::<InstallUserError>() {
-            Ok(user) => {
-                let status = match user.details.get("reason").and_then(Value::as_str) {
-                    Some("missing_env") => "missing",
-                    _ => "out-of-sync",
-                };
-                details["status"] = Value::String(status.to_string());
-                if let Some(reason) = user.details.get("reason") {
-                    details["reason"] = reason.clone();
-                }
-                if let Some(hint) = user.details.get("hint") {
-                    details["hint"] = hint.clone();
-                }
-                Ok(details)
-            }
-            Err(other) => Err(other),
-        },
-    }
-}
-
-fn detect_runtime_details(ctx: &CommandContext, snapshot: &ManifestSnapshot) -> Value {
     match detect_runtime_metadata(ctx, snapshot) {
-        Ok(meta) => json!({
-            "path": meta.path,
-            "version": meta.version,
-            "platform": meta.platform,
-        }),
-        Err(err) => json!({
-            "hint": format!("failed to detect python runtime: {err}"),
-        }),
+        Ok(meta) => RuntimeStatus {
+            version: Some(meta.version),
+            source: runtime_source_for(&meta.path),
+            role: RuntimeRole::Project,
+            path: Some(meta.path),
+            platform: Some(meta.platform),
+        },
+        Err(_) => RuntimeStatus {
+            version: None,
+            source: RuntimeSource::Unknown,
+            role: RuntimeRole::Project,
+            path: None,
+            platform: None,
+        },
     }
 }
 
-pub(crate) fn issue_values(messages: Vec<String>) -> Value {
-    let entries: Vec<Value> = messages
-        .into_iter()
-        .map(|message| {
-            let id = issue_id_for(&message);
-            json!({
-                "id": id,
-                "message": message,
-            })
-        })
-        .collect();
-    Value::Array(entries)
+fn project_env_status(
+    root: &Path,
+    env: Option<StoredEnvironment>,
+    lock_id: Option<String>,
+    env_issue: Option<Value>,
+    env_clean: bool,
+) -> EnvStatus {
+    let mut status = if env_clean {
+        EnvHealth::Clean
+    } else if env.is_some() {
+        EnvHealth::Stale
+    } else {
+        EnvHealth::Missing
+    };
+    if let Some(issue) = env_issue.as_ref() {
+        if let Some(reason) = issue.get("reason").and_then(Value::as_str) {
+            if reason == "missing_env" {
+                status = EnvHealth::Missing;
+            }
+        }
+    }
+    let path = env
+        .as_ref()
+        .map(|env| relativize(root, PathBuf::from(&env.site_packages)));
+    let last_built_at = env
+        .as_ref()
+        .and_then(|env| fs::metadata(&env.site_packages).ok())
+        .and_then(|meta| meta.modified().ok())
+        .and_then(format_system_time);
+
+    EnvStatus {
+        path,
+        status,
+        lock_id,
+        last_built_at,
+    }
+}
+
+fn project_state_label(kind: ProjectStateKind) -> String {
+    match kind {
+        ProjectStateKind::Uninitialized => "Uninitialized",
+        ProjectStateKind::InitializedEmpty => "InitializedEmpty",
+        ProjectStateKind::NeedsLock => "NeedsLock",
+        ProjectStateKind::NeedsEnv => "NeedsEnv",
+        ProjectStateKind::Consistent => "Consistent",
+    }
+    .to_string()
+}
+
+fn relativize(base: &Path, target: PathBuf) -> String {
+    target
+        .strip_prefix(base)
+        .unwrap_or(&target)
+        .display()
+        .to_string()
+}
+
+fn format_system_time(time: SystemTime) -> Option<String> {
+    let duration = time.duration_since(std::time::UNIX_EPOCH).ok()?;
+    let nanos: i128 = duration.as_nanos().try_into().ok()?;
+    let timestamp = OffsetDateTime::from_unix_timestamp_nanos(nanos).ok()?;
+    timestamp.format(&Rfc3339).ok()
+}
+
+fn missing_project_status(cwd: &Path) -> ExecutionOutcome {
+    let details = json!({
+        "code": "PX001",
+        "reason": "missing_project",
+        "searched": cwd.display().to_string(),
+        "why": ["No pyproject.toml with [tool.px] and no px.lock found in parent directories."],
+        "fix": ["Run `px init` in your project directory to start a new px project."]
+    });
+    ExecutionOutcome::user_error(
+        format!("PX001  No px project found above {}.", cwd.display()),
+        details,
+    )
 }
 
 pub(crate) fn issue_id_for(message: &str) -> String {

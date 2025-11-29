@@ -69,7 +69,7 @@ pub fn dispatch_command(
             let request = fmt_request_from_args(args);
             core_call(info, px_core::run_fmt(ctx, &request))
         }
-        CommandGroupCli::Status => {
+        CommandGroupCli::Status(_args) => {
             let info = CommandInfo::new(CommandGroup::Status, "status");
             core_call(info, px_core::project_status(ctx))
         }
