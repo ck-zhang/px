@@ -161,7 +161,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
   ERRORS   ...
   ```
 
-  The default reporter groups tests by file, aligns names/durations, numbers failures, and shows a short code excerpt. Set `PX_TEST_REPORTER=pytest` to use the native pytest reporter with px’s trimmed defaults (`--color=yes --tb=short --disable-warnings -q`).
+  The default reporter groups tests by file, aligns names/durations, numbers failures, and shows a short code excerpt. Set `PX_TEST_REPORTER=pytest` to use the native pytest reporter with px’s trimmed defaults (`--color=yes --tb=short -q`). px leaves warning handling to the project’s pytest configuration.
 
 ### `px fmt`
 

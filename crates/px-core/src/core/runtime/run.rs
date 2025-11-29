@@ -253,11 +253,7 @@ fn build_pytest_invocation(
 }
 
 fn default_pytest_flags(reporter: TestReporter) -> Vec<String> {
-    let mut flags = vec![
-        "--color=yes".to_string(),
-        "--tb=short".to_string(),
-        "--disable-warnings".to_string(),
-    ];
+    let mut flags = vec!["--color=yes".to_string(), "--tb=short".to_string()];
     if matches!(reporter, TestReporter::Px | TestReporter::Pytest) {
         flags.push("-q".to_string());
     }
@@ -1082,6 +1078,18 @@ mod tests {
         let cmd = build_pytest_command(temp.path(), &[]);
         assert_eq!(cmd, vec!["-m", "pytest", "tests"]);
         Ok(())
+    }
+
+    #[test]
+    fn default_pytest_flags_keep_warnings_enabled() {
+        let flags = default_pytest_flags(TestReporter::Px);
+        assert_eq!(flags, vec!["--color=yes", "--tb=short", "-q"]);
+    }
+
+    #[test]
+    fn default_pytest_flags_pytest_reporter_matches() {
+        let flags = default_pytest_flags(TestReporter::Pytest);
+        assert_eq!(flags, vec!["--color=yes", "--tb=short", "-q"]);
     }
 
     #[test]
