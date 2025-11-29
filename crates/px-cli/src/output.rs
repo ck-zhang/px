@@ -226,10 +226,9 @@ fn format_status_brief(payload: &StatusPayload) -> String {
         if matches!(
             payload.context.kind,
             px_core::StatusContextKind::Workspace | px_core::StatusContextKind::WorkspaceMember
-        ) {
-            if payload.next_action.kind == px_core::NextActionKind::SyncWorkspace {
-                cmd.push_str(" at workspace root");
-            }
+        ) && payload.next_action.kind == px_core::NextActionKind::SyncWorkspace
+        {
+            cmd.push_str(" at workspace root");
         }
         line.push_str(&format!(" – run `{cmd}`"));
     }

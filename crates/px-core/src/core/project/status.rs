@@ -275,10 +275,11 @@ fn missing_project_status(cwd: &Path) -> ExecutionOutcome {
         "reason": "missing_project",
         "searched": cwd.display().to_string(),
         "why": ["No pyproject.toml with [tool.px] and no px.lock found in parent directories."],
-        "fix": ["Run `px init` in your project directory to start a new px project."]
+        "fix": ["Run `px init` in your project directory to start a new px project."],
+        "hint": "Run `px init` in your project directory to start a new px project.",
     });
     ExecutionOutcome::user_error(
-        format!("PX001  No px project found above {}.", cwd.display()),
+        "PX001  No px project found. Run `px init` in your project directory first.",
         details,
     )
 }

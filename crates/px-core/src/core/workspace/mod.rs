@@ -263,8 +263,16 @@ fn write_project_state(
     if let Some(dir) = path.parent() {
         filesystem.create_dir_all(dir)?;
     }
-    filesystem.write(path, &contents)?;
-    Ok(())
+    let tmp_path = path.with_extension("tmp");
+    filesystem.write(&tmp_path, &contents)?;
+    match fs::rename(&tmp_path, path) {
+        Ok(_) => Ok(()),
+        Err(_err) if path.exists() => {
+            fs::remove_file(path)?;
+            fs::rename(&tmp_path, path).with_context(|| format!("writing {}", path.display()))
+        }
+        Err(err) => Err(err).with_context(|| format!("writing {}", path.display())),
+    }
 }
 
 fn evaluate_workspace_state(

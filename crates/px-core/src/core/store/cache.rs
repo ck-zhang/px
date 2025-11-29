@@ -93,10 +93,14 @@ pub fn compute_cache_usage(path: &Path) -> Result<CacheUsage> {
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             let entry_path = entry.path();
-            let metadata = entry.metadata()?;
-            if metadata.is_dir() {
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
                 stack.push(entry_path);
-            } else if metadata.is_file() {
+            } else if file_type.is_file() {
+                let metadata = entry.metadata()?;
                 total_entries += 1;
                 total_size_bytes += metadata.len();
             }
@@ -129,14 +133,17 @@ pub fn collect_cache_walk(path: &Path) -> Result<CacheWalk> {
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             let entry_path = entry.path();
-            let metadata = entry.metadata()?;
-            if metadata.is_dir() {
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
                 stack.push(entry_path.clone());
                 if entry_path != path {
                     walk.dirs.push(entry_path);
                 }
-            } else if metadata.is_file() {
-                let size = metadata.len();
+            } else if file_type.is_file() {
+                let size = entry.metadata()?.len();
                 walk.total_bytes += size;
                 walk.files.push(CacheEntry {
                     path: entry_path,

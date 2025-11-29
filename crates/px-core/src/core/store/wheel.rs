@@ -234,11 +234,31 @@ fn download_once(dest: &Path, request: &ArtifactRequest<'_>) -> Result<CachedWhe
         ));
     }
 
-    tmp.persist(dest)?;
-    Ok(CachedWheelFile {
-        path: dest.to_path_buf(),
-        size: written,
-    })
+    match tmp.persist(dest) {
+        Ok(_) => Ok(CachedWheelFile {
+            path: dest.to_path_buf(),
+            size: written,
+        }),
+        Err(err) => {
+            let io_err = err.error;
+            if io_err.kind() == io::ErrorKind::AlreadyExists {
+                match validate_existing(dest, request.sha256) {
+                    Ok(Some(existing)) => return Ok(existing),
+                    Ok(None) => {
+                        let tmp = err.file;
+                        let _ = fs::remove_file(dest);
+                        tmp.persist(dest)?;
+                        return Ok(CachedWheelFile {
+                            path: dest.to_path_buf(),
+                            size: written,
+                        });
+                    }
+                    Err(check_err) => return Err(check_err),
+                }
+            }
+            Err(io_err.into())
+        }
+    }
 }
 
 #[cfg(test)]
