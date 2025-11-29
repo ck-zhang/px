@@ -126,7 +126,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 
 ### `px test`
 
-* Same consistency semantics as `px run`. Discovers and runs the configured test runner (e.g. `pytest`) inside the project env.
+* Same consistency semantics as `px run`. Prefers project-provided runners like `tests/runtests.py` (or `runtests.py`) and otherwise runs `pytest` inside the project env.
 * Output style (default): px streams the runner stdout/stderr live and renders a compact report:
 
   ```

@@ -891,6 +891,46 @@ fn project_test_surfaces_missing_pytest() {
 }
 
 #[test]
+fn project_test_prefers_runtests_script_when_present() {
+    let (_temp, root) = common::prepare_fixture("px-runtests-runner");
+
+    let Some(python) = find_python() else {
+        eprintln!("skipping runtests fallback test (python binary not found)");
+        return;
+    };
+
+    let tests = root.join("tests");
+    fs::create_dir_all(&tests).expect("create tests dir");
+    fs::write(
+        tests.join("runtests.py"),
+        "import sys\n\n\ndef main():\n    print('runtests-runner')\n    return 0\n\nif __name__ == '__main__':\n    sys.exit(main())\n",
+    )
+    .expect("write runtests script");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["--json", "test"])
+        .assert()
+        .success();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    let runner = payload["details"]["runner"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        runner.contains("tests/runtests.py"),
+        "runner should point to tests/runtests.py: {runner:?}"
+    );
+    let stdout = payload["details"]["stdout"].as_str().unwrap_or_default();
+    assert!(
+        stdout.contains("runtests-runner"),
+        "stdout should include runtests script output: {stdout:?}"
+    );
+}
+
+#[test]
 fn corrupt_state_file_is_reported() {
     let (_temp, root) = common::init_empty_project("px-corrupt-state");
     let state = root.join(".px").join("state.json");

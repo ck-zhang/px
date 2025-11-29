@@ -19,7 +19,7 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub struct TestRequest {
-    pub pytest_args: Vec<String>,
+    pub args: Vec<String>,
     pub frozen: bool,
 }
 
@@ -40,7 +40,15 @@ enum TestReporter {
     Pytest,
 }
 
-/// Runs the project's tests using either pytest or px's fallback runner.
+#[derive(Clone, Debug)]
+enum TestRunner {
+    Pytest,
+    Builtin,
+    Script(PathBuf),
+}
+
+/// Runs the project's tests using a project-provided runner or pytest, with an
+/// optional px fallback runner.
 ///
 /// # Errors
 /// Returns an error if the Python environment cannot be prepared or test execution fails.
@@ -203,14 +211,14 @@ fn run_pytest_runner(
     ctx: &CommandContext,
     py_ctx: &PythonContext,
     envs: EnvPairs,
-    pytest_args: &[String],
+    test_args: &[String],
     stream_runner: bool,
 ) -> Result<ExecutionOutcome> {
     let reporter = test_reporter_from_env();
-    let (envs, pytest_cmd) = build_pytest_invocation(ctx, py_ctx, envs, pytest_args, reporter)?;
+    let (envs, pytest_cmd) = build_pytest_invocation(ctx, py_ctx, envs, test_args, reporter)?;
     let output = run_python_command(ctx, py_ctx, &pytest_cmd, &envs, stream_runner)?;
     if output.code == 0 {
-        let mut outcome = test_success("pytest", output, stream_runner, pytest_args);
+        let mut outcome = test_success("pytest", output, stream_runner, test_args);
         if let TestReporter::Px = reporter {
             mark_reporter_rendered(&mut outcome);
         }
@@ -220,9 +228,9 @@ fn run_pytest_runner(
         if ctx.config().test.fallback_builtin {
             return run_builtin_tests(ctx, py_ctx, envs, stream_runner);
         }
-        return Ok(missing_pytest_outcome(output, pytest_args));
+        return Ok(missing_pytest_outcome(output, test_args));
     }
-    let mut outcome = test_failure("pytest", output, stream_runner, pytest_args);
+    let mut outcome = test_failure("pytest", output, stream_runner, test_args);
     if let TestReporter::Px = reporter {
         mark_reporter_rendered(&mut outcome);
     }
@@ -233,7 +241,7 @@ fn build_pytest_invocation(
     ctx: &CommandContext,
     py_ctx: &PythonContext,
     mut envs: EnvPairs,
-    pytest_args: &[String],
+    test_args: &[String],
     reporter: TestReporter,
 ) -> Result<(EnvPairs, Vec<String>)> {
     let mut defaults = default_pytest_flags(reporter);
@@ -247,8 +255,7 @@ fn build_pytest_invocation(
         );
         defaults.extend_from_slice(&["-p".to_string(), "px_pytest_plugin".to_string()]);
     }
-    let pytest_cmd =
-        build_pytest_command_with_defaults(&py_ctx.project_root, pytest_args, &defaults);
+    let pytest_cmd = build_pytest_command_with_defaults(&py_ctx.project_root, test_args, &defaults);
     Ok((envs, pytest_cmd))
 }
 
@@ -420,24 +427,69 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
     run_tests_for_context(ctx, &py_ctx, request, sync_report)
 }
 
+fn select_test_runner(ctx: &CommandContext, py_ctx: &PythonContext) -> TestRunner {
+    if ctx.config().test.fallback_builtin {
+        return TestRunner::Builtin;
+    }
+    if let Some(script) = find_runtests_script(&py_ctx.project_root) {
+        return TestRunner::Script(script);
+    }
+    TestRunner::Pytest
+}
+
+fn find_runtests_script(project_root: &Path) -> Option<PathBuf> {
+    ["tests/runtests.py", "runtests.py"]
+        .iter()
+        .map(|rel| project_root.join(rel))
+        .find(|candidate| candidate.is_file())
+}
+
 fn run_tests_for_context(
     ctx: &CommandContext,
     py_ctx: &PythonContext,
     request: &TestRequest,
     sync_report: Option<crate::EnvironmentSyncReport>,
 ) -> Result<ExecutionOutcome> {
-    let command_args = json!({ "pytest_args": request.pytest_args });
+    let command_args = json!({ "test_args": request.args });
     let (mut envs, _preflight) = build_env_with_preflight(ctx, py_ctx, &command_args)?;
-    envs.push(("PX_TEST_RUNNER".into(), "pytest".into()));
     let stream_runner = !ctx.global.json;
 
-    let mut outcome = if ctx.config().test.fallback_builtin {
-        run_builtin_tests(ctx, py_ctx, envs, stream_runner)?
-    } else {
-        run_pytest_runner(ctx, py_ctx, envs, &request.pytest_args, stream_runner)?
+    let mut outcome = match select_test_runner(ctx, py_ctx) {
+        TestRunner::Builtin => run_builtin_tests(ctx, py_ctx, envs, stream_runner)?,
+        TestRunner::Script(script) => {
+            run_script_runner(ctx, py_ctx, envs, &script, &request.args, stream_runner)?
+        }
+        TestRunner::Pytest => {
+            envs.push(("PX_TEST_RUNNER".into(), "pytest".into()));
+            run_pytest_runner(ctx, py_ctx, envs, &request.args, stream_runner)?
+        }
     };
     attach_autosync_details(&mut outcome, sync_report);
     Ok(outcome)
+}
+
+fn run_script_runner(
+    ctx: &CommandContext,
+    py_ctx: &PythonContext,
+    mut envs: EnvPairs,
+    script: &Path,
+    args: &[String],
+    stream_runner: bool,
+) -> Result<ExecutionOutcome> {
+    let runner_label = script
+        .strip_prefix(&py_ctx.project_root)
+        .unwrap_or(script)
+        .display()
+        .to_string();
+    envs.push(("PX_TEST_RUNNER".into(), runner_label.clone()));
+    let mut cmd_args = vec![script.display().to_string()];
+    cmd_args.extend_from_slice(args);
+    let output = run_python_command(ctx, py_ctx, &cmd_args, &envs, stream_runner)?;
+    if output.code == 0 {
+        Ok(test_success(&runner_label, output, stream_runner, args))
+    } else {
+        Ok(test_failure(&runner_label, output, stream_runner, args))
+    }
 }
 
 fn run_builtin_tests(
@@ -1112,5 +1164,22 @@ mod tests {
             &["-k".to_string(), "unit".to_string(), "extra".to_string()],
         );
         assert_eq!(cmd, vec!["-m", "pytest", "-k", "unit", "extra"]);
+    }
+
+    #[test]
+    fn prefers_tests_runtests_script() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        fs::write(root.join("runtests.py"), "print('root')")?;
+        fs::create_dir_all(root.join("tests"))?;
+        fs::write(root.join("tests/runtests.py"), "print('tests')")?;
+
+        let detected = find_runtests_script(root).expect("script detected");
+        assert_eq!(
+            detected,
+            root.join("tests").join("runtests.py"),
+            "tests/runtests.py should be preferred over root runtests.py"
+        );
+        Ok(())
     }
 }

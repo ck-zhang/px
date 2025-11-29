@@ -178,7 +178,7 @@ fn missing_project_outcome(err: &anyhow::Error) -> Option<px_core::ExecutionOutc
 
 fn test_request_from_args(args: &TestArgs) -> TestRequest {
     TestRequest {
-        pytest_args: args.args.clone(),
+        args: args.args.clone(),
         frozen: args.frozen,
     }
 }

@@ -99,7 +99,7 @@ pub enum CommandGroupCli {
     Run(RunArgs),
     #[command(
         about = "Run tests with the same auto-sync rules as px run.",
-        override_usage = "px test [-- <PYTEST_ARG>...]"
+        override_usage = "px test [-- <TEST_ARG>...]"
     )]
     Test(TestArgs),
     #[command(
@@ -339,7 +339,7 @@ pub struct TestArgs {
         help = "Fail if px.lock is missing or the environment is out of sync"
     )]
     pub frozen: bool,
-    #[arg(last = true, value_name = "PYTEST_ARG")]
+    #[arg(last = true, value_name = "TEST_ARG")]
     pub args: Vec<String>,
 }
 
