@@ -79,6 +79,10 @@ _PX_ALLOWED = os.environ.get("PX_ALLOWED_PATHS", "")
 _ALLOWED = [p for p in _PX_ALLOWED.split(os.pathsep) if p]
 if not _ALLOWED:
     _ALLOWED = _collect_allowed_from_pythonpath()
+else:
+    for entry in _collect_allowed_from_pythonpath():
+        if entry not in _ALLOWED:
+            _ALLOWED.append(entry)
 _ALLOWED_ENV = os.pathsep.join(_ALLOWED)
 
 _FILTER_PATHS = True
@@ -1908,45 +1912,120 @@ impl PythonContext {
 pub(crate) fn ensure_version_file(manifest_path: &Path) -> Result<()> {
     let contents = fs::read_to_string(manifest_path)?;
     let doc: toml_edit::DocumentMut = contents.parse()?;
-    let Some(hooks) = doc
-        .get("tool")
+    let manifest_dir = manifest_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+
+    if let Some(version_file) = hatch_version_file(&doc) {
+        ensure_version_stub(&manifest_dir, &version_file, VersionFileStyle::HatchVcsHook)?;
+    }
+
+    if let Some(version_file) = setuptools_scm_version_file(&doc) {
+        ensure_version_stub(
+            &manifest_dir,
+            &version_file,
+            VersionFileStyle::SetuptoolsScm,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn hatch_version_file(doc: &toml_edit::DocumentMut) -> Option<PathBuf> {
+    doc.get("tool")
         .and_then(|tool| tool.get("hatch"))
         .and_then(|hatch| hatch.get("build"))
         .and_then(|build| build.get("hooks"))
         .and_then(|hooks| hooks.get("vcs"))
-    else {
-        return Ok(());
-    };
-    let Some(version_file) = hooks
-        .get("version-file")
+        .and_then(|vcs| vcs.get("version-file"))
         .and_then(|item| item.as_str())
         .map(PathBuf::from)
-    else {
-        return Ok(());
-    };
-    let version_path = manifest_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(version_file);
+}
+
+fn setuptools_scm_version_file(doc: &toml_edit::DocumentMut) -> Option<PathBuf> {
+    doc.get("tool")
+        .and_then(|tool| tool.get("setuptools_scm"))
+        .and_then(|cfg| cfg.get("write_to").or_else(|| cfg.get("version_file")))
+        .and_then(|item| item.as_str())
+        .map(PathBuf::from)
+}
+
+#[derive(Clone, Copy)]
+enum VersionFileStyle {
+    HatchVcsHook,
+    SetuptoolsScm,
+}
+
+fn ensure_version_stub(root: &Path, target: &Path, style: VersionFileStyle) -> Result<()> {
+    let version_path = root.join(target);
+    let mut rewrite = false;
     if version_path.exists() {
-        return Ok(());
+        if let VersionFileStyle::SetuptoolsScm = style {
+            if let Ok(contents) = fs::read_to_string(&version_path) {
+                let has_version = contents.contains("version =");
+                let has_alias = contents.contains("__version__");
+                let has_tuple = contents.contains("version_tuple = tuple(_v.release)");
+                let has_packaging =
+                    contents.contains("from packaging.version import Version as _Version");
+                let fallback_version = contents.lines().find_map(|line| {
+                    let trimmed = line.trim_start();
+                    if !trimmed.starts_with("version =") {
+                        return None;
+                    }
+                    let value = trimmed
+                        .split_once('=')
+                        .map(|(_, rhs)| rhs.trim().trim_matches('"'))
+                        .unwrap_or_default();
+                    Some(
+                        value == "unknown"
+                            || value.starts_with("0.0.0+")
+                            || value.starts_with("0+"),
+                    )
+                });
+                let needs_upgrade = fallback_version.unwrap_or(false);
+                if !(has_version && has_alias && has_tuple && has_packaging) || needs_upgrade {
+                    rewrite = true;
+                }
+            } else {
+                rewrite = true;
+            }
+        } else {
+            return Ok(());
+        }
     }
-    if let Some(parent) = version_path.parent() {
-        fs::create_dir_all(parent)?;
+    if !version_path.exists() || rewrite {
+        if let Some(parent) = version_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
     }
-    let derived = match derive_vcs_version(manifest_path.parent().unwrap_or_else(|| Path::new(".")))
-    {
+
+    let derived = match derive_vcs_version(root) {
         Ok(version) => version,
         Err(err) => {
             warn!(
                 error = %err,
-                path = %manifest_path.display(),
+                path = %root.display(),
                 "git metadata unavailable; writing fallback vcs version"
             );
             "0.0.0+unknown".to_string()
         }
     };
-    fs::write(&version_path, format!("__version__ = \"{derived}\"\n"))?;
+
+    let contents = match style {
+        VersionFileStyle::HatchVcsHook => format!("__version__ = \"{derived}\"\n"),
+        VersionFileStyle::SetuptoolsScm => format!(
+            "from packaging.version import Version as _Version\n\
+version = \"{derived}\"\n\
+__version__ = version\n\
+_v = _Version(version)\n\
+version_tuple = tuple(_v.release)\n\
+__all__ = [\"__version__\", \"version\", \"version_tuple\"]\n"
+        ),
+    };
+    if rewrite || !version_path.exists() {
+        fs::write(&version_path, contents)?;
+    }
     Ok(())
 }
 
@@ -2684,6 +2763,68 @@ mod tests {
     }
 
     #[test]
+    fn sitecustomize_merges_pythonpath_when_px_allowed_set() -> Result<()> {
+        let temp = tempdir()?;
+        let site_dir = temp.path().join("site");
+        fs::create_dir_all(&site_dir)?;
+        fs::write(site_dir.join("sitecustomize.py"), SITE_CUSTOMIZE)?;
+
+        let extra = temp.path().join("extra");
+        fs::create_dir_all(&extra)?;
+        fs::write(extra.join("shim.py"), "VALUE = 'ok'\n")?;
+
+        let python = match SystemEffects::new().python().detect_interpreter() {
+            Ok(path) => path,
+            Err(_) => return Ok(()),
+        };
+
+        let mut cmd = Command::new(&python);
+        cmd.current_dir(temp.path());
+        cmd.env_clear();
+        cmd.env("PX_ALLOWED_PATHS", site_dir.display().to_string());
+        let pythonpath = env::join_paths([extra.clone(), site_dir.clone()])?;
+        cmd.env("PYTHONPATH", pythonpath);
+        cmd.arg("-c").arg(
+            "import json, sys, shim; print(json.dumps({'value': shim.VALUE, 'path': sys.path}))",
+        );
+        let output = cmd.output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "python exited with {}: {}\n{}",
+            output.status,
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let payload: Value = serde_json::from_str(stdout.trim())?;
+        let value = payload
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert_eq!(value, "ok");
+        let paths: Vec<String> = payload
+            .get("path")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(std::string::ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let extra_canon = fs::canonicalize(&extra)?;
+        assert!(
+            paths
+                .iter()
+                .any(|entry| fs::canonicalize(entry).ok() == Some(extra_canon.clone())),
+            "extra PYTHONPATH entries should persist when PX_ALLOWED_PATHS is set; sys.path={paths:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn editable_stub_exposes_project_version_metadata() -> Result<()> {
         let temp = tempdir()?;
         let project_root = temp.path();
@@ -2883,6 +3024,42 @@ version-file = "demo/_version.py"
         assert!(
             contents.contains("__version__ = \"0.0.0+unknown\""),
             "fallback version should be written when git metadata is missing"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_version_file_supports_setuptools_scm_write_to() -> Result<()> {
+        let temp = tempdir()?;
+        let manifest = temp.path().join("pyproject.toml");
+        fs::write(
+            &manifest,
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.setuptools_scm]
+write_to = "demo/_version.py"
+"#,
+        )?;
+        let demo_dir = temp.path().join("demo");
+        fs::create_dir_all(&demo_dir)?;
+        fs::write(demo_dir.join("__init__.py"), "")?;
+
+        ensure_version_file(&manifest)?;
+        let contents = fs::read_to_string(demo_dir.join("_version.py"))?;
+        assert!(
+            contents.contains("version = \"0.0.0+unknown\""),
+            "setuptools_scm stub should include derived version"
+        );
+        assert!(
+            contents.contains("__version__ = version"),
+            "setuptools_scm stub should alias __version__"
+        );
+        assert!(
+            contents.contains("version_tuple = tuple(_v.release)"),
+            "setuptools_scm stub should export version_tuple from parsed release"
         );
         Ok(())
     }
