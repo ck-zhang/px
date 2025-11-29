@@ -43,6 +43,24 @@ import sys
 import sysconfig
 from pathlib import Path
 
+def _collect_allowed_from_pythonpath():
+    allowed = []
+    env_py = os.environ.get("PYTHONPATH", "")
+    for entry in env_py.split(os.pathsep):
+        if not entry:
+            continue
+        allowed.append(entry)
+        pth = Path(entry).joinpath("px.pth")
+        try:
+            with pth.open() as handle:
+                for line in handle:
+                    trimmed = line.strip()
+                    if trimmed:
+                        allowed.append(trimmed)
+        except OSError:
+            continue
+    return allowed
+
 def _stdlib_prefixes():
     prefixes = set()
     for key in ("stdlib", "platstdlib"):
@@ -58,6 +76,9 @@ def _stdlib_prefixes():
 _STD_PREFIXES = _stdlib_prefixes()
 _PX_ALLOWED = os.environ.get("PX_ALLOWED_PATHS", "")
 _ALLOWED = [p for p in _PX_ALLOWED.split(os.pathsep) if p]
+if not _ALLOWED:
+    _ALLOWED = _collect_allowed_from_pythonpath()
+_ALLOWED_ENV = os.pathsep.join(_ALLOWED)
 
 _FILTER_PATHS = True
 _target_exe = os.environ.get("PX_PYTHON")
@@ -108,7 +129,7 @@ if _FILTER_PATHS:
 
     sys.path[:] = _new_path
     # Ensure child processes inherit the px path set instead of a mutated sys.path
-    os.environ["PYTHONPATH"] = _PX_ALLOWED
+    os.environ["PYTHONPATH"] = _ALLOWED_ENV
 
     _SITE_BIN = Path(__file__).resolve().parent / "bin"
     if not _SITE_BIN.exists():
@@ -2260,6 +2281,67 @@ mod tests {
         assert!(
             file.contains(dep_mod.to_string_lossy().as_ref()),
             "expected module to load from site packages, got {file}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sitecustomize_uses_pythonpath_when_px_allowed_missing() -> Result<()> {
+        let temp = tempdir()?;
+        let site_dir = temp.path().join("site");
+        fs::create_dir_all(&site_dir)?;
+        fs::write(site_dir.join("sitecustomize.py"), SITE_CUSTOMIZE)?;
+
+        let dep_dir = site_dir.join("deps");
+        fs::create_dir_all(&dep_dir)?;
+        fs::write(dep_dir.join("shim.py"), "VALUE = 'ok'\n")?;
+        fs::write(site_dir.join("px.pth"), format!("{}\n", dep_dir.display()))?;
+
+        let python = match SystemEffects::new().python().detect_interpreter() {
+            Ok(path) => path,
+            Err(_) => return Ok(()),
+        };
+
+        let mut cmd = Command::new(&python);
+        cmd.current_dir(temp.path());
+        cmd.env_clear();
+        cmd.env("PYTHONPATH", site_dir.display().to_string());
+        cmd.arg("-c").arg(
+            "import json, sys, shim; print(json.dumps({'value': shim.VALUE, 'path': sys.path}))",
+        );
+        let output = cmd.output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "python exited with {}: {}\n{}",
+            output.status,
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let payload: Value = serde_json::from_str(stdout.trim())?;
+        let value = payload
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert_eq!(value, "ok");
+        let paths: Vec<String> = payload
+            .get("path")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(std::string::ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let dep_canon = fs::canonicalize(&dep_dir)?;
+        assert!(
+            paths
+                .iter()
+                .any(|entry| fs::canonicalize(entry).ok() == Some(dep_canon.clone())),
+            "px.pth entries should persist even when PX_ALLOWED_PATHS is unset; sys.path={paths:?}"
         );
         Ok(())
     }
