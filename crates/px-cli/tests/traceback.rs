@@ -3,7 +3,7 @@ use serde_json::Value;
 
 mod common;
 
-use common::prepare_fixture;
+use common::{prepare_fixture, prepare_traceback_fixture};
 
 #[test]
 fn run_missing_import_surfaces_px_hint() {
@@ -67,6 +67,28 @@ fn run_missing_import_exposes_traceback_in_json() {
             .and_then(|rec| rec.get("reason"))
             .and_then(Value::as_str),
         Some("missing_import")
+    );
+}
+
+#[test]
+fn run_traceback_is_not_duplicated_in_cli_output() {
+    let (_tmp, project) = prepare_traceback_fixture("traceback-cli-dedup");
+    let Some(python) = find_python() else {
+        eprintln!("skipping traceback dedup test (python binary not found)");
+        return;
+    };
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["run", "python", "demo_tracebacks.py", "RuntimeError"])
+        .assert()
+        .failure();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout");
+    let header = "Traceback (most recent call last):";
+    let count = stdout.matches(header).count();
+    assert!(
+        count == 1,
+        "traceback header should appear once in CLI output: {stdout:?}"
     );
 }
 

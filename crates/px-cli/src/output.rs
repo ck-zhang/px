@@ -92,6 +92,7 @@ pub fn emit_output(
                 }
             }
         } else {
+            let trace = traceback_from_details(&style, &outcome.details);
             if info.group == CommandGroup::Test
                 && outcome
                     .details
@@ -122,15 +123,22 @@ pub fn emit_output(
                 println!("stdout:");
                 println!("{stdout}");
             }
+            let mut printed_stderr = false;
             if let Some(stderr) = output_from_details(&outcome.details, "stderr") {
                 println!();
                 println!("stderr:");
                 println!("{stderr}");
+                printed_stderr = true;
             }
-            if let Some(trace) = traceback_from_details(&style, &outcome.details) {
-                println!();
-                println!("{}", trace.body);
-                if let Some(line) = trace.hint_line {
+            if let Some(trace) = trace.as_ref() {
+                if !printed_stderr {
+                    println!();
+                    println!("{}", trace.body);
+                    if let Some(line) = trace.hint_line.as_ref() {
+                        println!("{line}");
+                    }
+                } else if let Some(line) = trace.hint_line.as_ref() {
+                    println!();
                     println!("{line}");
                 }
             }
