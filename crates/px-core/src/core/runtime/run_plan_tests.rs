@@ -18,6 +18,7 @@ fn prefers_console_script_from_site_bin() -> anyhow::Result<()> {
 
     let ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        project_name: "demo".into(),
         python: "/usr/bin/python".into(),
         pythonpath: String::new(),
         allowed_paths: vec![],
@@ -53,6 +54,7 @@ scripts = { demo = "demo.cli:main" }
 
     let ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        project_name: "demo".into(),
         python: "/usr/bin/python".into(),
         pythonpath: String::new(),
         allowed_paths: vec![],

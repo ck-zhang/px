@@ -1539,15 +1539,26 @@ pub fn prepare_workspace_run_context(
                 json!({ "error": "contains non-utf8 data" }),
             )
         })?;
-    let px_options = workspace
+    let member_data = workspace
         .members
         .iter()
-        .find(|member| member.root == member_root)
+        .find(|member| member.root == member_root);
+    let px_options = member_data
         .map(|member| member.snapshot.px_options.clone())
+        .unwrap_or_default();
+    let project_name = member_data
+        .map(|member| member.snapshot.name.clone())
+        .or_else(|| {
+            member_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(std::string::ToString::to_string)
+        })
         .unwrap_or_default();
     let python_path = env.python.path.clone();
     let py_ctx = PythonContext {
         project_root: member_root.clone(),
+        project_name,
         python: python_path,
         pythonpath,
         allowed_paths,

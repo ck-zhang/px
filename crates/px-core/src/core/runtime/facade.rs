@@ -167,6 +167,19 @@ else:
     px_allowed = set(_ALLOWED)
     sys.path[:] = [path for path in sys.path if path not in px_allowed]
 
+try:
+    _perf_baseline = os.environ.get("PX_PYTEST_PERF_BASELINE")
+    if _perf_baseline:
+        import pytest_perf.runner as _perf_runner
+        def _px_perf_upstream_url(extras="", control=None):
+            spec = _perf_baseline.replace("{extras}", extras)
+            if control and "git+" in spec:
+                return spec + f"@{control}"
+            return spec
+        _perf_runner.upstream_url = _px_perf_upstream_url
+except Exception:
+    pass
+
 "#;
 
 pub(crate) type ManifestSnapshot = ProjectSnapshot;
@@ -539,6 +552,25 @@ fn write_project_metadata_stub(
     if let Some(entry_points) = render_editable_entry_points(&metadata) {
         fs_ops.write(&dist_dir.join("entry_points.txt"), entry_points.as_bytes())?;
     }
+    let bin_dir = site_dir.join("bin");
+    let python_path = bin_dir.join("python");
+    let python = Some(python_path.as_path());
+    let install_entrypoints = |entries: &BTreeMap<String, String>| {
+        for (name, target) in entries {
+            let _ = fs::remove_file(bin_dir.join(name));
+            let target_value = target.split_whitespace().next().unwrap_or(target).trim();
+            if let Some((module, callable)) = target_value.split_once(':') {
+                let _ =
+                    write_entrypoint_script(&bin_dir, name, module.trim(), callable.trim(), python);
+            }
+        }
+    };
+    if let Some(entries) = metadata.entry_points.get("console_scripts") {
+        install_entrypoints(entries);
+    }
+    if let Some(entries) = metadata.entry_points.get("gui_scripts") {
+        install_entrypoints(entries);
+    }
 
     let project_root = fs_ops
         .canonicalize(&snapshot.root)
@@ -603,6 +635,7 @@ fn load_editable_project_metadata(
         .get("version")
         .and_then(Item::as_str)
         .map(std::string::ToString::to_string)
+        .or_else(|| infer_version_from_version_file(&root, &doc, fs_ops))
         .or_else(|| infer_version_from_sources(&root, &normalized_name, fs_ops))
         .unwrap_or_else(|| "0.0.0+unknown".to_string());
     let requires_python = project
@@ -638,6 +671,45 @@ fn load_editable_project_metadata(
         entry_points,
         top_level,
     })
+}
+
+fn infer_version_from_version_file(
+    manifest_root: &Path,
+    doc: &DocumentMut,
+    fs_ops: &dyn effects::FileSystem,
+) -> Option<String> {
+    let candidates = [hatch_version_file(doc), setuptools_scm_version_file(doc)];
+    for relative in candidates.into_iter().flatten() {
+        let path = manifest_root.join(relative);
+        if fs_ops.metadata(&path).is_err() {
+            continue;
+        }
+        if let Ok(contents) = fs_ops.read_to_string(&path) {
+            for line in contents.lines() {
+                let trimmed = line.trim_start();
+                if let Some(raw) = trimmed.strip_prefix("version =") {
+                    let value = raw.trim().trim_matches('"');
+                    if !value.is_empty() {
+                        return Some(value.to_string());
+                    }
+                }
+                if trimmed.starts_with("__version__") {
+                    if let Some((_, raw_value)) = trimmed.split_once('=') {
+                        let value = raw_value.trim();
+                        if value.starts_with('"') || value.starts_with('\'') {
+                            let clean = value
+                                .trim_matches(|ch| matches!(ch, '"' | '\''))
+                                .to_string();
+                            if !clean.is_empty() {
+                                return Some(clean);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn infer_version_from_sources(
@@ -832,30 +904,38 @@ fn normalize_project_name(name: &str) -> String {
     result
 }
 
-fn materialize_wheel_scripts(
-    artifact_path: &Path,
+fn write_entrypoint_script(
     bin_dir: &Path,
+    name: &str,
+    module: &str,
+    callable: &str,
     python: Option<&Path>,
 ) -> Result<()> {
     fs::create_dir_all(bin_dir)?;
     let python_shebang = python
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "/usr/bin/env python3".to_string());
-    let write_entrypoint = |name: &str, module: &str, callable: &str| -> Result<()> {
-        let script_path = bin_dir.join(name);
-        let parts: Vec<String> = callable
-            .split('.')
-            .filter(|part| !part.is_empty())
-            .map(ToString::to_string)
-            .collect();
-        let parts_repr = format!("{parts:?}");
-        let contents = format!(
-            "#!{python_shebang}\nimport importlib\nimport sys\n\ndef _load():\n    module = importlib.import_module({module:?})\n    target = module\n    for attr in {parts_repr}:\n        target = getattr(target, attr)\n    return target\n\nif __name__ == '__main__':\n    sys.exit(_load()())\n"
-        );
-        fs::write(&script_path, contents)?;
-        set_exec_permissions(&script_path);
-        Ok(())
-    };
+    let parts: Vec<String> = callable
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .collect();
+    let parts_repr = format!("{parts:?}");
+    let contents = format!(
+        "#!{python_shebang}\nimport importlib\nimport sys\n\ndef _load():\n    module = importlib.import_module({module:?})\n    target = module\n    for attr in {parts_repr}:\n        target = getattr(target, attr)\n    return target\n\nif __name__ == '__main__':\n    sys.exit(_load()())\n"
+    );
+    let script_path = bin_dir.join(name);
+    fs::write(&script_path, contents)?;
+    set_exec_permissions(&script_path);
+    Ok(())
+}
+
+fn materialize_wheel_scripts(
+    artifact_path: &Path,
+    bin_dir: &Path,
+    python: Option<&Path>,
+) -> Result<()> {
+    fs::create_dir_all(bin_dir)?;
     if artifact_path.extension().is_some_and(|ext| ext == "dist") && artifact_path.is_dir() {
         let entry_points = fs::read_dir(artifact_path)?
             .filter_map(|entry| entry.ok())
@@ -892,7 +972,13 @@ fn materialize_wheel_scripts(
                             .unwrap_or(raw_target)
                             .trim();
                         if let Some((module, callable)) = target_value.split_once(':') {
-                            let _ = write_entrypoint(entry_name, module.trim(), callable.trim());
+                            let _ = write_entrypoint_script(
+                                bin_dir,
+                                entry_name,
+                                module.trim(),
+                                callable.trim(),
+                                python,
+                            );
                         }
                     }
                 }
@@ -963,7 +1049,13 @@ fn materialize_wheel_scripts(
                             .unwrap_or(raw_target)
                             .trim();
                         if let Some((module, callable)) = target_value.split_once(':') {
-                            let _ = write_entrypoint(entry_name, module.trim(), callable.trim());
+                            let _ = write_entrypoint_script(
+                                bin_dir,
+                                entry_name,
+                                module.trim(),
+                                callable.trim(),
+                                python,
+                            );
                         }
                     }
                 }
@@ -1699,6 +1791,7 @@ pub(crate) fn outcome_from_output(
 
 pub(crate) struct PythonContext {
     pub(crate) project_root: PathBuf,
+    pub(crate) project_name: String,
     pub(crate) python: String,
     pub(crate) pythonpath: String,
     pub(crate) allowed_paths: Vec<PathBuf>,
@@ -1838,6 +1931,7 @@ impl PythonContext {
         Ok((
             Self {
                 project_root,
+                project_name: snapshot.name.clone(),
                 python,
                 pythonpath: paths.pythonpath,
                 allowed_paths: paths.allowed_paths,
@@ -1853,6 +1947,7 @@ impl PythonContext {
         let mut envs = Vec::new();
         envs.push(("PYTHONPATH".into(), self.pythonpath.clone()));
         envs.push(("PYTHONUNBUFFERED".into(), "1".into()));
+        envs.push(("PYTHONDONTWRITEBYTECODE".into(), "1".into()));
         let allowed =
             env::join_paths(&self.allowed_paths).context("allowed path contains invalid UTF-8")?;
         let allowed = allowed
@@ -1961,36 +2056,66 @@ fn ensure_version_stub(root: &Path, target: &Path, style: VersionFileStyle) -> R
     let version_path = root.join(target);
     let mut rewrite = false;
     if version_path.exists() {
-        if let VersionFileStyle::SetuptoolsScm = style {
-            if let Ok(contents) = fs::read_to_string(&version_path) {
-                let has_version = contents.contains("version =");
-                let has_alias = contents.contains("__version__");
-                let has_tuple = contents.contains("version_tuple = tuple(_v.release)");
-                let has_packaging =
-                    contents.contains("from packaging.version import Version as _Version");
-                let fallback_version = contents.lines().find_map(|line| {
-                    let trimmed = line.trim_start();
-                    if !trimmed.starts_with("version =") {
-                        return None;
+        match style {
+            VersionFileStyle::HatchVcsHook => {
+                if let Ok(contents) = fs::read_to_string(&version_path) {
+                    let has_version = contents.contains("version =");
+                    let has_alias = contents.contains("__version__");
+                    let fallback_version = contents.lines().find_map(|line| {
+                        let trimmed = line.trim_start();
+                        if !trimmed.starts_with("version =") {
+                            return None;
+                        }
+                        let value = trimmed
+                            .split_once('=')
+                            .map(|(_, rhs)| rhs.trim().trim_matches('"'))
+                            .unwrap_or_default();
+                        Some(
+                            value == "unknown"
+                                || value.starts_with("0.0.0+")
+                                || value.starts_with("0+"),
+                        )
+                    });
+                    let needs_upgrade = fallback_version.unwrap_or(false);
+                    if !(has_version && has_alias) || needs_upgrade {
+                        rewrite = true;
                     }
-                    let value = trimmed
-                        .split_once('=')
-                        .map(|(_, rhs)| rhs.trim().trim_matches('"'))
-                        .unwrap_or_default();
-                    Some(
-                        value == "unknown"
-                            || value.starts_with("0.0.0+")
-                            || value.starts_with("0+"),
-                    )
-                });
-                let needs_upgrade = fallback_version.unwrap_or(false);
-                if !(has_version && has_alias && has_tuple && has_packaging) || needs_upgrade {
+                } else {
                     rewrite = true;
                 }
-            } else {
-                rewrite = true;
             }
-        } else {
+            VersionFileStyle::SetuptoolsScm => {
+                if let Ok(contents) = fs::read_to_string(&version_path) {
+                    let has_version = contents.contains("version =");
+                    let has_alias = contents.contains("__version__");
+                    let has_tuple = contents.contains("version_tuple = tuple(_v.release)");
+                    let has_packaging =
+                        contents.contains("from packaging.version import Version as _Version");
+                    let fallback_version = contents.lines().find_map(|line| {
+                        let trimmed = line.trim_start();
+                        if !trimmed.starts_with("version =") {
+                            return None;
+                        }
+                        let value = trimmed
+                            .split_once('=')
+                            .map(|(_, rhs)| rhs.trim().trim_matches('"'))
+                            .unwrap_or_default();
+                        Some(
+                            value == "unknown"
+                                || value.starts_with("0.0.0+")
+                                || value.starts_with("0+"),
+                        )
+                    });
+                    let needs_upgrade = fallback_version.unwrap_or(false);
+                    if !(has_version && has_alias && has_tuple && has_packaging) || needs_upgrade {
+                        rewrite = true;
+                    }
+                } else {
+                    rewrite = true;
+                }
+            }
+        }
+        if !rewrite {
             return Ok(());
         }
     }
@@ -2013,7 +2138,11 @@ fn ensure_version_stub(root: &Path, target: &Path, style: VersionFileStyle) -> R
     };
 
     let contents = match style {
-        VersionFileStyle::HatchVcsHook => format!("__version__ = \"{derived}\"\n"),
+        VersionFileStyle::HatchVcsHook => format!(
+            "version = \"{derived}\"\n\
+__version__ = version\n\
+__all__ = [\"__version__\", \"version\"]\n"
+        ),
         VersionFileStyle::SetuptoolsScm => format!(
             "from packaging.version import Version as _Version\n\
 version = \"{derived}\"\n\
@@ -2563,6 +2692,28 @@ mod tests {
     use zip::write::FileOptions;
 
     #[test]
+    fn base_env_disables_pyc_writes() -> Result<()> {
+        let temp = tempdir()?;
+        let ctx = PythonContext {
+            project_root: temp.path().to_path_buf(),
+            project_name: "demo".to_string(),
+            python: "python".into(),
+            pythonpath: temp.path().display().to_string(),
+            allowed_paths: vec![temp.path().to_path_buf()],
+            site_bin: None,
+            pep582_bin: Vec::new(),
+            px_options: PxOptions::default(),
+        };
+        let envs = ctx.base_env(&json!({}))?;
+        let flag = envs
+            .iter()
+            .find(|(key, _)| key == "PYTHONDONTWRITEBYTECODE")
+            .map(|(_, value)| value.as_str());
+        assert_eq!(flag, Some("1"));
+        Ok(())
+    }
+
+    #[test]
     fn materialize_scripts_from_dist_directory() -> Result<()> {
         let temp = tempdir()?;
         let artifact = temp.path().join("demo-0.1.0.dist");
@@ -2919,6 +3070,94 @@ build-backend = "setuptools.build_meta"
     }
 
     #[test]
+    fn editable_stub_prefers_version_file_value() -> Result<()> {
+        let temp = tempdir()?;
+        let project_root = temp.path();
+        let pyproject = project_root.join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            r#"[project]
+name = "demo"
+dynamic = ["version"]
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/demo/version.py"
+"#,
+        )?;
+        let pkg_dir = project_root.join("src/demo");
+        fs::create_dir_all(&pkg_dir)?;
+        fs::write(pkg_dir.join("__init__.py"), "")?;
+        fs::write(
+            pkg_dir.join("version.py"),
+            "version = \"9.9.9\"\n__version__ = version\n",
+        )?;
+
+        let snapshot = ProjectSnapshot::read_from(project_root)?;
+        let site_dir = project_root.join(".px").join("env").join("site");
+        let effects = SystemEffects::new();
+        effects.fs().create_dir_all(&site_dir)?;
+        write_project_metadata_stub(&snapshot, &site_dir, effects.fs())?;
+
+        let metadata = fs::read_to_string(site_dir.join("demo-9.9.9.dist-info").join("METADATA"))?;
+        assert!(
+            metadata.contains("Version: 9.9.9"),
+            "metadata should use version from version-file stub"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn editable_stub_writes_console_scripts() -> Result<()> {
+        let temp = tempdir()?;
+        let project_root = temp.path();
+        let pyproject = project_root.join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            r#"[project]
+name = "demo"
+dynamic = ["version"]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+tox = "demo.run:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+"#,
+        )?;
+        let pkg_dir = project_root.join("src/demo");
+        fs::create_dir_all(&pkg_dir)?;
+        fs::write(pkg_dir.join("__init__.py"), "__version__ = '1.0.0'\n")?;
+        fs::write(pkg_dir.join("run.py"), "def main():\n    return 0\n")?;
+
+        let snapshot = ProjectSnapshot::read_from(project_root)?;
+        let site_dir = project_root.join(".px").join("env").join("site");
+        let effects = SystemEffects::new();
+        effects.fs().create_dir_all(&site_dir)?;
+        write_project_metadata_stub(&snapshot, &site_dir, effects.fs())?;
+
+        let script = site_dir.join("bin").join("tox");
+        assert!(
+            script.exists(),
+            "console script should be generated for project entry points"
+        );
+        let contents = fs::read_to_string(script)?;
+        assert!(
+            contents.contains("demo.run"),
+            "entrypoint should import target module"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn ensure_version_file_populates_missing_file_from_git() -> Result<()> {
         if Command::new("git").arg("--version").status().is_err() {
             return Ok(());
@@ -2994,8 +3233,12 @@ version-file = "demo/_version.py"
         ensure_version_file(&manifest)?;
         let contents = fs::read_to_string(temp.path().join("demo/_version.py"))?;
         assert!(
-            contents.contains("__version__ = \"0.0.0+g"),
+            contents.contains("version = \"0.0.0+g"),
             "version file should be derived from git rev"
+        );
+        assert!(
+            contents.contains("__version__ = version"),
+            "git stub should alias __version__ to version"
         );
         Ok(())
     }
@@ -3022,8 +3265,49 @@ version-file = "demo/_version.py"
         ensure_version_file(&manifest)?;
         let contents = fs::read_to_string(temp.path().join("demo/_version.py"))?;
         assert!(
-            contents.contains("__version__ = \"0.0.0+unknown\""),
+            contents.contains("version = \"0.0.0+unknown\""),
             "fallback version should be written when git metadata is missing"
+        );
+        assert!(
+            contents.contains("__version__ = version"),
+            "fallback stub should alias __version__ to version"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_version_file_upgrades_hatch_stub_missing_alias() -> Result<()> {
+        let temp = tempdir()?;
+        let manifest = temp.path().join("pyproject.toml");
+        fs::write(
+            &manifest,
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "demo/_version.py"
+"#,
+        )?;
+        let demo_dir = temp.path().join("demo");
+        fs::create_dir_all(&demo_dir)?;
+        fs::write(demo_dir.join("__init__.py"), "")?;
+        fs::write(demo_dir.join("_version.py"), "__version__ = \"1.2.3\"\n")?;
+
+        ensure_version_file(&manifest)?;
+        let contents = fs::read_to_string(demo_dir.join("_version.py"))?;
+        assert!(
+            contents.contains("version = \"0.0.0+unknown\""),
+            "hatch stub should rewrite missing alias with derived version"
+        );
+        assert!(
+            contents.contains("__version__ = version"),
+            "hatch stub should alias __version__ to version"
+        );
+        assert!(
+            contents.contains("__all__ = [\"__version__\", \"version\"]"),
+            "hatch stub should export both aliases"
         );
         Ok(())
     }

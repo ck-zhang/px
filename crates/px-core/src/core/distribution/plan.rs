@@ -205,6 +205,7 @@ mod tests {
         let root = tempdir()?;
         let ctx = PythonContext {
             project_root: root.path().to_path_buf(),
+            project_name: "demo".to_string(),
             python: "/usr/bin/python".to_string(),
             pythonpath: String::new(),
             allowed_paths: Vec::new(),
