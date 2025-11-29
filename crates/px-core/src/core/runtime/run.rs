@@ -455,7 +455,6 @@ fn run_tests_for_context(
     sync_report: Option<crate::EnvironmentSyncReport>,
 ) -> Result<ExecutionOutcome> {
     let command_args = json!({ "test_args": request.args });
-    ensure_stdlib_tests_available(py_ctx)?;
     let (mut envs, _preflight) = build_env_with_preflight(ctx, py_ctx, &command_args)?;
     let stream_runner = !ctx.global.json;
 
@@ -503,6 +502,9 @@ fn run_builtin_tests(
     mut envs: Vec<(String, String)>,
     stream_runner: bool,
 ) -> Result<ExecutionOutcome> {
+    if let Some(path) = ensure_stdlib_tests_available(ctx)? {
+        append_pythonpath(&mut envs, &path);
+    }
     envs.push(("PX_TEST_RUNNER".into(), "builtin".into()));
     let script = "from sample_px_app import cli\nassert cli.greet() == 'Hello, World!'\nprint('px fallback test passed')";
     let args = vec!["-c".to_string(), script.to_string()];
@@ -523,7 +525,7 @@ fn test_success(
     )
 }
 
-fn ensure_stdlib_tests_available(py_ctx: &PythonContext) -> Result<()> {
+fn ensure_stdlib_tests_available(py_ctx: &PythonContext) -> Result<Option<PathBuf>> {
     const DISCOVER_SCRIPT: &str =
         "import json, sys, sysconfig; print(json.dumps({'version': sys.version.split()[0], 'stdlib': sysconfig.get_path('stdlib')}))";
     let output = Command::new(&py_ctx.python)
@@ -545,7 +547,7 @@ fn ensure_stdlib_tests_available(py_ctx: &PythonContext) -> Result<()> {
         .unwrap_or_default()
         .to_string();
     let Some((major, minor)) = parse_python_version(&runtime_version) else {
-        return Ok(());
+        return Ok(None);
     };
     let stdlib = payload
         .get("stdlib")
@@ -553,15 +555,27 @@ fn ensure_stdlib_tests_available(py_ctx: &PythonContext) -> Result<()> {
         .context("python stdlib path unavailable")?;
     let tests_dir = PathBuf::from(stdlib).join("test");
     if tests_dir.exists() {
-        return Ok(());
+        return Ok(None);
+    }
+
+    // Avoid mutating the system stdlib; stage tests under the project .px directory.
+    let staged_root = py_ctx
+        .project_root
+        .join(".px")
+        .join("stdlib-tests")
+        .join(format!("{major}.{minor}"));
+    let staged_tests = staged_root.join("test");
+    if staged_tests.exists() {
+        return Ok(Some(staged_root));
     }
 
     if let Some((host_python, source_tests)) = host_stdlib_tests(&major, &minor, &runtime_version) {
-        copy_stdlib_tests(&source_tests, &tests_dir, &host_python)?;
-        return Ok(());
+        if copy_stdlib_tests(&source_tests, &staged_tests, &host_python).is_ok() {
+            return Ok(Some(staged_root));
+        }
     }
-    if download_stdlib_tests(&runtime_version, &tests_dir)? {
-        return Ok(());
+    if download_stdlib_tests(&runtime_version, &staged_tests)? {
+        return Ok(Some(staged_root));
     }
 
     Err(InstallUserError::new(

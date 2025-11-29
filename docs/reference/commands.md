@@ -2,6 +2,8 @@
 
 Commands operate over the project or workspace state machines. Use this doc alongside `docs/reference/state-machines.md` for allowed states and invariants.
 
+For a quick inventory of CLI flags and environment toggles, see [Env Vars and Flags](./env-and-flags.md).
+
 ## Command surface
 
 ### Core project verbs

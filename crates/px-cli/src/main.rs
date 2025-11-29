@@ -28,6 +28,7 @@ fn main() -> Result<()> {
         // Suppress spinners/progress when JSON output is requested.
         env::set_var("PX_PROGRESS", "0");
     }
+    apply_env_overrides(&cli);
     let global = GlobalOptions {
         quiet: cli.quiet,
         verbose: cli.verbose,
@@ -76,4 +77,22 @@ fn init_tracing(trace: bool, verbose: u8) {
         .finish();
 
     let _ = tracing::subscriber::set_global_default(subscriber);
+}
+
+fn apply_env_overrides(cli: &PxCli) {
+    if cli.offline {
+        env::set_var("PX_ONLINE", "0");
+    } else if cli.online {
+        env::set_var("PX_ONLINE", "1");
+    }
+    if cli.no_resolver {
+        env::set_var("PX_RESOLVER", "0");
+    } else if cli.resolver {
+        env::set_var("PX_RESOLVER", "1");
+    }
+    if cli.force_sdist {
+        env::set_var("PX_FORCE_SDIST", "1");
+    } else if cli.prefer_wheels {
+        env::set_var("PX_FORCE_SDIST", "0");
+    }
 }

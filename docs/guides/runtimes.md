@@ -23,3 +23,4 @@ If no available runtime satisfies constraints, commands fail with a clear messag
 
 * Tool installs can pin a runtime via `px tool install <name> --python 3.11`; the chosen version is recorded in the tool lock.
 * If a runtime goes missing, px errors clearly and suggests reinstalling the required version rather than silently switching versions.
+* Env vars that steer runtime discovery and downloads are listed in [Env Vars and Flags](../reference/env-and-flags.md).
