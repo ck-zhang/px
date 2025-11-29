@@ -204,11 +204,34 @@ pub fn collect_requirement_packages(
     kind: &str,
     scope: &str,
 ) -> Result<(Value, Vec<OnboardPackagePlan>)> {
-    let specs = read_requirements_file(path)?;
+    let parsed = read_requirements_file(path)?;
     let rel = relative_path(root, path);
     let mut rows = Vec::new();
-    for spec in specs {
+    for spec in parsed.specs {
         rows.push(OnboardPackagePlan::new(spec, scope, rel.clone()));
+    }
+    if !parsed.extras.is_empty() {
+        let pyproject = root.join("pyproject.toml");
+        if pyproject.exists() {
+            if let Ok(contents) = fs::read_to_string(&pyproject) {
+                if let Ok(doc) = contents.parse::<DocumentMut>() {
+                    let mut seen = HashSet::new();
+                    for extra in parsed.extras {
+                        if !seen.insert(extra.clone()) {
+                            continue;
+                        }
+                        let deps = read_optional_dependency_group(&doc, &extra);
+                        for dep in deps {
+                            rows.push(OnboardPackagePlan::new(
+                                dep,
+                                scope,
+                                format!("{rel} [{extra}]"),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok((
         json!({ "kind": kind, "path": rel, "count": rows.len() }),
@@ -242,9 +265,29 @@ pub fn collect_setup_cfg_packages(
 /// # Errors
 ///
 /// Returns an error when the file cannot be read from disk.
-pub fn read_requirements_file(path: &Path) -> Result<Vec<String>> {
-    let contents = fs::read_to_string(path)?;
+#[derive(Debug, Default)]
+pub struct RequirementFile {
+    pub specs: Vec<String>,
+    pub extras: Vec<String>,
+}
+
+pub fn read_requirements_file(path: &Path) -> Result<RequirementFile> {
+    let mut visited = HashSet::new();
+    read_requirements_file_inner(path, &mut visited)
+}
+
+fn read_requirements_file_inner(
+    path: &Path,
+    visited: &mut HashSet<PathBuf>,
+) -> Result<RequirementFile> {
+    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(canonical.clone()) {
+        return Ok(RequirementFile::default());
+    }
+    let contents = fs::read_to_string(&canonical)?;
+    let base_dir = canonical.parent().unwrap_or_else(|| Path::new("."));
     let mut specs = Vec::new();
+    let mut extras = Vec::new();
     for line in contents.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -255,18 +298,47 @@ pub fn read_requirements_file(path: &Path) -> Result<Vec<String>> {
         } else {
             trimmed
         };
+        if let Some(rest) = spec.strip_prefix("-r") {
+            let target = rest.trim_start_matches([' ', '=']).trim();
+            if !target.is_empty() {
+                let include = if Path::new(target).is_absolute() {
+                    PathBuf::from(target)
+                } else {
+                    base_dir.join(target)
+                };
+                let nested = read_requirements_file_inner(&include, visited)?;
+                specs.extend(nested.specs);
+                extras.extend(nested.extras);
+            }
+            continue;
+        } else if let Some(rest) = spec.strip_prefix("--requirement") {
+            let target = rest.trim_start_matches([' ', '=']).trim();
+            if !target.is_empty() {
+                let include = if Path::new(target).is_absolute() {
+                    PathBuf::from(target)
+                } else {
+                    base_dir.join(target)
+                };
+                let nested = read_requirements_file_inner(&include, visited)?;
+                specs.extend(nested.specs);
+                extras.extend(nested.extras);
+            }
+            continue;
+        }
         if let Some(stripped) = spec.strip_prefix("-e ") {
             spec = stripped.trim();
         } else if let Some(stripped) = spec.strip_prefix("--editable ") {
             spec = stripped.trim();
         }
-        if let Some(extras) = spec.strip_prefix(".[") {
-            if let Some(end) = extras.find(']') {
-                let names = extras[..end].split(',');
+        if let Some(extras_block) = spec.strip_prefix(".[") {
+            if let Some(end) = extras_block.find(']') {
+                let names = extras_block[..end].split(',');
                 for extra in names {
                     let trimmed = extra.trim().to_lowercase();
                     if trimmed == "socks" {
                         specs.push("pysocks".to_string());
+                    } else if !trimmed.is_empty() {
+                        extras.push(trimmed);
                     }
                 }
             }
@@ -275,11 +347,14 @@ pub fn read_requirements_file(path: &Path) -> Result<Vec<String>> {
         if spec == "." || spec.starts_with("./") || spec.starts_with(".[") {
             continue;
         }
+        if spec.starts_with('-') {
+            continue;
+        }
         if !spec.is_empty() {
             specs.push(spec.to_string());
         }
     }
-    Ok(specs)
+    Ok(RequirementFile { specs, extras })
 }
 
 /// Read dependency entries from `setup.cfg`.
@@ -1226,6 +1301,69 @@ install_requires =
             "options.install_requires entries should be collected"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn requirements_file_resolves_nested_includes() -> Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path();
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested)?;
+        let inner = nested.join("constraints.txt");
+        fs::write(&inner, "anyio==4.0.0\n")?;
+
+        let tests_req = root.join("requirements-tests.txt");
+        fs::write(
+            &tests_req,
+            format!(
+                "-r {}\npytest==8.3.3\n",
+                inner.strip_prefix(root).unwrap().display()
+            ),
+        )?;
+
+        let base = root.join("requirements.txt");
+        fs::write(&base, "-r requirements-tests.txt\nuvicorn==0.30.0\n")?;
+
+        let parsed = read_requirements_file(&base)?;
+        let specs = parsed.specs;
+        assert!(
+            specs.contains(&"pytest==8.3.3".to_string())
+                && specs.contains(&"uvicorn==0.30.0".to_string())
+                && specs.contains(&"anyio==4.0.0".to_string()),
+            "included requirement files should be expanded"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn requirements_file_handles_recursive_includes() -> Result<()> {
+        let dir = tempdir()?;
+        let base = dir.path().join("requirements.txt");
+        fs::write(&base, "-r requirements.txt\nhttpx==0.27.0\n")?;
+
+        let parsed = read_requirements_file(&base)?;
+        let specs = parsed.specs;
+        assert_eq!(
+            specs,
+            vec!["httpx==0.27.0".to_string()],
+            "recursive includes should not loop forever"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn requirements_file_collects_local_extras() -> Result<()> {
+        let dir = tempdir()?;
+        let base = dir.path().join("requirements.txt");
+        fs::write(&base, "-e .[test,EXTRA]\n")?;
+
+        let parsed = read_requirements_file(&base)?;
+        assert!(
+            parsed.extras.contains(&"test".to_string())
+                && parsed.extras.contains(&"extra".to_string())
+        );
+        assert!(parsed.specs.is_empty());
         Ok(())
     }
 

@@ -1,7 +1,8 @@
-use std::fmt::Write as _;
 use std::{
-    collections::{HashMap, HashSet},
-    env, fmt, fs,
+    collections::{BTreeMap, HashMap, HashSet},
+    env, fmt,
+    fmt::Write as _,
+    fs,
     fs::File,
     io::Read,
     path::{Path, PathBuf},
@@ -418,6 +419,7 @@ pub(crate) fn refresh_project_site(
         Some(&env_python),
         ctx.fs(),
     )?;
+    write_project_metadata_stub(snapshot, &site_dir, ctx.fs())?;
     let env_python = write_python_environment_markers(&site_dir, &runtime, ctx.fs())?;
     let canonical_site = ctx.fs().canonicalize(&site_dir).unwrap_or(site_dir.clone());
     let runtime_state = StoredRuntime {
@@ -489,6 +491,341 @@ pub fn materialize_project_site(
     fs.write(&pth_copy_path, contents.as_bytes())?;
     write_sitecustomize(site_dir, Some(site_packages), fs)?;
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct EditableProjectMetadata {
+    name: String,
+    normalized_name: String,
+    version: String,
+    requires_python: Option<String>,
+    requires_dist: Vec<String>,
+    optional_requires: BTreeMap<String, Vec<String>>,
+    summary: Option<String>,
+    entry_points: BTreeMap<String, BTreeMap<String, String>>,
+    top_level: Vec<String>,
+}
+
+fn write_project_metadata_stub(
+    snapshot: &ManifestSnapshot,
+    site_dir: &Path,
+    fs_ops: &dyn effects::FileSystem,
+) -> Result<()> {
+    let metadata = match load_editable_project_metadata(&snapshot.manifest_path, fs_ops) {
+        Ok(meta) => meta,
+        Err(err) => {
+            warn!(
+                error = %err,
+                path = %snapshot.manifest_path.display(),
+                "skipping editable metadata stub"
+            );
+            return Ok(());
+        }
+    };
+
+    cleanup_editable_metadata(site_dir, &metadata.normalized_name, fs_ops)?;
+    let dist_dir = site_dir.join(format!(
+        "{}-{}.dist-info",
+        metadata.normalized_name, metadata.version
+    ));
+    fs_ops.create_dir_all(&dist_dir)?;
+
+    let metadata_body = render_editable_metadata(&metadata);
+    fs_ops.write(&dist_dir.join("METADATA"), metadata_body.as_bytes())?;
+    if let Some(entry_points) = render_editable_entry_points(&metadata) {
+        fs_ops.write(&dist_dir.join("entry_points.txt"), entry_points.as_bytes())?;
+    }
+
+    let project_root = fs_ops
+        .canonicalize(&snapshot.root)
+        .unwrap_or_else(|_| snapshot.root.clone());
+    let direct_url = serde_json::to_string_pretty(&json!({
+        "dir_info": { "editable": true },
+        "url": project_root.display().to_string(),
+    }))?;
+    fs_ops.write(&dist_dir.join("direct_url.json"), direct_url.as_bytes())?;
+    fs_ops.write(&dist_dir.join("INSTALLER"), b"px\n")?;
+    fs_ops.write(&dist_dir.join("PX-EDITABLE"), b"px\n")?;
+
+    if !metadata.top_level.is_empty() {
+        let mut body = metadata.top_level.join("\n");
+        body.push('\n');
+        fs_ops.write(&dist_dir.join("top_level.txt"), body.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn cleanup_editable_metadata(
+    site_dir: &Path,
+    normalized_name: &str,
+    fs_ops: &dyn effects::FileSystem,
+) -> Result<()> {
+    if let Ok(entries) = fs_ops.read_dir(site_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !name.starts_with(&format!("{normalized_name}-")) || !name.ends_with(".dist-info") {
+                continue;
+            }
+            let marker = path.join("PX-EDITABLE");
+            if marker.exists() {
+                let _ = fs_ops.remove_dir_all(&path);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_editable_project_metadata(
+    manifest_path: &Path,
+    fs_ops: &dyn effects::FileSystem,
+) -> Result<EditableProjectMetadata> {
+    let contents = fs_ops.read_to_string(manifest_path)?;
+    let doc: DocumentMut = contents.parse()?;
+    let project = project_table(&doc)?;
+    let name = project
+        .get("name")
+        .and_then(Item::as_str)
+        .ok_or_else(|| anyhow!("pyproject missing [project].name"))?
+        .to_string();
+    let normalized_name = normalize_project_name(&name);
+    let root = manifest_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let version = project
+        .get("version")
+        .and_then(Item::as_str)
+        .map(std::string::ToString::to_string)
+        .or_else(|| infer_version_from_sources(&root, &normalized_name, fs_ops))
+        .unwrap_or_else(|| "0.0.0+unknown".to_string());
+    let requires_python = project
+        .get("requires-python")
+        .and_then(Item::as_str)
+        .map(std::string::ToString::to_string);
+    let requires_dist = project
+        .get("dependencies")
+        .and_then(Item::as_array)
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|value| value.as_str().map(std::string::ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let optional_requires = collect_optional_dependencies(project);
+    let summary = project
+        .get("description")
+        .and_then(Item::as_str)
+        .map(std::string::ToString::to_string);
+    let entry_points = collect_entry_points(project);
+    let top_level = discover_top_level_modules(&root, &normalized_name, fs_ops);
+
+    Ok(EditableProjectMetadata {
+        name,
+        normalized_name,
+        version,
+        requires_python,
+        requires_dist,
+        optional_requires,
+        summary,
+        entry_points,
+        top_level,
+    })
+}
+
+fn infer_version_from_sources(
+    project_root: &Path,
+    normalized_name: &str,
+    fs_ops: &dyn effects::FileSystem,
+) -> Option<String> {
+    let module_name = normalized_name.replace(['-', '.'], "_").to_lowercase();
+    let candidates = [
+        project_root
+            .join("src")
+            .join(&module_name)
+            .join("__init__.py"),
+        project_root.join(&module_name).join("__init__.py"),
+    ];
+    for candidate in candidates {
+        if fs_ops.metadata(&candidate).is_err() {
+            continue;
+        }
+        if let Ok(contents) = fs_ops.read_to_string(&candidate) {
+            for line in contents.lines() {
+                let trimmed = line.trim_start();
+                if !trimmed.starts_with("__version__") {
+                    continue;
+                }
+                if let Some((_, raw_value)) = trimmed.split_once('=') {
+                    let value = raw_value.trim().trim_matches(|ch| ch == '"' || ch == '\'');
+                    if !value.is_empty() {
+                        return Some(value.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn discover_top_level_modules(
+    project_root: &Path,
+    normalized_name: &str,
+    fs_ops: &dyn effects::FileSystem,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut push_name = |value: &str| {
+        if !value.is_empty() && !value.starts_with('.') && value != "__pycache__" {
+            names.push(value.to_string());
+        }
+    };
+    for base in [project_root.join("src"), project_root.to_path_buf()] {
+        if let Ok(entries) = fs_ops.read_dir(&base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if fs_ops.metadata(&path.join("__init__.py")).is_ok() {
+                        if let Some(value) = path.file_name().and_then(|name| name.to_str()) {
+                            push_name(value);
+                        }
+                    }
+                } else if path.extension().is_some_and(|ext| ext == "py") {
+                    if let Some(stem) = path.file_stem().and_then(|name| name.to_str()) {
+                        push_name(stem);
+                    }
+                }
+            }
+        }
+    }
+    if names.is_empty() {
+        names.push(normalized_name.replace(['-', '.'], "_").to_lowercase());
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn collect_optional_dependencies(project: &Table) -> BTreeMap<String, Vec<String>> {
+    let mut extras = BTreeMap::new();
+    if let Some(optional) = project
+        .get("optional-dependencies")
+        .and_then(toml_edit::Item::as_table)
+    {
+        for (name, array) in optional.iter() {
+            if let Some(values) = array.as_array() {
+                let mut deps = Vec::new();
+                for value in values {
+                    if let Some(spec) = value.as_str() {
+                        deps.push(spec.to_string());
+                    }
+                }
+                if !deps.is_empty() {
+                    extras.insert(name.to_string(), deps);
+                }
+            }
+        }
+    }
+    extras
+}
+
+fn collect_entry_points(project: &Table) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut groups = BTreeMap::new();
+    collect_entry_point_group(project, "scripts", "console_scripts", &mut groups);
+    collect_entry_point_group(project, "gui-scripts", "gui_scripts", &mut groups);
+    if let Some(ep_table) = project
+        .get("entry-points")
+        .and_then(toml_edit::Item::as_table)
+    {
+        for (group, table) in ep_table.iter() {
+            if let Some(entries) = table.as_table() {
+                let mut mapped = BTreeMap::new();
+                for (name, value) in entries.iter() {
+                    if let Some(target) = value.as_str() {
+                        mapped.insert(name.to_string(), target.to_string());
+                    }
+                }
+                if !mapped.is_empty() {
+                    groups.insert(group.to_string(), mapped);
+                }
+            }
+        }
+    }
+    groups
+}
+
+fn collect_entry_point_group(
+    project: &Table,
+    project_key: &str,
+    entry_point_group: &str,
+    groups: &mut BTreeMap<String, BTreeMap<String, String>>,
+) {
+    if let Some(scripts) = project.get(project_key).and_then(toml_edit::Item::as_table) {
+        let mut mapped = BTreeMap::new();
+        for (name, value) in scripts.iter() {
+            if let Some(target) = value.as_str() {
+                mapped.insert(name.to_string(), target.to_string());
+            }
+        }
+        if !mapped.is_empty() {
+            groups.insert(entry_point_group.to_string(), mapped);
+        }
+    }
+}
+
+fn render_editable_entry_points(metadata: &EditableProjectMetadata) -> Option<String> {
+    if metadata.entry_points.is_empty() {
+        return None;
+    }
+    let mut sections = Vec::new();
+    for (group, entries) in &metadata.entry_points {
+        sections.push(format!("[{group}]"));
+        for (name, target) in entries {
+            sections.push(format!("{name} = {target}"));
+        }
+        sections.push(String::new());
+    }
+    Some(sections.join("\n"))
+}
+
+fn render_editable_metadata(metadata: &EditableProjectMetadata) -> String {
+    let mut lines = Vec::new();
+    lines.push("Metadata-Version: 2.1".to_string());
+    lines.push(format!("Name: {}", metadata.name));
+    lines.push(format!("Version: {}", metadata.version));
+    if let Some(summary) = &metadata.summary {
+        lines.push(format!("Summary: {summary}"));
+    }
+    if let Some(rp) = &metadata.requires_python {
+        lines.push(format!("Requires-Python: {rp}"));
+    }
+    for extra in metadata.optional_requires.keys() {
+        lines.push(format!("Provides-Extra: {extra}"));
+    }
+    for req in &metadata.requires_dist {
+        lines.push(format!("Requires-Dist: {req}"));
+    }
+    for (extra, reqs) in &metadata.optional_requires {
+        for req in reqs {
+            lines.push(format!(r#"Requires-Dist: {req} ; extra == "{extra}""#));
+        }
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+fn normalize_project_name(name: &str) -> String {
+    let mut result = String::new();
+    for ch in name.chars() {
+        if matches!(ch, '-' | '.' | ' ') {
+            result.push('_');
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 fn materialize_wheel_scripts(
@@ -2342,6 +2679,100 @@ mod tests {
                 .iter()
                 .any(|entry| fs::canonicalize(entry).ok() == Some(dep_canon.clone())),
             "px.pth entries should persist even when PX_ALLOWED_PATHS is unset; sys.path={paths:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn editable_stub_exposes_project_version_metadata() -> Result<()> {
+        let temp = tempdir()?;
+        let project_root = temp.path();
+        let pyproject = project_root.join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            r#"[project]
+name = "demo-proj"
+version = "1.2.3"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+"#,
+        )?;
+        let pkg_dir = project_root.join("src/demo_proj");
+        fs::create_dir_all(&pkg_dir)?;
+        fs::write(pkg_dir.join("__init__.py"), "__version__ = '1.2.3'\n")?;
+
+        let snapshot = ProjectSnapshot::read_from(project_root)?;
+        let site_dir = project_root.join(".px").join("env").join("site");
+        let effects = SystemEffects::new();
+        effects.fs().create_dir_all(&site_dir)?;
+        write_sitecustomize(&site_dir, None, effects.fs())?;
+        write_project_metadata_stub(&snapshot, &site_dir, effects.fs())?;
+
+        let python = match effects.python().detect_interpreter() {
+            Ok(path) => path,
+            Err(_) => return Ok(()),
+        };
+        let allowed = env::join_paths([site_dir.clone(), project_root.join("src")])?;
+        let allowed_str = allowed.to_string_lossy().into_owned();
+        let mut cmd = Command::new(&python);
+        cmd.current_dir(project_root);
+        cmd.env("PYTHONPATH", allowed_str.clone());
+        cmd.env("PX_ALLOWED_PATHS", allowed_str);
+        cmd.arg("-c").arg(
+            "import importlib.metadata, json; print(json.dumps({'version': importlib.metadata.version('demo-proj')}))",
+        );
+        let output = cmd.output()?;
+        if !output.status.success() {
+            return Ok(());
+        }
+        let payload: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(
+            payload.get("version").and_then(Value::as_str),
+            Some("1.2.3")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn editable_stub_uses_source_version_when_manifest_missing() -> Result<()> {
+        let temp = tempdir()?;
+        let project_root = temp.path();
+        let pyproject = project_root.join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            r#"[project]
+name = "dynamic-demo"
+dynamic = ["version"]
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+"#,
+        )?;
+        let pkg_dir = project_root.join("src/dynamic_demo");
+        fs::create_dir_all(&pkg_dir)?;
+        fs::write(pkg_dir.join("__init__.py"), "__version__ = '9.9.9'\n")?;
+
+        let snapshot = ProjectSnapshot::read_from(project_root)?;
+        let site_dir = project_root.join(".px").join("env").join("site");
+        let effects = SystemEffects::new();
+        effects.fs().create_dir_all(&site_dir)?;
+        write_sitecustomize(&site_dir, None, effects.fs())?;
+        write_project_metadata_stub(&snapshot, &site_dir, effects.fs())?;
+
+        let dist = site_dir
+            .join("dynamic_demo-9.9.9.dist-info")
+            .join("METADATA");
+        let metadata = fs::read_to_string(&dist)?;
+        assert!(
+            metadata.contains("Version: 9.9.9"),
+            "metadata should contain source-derived version"
         );
         Ok(())
     }
