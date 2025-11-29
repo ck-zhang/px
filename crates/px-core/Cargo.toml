@@ -28,6 +28,7 @@ tempfile.workspace = true
 base64 = "0.22"
 uv-build-backend.workspace = true
 walkdir = "2"
+url.workspace = true
 
 [features]
 default = []

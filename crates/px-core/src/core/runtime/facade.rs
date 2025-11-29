@@ -32,6 +32,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use toml_edit::{Array, DocumentMut, Item, Table, TomlError, Value as TomlValue};
 use tracing::warn;
+use url::Url;
 
 use super::artifacts::{ensure_exact_pins, parse_exact_pin, resolve_pins};
 use crate::effects::Effects;
@@ -166,6 +167,12 @@ if _FILTER_PATHS:
 else:
     px_allowed = set(_ALLOWED)
     sys.path[:] = [path for path in sys.path if path not in px_allowed]
+
+if "" in sys.path:
+    try:
+        sys.path.remove("")
+    except Exception:
+        pass
 
 try:
     _perf_baseline = os.environ.get("PX_PYTEST_PERF_BASELINE")
@@ -541,53 +548,96 @@ fn write_project_metadata_stub(
     };
 
     cleanup_editable_metadata(site_dir, &metadata.normalized_name, fs_ops)?;
+    if let Some(site_packages) = detect_local_site_packages(fs_ops, site_dir) {
+        let prefix = format!("{}-", metadata.normalized_name);
+        let mut installed = false;
+        if let Ok(entries) = fs_ops.read_dir(&site_packages) {
+            for entry in entries.flatten() {
+                let file_name = entry.file_name();
+                let name = file_name.to_str().unwrap_or_default();
+                if name.starts_with(&prefix) && name.ends_with(".dist-info") {
+                    installed = true;
+                    break;
+                }
+            }
+        }
+        if installed {
+            if let Ok(entries) = fs_ops.read_dir(site_dir) {
+                for entry in entries.flatten() {
+                    let file_name = entry.file_name();
+                    let name = file_name.to_str().unwrap_or_default();
+                    if name.starts_with(&prefix) && name.ends_with(".dist-info") {
+                        let _ = fs_ops.remove_dir_all(&entry.path());
+                    }
+                }
+            }
+            return Ok(());
+        }
+    }
     let dist_dir = site_dir.join(format!(
         "{}-{}.dist-info",
         metadata.normalized_name, metadata.version
     ));
     fs_ops.create_dir_all(&dist_dir)?;
 
+    let mut record_paths = Vec::new();
+
     let metadata_body = render_editable_metadata(&metadata);
     fs_ops.write(&dist_dir.join("METADATA"), metadata_body.as_bytes())?;
+    record_paths.push(dist_dir.join("METADATA"));
     if let Some(entry_points) = render_editable_entry_points(&metadata) {
         fs_ops.write(&dist_dir.join("entry_points.txt"), entry_points.as_bytes())?;
+        record_paths.push(dist_dir.join("entry_points.txt"));
     }
     let bin_dir = site_dir.join("bin");
     let python_path = bin_dir.join("python");
     let python = Some(python_path.as_path());
-    let install_entrypoints = |entries: &BTreeMap<String, String>| {
+    let install_entrypoints = |entries: &BTreeMap<String, String>,
+                               record_paths: &mut Vec<PathBuf>| {
         for (name, target) in entries {
             let _ = fs::remove_file(bin_dir.join(name));
             let target_value = target.split_whitespace().next().unwrap_or(target).trim();
             if let Some((module, callable)) = target_value.split_once(':') {
-                let _ =
-                    write_entrypoint_script(&bin_dir, name, module.trim(), callable.trim(), python);
+                if let Ok(script_path) =
+                    write_entrypoint_script(&bin_dir, name, module.trim(), callable.trim(), python)
+                {
+                    record_paths.push(script_path);
+                }
             }
         }
     };
     if let Some(entries) = metadata.entry_points.get("console_scripts") {
-        install_entrypoints(entries);
+        install_entrypoints(entries, &mut record_paths);
     }
     if let Some(entries) = metadata.entry_points.get("gui_scripts") {
-        install_entrypoints(entries);
+        install_entrypoints(entries, &mut record_paths);
     }
 
     let project_root = fs_ops
         .canonicalize(&snapshot.root)
         .unwrap_or_else(|_| snapshot.root.clone());
+    let direct_url = Url::from_file_path(&project_root)
+        .ok()
+        .map(|url| url.to_string())
+        .unwrap_or_else(|| format!("file://{}", project_root.display()));
     let direct_url = serde_json::to_string_pretty(&json!({
         "dir_info": { "editable": true },
-        "url": project_root.display().to_string(),
+        "url": direct_url,
     }))?;
     fs_ops.write(&dist_dir.join("direct_url.json"), direct_url.as_bytes())?;
+    record_paths.push(dist_dir.join("direct_url.json"));
     fs_ops.write(&dist_dir.join("INSTALLER"), b"px\n")?;
+    record_paths.push(dist_dir.join("INSTALLER"));
     fs_ops.write(&dist_dir.join("PX-EDITABLE"), b"px\n")?;
+    record_paths.push(dist_dir.join("PX-EDITABLE"));
 
     if !metadata.top_level.is_empty() {
         let mut body = metadata.top_level.join("\n");
         body.push('\n');
         fs_ops.write(&dist_dir.join("top_level.txt"), body.as_bytes())?;
+        record_paths.push(dist_dir.join("top_level.txt"));
     }
+    write_record_file(site_dir, &dist_dir, record_paths, fs_ops)?;
     Ok(())
 }
 
@@ -614,6 +664,34 @@ fn cleanup_editable_metadata(
     Ok(())
 }
 
+fn write_record_file(
+    site_dir: &Path,
+    dist_dir: &Path,
+    mut record_paths: Vec<PathBuf>,
+    fs_ops: &dyn effects::FileSystem,
+) -> Result<()> {
+    let record_path = dist_dir.join("RECORD");
+    record_paths.push(record_path.clone());
+    let mut seen = HashSet::new();
+    let mut lines = Vec::new();
+    for path in record_paths {
+        if !path.exists() {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(site_dir)
+            .unwrap_or_else(|_| path.as_path());
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if !seen.insert(rel_str.clone()) {
+            continue;
+        }
+        lines.push(format!("{rel_str},,"));
+    }
+    lines.sort();
+    fs_ops.write(&record_path, lines.join("\n").as_bytes())?;
+    Ok(())
+}
+
 fn load_editable_project_metadata(
     manifest_path: &Path,
     fs_ops: &dyn effects::FileSystem,
@@ -636,6 +714,7 @@ fn load_editable_project_metadata(
         .and_then(Item::as_str)
         .map(std::string::ToString::to_string)
         .or_else(|| infer_version_from_version_file(&root, &doc, fs_ops))
+        .or_else(|| infer_version_from_versioneer(&root, &normalized_name, fs_ops))
         .or_else(|| infer_version_from_sources(&root, &normalized_name, fs_ops))
         .unwrap_or_else(|| "0.0.0+unknown".to_string());
     let requires_python = project
@@ -712,6 +791,57 @@ fn infer_version_from_version_file(
     None
 }
 
+fn infer_version_from_versioneer(
+    project_root: &Path,
+    normalized_name: &str,
+    fs_ops: &dyn effects::FileSystem,
+) -> Option<String> {
+    let module = normalized_name.replace(['-', '.'], "_").to_lowercase();
+    let candidates = [
+        project_root.join("src").join(&module).join("_version.py"),
+        project_root.join(&module).join("_version.py"),
+    ];
+    let Some(path) = candidates.iter().find(|path| fs_ops.metadata(path).is_ok()) else {
+        return None;
+    };
+
+    let python = detect_interpreter().ok()?;
+    let script = format!(
+        r#"import importlib.util, json, pathlib
+path = pathlib.Path({path:?})
+spec = importlib.util.spec_from_file_location("px_versioneer", path)
+if spec is None or spec.loader is None:
+    print(json.dumps({{}}))
+    raise SystemExit(0)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+getter = getattr(mod, "get_versions", None) or getattr(mod, "get_version", None)
+version = None
+if callable(getter):
+    value = getter()
+    if isinstance(value, dict):
+        version = value.get("version") or value.get("closest-tag") or value.get("closest_tag")
+    else:
+        version = value
+print(json.dumps({{"version": version}}))
+"#
+    );
+    let output = Command::new(python)
+        .args(["-c", &script])
+        .current_dir(project_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let payload: Value = serde_json::from_slice(&output.stdout).ok()?;
+    payload
+        .get("version")
+        .and_then(Value::as_str)
+        .map(std::string::ToString::to_string)
+        .filter(|value| !value.is_empty())
+}
+
 fn infer_version_from_sources(
     project_root: &Path,
     normalized_name: &str,
@@ -736,9 +866,15 @@ fn infer_version_from_sources(
                     continue;
                 }
                 if let Some((_, raw_value)) = trimmed.split_once('=') {
-                    let value = raw_value.trim().trim_matches(|ch| ch == '"' || ch == '\'');
-                    if !value.is_empty() {
-                        return Some(value.to_string());
+                    let value = raw_value.trim();
+                    let quoted = (value.starts_with('"') && value.ends_with('"'))
+                        || (value.starts_with('\'') && value.ends_with('\''));
+                    if !quoted {
+                        continue;
+                    }
+                    let cleaned = value.trim_matches(|ch| ch == '"' || ch == '\'');
+                    if !cleaned.is_empty() {
+                        return Some(cleaned.to_string());
                     }
                 }
             }
@@ -910,7 +1046,7 @@ fn write_entrypoint_script(
     module: &str,
     callable: &str,
     python: Option<&Path>,
-) -> Result<()> {
+) -> Result<PathBuf> {
     fs::create_dir_all(bin_dir)?;
     let python_shebang = python
         .map(|path| path.display().to_string())
@@ -927,7 +1063,7 @@ fn write_entrypoint_script(
     let script_path = bin_dir.join(name);
     fs::write(&script_path, contents)?;
     set_exec_permissions(&script_path);
-    Ok(())
+    Ok(script_path)
 }
 
 fn materialize_wheel_scripts(
@@ -1948,6 +2084,7 @@ impl PythonContext {
         envs.push(("PYTHONPATH".into(), self.pythonpath.clone()));
         envs.push(("PYTHONUNBUFFERED".into(), "1".into()));
         envs.push(("PYTHONDONTWRITEBYTECODE".into(), "1".into()));
+        envs.push(("PYTHONSAFEPATH".into(), "1".into()));
         let allowed =
             env::join_paths(&self.allowed_paths).context("allowed path contains invalid UTF-8")?;
         let allowed = allowed
@@ -2024,6 +2161,8 @@ pub(crate) fn ensure_version_file(manifest_path: &Path) -> Result<()> {
         )?;
     }
 
+    ensure_inline_version_module(&manifest_dir, &doc)?;
+
     Ok(())
 }
 
@@ -2044,6 +2183,122 @@ fn setuptools_scm_version_file(doc: &toml_edit::DocumentMut) -> Option<PathBuf> 
         .and_then(|cfg| cfg.get("write_to").or_else(|| cfg.get("version_file")))
         .and_then(|item| item.as_str())
         .map(PathBuf::from)
+}
+
+fn ensure_inline_version_module(manifest_dir: &Path, doc: &toml_edit::DocumentMut) -> Result<()> {
+    let Some(project) = doc.get("project").and_then(Item::as_table) else {
+        return Ok(());
+    };
+    if project
+        .get("dynamic")
+        .and_then(Item::as_array)
+        .map_or(false, |items| {
+            items
+                .iter()
+                .any(|item| item.as_str().is_some_and(|value| value == "version"))
+        })
+    {
+        return Ok(());
+    }
+
+    let Some(name) = project.get("name").and_then(Item::as_str) else {
+        return Ok(());
+    };
+    let Some(version) = project.get("version").and_then(Item::as_str) else {
+        return Ok(());
+    };
+
+    let module = name.replace(['-', '.'], "_").to_lowercase();
+    let candidates = [
+        manifest_dir.join("src").join(&module),
+        manifest_dir.join("python").join(&module),
+        manifest_dir.join(&module),
+    ];
+    let Some(package_dir) = candidates.iter().find(|path| path.exists()) else {
+        return Ok(());
+    };
+    let version_pyi = package_dir.join("version.pyi");
+    if !version_pyi.exists() {
+        return Ok(());
+    }
+    let version_py = package_dir.join("version.py");
+
+    let (version_value, git_revision) = inline_version_values(manifest_dir, version);
+    let release_flag = if !version_value.contains("dev") && !version_value.contains('+') {
+        "True"
+    } else {
+        "False"
+    };
+    let contents = format!(
+        "\"\"\"\nModule to expose more detailed version info for the installed `{name}`\n\"\"\"\n\
+version = \"{version_value}\"\n\
+__version__ = version\n\
+full_version = version\n\n\
+git_revision = \"{git_revision}\"\n\
+release = {release_flag}\n\
+short_version = version.split(\"+\")[0]\n"
+    );
+
+    if let Some(parent) = version_py.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if version_py.exists() {
+        if let Ok(current) = fs::read_to_string(&version_py) {
+            if current == contents {
+                return Ok(());
+            }
+        }
+    }
+    fs::write(&version_py, contents)?;
+    Ok(())
+}
+
+fn inline_version_values(manifest_dir: &Path, version: &str) -> (String, String) {
+    let mut version_value = version.to_string();
+    let mut git_revision = String::new();
+
+    if let Some((hash, date)) = latest_git_commit(manifest_dir) {
+        git_revision = hash.clone();
+        if version_value.contains("dev") && !date.is_empty() {
+            let short = hash.chars().take(7).collect::<String>();
+            if !short.is_empty() {
+                version_value = format!("{version_value}+git{date}.{short}");
+            }
+        }
+    }
+
+    (version_value, git_revision)
+}
+
+fn latest_git_commit(manifest_dir: &Path) -> Option<(String, String)> {
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "log.showSignature=false",
+            "log",
+            "-1",
+            "--format=\"%H %aI\"",
+        ])
+        .current_dir(manifest_dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut parts = stdout.trim().trim_matches('"').split_whitespace();
+    let hash = parts.next().unwrap_or_default();
+    if hash.is_empty() {
+        return None;
+    }
+    let timestamp = parts.next().unwrap_or_default();
+    let date = timestamp
+        .split('T')
+        .next()
+        .unwrap_or_default()
+        .replace('-', "");
+    Some((hash.to_string(), date))
 }
 
 #[derive(Clone, Copy)]
@@ -2225,6 +2480,61 @@ pub(crate) struct PythonPathInfo {
     pub(crate) pep582_bin: Vec<PathBuf>,
 }
 
+fn detect_local_site_packages(fs: &dyn effects::FileSystem, site_dir: &Path) -> Option<PathBuf> {
+    let lib_dir = site_dir.join("lib");
+    if let Ok(entries) = fs.read_dir(&lib_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if let Some(name) = path.file_name().and_then(|value| value.to_str()) {
+                if !name.starts_with("python") {
+                    continue;
+                }
+            }
+            let candidate = path.join("site-packages");
+            if fs.metadata(&candidate).is_ok() {
+                return Some(candidate);
+            }
+        }
+    }
+    let fallback = site_dir.join("site-packages");
+    fs.metadata(&fallback).ok().map(|_| fallback)
+}
+
+fn discover_code_generator_paths(
+    fs: &dyn effects::FileSystem,
+    project_root: &Path,
+    max_depth: usize,
+) -> Vec<PathBuf> {
+    let mut extras = Vec::new();
+    let mut stack = vec![(project_root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(entries) = fs.read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            if name
+                .to_str()
+                .is_some_and(|value| value == "code_generators")
+            {
+                extras.push(path.clone());
+                continue;
+            }
+            if depth < max_depth {
+                stack.push((path, depth + 1));
+            }
+        }
+    }
+    extras
+}
+
 pub(crate) fn build_pythonpath(
     fs: &dyn effects::FileSystem,
     project_root: &Path,
@@ -2232,6 +2542,8 @@ pub(crate) fn build_pythonpath(
 ) -> Result<PythonPathInfo> {
     let mut site_paths = Vec::new();
     let mut site_dir_used = None;
+    let mut site_packages_used = None;
+    let code_paths = discover_code_generator_paths(fs, project_root, 3);
 
     if let Some(site_dir) =
         site_override.or_else(|| resolve_project_site(fs, project_root).ok().flatten())
@@ -2239,6 +2551,10 @@ pub(crate) fn build_pythonpath(
         let canonical = fs.canonicalize(&site_dir).unwrap_or(site_dir.clone());
         site_dir_used = Some(canonical.clone());
         site_paths.push(canonical.clone());
+        if let Some(site_packages) = detect_local_site_packages(fs, &canonical) {
+            site_packages_used = Some(site_packages.clone());
+            site_paths.push(site_packages);
+        }
         let pth = canonical.join("px.pth");
         if pth.exists() {
             if let Ok(contents) = fs.read_to_string(&pth) {
@@ -2314,13 +2630,30 @@ pub(crate) fn build_pythonpath(
     if let Some(dir) = site_dir_used.as_ref() {
         paths.push(dir.clone());
     }
-    paths.extend(project_paths);
-    paths.extend(pep582_libs);
-    for path in site_paths {
-        if Some(&path) != site_dir_used.as_ref() {
-            paths.push(path);
-        }
+    paths.extend(code_paths.clone());
+    paths.extend(project_paths.clone());
+    if let Some(pkgs) = site_packages_used.as_ref() {
+        paths.push(pkgs.clone());
     }
+    for path in site_paths {
+        if Some(&path) == site_dir_used.as_ref() {
+            continue;
+        }
+        if site_packages_used
+            .as_ref()
+            .is_some_and(|pkgs| pkgs == &path)
+        {
+            continue;
+        }
+        if project_paths.iter().any(|pkg| pkg == &path) {
+            continue;
+        }
+        if code_paths.iter().any(|extra| extra == &path) {
+            continue;
+        }
+        paths.push(path);
+    }
+    paths.extend(pep582_libs);
     paths.retain(|p| p.exists());
     if paths.is_empty() {
         paths.push(project_root.to_path_buf());
@@ -2853,6 +3186,88 @@ mod tests {
     }
 
     #[test]
+    fn project_paths_precede_local_site_packages() -> Result<()> {
+        let temp = tempdir()?;
+        let project_root = temp.path();
+        let site_dir = project_root.join("site");
+        let site_packages = site_dir.join("site-packages");
+        fs::create_dir_all(&site_packages)?;
+        fs::write(site_dir.join("sitecustomize.py"), SITE_CUSTOMIZE)?;
+
+        let site_pkg = site_packages.join("demo");
+        fs::create_dir_all(&site_pkg)?;
+        fs::write(site_pkg.join("__init__.py"), "VALUE = 'site'\n")?;
+
+        let project_pkg = project_root.join("demo");
+        fs::create_dir_all(&project_pkg)?;
+        fs::write(project_pkg.join("__init__.py"), "VALUE = 'project'\n")?;
+
+        let effects = SystemEffects::new();
+        let paths = build_pythonpath(effects.fs(), project_root, Some(site_dir.clone()))?;
+        let allowed_env = env::join_paths(&paths.allowed_paths)?
+            .into_string()
+            .expect("allowed paths");
+        let python = match effects.python().detect_interpreter() {
+            Ok(path) => path,
+            Err(_) => return Ok(()),
+        };
+
+        let mut cmd = Command::new(&python);
+        cmd.current_dir(project_root);
+        cmd.env("PYTHONPATH", paths.pythonpath.clone());
+        cmd.env("PX_ALLOWED_PATHS", allowed_env);
+        cmd.env("PYTHONSAFEPATH", "1");
+        cmd.arg("-c").arg(
+            "import importlib, json, sys; mod = importlib.import_module('demo'); \
+             print(json.dumps({'value': getattr(mod, 'VALUE', ''), 'file': getattr(mod, '__file__', ''), 'prefix': sys.path[:4]}))",
+        );
+        let output = cmd.output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "python exited with {}: {}\n{}",
+            output.status,
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let payload: Value = serde_json::from_str(stdout.trim())?;
+        let value = payload
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert_eq!(value, "project");
+        let file = payload.get("file").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            file.contains(project_pkg.to_string_lossy().as_ref()),
+            "expected project package, got {file}"
+        );
+        let prefix: Vec<PathBuf> = payload
+            .get("prefix")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let proj_pos = prefix
+            .iter()
+            .position(|entry| fs::canonicalize(entry).ok() == Some(project_root.to_path_buf()));
+        let site_pos = prefix
+            .iter()
+            .position(|entry| fs::canonicalize(entry).ok() == Some(site_packages.clone()));
+        assert!(
+            proj_pos < site_pos,
+            "project path should precede site-packages in sys.path, got {:?}",
+            prefix
+        );
+        Ok(())
+    }
+
+    #[test]
     fn sitecustomize_uses_pythonpath_when_px_allowed_missing() -> Result<()> {
         let temp = tempdir()?;
         let site_dir = temp.path().join("site");
@@ -3025,6 +3440,48 @@ build-backend = "setuptools.build_meta"
         assert_eq!(
             payload.get("version").and_then(Value::as_str),
             Some("1.2.3")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn editable_stub_writes_file_url_direct_url() -> Result<()> {
+        let temp = tempdir()?;
+        let project_root = temp.path();
+        let pyproject = project_root.join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            r#"[project]
+name = "demo-dir-url"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+"#,
+        )?;
+        let pkg_dir = project_root.join("demo_dir_url");
+        fs::create_dir_all(&pkg_dir)?;
+        fs::write(pkg_dir.join("__init__.py"), "")?;
+
+        let snapshot = ProjectSnapshot::read_from(project_root)?;
+        let site_dir = project_root.join(".px").join("env").join("site");
+        let effects = SystemEffects::new();
+        effects.fs().create_dir_all(&site_dir)?;
+        write_project_metadata_stub(&snapshot, &site_dir, effects.fs())?;
+
+        let contents =
+            fs::read_to_string(site_dir.join("demo_dir_url-0.1.0.dist-info/direct_url.json"))?;
+        let payload: Value = serde_json::from_str(&contents)?;
+        let url = payload
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            url.starts_with("file://"),
+            "direct_url.json should contain a file:// URL, got {url}"
         );
         Ok(())
     }
@@ -3345,6 +3802,78 @@ write_to = "demo/_version.py"
             contents.contains("version_tuple = tuple(_v.release)"),
             "setuptools_scm stub should export version_tuple from parsed release"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_version_file_writes_inline_version_stub() -> Result<()> {
+        let temp = tempdir()?;
+        let manifest = temp.path().join("pyproject.toml");
+        fs::write(
+            &manifest,
+            r#"[project]
+name = "demo-pkg"
+version = "1.2.3.dev0"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+"#,
+        )?;
+        let pkg_dir = temp.path().join("demo_pkg");
+        fs::create_dir_all(&pkg_dir)?;
+        fs::write(pkg_dir.join("__init__.py"), "")?;
+        fs::write(pkg_dir.join("version.pyi"), "version: str\n")?;
+
+        ensure_version_file(&manifest)?;
+        let contents = fs::read_to_string(pkg_dir.join("version.py"))?;
+        assert!(
+            contents.contains("version = \"1.2.3.dev0\""),
+            "stub should use manifest version"
+        );
+        assert!(
+            contents.contains("release = False"),
+            "dev versions should mark release as False"
+        );
+        assert!(
+            contents.contains("short_version = version.split(\"+\")[0]"),
+            "stub should set short_version"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn infers_version_from_versioneer_module() -> Result<()> {
+        let temp = tempdir()?;
+        let manifest = temp.path().join("pyproject.toml");
+        fs::write(
+            &manifest,
+            r#"[project]
+name = "demo-ver"
+dynamic = ["version"]
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+"#,
+        )?;
+        let pkg_dir = temp.path().join("demo_ver");
+        fs::create_dir_all(&pkg_dir)?;
+        fs::write(
+            pkg_dir.join("__init__.py"),
+            "from ._version import get_versions\nv = get_versions()\n__version__ = v.get('closest-tag', v['version'])\n",
+        )?;
+        fs::write(
+            pkg_dir.join("_version.py"),
+            "def get_versions():\n    return {'version': '1.2.3+dev', 'closest-tag': 'v1.2.3'}\n",
+        )?;
+
+        let metadata =
+            load_editable_project_metadata(&manifest, SystemEffects::new().fs()).unwrap();
+        assert_eq!(metadata.version, "1.2.3+dev");
         Ok(())
     }
 
