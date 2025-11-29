@@ -1,5 +1,7 @@
 use anyhow::Result;
+use pep440_rs::{Version, VersionSpecifiers};
 use serde_json::{json, Value};
+use std::str::FromStr;
 
 use crate::{
     is_missing_project_error, manifest_snapshot, progress::ProgressReporter, runtime_manager,
@@ -98,6 +100,40 @@ pub fn python_use(ctx: &CommandContext, request: &PythonUseRequest) -> Result<Ex
         )
         .into());
     };
+    let snapshot = manifest_snapshot()?;
+    let requirement = &snapshot.python_requirement;
+    let specifiers = VersionSpecifiers::from_str(requirement).map_err(|err| {
+        InstallUserError::new(
+            "project requires-python is invalid",
+            json!({
+                "error": err.to_string(),
+                "requires_python": requirement,
+            }),
+        )
+    })?;
+    let runtime_version = Version::from_str(&record.full_version).map_err(|err| {
+        InstallUserError::new(
+            "unable to parse runtime version",
+            json!({
+                "runtime": record.full_version,
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    if !specifiers.contains(&runtime_version) {
+        return Err(InstallUserError::new(
+            format!(
+                "runtime {normalized} does not satisfy project requires-python"
+            ),
+            json!({
+                "requested": normalized,
+                "runtime_full_version": record.full_version,
+                "requires_python": requirement,
+                "hint": format!("choose a runtime compatible with `{}` or update [project].requires-python", requirement),
+            }),
+        )
+        .into());
+    }
     let pyproject = project_root.join("pyproject.toml");
     let mut editor = ManifestEditor::open(&pyproject)?;
     let changed = editor.set_tool_python(&normalized)?;

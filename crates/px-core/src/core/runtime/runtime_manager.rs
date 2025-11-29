@@ -241,6 +241,14 @@ pub fn resolve_runtime(
                     .cloned()
             })
         {
+            if let Ok(runtime_version) = Version::from_str(&record.full_version) {
+                if !specifiers.contains(&runtime_version) {
+                    bail!(
+                        "px runtime {requested} ({}) does not satisfy requires-python `{requirement}`",
+                        record.full_version
+                    );
+                }
+            }
             return Ok(RuntimeSelection {
                 record,
                 source: RuntimeSource::Explicit,
@@ -426,6 +434,23 @@ mod tests {
         );
         let selection = resolve_runtime(None, ">=3.0").expect("select runtime");
         assert_eq!(selection.record.path, "/usr/bin/python3");
+    }
+
+    #[test]
+    #[serial]
+    fn resolve_runtime_rejects_explicit_incompatible_runtime() {
+        let temp = TempDir::new().unwrap();
+        let (registry, _guard) = registry_path_in(&temp, "registry.json");
+        write_registry(
+            &registry,
+            r#"{"runtimes":[{"version":"3.9","full_version":"3.9.25","path":"/usr/bin/python3.9","default":true}]}"#,
+        );
+        let err = resolve_runtime(Some("3.9"), ">=3.11").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not satisfy requires-python `>=3.11`"),
+            "expected incompatibility error, got {err}"
+        );
     }
 
     #[test]

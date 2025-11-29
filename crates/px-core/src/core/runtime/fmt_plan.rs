@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use toml_edit::{DocumentMut, InlineTable, Item, Table};
 
-pub(crate) const DEFAULT_RUFF_REQUIREMENT: &str = "ruff==0.6.9";
+pub(crate) const DEFAULT_RUFF_REQUIREMENT: &str = "ruff==0.14.6";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QualityKind {
