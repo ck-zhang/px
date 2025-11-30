@@ -1071,7 +1071,8 @@ fn preflight_plugins(
     }
 }
 
-const PX_PYTEST_PLUGIN: &str = r#"import sys
+const PX_PYTEST_PLUGIN: &str = r#"import os
+import sys
 import time
 import pytest
 from _pytest._io.terminalwriter import TerminalWriter
@@ -1089,8 +1090,13 @@ class PxTerminalReporter:
         self.files = []
         self._current_file = None
         self.failures = []
+        self.collection_errors = []
         self.stats = {"passed": 0, "failed": 0, "skipped": 0, "error": 0, "xfailed": 0, "xpassed": 0}
         self.exitstatus = 0
+        self.spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        self.spinner_index = 0
+        self.last_progress_len = 0
+        self._spinner_active = True
 
     def pytest_sessionstart(self, session):
         import platform
@@ -1102,6 +1108,7 @@ class PxTerminalReporter:
         self._tw.line(f"root:   {root}")
         self._tw.line(f"config: {cfg}")
         self.collection_start = time.time()
+        self._render_progress(note="collecting", force=True)
 
     def pytest_collection_finish(self, session):
         self.collected = len(session.items)
@@ -1110,8 +1117,17 @@ class PxTerminalReporter:
         self.collection_duration = time.time() - (self.collection_start or self.session_start)
         label = "tests" if self.collected != 1 else "test"
         file_label = "files" if len(self.files) != 1 else "file"
+        self._spinner_active = False
+        self._clear_spinner(newline=True)
         self._tw.line(f"collected {self.collected} {label} from {len(self.files)} {file_label} in {self.collection_duration:.2f}s")
         self._tw.line("")
+
+    def pytest_collectreport(self, report):
+        if report.failed:
+            self.stats["error"] += 1
+            summary = getattr(report, "longreprtext", "") or getattr(report, "longrepr", "")
+            self.collection_errors.append((str(report.fspath), str(summary)))
+        self._render_progress(note="collecting")
 
     def pytest_runtest_logreport(self, report):
         if report.when not in ("setup", "call", "teardown"):
@@ -1138,11 +1154,44 @@ class PxTerminalReporter:
 
     def pytest_sessionfinish(self, session, exitstatus):
         self.exitstatus = exitstatus
+        self._spinner_active = False
+        self._clear_spinner(newline=True)
         if self.failures:
             self._render_failures()
+        if self.collection_errors:
+            self._render_collection_errors()
         self._render_summary(exitstatus)
 
     # --- rendering helpers ---
+    def _render_progress(self, note="", force=False):
+        if not force and not self._spinner_active:
+            return
+        total = self.collected or "?"
+        completed = (
+            self.stats["passed"]
+            + self.stats["failed"]
+            + self.stats["skipped"]
+            + self.stats["error"]
+            + self.stats["xfailed"]
+            + self.stats["xpassed"]
+        )
+        frame = self.spinner_frames[self.spinner_index % len(self.spinner_frames)]
+        self.spinner_index += 1
+        line = f"\r{frame} {completed}/{total} • pass:{self.stats['passed']} fail:{self.stats['failed']} skip:{self.stats['skipped']} err:{self.stats['error']}"
+        if note:
+            line += f" • {note}"
+        padding = max(self.last_progress_len - len(line), 0)
+        sys.stdout.write(line + (" " * padding))
+        sys.stdout.flush()
+        self.last_progress_len = len(line)
+
+    def _clear_spinner(self, newline: bool = False):
+        if self.last_progress_len:
+            end = "\n" if newline else "\r"
+            sys.stdout.write("\r" + " " * self.last_progress_len + end)
+            sys.stdout.flush()
+            self.last_progress_len = 0
+
     def _print_test_result(self, file_path, name, status, duration):
         if self._current_file != file_path:
             self._current_file = file_path
@@ -1158,6 +1207,16 @@ class PxTerminalReporter:
         self._tw.line("-" * 11)
         for idx, report in enumerate(self.failures, start=1):
             self._render_single_failure(idx, report)
+
+    def _render_collection_errors(self):
+        self._tw.line(f"COLLECTION ERRORS ({len(self.collection_errors)})", red=True, bold=True)
+        self._tw.line("-" * 19)
+        for idx, (path, summary) in enumerate(self.collection_errors, start=1):
+            self._tw.line("")
+            self._tw.line(f"{idx}) {path}", bold=True)
+            if summary:
+                for line in str(summary).splitlines():
+                    self._tw.line(f"   {line}", red=True)
 
     def _render_single_failure(self, idx, report):
         path, lineno = self._failure_lineno(report)

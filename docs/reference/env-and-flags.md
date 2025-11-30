@@ -60,6 +60,8 @@ Prefer the flags above for interactive use; env vars remain for CI/automation or
 * `PX_CACHE_PATH` – root for the shared artifact cache (default under `$HOME/.cache/px/store`).
 * `PX_TOOLS_DIR` – root for installed tools (metadata/locks/envs; default `~/.px/tools`).
 * `PX_TOOL_STORE` – location for cached tool environments (default `~/.px/tools/store/envs`).
+* `PX_NO_ENSUREPIP=1` – skip the automatic `python -m ensurepip --default-pip --upgrade` when px refreshes a project site. By default px runs ensurepip only when pip is absent in the project’s `.px` site.
+* `PX_DEBUG_SITE_PATHS=/path/to/file` – write the final `sys.path` computed by px’s `sitecustomize` to the given file (for debugging path issues).
 
 ### Dependency selection and execution behavior
 

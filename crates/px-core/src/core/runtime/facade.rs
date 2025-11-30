@@ -105,6 +105,13 @@ def _allow(path):
         return False
     if "__pypackages__" in norm:
         return True
+    for allowed in _ALLOWED:
+        try:
+            allowed_norm = os.path.normpath(allowed)
+        except Exception:
+            continue
+        if norm == allowed_norm or norm.startswith(allowed_norm + os.sep):
+            return True
     for prefix in _STD_PREFIXES:
         if norm == prefix or norm.startswith(prefix + os.sep):
             return True
@@ -113,7 +120,25 @@ def _allow(path):
 if _FILTER_PATHS:
     _new_path = []
     _seen = set()
+    _original = list(sys.path)
     _script_dir = sys.path[0] if sys.path else ""
+    try:
+        _cwd = os.getcwd()
+    except Exception:
+        _cwd = ""
+    if not _script_dir:
+        _script_dir = _cwd
+    _argv_dir = ""
+    try:
+        _argv0 = sys.argv[0] if sys.argv else ""
+        if _argv0:
+            _argv_path = _argv0
+            if not os.path.isabs(_argv_path):
+                _argv_path = os.path.abspath(_argv_path)
+            if os.path.isfile(_argv_path):
+                _argv_dir = os.path.dirname(_argv_path)
+    except Exception:
+        _argv_dir = ""
 
     def _push(path):
         if not path:
@@ -132,6 +157,12 @@ if _FILTER_PATHS:
 
     if _script_dir:
         _push(_script_dir)
+    if _argv_dir:
+        _push(_argv_dir)
+    if _cwd and _cwd not in _seen:
+        _push(_cwd)
+    for path in _original:
+        _push(path)
 
     sys.path[:] = _new_path
     # Ensure child processes inherit the px path set instead of a mutated sys.path
@@ -171,6 +202,13 @@ else:
 if "" in sys.path:
     try:
         sys.path.remove("")
+    except Exception:
+        pass
+
+_debug_dump = os.environ.get("PX_DEBUG_SITE_PATHS")
+if _debug_dump:
+    try:
+        Path(_debug_dump).write_text("\n".join(sys.path))
     except Exception:
         pass
 
@@ -445,6 +483,7 @@ pub(crate) fn refresh_project_site(
     )?;
     write_project_metadata_stub(snapshot, &site_dir, ctx.fs())?;
     let env_python = write_python_environment_markers(&site_dir, &runtime, ctx.fs())?;
+    ensure_project_pip(ctx, snapshot, &site_dir, &runtime, &env_python)?;
     let canonical_site = ctx.fs().canonicalize(&site_dir).unwrap_or(site_dir.clone());
     let runtime_state = StoredRuntime {
         path: runtime.path.clone(),
@@ -462,6 +501,87 @@ pub(crate) fn refresh_project_site(
         },
     };
     persist_project_state(ctx.fs(), &snapshot.root, env_state, runtime_state)
+}
+
+fn ensure_project_pip(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+    site_dir: &Path,
+    runtime: &RuntimeMetadata,
+    env_python: &Path,
+) -> Result<()> {
+    if std::env::var("PX_NO_ENSUREPIP")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let site_packages = site_packages_dir(site_dir, &runtime.version);
+    let pip_present = site_dir.join("bin").join("pip").exists()
+        || site_dir.join("bin").join("pip3").exists()
+        || site_packages.join("pip").exists();
+    if pip_present {
+        return Ok(());
+    }
+
+    let paths = build_pythonpath(ctx.fs(), &snapshot.root, Some(site_dir.to_path_buf()))?;
+    let allowed = env::join_paths(&paths.allowed_paths)
+        .context("allowed path contains invalid UTF-8")?
+        .into_string()
+        .map_err(|_| anyhow!("allowed path contains non-utf8 data"))?;
+    let mut envs = vec![
+        ("PYTHONPATH".into(), paths.pythonpath.clone()),
+        ("PYTHONUNBUFFERED".into(), "1".into()),
+        ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
+        ("PX_ALLOWED_PATHS".into(), allowed),
+        (
+            "PX_PROJECT_ROOT".into(),
+            snapshot.root.display().to_string(),
+        ),
+        ("PX_PYTHON".into(), env_python.display().to_string()),
+    ];
+    if let Some(bin) = &paths.site_bin {
+        let mut path_entries = vec![bin.clone()];
+        if let Some(site_root) = bin.parent() {
+            envs.push(("VIRTUAL_ENV".into(), site_root.display().to_string()));
+        }
+        if let Ok(existing) = env::var("PATH") {
+            path_entries.extend(env::split_paths(&existing));
+        }
+        if let Ok(joined) = env::join_paths(path_entries) {
+            if let Ok(value) = joined.into_string() {
+                envs.push(("PATH".into(), value));
+            }
+        }
+    }
+    disable_proxy_env(&mut envs);
+
+    let output = ctx.python_runtime().run_command(
+        env_python
+            .to_str()
+            .ok_or_else(|| anyhow!("invalid python path"))?,
+        &[
+            "-m".to_string(),
+            "ensurepip".to_string(),
+            "--default-pip".to_string(),
+            "--upgrade".to_string(),
+        ],
+        &envs,
+        &snapshot.root,
+    )?;
+    if output.code != 0 {
+        let mut message = String::from("failed to bootstrap pip in the px environment");
+        if !output.stderr.trim().is_empty() {
+            message.push_str(": ");
+            message.push_str(output.stderr.trim());
+        }
+        if output.stderr.trim().is_empty() && !output.stdout.trim().is_empty() {
+            message.push_str(": ");
+            message.push_str(output.stdout.trim());
+        }
+        bail!(message);
+    }
+    Ok(())
 }
 
 pub fn materialize_project_site(
@@ -2097,6 +2217,9 @@ impl PythonContext {
         ));
         envs.push(("PX_PYTHON".into(), self.python.clone()));
         envs.push(("PX_COMMAND_JSON".into(), command_args.to_string()));
+        if let Ok(debug_site) = env::var("PX_DEBUG_SITE_PATHS") {
+            envs.push(("PX_DEBUG_SITE_PATHS".into(), debug_site));
+        }
         if let Some(alias) = self.px_options.manage_command.as_ref() {
             let trimmed = alias.trim();
             if !trimmed.is_empty() {
@@ -3013,14 +3136,16 @@ pub fn format_status_message(info: CommandInfo, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SystemEffects;
+    use crate::{GlobalOptions, SystemEffects};
     use anyhow::Result;
+    use px_domain::ResolvedDependency;
     use serde_json::Value;
     use std::env;
     use std::fs;
     use std::io::Write;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::Arc;
     use tempfile::tempdir;
     use zip::write::FileOptions;
 
@@ -3097,6 +3222,46 @@ mod tests {
         assert!(gamma.contains("demo.core"));
         let helper = fs::read_to_string(bin_dir.join("helper.sh"))?;
         assert!(helper.contains("helper"));
+        Ok(())
+    }
+
+    #[test]
+    fn refresh_project_site_bootstraps_pip() -> Result<()> {
+        let temp = tempdir()?;
+        let project_root = temp.path();
+        fs::write(
+            project_root.join("pyproject.toml"),
+            r#"[project]
+name = "pip-bootstrap"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+"#,
+        )?;
+        let snapshot = px_domain::project::snapshot::ProjectSnapshot::read_from(project_root)?;
+        let lock = render_lockfile(&snapshot, &Vec::<ResolvedDependency>::new(), PX_VERSION)?;
+        fs::write(project_root.join("px.lock"), lock)?;
+
+        let global = GlobalOptions::default();
+        let ctx = CommandContext::new(&global, Arc::new(SystemEffects::new()))?;
+        refresh_project_site(&snapshot, &ctx)?;
+
+        let state = load_project_state(ctx.fs(), project_root)?;
+        let env = state.current_env.expect("env stored");
+        let site_dir = PathBuf::from(&env.site_packages);
+        let site_packages = site_packages_dir(&site_dir, &env.python.version);
+        assert!(
+            site_packages.join("pip").exists(),
+            "pip package should be installed into the px site"
+        );
+        assert!(
+            site_dir.join("bin").join("pip").exists() || site_dir.join("bin").join("pip3").exists(),
+            "pip entrypoint should be generated under site/bin"
+        );
+
         Ok(())
     }
 
@@ -3386,6 +3551,64 @@ mod tests {
                 .iter()
                 .any(|entry| fs::canonicalize(entry).ok() == Some(extra_canon.clone())),
             "extra PYTHONPATH entries should persist when PX_ALLOWED_PATHS is set; sys.path={paths:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sitecustomize_reinserts_cwd_when_script_dir_empty() -> Result<()> {
+        let temp = tempdir()?;
+        let site_dir = temp.path().join("site");
+        fs::create_dir_all(&site_dir)?;
+        fs::write(site_dir.join("sitecustomize.py"), SITE_CUSTOMIZE)?;
+
+        let python = match SystemEffects::new().python().detect_interpreter() {
+            Ok(path) => path,
+            Err(_) => return Ok(()),
+        };
+
+        let mut cmd = Command::new(&python);
+        cmd.current_dir(temp.path());
+        cmd.env_clear();
+        cmd.env("PYTHONPATH", site_dir.display().to_string());
+        cmd.env("PX_ALLOWED_PATHS", site_dir.display().to_string());
+        cmd.env("PYTHONSAFEPATH", "1");
+        cmd.arg("-c").arg(
+            "import sitecustomize, json, sys; print(json.dumps({'path': sys.path, 'site': getattr(sitecustomize, '__file__', '')}))",
+        );
+        let output = cmd.output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "python exited with {}: {}\n{}",
+            output.status,
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let payload: Value = serde_json::from_str(stdout.trim())?;
+        let site_path = payload.get("site").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            site_path.contains(site_dir.to_string_lossy().as_ref()),
+            "sitecustomize should be loaded from the px site directory: {site_path}"
+        );
+        let paths: Vec<PathBuf> = payload
+            .get("path")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cwd = fs::canonicalize(temp.path())?;
+        assert!(
+            paths
+                .iter()
+                .any(|entry| fs::canonicalize(entry).ok() == Some(cwd.clone())),
+            "current working directory should be retained in sys.path, got {paths:?}"
         );
         Ok(())
     }
