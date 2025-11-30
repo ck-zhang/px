@@ -309,22 +309,11 @@ fn evaluate_workspace_state(
                     .clone()
                     .unwrap_or(compute_lock_hash(&workspace.lock_path)?),
             );
-            if let Some(env) = env_state.current_env.clone() {
-                let site_dir = PathBuf::from(&env.site_packages);
-                if let Some(expected) = lock_id.as_ref() {
-                    if env.lock_id == *expected && site_dir.exists() {
-                        env_clean = true;
-                    } else {
-                        env_issue = Some(json!({
-                            "reason": if site_dir.exists() { "env_outdated" } else { "missing_env" },
-                            "site": env.site_packages,
-                            "expected_lock_id": lock_id.clone(),
-                            "current_lock_id": env.lock_id,
-                        }));
-                    }
+            if let Some(lock_id) = lock_id.as_deref() {
+                match ensure_workspace_env_matches(ctx, workspace, &env_state, lock_id) {
+                    Ok(()) => env_clean = true,
+                    Err(user) => env_issue = Some(user.details),
                 }
-            } else {
-                env_issue = Some(json!({ "reason": "missing_env" }));
             }
         }
     }
@@ -361,6 +350,72 @@ fn evaluate_workspace_state(
         lock_issue,
         env_issue,
     })
+}
+
+fn ensure_workspace_env_matches(
+    ctx: &CommandContext,
+    workspace: &WorkspaceSnapshot,
+    env_state: &ProjectState,
+    lock_id: &str,
+) -> Result<(), InstallUserError> {
+    let Some(env) = env_state.current_env.as_ref() else {
+        return Err(InstallUserError::new(
+            "workspace environment missing",
+            json!({
+                "hint": "run `px sync` to build the workspace environment",
+                "reason": "missing_env",
+            }),
+        ));
+    };
+    let site_dir = PathBuf::from(&env.site_packages);
+    if env.lock_id != lock_id {
+        return Err(InstallUserError::new(
+            "workspace environment is out of date",
+            json!({
+                "expected_lock_id": lock_id,
+                "current_lock_id": env.lock_id,
+                "hint": "run `px sync` to rebuild the workspace environment",
+                "reason": "env_outdated",
+            }),
+        ));
+    }
+    if !site_dir.exists() {
+        return Err(InstallUserError::new(
+            "workspace environment missing",
+            json!({
+                "site": env.site_packages,
+                "hint": "run `px sync` to rebuild the workspace environment",
+                "reason": "missing_env",
+            }),
+        ));
+    }
+    let runtime = detect_runtime_metadata(ctx, &workspace.lock_snapshot()).map_err(|err| {
+        InstallUserError::new(
+            "workspace runtime unavailable",
+            json!({
+                "error": err.to_string(),
+                "hint": "install or select a compatible Python runtime, then rerun",
+                "reason": "runtime_unavailable",
+            }),
+        )
+    })?;
+    if runtime.version != env.python.version || runtime.platform != env.platform {
+        return Err(InstallUserError::new(
+            format!(
+                "workspace environment targets Python {} ({}) but {} ({}) is active",
+                env.python.version, env.platform, runtime.version, runtime.platform
+            ),
+            json!({
+                "expected_python": env.python.version,
+                "current_python": runtime.version,
+                "expected_platform": env.platform,
+                "current_platform": runtime.platform,
+                "hint": "run `px sync` to rebuild for the current runtime",
+                "reason": "runtime_mismatch",
+            }),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -1579,6 +1634,7 @@ mod tests {
     use crate::{CommandStatus, GlobalOptions, StatusPayload, SystemEffects};
     use px_domain::lockfile::load_lockfile;
     use serde_json;
+    use serde_json::Value;
     use std::fs;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -1634,7 +1690,12 @@ members = ["apps/a", "libs/b"]
             .unwrap_or_else(|| compute_lock_hash(&workspace.lock_path).unwrap())
     }
 
-    fn write_env_state(workspace: &WorkspaceSnapshot, lock_id: &str) {
+    fn write_env_state_with_runtime(
+        workspace: &WorkspaceSnapshot,
+        lock_id: &str,
+        python_version: &str,
+        platform: &str,
+    ) {
         let env_root = workspace
             .config
             .root
@@ -1647,14 +1708,14 @@ members = ["apps/a", "libs/b"]
             "current_env": {
                 "id": "env-test",
                 "lock_id": lock_id,
-                "platform": "any",
+                "platform": platform,
                 "site_packages": site.display().to_string(),
-                "python": { "path": "python", "version": "3.11" }
+                "python": { "path": "python", "version": python_version }
             },
             "runtime": {
                 "path": "python",
-                "version": "3.11",
-                "platform": "any"
+                "version": python_version,
+                "platform": platform
             }
         });
         let state_path = workspace
@@ -1763,13 +1824,39 @@ include-groups = ["dev"]
         write_workspace(root);
         let workspace = load_workspace(root);
         let lock_id = write_lock(&workspace);
-        write_env_state(&workspace, &lock_id);
-
         let ctx = command_context();
+        let runtime = detect_runtime_metadata(&ctx, &workspace.lock_snapshot()).unwrap();
+        write_env_state_with_runtime(&workspace, &lock_id, &runtime.version, &runtime.platform);
+
         let outcome = workspace_status(&ctx, WorkspaceScope::Root(workspace)).unwrap();
         assert_eq!(outcome.status, CommandStatus::Ok);
         let payload: StatusPayload =
             serde_json::from_value(outcome.details.clone()).expect("status payload");
         assert!(payload.is_consistent());
+    }
+
+    #[test]
+    fn workspace_state_detects_runtime_mismatch() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        write_workspace(root);
+        let workspace = load_workspace(root);
+        let lock_id = write_lock(&workspace);
+        write_env_state_with_runtime(&workspace, &lock_id, "0.0", "any");
+
+        let ctx = command_context();
+        let report = evaluate_workspace_state(&ctx, &workspace).unwrap();
+        assert!(
+            !report.env_clean,
+            "runtime mismatches should mark workspace env dirty"
+        );
+        assert_eq!(report.canonical, WorkspaceStateKind::NeedsEnv);
+        let reason = report.env_issue.and_then(|issue| {
+            issue
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+        assert_eq!(reason.as_deref(), Some("runtime_mismatch"));
     }
 }

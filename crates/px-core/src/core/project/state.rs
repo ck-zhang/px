@@ -32,7 +32,6 @@ pub(crate) fn evaluate_project_state(
         }
         manifest_clean = match (&manifest_fingerprint, &lock_fingerprint) {
             (Some(manifest), Some(lock_fp)) => manifest == lock_fp,
-            (Some(_), None) => lock_issue.is_none(),
             _ => false,
         };
     }
@@ -100,8 +99,13 @@ pub(crate) fn ensure_mutation_allowed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{CommandContext, GlobalOptions, SystemEffects, PX_VERSION};
     use px_domain::{DependencyGroupSource, ProjectStateReport};
+    use std::fs;
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use toml_edit::DocumentMut;
 
     #[test]
     fn mutation_gate_blocks_update_without_lock() {
@@ -285,5 +289,47 @@ mod tests {
             outcome.message.contains("px.lock is out of date")
                 || outcome.message.contains("px.lock")
         );
+    }
+
+    #[test]
+    fn evaluate_marks_missing_lock_fingerprint_as_drift() -> Result<()> {
+        let tmp = tempdir()?;
+        let root = tmp.path();
+        fs::write(
+            root.join("pyproject.toml"),
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.px]
+"#,
+        )?;
+        let snapshot = px_domain::ProjectSnapshot::read_from(root)?;
+        let lock_contents = px_domain::render_lockfile(&snapshot, &[], PX_VERSION)?;
+        let mut doc: DocumentMut = lock_contents.parse().expect("parse lock");
+        if let Some(meta) = doc
+            .get_mut("metadata")
+            .and_then(toml_edit::Item::as_table_mut)
+        {
+            meta.remove("manifest_fingerprint");
+        }
+        fs::write(root.join("px.lock"), doc.to_string())?;
+        let globals = GlobalOptions {
+            quiet: false,
+            verbose: 0,
+            trace: false,
+            json: false,
+            config: None,
+        };
+        let ctx = CommandContext::new(&globals, Arc::new(SystemEffects::new()))?;
+        let snapshot = px_domain::ProjectSnapshot::read_from(root)?;
+
+        let report = evaluate_project_state(&ctx, &snapshot)?;
+
+        assert!(!report.manifest_clean);
+        assert_eq!(report.canonical, px_domain::ProjectStateKind::NeedsLock);
+        Ok(())
     }
 }
