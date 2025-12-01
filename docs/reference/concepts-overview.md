@@ -39,6 +39,7 @@ Tools are isolated from projects and from each other. Upgrading Python or changi
 ## Design principles (at a glance)
 
 * **Two parallel state machines, same shape** – projects and workspaces each have Manifest/Lock/Env artifacts and state machines; commands are transitions over these machines.
+* **Content-addressable store** – artifacts and env materialization rely on a digest-keyed store; see [Content Addressable Store](../design/content-addressable-store.md) for layout and invariants.
 * **Determinism** – given the same inputs, px chooses the same runtimes, lockfiles, envs, and command resolution paths.
 * **Smooth UX, explicit mutation** – mutating operations are explicit (`init`, `add`, `remove`, `sync`, `update`, `tool install/upgrade/remove`); reader commands never change manifests or lockfiles.
 
