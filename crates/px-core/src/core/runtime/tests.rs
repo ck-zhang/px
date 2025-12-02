@@ -15,6 +15,7 @@ use px_domain::lockfile::{LockSnapshot, LockedArtifact, LockedDependency};
 use px_domain::marker_applies;
 use px_domain::{DependencyGroupSource, PxOptions};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -89,6 +90,7 @@ fn base_env_exports_manage_command_alias() -> Result<()> {
         px_options: PxOptions {
             manage_command: Some("self".to_string()),
             plugin_imports: Vec::new(),
+            env_vars: BTreeMap::new(),
         },
     };
     // Seed existing PATH and proxy vars to verify overrides
@@ -175,7 +177,8 @@ fn python_environment_markers_create_pyvenv_and_shims() -> Result<()> {
     };
     let effects = SystemEffects::new();
     let env_python =
-        write_python_environment_markers(&site_dir, &runtime, effects.fs()).expect("markers");
+        write_python_environment_markers(&site_dir, &runtime, &runtime_python, effects.fs())
+            .expect("markers");
 
     let pyvenv_cfg = site_dir.join("pyvenv.cfg");
     assert!(pyvenv_cfg.exists(), "pyvenv.cfg should be written");
@@ -306,6 +309,7 @@ fn materialize_project_site_writes_cached_paths() {
                 abi_tag: "none".into(),
                 platform_tag: "any".into(),
                 is_direct_url: false,
+                build_options_hash: String::new(),
             }),
             requires: Vec::new(),
             source: None,
@@ -378,6 +382,7 @@ fn materialize_project_site_skips_missing_artifacts() {
                 abi_tag: "none".into(),
                 platform_tag: "any".into(),
                 is_direct_url: false,
+                build_options_hash: String::new(),
             }),
             requires: Vec::new(),
             source: None,

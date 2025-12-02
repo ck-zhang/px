@@ -29,6 +29,10 @@ base64 = "0.22"
 uv-build-backend.workspace = true
 walkdir = "2"
 url.workspace = true
+fs4 = "0.6"
+rusqlite = { version = "0.31", features = ["bundled"] }
+rand = "0.8"
+filetime = "0.2"
 
 [features]
 default = []

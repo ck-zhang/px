@@ -10,6 +10,7 @@ use common::{parse_json, prepare_fixture, require_online};
 
 #[test]
 fn run_prints_fixture_output() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("run-hello");
     set_px_scripts(&project, &[("cli", "sample_px_app.cli:main")]);
     let Some(python) = find_python() else {
@@ -32,6 +33,7 @@ fn run_prints_fixture_output() {
 
 #[test]
 fn run_defaults_to_first_project_script() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("run-default-script");
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
@@ -48,6 +50,7 @@ fn run_defaults_to_first_project_script() {
 
 #[test]
 fn run_falls_back_to_package_cli_when_scripts_missing() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("run-package-cli");
     remove_scripts_table(&project);
 
@@ -68,6 +71,7 @@ fn run_falls_back_to_package_cli_when_scripts_missing() {
 
 #[test]
 fn run_supports_python_passthrough_invocations() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("run-passthrough");
     let Some(python) = find_python() else {
         eprintln!("skipping passthrough test (python binary not found)");
@@ -108,6 +112,7 @@ fn run_supports_python_passthrough_invocations() {
 
 #[test]
 fn run_reads_stdin_and_python_source_dirs() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("run-python-stdin");
     let package = project.join("sample_px_app");
     let relocated = project.join("python").join("sample_px_app");
@@ -135,6 +140,7 @@ fn run_reads_stdin_and_python_source_dirs() {
 
 #[test]
 fn run_respects_explicit_entry_even_with_other_defaults() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("run-explicit-entry");
     set_px_scripts(
         &project,
@@ -169,6 +175,7 @@ fn run_respects_explicit_entry_even_with_other_defaults() {
 
 #[test]
 fn run_forwards_args_to_default_entry_when_no_entry_passed() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("run-forward-default");
     set_px_scripts(&project, &[("cli", "sample_px_app.cli:main")]);
     let Some(python) = find_python() else {
@@ -203,6 +210,7 @@ fn run_forwards_args_to_default_entry_when_no_entry_passed() {
 
 #[test]
 fn run_errors_when_no_default_entry_available() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("run-missing-default");
     let pyproject = project.join("pyproject.toml");
     fs::remove_file(&pyproject).expect("remove pyproject");
@@ -223,6 +231,7 @@ fn run_errors_when_no_default_entry_available() {
 
 #[test]
 fn run_frozen_errors_when_environment_missing() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("run-frozen-missing-env");
     if project.join(".px").exists() {
         fs::remove_dir_all(project.join(".px")).expect("clean .px");
@@ -257,6 +266,7 @@ fn run_frozen_errors_when_environment_missing() {
 
 #[test]
 fn run_frozen_errors_when_lock_missing() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("run-json-flag");
     let lock = project.join("px.lock");
     fs::remove_file(&lock).expect("remove lock");
@@ -288,6 +298,7 @@ fn run_frozen_errors_when_lock_missing() {
 
 #[test]
 fn run_frozen_errors_when_env_outdated() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("run-json-flag");
     let px_dir = project.join(".px");
     fs::create_dir_all(&px_dir).expect("px dir");
@@ -320,6 +331,7 @@ fn run_frozen_errors_when_env_outdated() {
 
 #[test]
 fn run_frozen_errors_on_runtime_mismatch() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("run-json-flag");
     let lock = project.join("px.lock");
     let lock_id = "b0e3d49bac8025c47d3794eaf7e54f74d8b21d357aead0bd433a14e810b4c07f";
@@ -390,6 +402,7 @@ fn write_stale_state(project: &Path, lock_hash: &str) {
 
 #[test]
 fn run_accepts_post_subcommand_json_flag() {
+    let _guard = common::test_env_guard();
     use common::prepare_named_fixture;
     let (_tmp, project) = prepare_named_fixture("run-json-flag", "run-json-flag");
     set_px_scripts(&project, &[("cli", "sample_px_app.cli:main")]);
@@ -424,6 +437,7 @@ fn run_accepts_post_subcommand_json_flag() {
 
 #[test]
 fn run_emits_hint_when_requests_socks_missing_under_proxy() {
+    let _guard = common::test_env_guard();
     use common::prepare_named_fixture;
     let (_tmp, project) = prepare_named_fixture("run-proxy-traceback", "run-proxy-traceback");
     set_px_scripts(&project, &[("cli", "sample_px_app.cli:main")]);
@@ -454,6 +468,7 @@ fn run_emits_hint_when_requests_socks_missing_under_proxy() {
 
 #[test]
 fn run_frozen_handles_large_dependency_graph() {
+    let _guard = common::test_env_guard();
     if !require_online() {
         return;
     }
@@ -482,6 +497,7 @@ fn run_frozen_handles_large_dependency_graph() {
 
 #[test]
 fn run_rejects_dry_run_flag() {
+    let _guard = common::test_env_guard();
     let temp = tempfile::tempdir().expect("tempdir");
     let assert = cargo_bin_cmd!("px")
         .current_dir(temp.path())
@@ -553,6 +569,7 @@ fn find_python() -> Option<String> {
 
 #[test]
 fn test_command_falls_back_when_pytest_missing() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("test-fallback");
     let Some(python) = find_python() else {
         eprintln!("skipping test fallback (python binary not found)");

@@ -1,17 +1,33 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
+use hex;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use super::{
-    apply_python_env, load_cached_build, persist_metadata,
+    apply_python_env,
+    cas::{
+        global_store, pkg_build_lookup_key, source_lookup_key, ObjectKind, ObjectPayload,
+        PkgBuildHeader, SourceHeader,
+    },
+    load_cached_build, persist_metadata,
     wheel::{compute_sha256, ensure_wheel_dist, parse_wheel_tags, wheel_path},
     BuiltWheel, SdistRequest,
 };
+use std::borrow::Cow;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum BuildMethod {
+    PipWheel,
+    PythonBuild,
+}
 
 /// Build or retrieve an sdist-derived wheel from the cache.
 ///
@@ -20,6 +36,8 @@ use super::{
 /// Returns an error when the archive cannot be unpacked, hashed, or copied into
 /// the cache directory.
 pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Result<BuiltWheel> {
+    let cas = global_store();
+
     let precomputed_id = request.sha256.map(|sha| build_identifier(request, sha));
     if let Some(id) = &precomputed_id {
         let meta_path = cache_root.join("sdist-build").join(id).join("meta.json");
@@ -41,6 +59,27 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
             );
         }
     }
+    let sdist_bytes = fs::read(temp_file.path())?;
+    let source_header = SourceHeader {
+        name: request.normalized_name.to_string(),
+        version: request.version.to_string(),
+        filename: request.filename.to_string(),
+        index_url: request.url.to_string(),
+        sha256: download_sha.clone(),
+    };
+    let source_key = source_lookup_key(&source_header);
+    let source_oid = match cas.lookup_key(ObjectKind::Source, &source_key)? {
+        Some(oid) => oid,
+        None => {
+            let payload = ObjectPayload::Source {
+                header: source_header.clone(),
+                bytes: Cow::Owned(sdist_bytes.clone()),
+            };
+            let stored = cas.store(&payload)?;
+            cas.record_key(ObjectKind::Source, &source_key, &stored.oid)?;
+            stored.oid
+        }
+    };
     let build_id = precomputed_id.unwrap_or_else(|| build_identifier(request, &download_sha));
     let build_root = cache_root.join("sdist-build").join(&build_id);
     let meta_path = build_root.join("meta.json");
@@ -70,7 +109,7 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
     extract_sdist(request.python_path, &sdist_path, &src_dir)?;
     let project_dir = discover_project_dir(&src_dir)?;
     ensure_build_bootstrap(request.python_path)?;
-    run_python_build(request.python_path, &project_dir, &dist_dir)?;
+    let build_method = run_python_build(request.python_path, &project_dir, &dist_dir)?;
 
     let built_wheel_path = find_wheel(&dist_dir)?;
     let filename = built_wheel_path
@@ -95,6 +134,22 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
     let sha256 = compute_sha256(&dest)?;
     let size = fs::metadata(&dest)?.len();
     let dist_path = ensure_wheel_dist(&dest, &sha256)?;
+    let runtime_abi = format!("{python_tag}-{abi_tag}-{platform_tag}");
+    let build_options_hash = compute_build_options_hash(request.python_path, build_method)?;
+    let archive = super::cas::archive_dir_canonical(&dist_path)?;
+    let pkg_header = PkgBuildHeader {
+        source_oid,
+        runtime_abi,
+        build_options_hash: build_options_hash.clone(),
+    };
+    let pkg_key = pkg_build_lookup_key(&pkg_header);
+    let pkg_payload = ObjectPayload::PkgBuild {
+        header: pkg_header.clone(),
+        archive: Cow::Owned(archive),
+    };
+    let stored_pkg = cas.store(&pkg_payload)?;
+    cas.record_key(ObjectKind::PkgBuild, &pkg_key, &stored_pkg.oid)?;
+
     let built = BuiltWheel {
         filename,
         url: request.url.to_string(),
@@ -105,6 +160,7 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
         python_tag,
         abi_tag,
         platform_tag,
+        build_options_hash,
     };
     persist_metadata(&meta_path, &built)?;
 
@@ -213,9 +269,9 @@ fn extract_sdist(python: &str, sdist: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_python_build(python: &str, project_dir: &Path, out_dir: &Path) -> Result<()> {
+fn run_python_build(python: &str, project_dir: &Path, out_dir: &Path) -> Result<BuildMethod> {
     match pip_wheel_fallback(python, project_dir, out_dir) {
-        Ok(()) => Ok(()),
+        Ok(method) => Ok(method),
         Err(pip_err) => {
             let mut cmd = Command::new(python);
             cmd.arg("-m")
@@ -230,7 +286,7 @@ fn run_python_build(python: &str, project_dir: &Path, out_dir: &Path) -> Result<
                 format!("failed to run python -m build in {}", project_dir.display())
             })?;
             if output.status.success() {
-                Ok(())
+                Ok(BuildMethod::PythonBuild)
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                 bail!("python -m pip wheel failed: {pip_err}\npython -m build failed: {stderr}")
@@ -239,7 +295,7 @@ fn run_python_build(python: &str, project_dir: &Path, out_dir: &Path) -> Result<
     }
 }
 
-fn pip_wheel_fallback(python: &str, project_dir: &Path, out_dir: &Path) -> Result<()> {
+fn pip_wheel_fallback(python: &str, project_dir: &Path, out_dir: &Path) -> Result<BuildMethod> {
     let mut cmd = Command::new(python);
     cmd.arg("-m")
         .arg("pip")
@@ -256,7 +312,7 @@ fn pip_wheel_fallback(python: &str, project_dir: &Path, out_dir: &Path) -> Resul
         )
     })?;
     if output.status.success() {
-        return Ok(());
+        return Ok(BuildMethod::PipWheel);
     }
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     bail!("{stderr}");
@@ -333,11 +389,106 @@ fn find_wheel(dist_dir: &Path) -> Result<PathBuf> {
     found.ok_or_else(|| anyhow!("wheel not found in {}", dist_dir.display()))
 }
 
+pub(crate) fn compute_build_options_hash(python_path: &str, method: BuildMethod) -> Result<String> {
+    #[derive(Serialize)]
+    struct BuildOptionsFingerprint {
+        python: String,
+        method: BuildMethod,
+        env: BTreeMap<String, String>,
+    }
+
+    let python = fs::canonicalize(python_path)
+        .unwrap_or_else(|_| PathBuf::from(python_path))
+        .display()
+        .to_string();
+    let fingerprint = BuildOptionsFingerprint {
+        python,
+        method,
+        env: build_env_fingerprint(),
+    };
+    let bytes = serde_json::to_vec(&fingerprint)?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+/// Compute the build options hash for a wheel-style build/install.
+pub(crate) fn wheel_build_options_hash(python_path: &str) -> Result<String> {
+    compute_build_options_hash(python_path, BuildMethod::PipWheel)
+}
+
+fn build_env_fingerprint() -> BTreeMap<String, String> {
+    const BUILD_ENV_VARS: &[&str] = &[
+        "ARCHFLAGS",
+        "CFLAGS",
+        "CPPFLAGS",
+        "CXXFLAGS",
+        "LDFLAGS",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "PKG_CONFIG_PATH",
+        "PIP_CONFIG_FILE",
+        "PIP_DISABLE_PIP_VERSION_CHECK",
+        "PIP_EXTRA_INDEX_URL",
+        "PIP_FIND_LINKS",
+        "PIP_INDEX_URL",
+        "PIP_NO_BUILD_ISOLATION",
+        "PIP_NO_CACHE_DIR",
+        "PIP_PREFER_BINARY",
+        "PIP_PROGRESS_BAR",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONHASHSEED",
+        "PYTHONUTF8",
+        "PYTHONWARNINGS",
+        "SETUPTOOLS_USE_DISTUTILS",
+        "SOURCE_DATE_EPOCH",
+    ];
+    let mut env = BTreeMap::new();
+    for key in BUILD_ENV_VARS {
+        if let Ok(value) = std::env::var(key) {
+            env.insert((*key).to_string(), value);
+        }
+    }
+    env
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
     use std::fs;
     use tempfile::tempdir;
+
+    fn restore_env(key: &str, original: Option<String>) {
+        match original {
+            Some(value) => env::set_var(key, value),
+            None => env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn build_options_hash_reflects_env_changes() -> Result<()> {
+        let key = "CFLAGS";
+        let original = env::var(key).ok();
+        env::set_var(key, "value-1");
+        let temp_python = env::temp_dir().join("python");
+        let python = temp_python.display().to_string();
+
+        let first = compute_build_options_hash(&python, BuildMethod::PipWheel)?;
+        env::set_var(key, "value-2");
+        let second = compute_build_options_hash(&python, BuildMethod::PipWheel)?;
+
+        restore_env(key, original);
+        assert_ne!(first, second, "hash should change when build env changes");
+        Ok(())
+    }
+
+    #[test]
+    fn build_options_hash_varies_by_method() -> Result<()> {
+        let temp_python = env::temp_dir().join("python");
+        let python = temp_python.display().to_string();
+        let pip = compute_build_options_hash(&python, BuildMethod::PipWheel)?;
+        let build = compute_build_options_hash(&python, BuildMethod::PythonBuild)?;
+        assert_ne!(pip, build, "build method should influence options hash");
+        Ok(())
+    }
 
     #[test]
     fn detects_project_at_root_with_pyproject() -> Result<()> {

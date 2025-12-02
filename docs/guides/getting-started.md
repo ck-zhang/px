@@ -2,6 +2,8 @@
 
 px is the front door for Python projects: it owns the runtime, dependencies, and environment layout so commands are deterministic.
 
+px currently supports Linux and macOS only; Windows is not supported yet. Use WSL or a Unix host for now.
+
 ## Quick start (single project)
 
 1. From your project root, run `px init` to create `pyproject.toml`, `px.lock`, and `.px/`.

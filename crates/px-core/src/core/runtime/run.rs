@@ -251,12 +251,14 @@ fn build_pytest_invocation(
     let mut defaults = default_pytest_flags(reporter);
     if let TestReporter::Px = reporter {
         let plugin_path = ensure_px_pytest_plugin(ctx, py_ctx)?;
+        let plugin_dir = plugin_path
+            .parent()
+            .unwrap_or(py_ctx.project_root.as_path());
         append_pythonpath(
             &mut envs,
-            plugin_path
-                .parent()
-                .unwrap_or(py_ctx.project_root.as_path()),
+            plugin_dir,
         );
+        append_allowed_paths(&mut envs, plugin_dir);
         defaults.extend_from_slice(&["-p".to_string(), "px_pytest_plugin".to_string()]);
     }
     let pytest_cmd = build_pytest_command_with_defaults(&py_ctx.project_root, test_args, &defaults);
@@ -302,6 +304,20 @@ fn append_pythonpath(envs: &mut EnvPairs, plugin_dir: &Path) {
         }
     } else {
         envs.push(("PYTHONPATH".into(), plugin_entry));
+    }
+}
+
+fn append_allowed_paths(envs: &mut EnvPairs, path: &Path) {
+    if let Some((_, value)) = envs.iter_mut().find(|(key, _)| key == "PX_ALLOWED_PATHS") {
+        let mut parts: Vec<_> = env::split_paths(value).collect();
+        if !parts.iter().any(|p| p == path) {
+            parts.insert(0, path.to_path_buf());
+            if let Ok(joined) = env::join_paths(parts) {
+                if let Ok(strval) = joined.into_string() {
+                    *value = strval;
+                }
+            }
+        }
     }
 }
 
@@ -678,9 +694,13 @@ fn download_stdlib_tests(version: &str, dest: &Path) -> Result<bool> {
         );
         return Ok(false);
     }
-    let bytes = response
-        .bytes()
-        .context("reading cpython source archive for stdlib tests")?;
+    let bytes = match response.bytes() {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            debug!(%err, url = %url, "failed to read cpython source archive for stdlib tests");
+            return Ok(false);
+        }
+    };
     let mut archive = Archive::new(GzDecoder::new(Cursor::new(bytes)));
     if dest.exists() {
         fs::remove_dir_all(dest)
@@ -983,7 +1003,16 @@ fn run_passthrough(
 }
 
 fn missing_pytest(stderr: &str) -> bool {
-    stderr.contains("No module named") && stderr.contains("pytest")
+    let lowered = stderr.to_ascii_lowercase();
+    if !lowered.contains("no module named") {
+        return false;
+    }
+    lowered.contains("no module named 'pytest'")
+        || lowered.contains("no module named \"pytest\"")
+        || lowered
+            .split_once("no module named")
+            .map(|(_, rest)| rest.trim_start().starts_with("pytest"))
+            .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1353,6 +1382,7 @@ mod tests {
     use crate::{GlobalOptions, SystemEffects};
     use px_domain::PxOptions;
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::fs;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -1387,6 +1417,7 @@ mod tests {
             px_options: PxOptions {
                 manage_command: Some("self".into()),
                 plugin_imports: vec!["json".into()],
+                env_vars: BTreeMap::new(),
             },
         };
 
@@ -1420,6 +1451,7 @@ mod tests {
             px_options: PxOptions {
                 manage_command: None,
                 plugin_imports: vec!["px_missing_plugin_mod".into()],
+                env_vars: BTreeMap::new(),
             },
         };
 
@@ -1429,6 +1461,69 @@ mod tests {
             .iter()
             .any(|(key, value)| key == "PX_PLUGIN_PREFLIGHT" && value == "0"));
         Ok(())
+    }
+
+    #[test]
+    fn pytest_plugin_path_is_on_env_vars() -> Result<()> {
+        let ctx = ctx_with_defaults();
+        let python = match ctx.python_runtime().detect_interpreter() {
+            Ok(path) => path,
+            Err(_) => return Ok(()),
+        };
+        let temp = tempdir()?;
+        let py_ctx = PythonContext {
+            project_root: temp.path().to_path_buf(),
+            project_name: "demo".into(),
+            python,
+            pythonpath: temp.path().display().to_string(),
+            allowed_paths: vec![temp.path().to_path_buf()],
+            site_bin: None,
+            pep582_bin: Vec::new(),
+            px_options: PxOptions::default(),
+        };
+        let envs = py_ctx.base_env(&json!({}))?;
+        let (envs, _cmd) = build_pytest_invocation(
+            &ctx,
+            &py_ctx,
+            envs,
+            &[],
+            TestReporter::Px,
+        )?;
+        let plugin_dir = temp.path().join(".px").join("plugins");
+        let pythonpath = envs
+            .iter()
+            .find(|(k, _)| k == "PYTHONPATH")
+            .map(|(_, v)| v)
+            .cloned()
+            .unwrap_or_default();
+        let allowed = envs
+            .iter()
+            .find(|(k, _)| k == "PX_ALLOWED_PATHS")
+            .map(|(_, v)| v)
+            .cloned()
+            .unwrap_or_default();
+        let py_entries: Vec<_> = std::env::split_paths(&pythonpath).collect();
+        let allowed_entries: Vec<_> = std::env::split_paths(&allowed).collect();
+        assert!(
+            py_entries.iter().any(|entry| entry == &plugin_dir),
+            "PYTHONPATH should include the px pytest plugin dir"
+        );
+        assert!(
+            allowed_entries.iter().any(|entry| entry == &plugin_dir),
+            "PX_ALLOWED_PATHS should include the px pytest plugin dir"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_pytest_detection_targets_pytest_module_only() {
+        assert!(missing_pytest(
+            "ModuleNotFoundError: No module named 'pytest'\n"
+        ));
+        assert!(missing_pytest("ImportError: No module named pytest"));
+        assert!(!missing_pytest(
+            "ModuleNotFoundError: No module named 'px_pytest_plugin'\n"
+        ));
     }
 
     #[test]

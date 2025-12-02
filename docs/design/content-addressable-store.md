@@ -213,20 +213,22 @@ On disk, the store looks like:
       abcdef1234...          # raw CAS blob for some oid
     cd/
       cd9876...
-  index.sqlite               # metadata + ownership
+  index.sqlite               # metadata index + ownership cache
   locks/
     ababcdef1234...          # per-oid lock files
   tmp/
     ababcdef1234...partial   # in-progress writes
+  runtimes/<oid>/            # materialized runtime tree + manifest.json (implementation detail)
+  pkg-builds/<oid>/          # materialized pkg-build tree (implementation detail)
 ```
 
 * Objects are sharded by two hex prefix characters to avoid giant directories.
 * Filenames are the full `oid` (no semantic suffix).
-* `index.sqlite` (or similar) stores:
+* `index.sqlite` (or equivalent) is a **reconstructible index** over the store. It caches metadata and ownership, but is not the ultimate source of truth for content or liveness. It stores:
 
   * `meta(key PRIMARY KEY, value TEXT)` – e.g. CAS format/schema versions and px version info.
-  * `objects(oid PRIMARY KEY, kind, size, created_at, last_accessed)`
-  * `refs(owner_type, owner_id, oid, PRIMARY KEY(owner_type, owner_id, oid))`
+  * `objects(oid PRIMARY KEY, kind, size, created_at, last_accessed)` – cached metadata about CAS blobs.
+  * `refs(owner_type, owner_id, oid, PRIMARY KEY(owner_type, owner_id, oid))` – cached ownership edges.
 
 `owner_type` ∈ `{runtime, profile, project-env, workspace-env, tool-env}`. `owner_id` is a stable, px-level identifier, e.g.:
 
@@ -235,6 +237,20 @@ On disk, the store looks like:
 * `tool-env:<tool_name>:<tool_lock_id>:<runtime>`
 * `runtime:<version>:<platform>`
 * `profile:<profile_oid>`
+
+Authoritative sources:
+
+* The bytes and canonical headers of blobs under `objects/` are the source of truth for `(oid, kind, payload)`.
+* Runtime manifests under `~/.px/store/runtimes/<oid>/manifest.json` record runtime ownership metadata (version, platform, owner id) and are used when reconstructing the index/refs.
+* Env materializations under `~/.px/envs/<profile_oid>/manifest.json` (and future runtime manifests) are the source of truth for which profiles/runtimes are “live roots”.
+* `index.sqlite` must always be reconstructible from these authoritative sources (see §13.8.4).
+
+#### Store immutability
+
+* CAS objects, once created, are never modified in place.
+* After successful creation, store objects under `objects/` are made read-only at the filesystem level (e.g. removing write bits) to prevent accidental mutation by tools.
+* Envs are materialized via symlinks and/or `.pth` entries pointing into the store; px never creates writable paths that resolve back into `~/.px/store`.
+* px may perform startup/background checks to verify and repair store permissions to maintain immutability.
 
 ---
 
@@ -525,7 +541,10 @@ On env deletion (e.g. project removed or lock superseded):
 
 #### 13.7.2 GC algorithm
 
-GC is a **mark‑and‑sweep** over objects, driven by `refs`:
+GC is a **mark-and-sweep** over objects, driven by `refs`. The index is treated as a cache, so GC has a precondition:
+
+* GC MUST NOT run while `index.sqlite` is missing, obviously corrupt, or has failed an integrity check.
+* If the index is missing or corrupt, px MUST first rebuild it from `objects/` and env/runtime manifests as specified in §13.8.4. Only after successful reconstruction may GC proceed.
 
 1. **Mark phase**
 
@@ -537,7 +556,7 @@ GC is a **mark‑and‑sweep** over objects, driven by `refs`:
 
      * If `oid NOT IN live_set` and older than a configured grace period:
 
-       * Delete `objects/<prefix>/<oid>` atomically,
+       * Unlink `objects/<prefix>/<oid>` atomically,
        * Remove row from `objects`.
 
 3. Optionally enforce a store size limit:
@@ -549,6 +568,7 @@ Invariants:
 * An object with at least one `refs` row is never deleted.
 * GC operations are transactional: a crash mid‑GC never yields an object that’s “referenced but missing” (either the object or all its refs survive).
 * Size‑based GC does not violate the above invariants.
+* After index reconstruction (§13.8.4), any object not reachable from env/runtime manifests (and thus not recreated in `refs`) is considered eligible for GC after the grace period; such objects can always be re-built from lockfiles if later needed.
 
 ---
 
@@ -600,6 +620,16 @@ Optional `px doctor` / background health checks:
 * Sweep `tmp/*.partial` and delete any leftover partials.
 * Sample existing objects and verify their digests; delete corrupt blobs and remove `refs` entries that point only to missing objects, prompting rebuild on next use.
 * Check CAS format/schema version in `index.sqlite` and fail cleanly on incompatibility.
+* If `index.sqlite` is missing or fails integrity checks, reconstruct it from the store + manifests as per §13.8.4 before any GC/cleanup.
+
+#### 13.8.4 Index reconstruction & GC gating
+
+* Create a fresh index (schema + meta).
+* Rebuild `objects` by walking `~/.px/store/objects/**`, reading canonical headers, and recording `(oid, kind, size, timestamps)`.
+* Rebuild `refs` from env manifests under `~/.px/envs`, adding `profile` → `profile/runtime/pkg-build` edges.
+* Optionally reconstruct higher-level owners (project-env, workspace-env, tool-env) from `.px/state.json` for richer diagnostics.
+* Mark the index as healthy; GC and size-based cleanup MUST only run against a healthy index.
+* Consequences: objects not reachable from manifests may be GC’d after the grace period but are reproducible from lockfiles.
 
 ---
 
@@ -639,6 +669,10 @@ px ships with:
 
   * Never corrupt local store.
   * px surfaces them as non-fatal (falls back to local builds if possible) or as clear CAS‑level errors (`PX81x`).
+
+* Implementation toggle:
+
+  * Remote push/pull is off by default; enable explicitly via `PX_CAS_REMOTE_ENABLE=1` plus `PX_CAS_REMOTE_URL`/`PX_CAS_REMOTE_PATH`.
 
 The digest is always authoritative; remote is a cache/replica, not a different source of truth.
 

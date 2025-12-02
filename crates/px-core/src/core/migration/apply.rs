@@ -13,8 +13,8 @@ use px_domain::{
 use crate::runtime_manager;
 use crate::{
     discover_project_root, install_snapshot, lock_is_fresh, manifest_snapshot_at,
-    resolve_dependencies_with_effects, summarize_autopins, CommandContext, ExecutionOutcome,
-    InstallState, InstallUserError, ManifestSnapshot,
+    refresh_project_site, resolve_dependencies_with_effects, summarize_autopins, CommandContext,
+    ExecutionOutcome, InstallState, InstallUserError, ManifestSnapshot,
 };
 
 use super::plan::{apply_precedence, apply_python_override};
@@ -547,6 +547,13 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
             }
         }
     };
+
+    if let Err(err) = refresh_project_site(&snapshot, ctx) {
+        if pyproject_modified {
+            rollback_failed_migration(&backups, &created_files)?;
+        }
+        return Err(err);
+    }
 
     let backup_summary = backups.finish();
     let pyproject_updated = pyproject_plan.updated() || autopin_changed_pyproject;

@@ -8,6 +8,7 @@ use common::{init_empty_project, parse_json, prepare_fixture, project_identity};
 
 #[test]
 fn output_build_produces_wheel_and_sdist() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = init_empty_project("output-build");
     let (name, normalized, version) = project_identity(&project);
     let dist_dir = project.join("dist-artifacts");
@@ -53,7 +54,13 @@ fn output_build_produces_wheel_and_sdist() {
 
 #[test]
 fn publish_dry_run_reports_registry_and_artifacts() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = init_empty_project("output-publish-dry-run");
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["sync"])
+        .assert()
+        .success();
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .args(["build"])
@@ -89,6 +96,7 @@ fn publish_dry_run_reports_registry_and_artifacts() {
 
 #[test]
 fn publish_requires_token_when_online() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = init_empty_project("output-publish-token");
     cargo_bin_cmd!("px")
         .current_dir(&project)
@@ -119,6 +127,7 @@ fn publish_requires_token_when_online() {
 
 #[test]
 fn publish_errors_when_dist_missing() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = init_empty_project("output-publish-missing-dist");
 
     let assert = cargo_bin_cmd!("px")
@@ -139,6 +148,7 @@ fn publish_errors_when_dist_missing() {
 
 #[test]
 fn build_dry_run_reports_empty_artifacts() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = init_empty_project("output-build-dry-run");
 
     let assert = cargo_bin_cmd!("px")
@@ -166,6 +176,7 @@ fn build_dry_run_reports_empty_artifacts() {
 
 #[test]
 fn publish_requires_online_flag_when_artifacts_exist() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = init_empty_project("output-publish-offline");
     cargo_bin_cmd!("px")
         .current_dir(&project)
@@ -196,6 +207,7 @@ fn publish_requires_online_flag_when_artifacts_exist() {
 
 #[test]
 fn publish_rejects_empty_token_value() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = init_empty_project("output-publish-empty-token");
     cargo_bin_cmd!("px")
         .current_dir(&project)
@@ -226,7 +238,13 @@ fn publish_rejects_empty_token_value() {
 
 #[test]
 fn publish_dry_run_accepts_custom_registry_url() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = init_empty_project("output-publish-custom-registry");
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["sync"])
+        .assert()
+        .success();
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .args(["build"])
@@ -256,6 +274,7 @@ fn publish_dry_run_accepts_custom_registry_url() {
 
 #[test]
 fn built_wheel_is_installable_with_pip() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("sample_px_app");
     let Some(python) = find_python() else {
         eprintln!("skipping wheel install test (python binary not found)");

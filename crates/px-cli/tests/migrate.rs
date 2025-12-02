@@ -15,18 +15,28 @@ fn require_online() -> bool {
 }
 
 fn px_command(temp: &TempDir) -> assert_cmd::Command {
+    let cache_path = temp.path().join(".px-cache");
+    let _ = std::fs::remove_dir_all(&cache_path);
+    let store_path = cache_path.join("store");
+    let _ = std::fs::remove_dir_all(&store_path);
     let mut cmd = cargo_bin_cmd!("px");
     cmd.current_dir(temp.path())
         .env("PX_ONLINE", "1")
-        .env("PX_CACHE_PATH", temp.path().join(".px-cache"));
+        .env("PX_CACHE_PATH", &cache_path)
+        .env("PX_STORE_PATH", &store_path);
     cmd
 }
 
 fn px_command_offline(temp: &TempDir) -> assert_cmd::Command {
+    let cache_path = temp.path().join(".px-cache");
+    let _ = std::fs::remove_dir_all(&cache_path);
+    let store_path = cache_path.join("store");
+    let _ = std::fs::remove_dir_all(&store_path);
     let mut cmd = cargo_bin_cmd!("px");
     cmd.current_dir(temp.path())
         .env("PX_ONLINE", "0")
-        .env("PX_CACHE_PATH", temp.path().join(".px-cache"));
+        .env("PX_CACHE_PATH", &cache_path)
+        .env("PX_STORE_PATH", &store_path);
     cmd
 }
 
@@ -148,6 +158,42 @@ build-backend = "setuptools.build_meta"
     assert!(
         temp.path().join("px.lock").exists(),
         "px.lock should be created"
+    );
+}
+
+#[test]
+fn migrate_apply_builds_environment() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(&temp, "requirements.txt", "rich==13.7.1\n");
+
+    let assert = px_command(&temp)
+        .args([
+            "--json",
+            "migrate",
+            "--apply",
+            "--allow-dirty",
+            "--source",
+            "requirements.txt",
+        ])
+        .assert()
+        .success();
+    let payload: Value = serde_json::from_slice(&assert.get_output().stdout).expect("json payload");
+    assert_eq!(payload["status"], "ok");
+
+    let status = px_command(&temp)
+        .args(["--json", "status"])
+        .assert()
+        .success();
+    let status_json: Value =
+        serde_json::from_slice(&status.get_output().stdout).expect("json status");
+    assert_eq!(status_json["env"]["status"], "clean");
+    let project_state = status_json["project"]["state"].as_str().unwrap_or_default();
+    assert_eq!(
+        project_state, "Consistent",
+        "expected Consistent state, got {project_state}"
     );
 }
 

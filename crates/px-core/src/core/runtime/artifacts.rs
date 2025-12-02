@@ -19,7 +19,7 @@ use crate::effects;
 use crate::progress::{download_concurrency, ProgressReporter};
 use crate::pypi::{PypiFile, PypiReleaseResponse};
 use crate::python_sys::{detect_interpreter, detect_interpreter_tags, InterpreterTags};
-use crate::store::{ArtifactRequest, CacheLocation, SdistRequest};
+use crate::store::{wheel_build_options_hash, ArtifactRequest, CacheLocation, SdistRequest};
 use crate::{InstallUserError, PX_VERSION};
 
 pub(crate) fn resolve_pins(
@@ -106,8 +106,16 @@ fn download_artifact(
     force_sdist: bool,
 ) -> Result<ResolvedDependency> {
     let release = pypi.fetch_release(&pin.normalized, &pin.version, &pin.specifier)?;
+    let default_build_hash = wheel_build_options_hash(&python)?;
     let artifact = if force_sdist {
-        build_wheel_via_sdist(cache_store, cache, &release, &pin, python)?
+        build_wheel_via_sdist(
+            cache_store,
+            cache,
+            &release,
+            &pin,
+            python,
+            &default_build_hash,
+        )?
     } else {
         match select_wheel(&release.urls, tags, &pin.specifier) {
             Ok(wheel) => {
@@ -128,10 +136,18 @@ fn download_artifact(
                     python_tag: wheel.python_tag.clone(),
                     abi_tag: wheel.abi_tag.clone(),
                     platform_tag: wheel.platform_tag.clone(),
+                    build_options_hash: default_build_hash.clone(),
                     is_direct_url: false,
                 }
             }
-            Err(_) => build_wheel_via_sdist(cache_store, cache, &release, &pin, python)?,
+            Err(_) => build_wheel_via_sdist(
+                cache_store,
+                cache,
+                &release,
+                &pin,
+                python,
+                &default_build_hash,
+            )?,
         }
     };
 
@@ -153,6 +169,7 @@ fn build_wheel_via_sdist(
     release: &PypiReleaseResponse,
     pin: &PinSpec,
     python: &str,
+    default_build_hash: &str,
 ) -> Result<LockedArtifact> {
     let sdist = select_sdist(&release.urls, &pin.specifier)?;
     let built = cache_store.ensure_sdist_build(
@@ -166,6 +183,11 @@ fn build_wheel_via_sdist(
             python_path: python,
         },
     )?;
+    let build_options_hash = if built.build_options_hash.is_empty() {
+        default_build_hash.to_string()
+    } else {
+        built.build_options_hash.clone()
+    };
     Ok(LockedArtifact {
         filename: built.filename,
         url: built.url,
@@ -175,6 +197,7 @@ fn build_wheel_via_sdist(
         python_tag: built.python_tag,
         abi_tag: built.abi_tag,
         platform_tag: built.platform_tag,
+        build_options_hash,
         is_direct_url: false,
     })
 }

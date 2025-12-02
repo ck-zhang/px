@@ -1,6 +1,6 @@
 #![deny(clippy::all, warnings)]
 
-use std::{env, sync::Arc};
+use std::{env, path::PathBuf, sync::Arc};
 
 use clap::Parser;
 use color_eyre::{eyre::eyre, Result};
@@ -19,6 +19,11 @@ use output::{emit_output, OutputOptions, StatusRenderOptions};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
+
+    if cfg!(windows) {
+        eprintln!("px currently supports Linux and macOS only; Windows is not supported yet. Please use WSL or a Unix host.");
+        std::process::exit(1);
+    }
 
     let cli = PxCli::parse();
     init_tracing(cli.trace, cli.verbose);
@@ -94,5 +99,15 @@ fn apply_env_overrides(cli: &PxCli) {
         env::set_var("PX_FORCE_SDIST", "1");
     } else if cli.prefer_wheels {
         env::set_var("PX_FORCE_SDIST", "0");
+    }
+
+    // Keep the CAS store aligned with an explicit cache override. This avoids
+    // surprises (and format mismatches) when a caller sets PX_CACHE_PATH but
+    // forgets to pin PX_STORE_PATH as well.
+    if env::var_os("PX_STORE_PATH").is_none() {
+        if let Some(cache) = env::var_os("PX_CACHE_PATH") {
+            let store = PathBuf::from(cache).join("store");
+            env::set_var("PX_STORE_PATH", store);
+        }
     }
 }

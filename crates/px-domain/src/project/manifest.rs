@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
 };
@@ -19,6 +19,7 @@ pub(crate) const TOMLI_W_REQUIREMENT: &str = "tomli-w>=1.0.0";
 pub struct PxOptions {
     pub manage_command: Option<String>,
     pub plugin_imports: Vec<String>,
+    pub env_vars: BTreeMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -776,6 +777,17 @@ pub(crate) fn manifest_fingerprint(
             hasher.update(b"\n");
         }
     }
+    if !options.env_vars.is_empty() {
+        let mut vars = options.env_vars.clone().into_iter().collect::<Vec<_>>();
+        vars.sort_by(|a, b| a.0.cmp(&b.0));
+        for (key, value) in vars {
+            hasher.update(b"env:");
+            hasher.update(key.trim().as_bytes());
+            hasher.update(b"=");
+            hasher.update(value.trim().as_bytes());
+            hasher.update(b"\n");
+        }
+    }
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -878,6 +890,19 @@ pub fn px_options_from_doc(doc: &DocumentMut) -> PxOptions {
             imports.sort();
             imports.dedup();
             options.plugin_imports = imports;
+        }
+        if let Some(env_table) = px.get("env").and_then(Item::as_table) {
+            for (key, value) in env_table.iter() {
+                let key = key.trim();
+                if key.is_empty() {
+                    continue;
+                }
+                if let Some(val) = value.as_str() {
+                    options.env_vars.insert(key.to_string(), val.to_string());
+                } else if let Some(val) = value.as_value() {
+                    options.env_vars.insert(key.to_string(), val.to_string());
+                }
+            }
         }
     }
     options
@@ -1470,6 +1495,9 @@ requires-python = ">=3.11"
 [tool.px]
 manage-command = " self "
 plugin-imports = ["tomli_w", " tomli_w ", "hatchling.builders.plugin"]
+ [tool.px.env]
+ FOO = "bar"
+ COUNT = 1
 "#
         .parse()?;
 
@@ -1481,6 +1509,13 @@ plugin-imports = ["tomli_w", " tomli_w ", "hatchling.builders.plugin"]
                 "hatchling.builders.plugin".to_string(),
                 "tomli_w".to_string()
             ]
+        );
+        assert_eq!(
+            options.env_vars,
+            BTreeMap::from([
+                ("COUNT".to_string(), "1".to_string()),
+                ("FOO".to_string(), "bar".to_string())
+            ])
         );
         Ok(())
     }

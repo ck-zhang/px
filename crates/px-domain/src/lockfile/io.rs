@@ -595,6 +595,11 @@ fn parse_artifact_table(table: &Table) -> Option<LockedArtifact> {
         .get("is_direct_url")
         .and_then(Item::as_bool)
         .unwrap_or(false);
+    let build_options_hash = table
+        .get("build_options_hash")
+        .and_then(Item::as_str)
+        .unwrap_or_default()
+        .to_string();
     Some(LockedArtifact {
         filename,
         url,
@@ -605,6 +610,7 @@ fn parse_artifact_table(table: &Table) -> Option<LockedArtifact> {
         abi_tag,
         platform_tag,
         is_direct_url,
+        build_options_hash,
     })
 }
 

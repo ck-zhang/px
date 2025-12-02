@@ -16,3 +16,12 @@ pub mod commands {
     pub const PYTHON: &str = "PX650";
     pub const GENERIC: &str = "PX000";
 }
+
+#[allow(dead_code)]
+pub mod cas {
+    pub const MISSING_OR_CORRUPT: &str = "PX800";
+    pub const STORE_WRITE_FAILURE: &str = "PX810";
+    pub const INDEX_CORRUPT: &str = "PX811";
+    pub const FORMAT_INCOMPATIBLE: &str = "PX812";
+    pub const REMOTE_FAILURE: &str = "PX813";
+}

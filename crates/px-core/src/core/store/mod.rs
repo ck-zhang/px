@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::python_sys::detect_interpreter;
 
+pub mod cas;
 pub mod pypi;
 
 mod cache;
@@ -24,6 +25,7 @@ pub use cache::{
 };
 pub use prefetch::prefetch_artifacts;
 pub use sdist::ensure_sdist_build;
+pub(crate) use sdist::wheel_build_options_hash;
 #[allow(unused_imports)]
 pub use wheel::{
     cache_wheel, compute_sha256, download_with_retry, ensure_wheel_dist, http_client,
@@ -110,6 +112,7 @@ pub struct BuiltWheel {
     pub python_tag: String,
     pub abi_tag: String,
     pub platform_tag: String,
+    pub build_options_hash: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -124,6 +127,8 @@ struct BuiltWheelMetadata {
     python_tag: String,
     abi_tag: String,
     platform_tag: String,
+    #[serde(default)]
+    build_options_hash: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -149,6 +154,7 @@ fn load_cached_build(meta_path: &Path) -> Result<Option<BuiltWheel>> {
         python_tag: meta.python_tag,
         abi_tag: meta.abi_tag,
         platform_tag: meta.platform_tag,
+        build_options_hash: meta.build_options_hash,
     }))
 }
 
@@ -163,6 +169,7 @@ fn persist_metadata(meta_path: &Path, built: &BuiltWheel) -> Result<()> {
         python_tag: built.python_tag.clone(),
         abi_tag: built.abi_tag.clone(),
         platform_tag: built.platform_tag.clone(),
+        build_options_hash: built.build_options_hash.clone(),
     };
     if let Some(parent) = meta_path.parent() {
         fs::create_dir_all(parent)?;

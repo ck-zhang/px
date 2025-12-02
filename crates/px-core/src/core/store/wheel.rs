@@ -10,9 +10,11 @@ use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
 use super::{
+    cas::{global_store, source_lookup_key, LoadedObject, ObjectKind, ObjectPayload, SourceHeader},
     ArtifactRequest, CachedArtifact, CachedWheelFile, WheelUnpackMetadata, HTTP_TIMEOUT,
     USER_AGENT, WHEEL_MARKER_NAME,
 };
+use std::borrow::Cow;
 
 /// Ensure the requested wheel is available within the cache.
 ///
@@ -21,16 +23,67 @@ use super::{
 /// Returns an error when downloads fail, hashes do not match, or the cache
 /// directory cannot be mutated.
 pub fn cache_wheel(cache_root: &Path, request: &ArtifactRequest<'_>) -> Result<CachedArtifact> {
+    let cas = global_store();
+    let header = SourceHeader {
+        name: request.name.to_string(),
+        version: request.version.to_string(),
+        filename: request.filename.to_string(),
+        index_url: request.url.to_string(),
+        sha256: request.sha256.to_string(),
+    };
+    let lookup_key = source_lookup_key(&header);
+    if let Some(oid) = cas.lookup_key(ObjectKind::Source, &lookup_key)? {
+        match cas.load(&oid) {
+            Ok(LoadedObject::Source { bytes, .. }) => {
+                let wheel_dest =
+                    wheel_path(cache_root, request.name, request.version, request.filename);
+                if let Some(parent) = wheel_dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&wheel_dest, &bytes)?;
+                let sha = compute_sha256(&wheel_dest)?;
+                if sha != request.sha256 {
+                    return Err(anyhow!(
+                        "CAS source digest mismatch for {} (expected {}, got {})",
+                        request.filename,
+                        request.sha256,
+                        sha
+                    ));
+                }
+                let dist_path = ensure_wheel_dist(&wheel_dest, request.sha256)?;
+                return Ok(CachedArtifact {
+                    wheel_path: wheel_dest,
+                    dist_path,
+                    size: bytes.len() as u64,
+                });
+            }
+            Ok(_) => {
+                // Wrong kind stored under key; fall through to download.
+            }
+            Err(_) => {
+                // Corrupt or missing; allow download path to refresh.
+            }
+        }
+    }
+
     let wheel_dest = wheel_path(cache_root, request.name, request.version, request.filename);
     let wheel = match validate_existing(&wheel_dest, request.sha256)? {
         Some(existing) => existing,
         None => download_with_retry(&wheel_dest, request)?,
     };
+    let artifact_size = wheel.size;
     let dist_path = ensure_wheel_dist(&wheel.path, request.sha256)?;
+    let wheel_bytes = fs::read(&wheel.path)?;
+    let payload = ObjectPayload::Source {
+        header,
+        bytes: Cow::Owned(wheel_bytes.clone()),
+    };
+    let stored = cas.store(&payload)?;
+    cas.record_key(ObjectKind::Source, &lookup_key, &stored.oid)?;
     Ok(CachedArtifact {
         wheel_path: wheel.path,
         dist_path,
-        size: wheel.size,
+        size: artifact_size,
     })
 }
 

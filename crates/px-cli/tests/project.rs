@@ -9,13 +9,18 @@ mod common;
 
 use common::{parse_json, prepare_fixture, require_online};
 
+fn px_cmd() -> assert_cmd::Command {
+    common::ensure_test_store_env();
+    cargo_bin_cmd!("px")
+}
+
 #[test]
 fn project_init_creates_minimal_shape() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path().join("demo_shape");
     fs::create_dir_all(&project_dir).expect("create project dir");
 
-    cargo_bin_cmd!("px")
+    px_cmd()
         .current_dir(&project_dir)
         .arg("init")
         .assert()
@@ -85,7 +90,7 @@ fn project_init_infers_package_name_from_directory() {
     let project_dir = temp.path().join("Fancy-App");
     fs::create_dir_all(&project_dir).expect("create project dir");
 
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(&project_dir)
         .args(["init"])
         .assert()
@@ -107,7 +112,7 @@ fn project_init_refuses_when_pyproject_exists() {
     scaffold_demo(&temp, "demo_pkg");
     let project_dir = temp.path();
 
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(project_dir)
         .args(["init"])
         .assert()
@@ -127,7 +132,7 @@ fn project_init_reports_orphaned_lockfile() {
     let project_dir = temp.path();
     fs::write(project_dir.join("px.lock"), "").expect("write px.lock");
 
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(project_dir)
         .args(["init"])
         .assert()
@@ -156,7 +161,7 @@ fn project_init_cleans_up_when_runtime_missing() {
     fs::create_dir_all(&project_dir).expect("create project dir");
     let registry = temp.path().join("runtimes.json");
 
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(&project_dir)
         .env("PX_RUNTIME_REGISTRY", &registry)
         .args(["init"])
@@ -192,7 +197,7 @@ fn project_surfaces_invalid_pyproject_without_trace() {
     )
     .expect("write invalid pyproject");
 
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(project_dir)
         .args(["--json", "status"])
         .assert()
@@ -230,7 +235,7 @@ build-backend = "setuptools.build_meta"
     .expect("write pyproject");
     fs::write(project_dir.join("px.lock"), "not toml").expect("write lockfile");
 
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(project_dir)
         .args(["--json", "status"])
         .assert()
@@ -251,7 +256,7 @@ fn project_init_respects_python_operator() {
     let project_dir = temp.path().join("py-req");
     fs::create_dir_all(&project_dir).expect("create project dir");
 
-    cargo_bin_cmd!("px")
+    px_cmd()
         .current_dir(&project_dir)
         .args(["init", "--py", "~=3.11"])
         .assert()
@@ -271,7 +276,7 @@ fn project_init_dry_run_writes_nothing() {
     let project_dir = temp.path().join("dry-init");
     fs::create_dir_all(&project_dir).expect("create project dir");
 
-    cargo_bin_cmd!("px")
+    px_cmd()
         .current_dir(&project_dir)
         .args(["init", "--dry-run"])
         .assert()
@@ -297,7 +302,7 @@ fn project_init_json_reports_details() {
     let project_dir = temp.path().join("json-demo");
     fs::create_dir_all(&project_dir).expect("create project dir");
 
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(&project_dir)
         .args(["--json", "init"])
         .assert()
@@ -336,13 +341,13 @@ fn px_why_reports_direct_dependency() {
         return;
     }
     let (_tmp, project) = prepare_fixture("why-direct");
-    cargo_bin_cmd!("px")
+    px_cmd()
         .current_dir(&project)
         .env("PX_ONLINE", "1")
         .arg("sync")
         .assert()
         .success();
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(&project)
         .env("PX_ONLINE", "1")
         .args(["--json", "why", "rich"])
@@ -366,13 +371,13 @@ fn px_why_reports_transitive_chain() {
         return;
     }
     let (_tmp, project) = prepare_fixture("why-transitive");
-    cargo_bin_cmd!("px")
+    px_cmd()
         .current_dir(&project)
         .env("PX_ONLINE", "1")
         .arg("sync")
         .assert()
         .success();
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(&project)
         .env("PX_ONLINE", "1")
         .args(["--json", "why", "markdown-it-py"])
@@ -412,7 +417,7 @@ fn project_add_inserts_dependency() {
     scaffold_demo(&temp, "demo_add");
     let project_dir = temp.path();
 
-    cargo_bin_cmd!("px")
+    px_cmd()
         .current_dir(project_dir)
         .args(["add", "requests==2.32.3"])
         .assert()
@@ -432,7 +437,7 @@ fn project_add_dry_run_leaves_project_unchanged() {
     let pyproject_before = fs::read_to_string(&pyproject).expect("read pyproject");
     let lock_before = fs::read_to_string(&lock).expect("read lockfile");
 
-    cargo_bin_cmd!("px")
+    px_cmd()
         .current_dir(project_dir)
         .args(["add", "requests", "--dry-run"])
         .assert()
@@ -457,7 +462,7 @@ fn project_update_restores_manifest_on_failure() {
     }
     let (_temp, root) = common::init_empty_project("px-update-restore");
     let cache = root.join(".px-cache");
-    cargo_bin_cmd!("px")
+    px_cmd()
         .current_dir(&root)
         .env("PX_CACHE_PATH", &cache)
         .args(["add", "packaging==23.0"])
@@ -471,7 +476,7 @@ fn project_update_restores_manifest_on_failure() {
     perms.set_readonly(true);
     fs::set_permissions(&lockfile, perms).expect("set readonly lockfile");
 
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(&root)
         .env("PX_CACHE_PATH", &cache)
         .args(["--json", "update", "packaging"])
@@ -524,7 +529,7 @@ build-backend = "setuptools.build_meta"
     )
     .expect("write pyproject");
 
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(project_dir)
         .args(["--json", "sync", "--dry-run"])
         .assert()
@@ -547,13 +552,13 @@ fn project_remove_deletes_dependency() {
     scaffold_demo(&temp, "demo_remove");
     let project_dir = temp.path();
 
-    cargo_bin_cmd!("px")
+    px_cmd()
         .current_dir(project_dir)
         .args(["add", "requests==2.32.3"])
         .assert()
         .success();
 
-    cargo_bin_cmd!("px")
+    px_cmd()
         .current_dir(project_dir)
         .args(["remove", "requests"])
         .assert()
@@ -569,7 +574,7 @@ fn project_remove_requires_direct_dependency() {
     scaffold_demo(&temp, "demo_remove_missing");
     let project_dir = temp.path();
 
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(project_dir)
         .args(["remove", "missing-pkg"])
         .assert()
@@ -589,7 +594,7 @@ fn project_remove_requires_direct_dependency() {
 #[test]
 fn px_commands_require_project_root() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(temp.path())
         .args(["add", "requests==2.32.3"])
         .assert()
@@ -622,7 +627,7 @@ fn all_project_commands_surface_missing_project_errors() {
     ];
 
     for args in &human_commands {
-        let assert = cargo_bin_cmd!("px")
+        let assert = px_cmd()
             .current_dir(temp.path())
             .args(args)
             .assert()
@@ -649,7 +654,7 @@ fn all_project_commands_surface_missing_project_errors() {
     ];
 
     for args in &json_commands {
-        let assert = cargo_bin_cmd!("px")
+        let assert = px_cmd()
             .current_dir(temp.path())
             .args(args)
             .assert()
@@ -677,14 +682,14 @@ fn px_commands_walk_up_to_project_root() {
     let project_dir = temp.path().join("root-app");
     fs::create_dir_all(project_dir.join("nested").join("deep")).expect("create dirs");
 
-    cargo_bin_cmd!("px")
+    px_cmd()
         .current_dir(&project_dir)
         .args(["init", "--package", "root_app"])
         .assert()
         .success();
 
     let nested = project_dir.join("nested").join("deep");
-    cargo_bin_cmd!("px")
+    px_cmd()
         .current_dir(&nested)
         .args(["add", "requests==2.32.3"])
         .assert()
@@ -701,7 +706,7 @@ fn px_commands_walk_up_to_project_root() {
 fn sync_frozen_missing_lock_hint_is_clear() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path();
-    cargo_bin_cmd!("px")
+    px_cmd()
         .current_dir(project_dir)
         .args(["init", "--package", "sync_hint_demo"])
         .assert()
@@ -712,7 +717,7 @@ fn sync_frozen_missing_lock_hint_is_clear() {
         eprintln!("skipping sync hint test (python binary not found)");
         return;
     };
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(project_dir)
         .env("PX_RUNTIME_PYTHON", &python)
         .args(["--json", "sync", "--frozen"])
@@ -741,7 +746,7 @@ fn project_status_reports_missing_lock() {
         eprintln!("skipping status test (python binary not found)");
         return;
     };
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
         .args(["--json", "status"])
@@ -770,7 +775,7 @@ fn project_status_detects_manifest_drift() {
         eprintln!("skipping status test (python binary not found)");
         return;
     };
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
         .args(["--json", "status"])
@@ -791,7 +796,12 @@ fn project_status_detects_manifest_drift() {
 
 #[test]
 fn project_status_ignores_dependencies_filtered_by_markers() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = common::init_empty_project("px-status-markers");
+    let cache = project.join(".px-cache");
+    let store = cache.join("store");
+    let envs = cache.join("envs");
+    fs::create_dir_all(&envs).expect("create envs dir");
     let pyproject = project.join("pyproject.toml");
     let mut doc: DocumentMut = fs::read_to_string(&pyproject)
         .expect("read pyproject")
@@ -808,9 +818,16 @@ fn project_status_ignores_dependencies_filtered_by_markers() {
         return;
     };
 
-    cargo_bin_cmd!("px")
+    // Clean once, then reuse the same test cache across both commands so the
+    // environment persists between sync and status.
+    let mut sync_cmd = cargo_bin_cmd!("px");
+    sync_cmd
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
         .args(["sync"])
         .assert()
         .success();
@@ -818,6 +835,10 @@ fn project_status_ignores_dependencies_filtered_by_markers() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
         .args(["--json", "status"])
         .assert()
         .success();
@@ -832,7 +853,7 @@ fn run_and_test_report_missing_manifest_command() {
     let root = temp.path();
     fs::write(root.join("px.lock"), "").expect("touch lock");
 
-    let run = cargo_bin_cmd!("px")
+    let run = px_cmd()
         .current_dir(root)
         .args(["--json", "run", "demo"])
         .assert()
@@ -840,7 +861,7 @@ fn run_and_test_report_missing_manifest_command() {
     let payload = parse_json(&run);
     assert_eq!(payload["details"]["command"], json!("run"));
 
-    let test = cargo_bin_cmd!("px")
+    let test = px_cmd()
         .current_dir(root)
         .args(["--json", "test"])
         .assert()
@@ -851,16 +872,37 @@ fn run_and_test_report_missing_manifest_command() {
 
 #[test]
 fn project_test_surfaces_missing_pytest() {
+    let _guard = common::test_env_guard();
     let (_temp, root) = common::init_empty_project("px-missing-pytest");
+    let cache = root.join(".px-cache");
+    let store = cache.join("store");
+    let envs = cache.join("envs");
+    fs::create_dir_all(&envs).expect("create envs dir");
 
     let Some(python) = find_python() else {
         eprintln!("skipping missing pytest test (python binary not found)");
         return;
     };
+    let has_pytest = std::process::Command::new(&python)
+        .args([
+            "-c",
+            "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('pytest') else 1)",
+        ])
+        .status()
+        .ok()
+        .is_some_and(|status| status.success());
+    if has_pytest {
+        eprintln!("skipping missing pytest test (pytest already available on runtime)");
+        return;
+    }
 
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(&root)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
         .args(["--json", "test"])
         .assert()
         .failure();
@@ -907,7 +949,7 @@ fn project_test_prefers_runtests_script_when_present() {
     )
     .expect("write runtests script");
 
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(&root)
         .env("PX_RUNTIME_PYTHON", &python)
         .args(["--json", "test"])
@@ -937,7 +979,7 @@ fn corrupt_state_file_is_reported() {
     fs::create_dir_all(state.parent().unwrap()).expect("create .px");
     fs::write(&state, "{not-json").expect("corrupt state");
 
-    let assert = cargo_bin_cmd!("px")
+    let assert = px_cmd()
         .current_dir(root)
         .args(["--json", "status"])
         .assert()
@@ -976,7 +1018,7 @@ fn find_python() -> Option<String> {
 }
 
 fn scaffold_demo(temp: &TempDir, package: &str) {
-    cargo_bin_cmd!("px")
+    px_cmd()
         .current_dir(temp.path())
         .args(["init", "--package", package])
         .assert()

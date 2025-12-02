@@ -15,6 +15,8 @@ pub struct LockedArtifact {
     pub platform_tag: String,
     #[serde(default)]
     pub is_direct_url: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub build_options_hash: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

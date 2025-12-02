@@ -2,6 +2,8 @@
 
 This docs set replaces the monolithic `spec.md` with focused guides and references. Start here, then dive into the section you need.
 
+Platform support: px targets Linux and macOS today; Windows is not supported yet (use WSL in the meantime).
+
 ## Guides
 
 * [Getting started](./guides/getting-started.md)

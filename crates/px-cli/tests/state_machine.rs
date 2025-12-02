@@ -27,13 +27,42 @@ fn find_python() -> Option<String> {
 
 #[test]
 fn fmt_bypasses_project_lock_env_gating() {
+    let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("fmt-bypass");
+    let cache = project.join(".px-cache");
+    let store = cache.join("store");
+    let envs = cache.join("envs");
+    let tools = cache.join("tools");
+    fs::create_dir_all(&envs).expect("create envs dir");
+    fs::create_dir_all(&tools).expect("create tools dir");
+    let Some(python) = find_python() else {
+        eprintln!("skipping fmt bypass test (python binary not found)");
+        return;
+    };
     let lock = project.join("px.lock");
     fs::remove_file(&lock).expect("remove px.lock");
     fs::remove_dir_all(project.join(".px")).ok();
 
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_TOOLS_DIR", &tools)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
+        .args(["tool", "install", "ruff", "ruff==0.14.6"])
+        .assert()
+        .success();
+
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_TOOLS_DIR", &tools)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
         .args(["--json", "fmt"])
         .assert()
         .success();

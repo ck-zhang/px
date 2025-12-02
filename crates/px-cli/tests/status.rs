@@ -31,7 +31,12 @@ fn find_python() -> Option<String> {
 
 #[test]
 fn project_status_json_consistent() {
+    let _guard = common::test_env_guard();
     let (_tmp, root) = common::init_empty_project("status-consistent");
+    let cache = root.join(".px-cache");
+    let store = cache.join("store");
+    let envs = cache.join("envs");
+    fs::create_dir_all(&envs).expect("create envs dir");
     let Some(python) = find_python() else {
         eprintln!("skipping status test (python binary not found)");
         return;
@@ -40,6 +45,10 @@ fn project_status_json_consistent() {
     cargo_bin_cmd!("px")
         .current_dir(&root)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
         .args(["sync"])
         .assert()
         .success();
@@ -47,6 +56,10 @@ fn project_status_json_consistent() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&root)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
         .args(["--json", "status"])
         .assert()
         .success();
@@ -66,7 +79,12 @@ fn project_status_json_consistent() {
 
 #[test]
 fn project_status_detects_manifest_drift() {
+    let _guard = common::test_env_guard();
     let (_tmp, root) = common::init_empty_project("status-drift");
+    let cache = root.join(".px-cache");
+    let store = cache.join("store");
+    let envs = cache.join("envs");
+    fs::create_dir_all(&envs).expect("create envs dir");
     let Some(python) = find_python() else {
         eprintln!("skipping status test (python binary not found)");
         return;
@@ -75,6 +93,10 @@ fn project_status_detects_manifest_drift() {
     cargo_bin_cmd!("px")
         .current_dir(&root)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
         .args(["sync"])
         .assert()
         .success();
@@ -92,6 +114,10 @@ fn project_status_detects_manifest_drift() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&root)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
         .args(["--json", "status"])
         .assert()
         .failure();
@@ -103,7 +129,12 @@ fn project_status_detects_manifest_drift() {
 
 #[test]
 fn project_status_detects_missing_env() {
+    let _guard = common::test_env_guard();
     let (_tmp, root) = common::init_empty_project("status-missing-env");
+    let cache = root.join(".px-cache");
+    let store = cache.join("store");
+    let envs = cache.join("envs");
+    fs::create_dir_all(&envs).expect("create envs dir");
     let Some(python) = find_python() else {
         eprintln!("skipping status test (python binary not found)");
         return;
@@ -112,6 +143,10 @@ fn project_status_detects_missing_env() {
     cargo_bin_cmd!("px")
         .current_dir(&root)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
         .args(["sync"])
         .assert()
         .success();
@@ -123,8 +158,13 @@ fn project_status_detects_missing_env() {
     let site = state["current_env"]["site_packages"]
         .as_str()
         .expect("site path");
-    if Path::new(site).exists() {
-        fs::remove_dir_all(site).expect("remove env dir");
+    let site_path = Path::new(site);
+    if site_path.exists() {
+        if let Some(env_root) = site_path.ancestors().nth(3) {
+            let _ = fs::remove_dir_all(env_root);
+        } else {
+            let _ = fs::remove_dir_all(site_path);
+        }
     }
 
     let assert = cargo_bin_cmd!("px")
@@ -141,9 +181,14 @@ fn project_status_detects_missing_env() {
 
 #[test]
 fn workspace_member_status_consistent() {
+    let _guard = common::test_env_guard();
     let (_tmp, root) = prepare_named_fixture("workspace_basic", "status-ws-consistent");
     let member_a = root.join("apps").join("a");
     let member_b = root.join("libs").join("b");
+    let cache = root.join(".px-cache");
+    let store = cache.join("store");
+    let envs = cache.join("envs");
+    fs::create_dir_all(&envs).expect("create envs dir");
     fs::create_dir_all(&member_a).expect("create member a");
     fs::create_dir_all(&member_b).expect("create member b");
     write_member_manifest(&member_a, "member-a");
@@ -157,6 +202,10 @@ fn workspace_member_status_consistent() {
     cargo_bin_cmd!("px")
         .current_dir(&root)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
         .args(["sync"])
         .assert()
         .success();
@@ -164,6 +213,10 @@ fn workspace_member_status_consistent() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&member_a)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
         .args(["status", "--json"])
         .assert()
         .success();
@@ -182,9 +235,14 @@ fn workspace_member_status_consistent() {
 
 #[test]
 fn workspace_status_detects_member_drift() {
+    let _guard = common::test_env_guard();
     let (_tmp, root) = prepare_named_fixture("workspace_basic", "status-ws-drift");
     let member_a = root.join("apps").join("a");
     let member_b = root.join("libs").join("b");
+    let cache = root.join(".px-cache");
+    let store = cache.join("store");
+    let envs = cache.join("envs");
+    fs::create_dir_all(&envs).expect("create envs dir");
     fs::create_dir_all(&member_a).expect("create member a");
     fs::create_dir_all(&member_b).expect("create member b");
     write_member_manifest(&member_a, "member-a");
@@ -198,6 +256,10 @@ fn workspace_status_detects_member_drift() {
     cargo_bin_cmd!("px")
         .current_dir(&root)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
         .args(["sync"])
         .assert()
         .success();
@@ -215,6 +277,10 @@ fn workspace_status_detects_member_drift() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&member_a)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
         .args(["status", "--json"])
         .assert()
         .failure();

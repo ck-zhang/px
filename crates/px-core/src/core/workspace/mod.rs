@@ -8,19 +8,24 @@ use std::os::unix::fs::PermissionsExt;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use toml_edit::DocumentMut;
 
+use crate::core::runtime::cas_env::{ensure_profile_env, workspace_env_owner_id};
+use crate::core::runtime::validate_cas_environment;
 use crate::core::status::runtime_source_for;
+use crate::core::tooling::diagnostics;
+use crate::store::cas::{global_store, run_gc_with_env_policy, OwnerId, OwnerType};
 use crate::{
     compute_lock_hash, dependency_name, detect_runtime_metadata, effects::FileSystem,
-    materialize_project_site, prepare_project_runtime, resolve_dependencies_with_effects,
-    resolve_pins, site_packages_dir, write_python_environment_markers, CommandContext,
-    CommandStatus, EnvHealth, EnvStatus, ExecutionOutcome, InstallUserError, LockHealth,
-    LockStatus, ManifestSnapshot, NextAction, NextActionKind, PythonContext, RuntimeMetadata,
-    RuntimeRole, RuntimeSource, RuntimeStatus, StatusContext, StatusContextKind, StatusPayload,
-    StoredEnvironment, StoredRuntime, WorkspaceMemberStatus, WorkspaceStatusPayload, PX_VERSION,
+    prepare_project_runtime, resolve_dependencies_with_effects, resolve_pins,
+    write_python_environment_markers, CommandContext, CommandStatus, EnvHealth, EnvStatus,
+    ExecutionOutcome, InstallUserError, LockHealth, LockStatus, ManifestSnapshot, NextAction,
+    NextActionKind, PythonContext, RuntimeRole, RuntimeSource, RuntimeStatus, StatusContext,
+    StatusContextKind, StatusPayload, StoredEnvironment, StoredRuntime, WorkspaceMemberStatus,
+    WorkspaceStatusPayload, PX_VERSION,
 };
+use px_domain::project::manifest::px_options_from_doc;
 use px_domain::{
     detect_lock_drift, discover_workspace_root, load_lockfile_optional, read_workspace_config,
     workspace_manifest_fingerprint, workspace_member_for_path, ManifestEditor, ProjectSnapshot,
@@ -54,6 +59,7 @@ pub struct WorkspaceSnapshot {
     pub python_override: Option<String>,
     pub dependencies: Vec<String>,
     pub name: String,
+    pub px_options: PxOptions,
 }
 
 impl WorkspaceSnapshot {
@@ -71,7 +77,7 @@ impl WorkspaceSnapshot {
             group_dependencies: Vec::new(),
             requirements: self.dependencies.clone(),
             python_override: self.python_override.clone(),
-            px_options: PxOptions::default(),
+            px_options: self.px_options.clone(),
             manifest_fingerprint: self.manifest_fingerprint.clone(),
         }
     }
@@ -180,6 +186,14 @@ fn load_workspace_snapshot(root: &Path) -> Result<WorkspaceSnapshot> {
                 .map(|s| s.to_string_lossy().to_string())
         })
         .unwrap_or_else(|| "workspace".to_string());
+    let px_options = {
+        let contents = fs::read_to_string(&config.manifest_path)
+            .with_context(|| format!("failed to read {}", config.manifest_path.display()))?;
+        let doc: DocumentMut = contents
+            .parse()
+            .with_context(|| format!("failed to parse {}", config.manifest_path.display()))?;
+        px_options_from_doc(&doc)
+    };
 
     Ok(WorkspaceSnapshot {
         lock_path: config.root.join("px.workspace.lock"),
@@ -190,6 +204,7 @@ fn load_workspace_snapshot(root: &Path) -> Result<WorkspaceSnapshot> {
         python_override,
         dependencies,
         name,
+        px_options,
     })
 }
 
@@ -322,7 +337,13 @@ fn evaluate_workspace_state(
     let env_exists = env_state
         .current_env
         .as_ref()
-        .map(|env| PathBuf::from(&env.site_packages).exists())
+        .map(|env| {
+            env.env_path
+                .as_ref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(&env.site_packages))
+                .exists()
+        })
         .unwrap_or(false);
     let canonical = if !manifest_exists {
         WorkspaceStateKind::Uninitialized
@@ -414,6 +435,29 @@ fn ensure_workspace_env_matches(
                 "reason": "runtime_mismatch",
             }),
         ));
+    }
+    if env.profile_oid.is_none() {
+        return Err(InstallUserError::new(
+            "workspace environment CAS profile missing",
+            json!({
+                "reason": "missing_env",
+                "code": diagnostics::cas::MISSING_OR_CORRUPT,
+                "hint": "run `px sync` to rebuild the workspace environment",
+            }),
+        ));
+    }
+    if let Err(err) = validate_cas_environment(env) {
+        return match err.downcast::<InstallUserError>() {
+            Ok(user) => Err(user),
+            Err(other) => Err(InstallUserError::new(
+                "workspace environment verification failed",
+                json!({
+                    "reason": "env_outdated",
+                    "code": diagnostics::cas::MISSING_OR_CORRUPT,
+                    "error": other.to_string(),
+                }),
+            )),
+        };
     }
     Ok(())
 }
@@ -554,6 +598,9 @@ fn resolve_workspace(ctx: &CommandContext, workspace: &WorkspaceSnapshot) -> Res
 }
 
 fn refresh_workspace_site(ctx: &CommandContext, workspace: &WorkspaceSnapshot) -> Result<()> {
+    let previous_env = load_workspace_state(ctx.fs(), &workspace.config.root)
+        .ok()
+        .and_then(|state| state.current_env);
     let snapshot = workspace.lock_snapshot();
     let _ = prepare_project_runtime(&snapshot)?;
     let lock = load_lockfile_optional(&workspace.lock_path)?.ok_or_else(|| {
@@ -567,39 +614,81 @@ fn refresh_workspace_site(ctx: &CommandContext, workspace: &WorkspaceSnapshot) -
         .lock_id
         .clone()
         .unwrap_or(compute_lock_hash(&workspace.lock_path)?);
-    let env_id = compute_environment_id(&lock_id, &runtime);
-    let env_root = workspace.config.root.join(".px").join("envs").join(&env_id);
-    ctx.fs().create_dir_all(&env_root)?;
-    let site_dir = env_root.join("site");
-    ctx.fs().create_dir_all(&site_dir)?;
-    let site_packages = site_packages_dir(&site_dir, &runtime.version);
-    ctx.fs().create_dir_all(&site_packages)?;
-    let env_python = site_dir.join("bin").join("python");
-    materialize_project_site(
-        &site_dir,
-        &site_packages,
-        &lock,
-        Some(&env_python),
+    let env_owner = OwnerId {
+        owner_type: OwnerType::WorkspaceEnv,
+        owner_id: workspace_env_owner_id(&workspace.config.root, &lock_id, &runtime.version)?,
+    };
+    let cas_profile = ensure_profile_env(ctx, &snapshot, &lock, &runtime, &env_owner)?;
+    let env_python = write_python_environment_markers(
+        &cas_profile.env_path,
+        &runtime,
+        &cas_profile.runtime_path,
         ctx.fs(),
     )?;
-    let env_python = write_python_environment_markers(&site_dir, &runtime, ctx.fs())?;
-    let canonical_site = ctx.fs().canonicalize(&site_dir).unwrap_or(site_dir.clone());
     let runtime_state = StoredRuntime {
-        path: runtime.path.clone(),
+        path: cas_profile.runtime_path.display().to_string(),
         version: runtime.version.clone(),
         platform: runtime.platform.clone(),
     };
     let env_state = StoredEnvironment {
-        id: env_id,
+        id: cas_profile.profile_oid.clone(),
         lock_id,
         platform: runtime.platform.clone(),
-        site_packages: canonical_site.display().to_string(),
+        site_packages: cas_profile.env_path.display().to_string(),
+        env_path: Some(cas_profile.env_path.display().to_string()),
+        profile_oid: Some(cas_profile.profile_oid.clone()),
         python: crate::StoredPython {
             path: env_python.display().to_string(),
             version: runtime.version.clone(),
         },
     };
-    persist_workspace_state(ctx.fs(), &workspace.config.root, env_state, runtime_state)
+    let local_envs = workspace.config.root.join(".px").join("envs");
+    ctx.fs().create_dir_all(&local_envs)?;
+    let current = local_envs.join("current");
+    if current.exists() {
+        let _ = fs::remove_file(&current).or_else(|_| fs::remove_dir_all(&current));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let _ = symlink(&cas_profile.env_path, &current);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fs::remove_dir_all(&current);
+        let _ = fs::hard_link(&cas_profile.env_path, &current);
+    }
+    persist_workspace_state(ctx.fs(), &workspace.config.root, env_state, runtime_state)?;
+
+    if let Some(prev) = previous_env {
+        if let Some(prev_profile) = prev.profile_oid.as_deref() {
+            if prev_profile != cas_profile.profile_oid {
+                let store = global_store();
+                if let Ok(prev_owner_id) = workspace_env_owner_id(
+                    &workspace.config.root,
+                    &prev.lock_id,
+                    &prev.python.version,
+                ) {
+                    let prev_owner = OwnerId {
+                        owner_type: OwnerType::WorkspaceEnv,
+                        owner_id: prev_owner_id,
+                    };
+                    if store.remove_ref(&prev_owner, prev_profile)? {
+                        if store.refs_for(prev_profile)?.is_empty() {
+                            let profile_owner = OwnerId {
+                                owner_type: OwnerType::Profile,
+                                owner_id: prev_profile.to_string(),
+                            };
+                            let _ = store.remove_owner_refs(&profile_owner)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = run_gc_with_env_policy(global_store());
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -731,17 +820,6 @@ fn build_workspace_lock(
     owners.sort_by(|a, b| a.name.cmp(&b.name));
 
     WorkspaceLock { members, owners }
-}
-
-fn compute_environment_id(lock_id: &str, runtime: &RuntimeMetadata) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(lock_id.as_bytes());
-    hasher.update(runtime.version.as_bytes());
-    hasher.update(runtime.platform.as_bytes());
-    hasher.update(runtime.path.as_bytes());
-    let digest = format!("{:x}", hasher.finalize());
-    let short = &digest[..digest.len().min(16)];
-    format!("env-{short}")
 }
 
 struct WorkspaceBackup {
@@ -1786,6 +1864,47 @@ include-groups = ["dev"]
     }
 
     #[test]
+    fn workspace_px_options_flow_into_snapshot() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let ws_manifest = root.join("pyproject.toml");
+        fs::write(
+            &ws_manifest,
+            r#"[tool.px.workspace]
+members = ["apps/a"]
+
+[tool.px.env]
+FOO = "bar"
+"#,
+        )
+        .unwrap();
+
+        let member_root = root.join("apps/a");
+        fs::create_dir_all(&member_root).unwrap();
+        fs::write(
+            member_root.join("pyproject.toml"),
+            r#"[project]
+name = "a"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = []
+"#,
+        )
+        .unwrap();
+
+        let snapshot = load_workspace_snapshot(root).unwrap();
+        assert_eq!(
+            snapshot.px_options.env_vars.get("FOO"),
+            Some(&"bar".to_string())
+        );
+        let lock_snapshot = snapshot.lock_snapshot();
+        assert_eq!(
+            lock_snapshot.px_options.env_vars.get("FOO"),
+            Some(&"bar".to_string())
+        );
+    }
+
+    #[test]
     fn workspace_status_reports_missing_lock() {
         let tmp = tempdir().unwrap();
         let root = tmp.path();
@@ -1823,10 +1942,9 @@ include-groups = ["dev"]
         let root = tmp.path();
         write_workspace(root);
         let workspace = load_workspace(root);
-        let lock_id = write_lock(&workspace);
+        write_lock(&workspace);
         let ctx = command_context();
-        let runtime = detect_runtime_metadata(&ctx, &workspace.lock_snapshot()).unwrap();
-        write_env_state_with_runtime(&workspace, &lock_id, &runtime.version, &runtime.platform);
+        refresh_workspace_site(&ctx, &workspace).unwrap();
 
         let outcome = workspace_status(&ctx, WorkspaceScope::Root(workspace)).unwrap();
         assert_eq!(outcome.status, CommandStatus::Ok);

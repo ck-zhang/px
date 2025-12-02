@@ -3,14 +3,72 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 use assert_cmd::{assert::Assert, cargo::cargo_bin_cmd};
+use std::sync::OnceLock;
 use serde_json::Value;
 use std::env;
+use std::cell::RefCell;
 use tempfile::TempDir;
 use toml_edit::DocumentMut;
 
+thread_local! {
+    static TEST_CACHE: RefCell<Option<TempDir>> = RefCell::new(None);
+}
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn serial_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+pub fn reset_test_store_env() {
+    let _guard = env_lock().lock().unwrap();
+    // Keep the shared cache stable across concurrent tests to avoid flipping
+    // PX_* environment variables mid-execution.
+}
+
+#[must_use]
+pub fn test_env_guard() -> std::sync::MutexGuard<'static, ()> {
+    serial_lock().lock().unwrap()
+}
+
+pub fn ensure_test_store_env() {
+    let _guard = env_lock().lock().unwrap();
+    TEST_CACHE.with(|cell| {
+        if cell.borrow().is_none() {
+            let dir = tempfile::Builder::new()
+                .prefix("px-test-cache")
+                .tempdir()
+                .expect("tempdir");
+            *cell.borrow_mut() = Some(dir);
+        }
+        let cache = cell
+            .borrow()
+            .as_ref()
+            .expect("cache dir")
+            .path()
+            .to_path_buf();
+        let store = cache.join("store");
+        let envs = cache.join("envs");
+        let tools = cache.join("tools");
+        let _ = fs::create_dir_all(&store);
+        let _ = fs::create_dir_all(&envs);
+        let _ = fs::create_dir_all(&tools);
+        env::set_var("PX_CACHE_PATH", &cache);
+        env::set_var("PX_STORE_PATH", store);
+        env::set_var("PX_ENVS_PATH", envs);
+        env::set_var("PX_TOOLS_DIR", tools);
+        env::set_var("PX_NO_ENSUREPIP", "1");
+        env::set_var("PX_RUNTIME_HOST_ONLY", "1");
+    });
+}
 #[must_use]
 /// Copies the sample fixture into a temporary directory.
 ///
@@ -26,6 +84,8 @@ pub fn prepare_fixture(prefix: &str) -> (TempDir, PathBuf) {
 /// # Panics
 /// Panics if the temporary directory cannot be created or the fixture copy fails.
 pub fn prepare_named_fixture(fixture: &str, prefix: &str) -> (TempDir, PathBuf) {
+    reset_test_store_env();
+    ensure_test_store_env();
     let temp = tempfile::Builder::new()
         .prefix(prefix)
         .tempdir()
@@ -108,6 +168,8 @@ pub fn parse_json(assert: &Assert) -> Value {
 /// # Panics
 /// Panics if the temporary project directory cannot be created or commands fail.
 pub fn init_empty_project(prefix: &str) -> (TempDir, PathBuf) {
+    reset_test_store_env();
+    ensure_test_store_env();
     let temp = tempfile::Builder::new()
         .prefix(prefix)
         .tempdir()
@@ -117,6 +179,12 @@ pub fn init_empty_project(prefix: &str) -> (TempDir, PathBuf) {
         .arg("init")
         .assert()
         .success();
+    // Materialize the environment up front so build/publish paths in tests start
+    // from a consistent, ready state.
+    let _ = cargo_bin_cmd!("px")
+        .current_dir(temp.path())
+        .arg("sync")
+        .assert();
     let root = temp.path().to_path_buf();
     (temp, root)
 }
