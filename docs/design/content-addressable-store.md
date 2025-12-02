@@ -28,6 +28,26 @@ The CAS must be:
 * **Concurrency‑safe** – multi‑process use cannot corrupt the store.
 * **GC‑safe** – nothing with live references is ever reclaimed.
 * **Remote‑ready** – optional push/pull of objects between machines.
+* **Versioned** – store/index format is explicitly versioned for safe upgrades.
+
+---
+
+### 13.1.1 CAS format & schema versioning
+
+The CAS layout and index are versioned:
+
+* `index.sqlite` (or equivalent) contains a small `meta` (or `version`) table holding keys like:
+
+  * `cas_format_version`
+  * `schema_version`
+  * `created_by_px_version`
+  * `last_used_px_version`
+* On startup, px reads this metadata:
+
+  * If compatible with the current px version → continue.
+* If incompatible → fail with a clear CAS‑level error (e.g. `PX812`) and remediation (“migrate” or “clear the CAS store”).
+
+Backward‑incompatible changes to on‑disk layout or payload schemas must bump `cas_format_version`.
 
 ---
 
@@ -53,11 +73,11 @@ The CAS introduces a few new nouns:
   * a set of pkg-build objects,
   * optional config (env vars, path ordering, etc.).
 
-* **Env key (env_id)** – derived from a profile; identifies a **profile materialization** under `.px/envs`.
+* **Env key (env_id)** – exactly the `profile_oid`; identifies a **profile materialization** under `.px/envs`.
 
 * **Owner** – a higher-level thing that “uses” objects:
 
-  * `project-env`, `workspace-env`, `tool-env`, `runtime`.
+  * `runtime`, `profile`, `project-env`, `workspace-env`, `tool-env`.
 
 The CAS is deliberately orthogonal to M/L/E and WM/WL/WE:
 
@@ -80,6 +100,34 @@ oid := sha256( canonical_encode(kind, payload) )
 * `payload` depends on the object kind (below).
 * Hashes are hex‑encoded for paths and human‑visible IDs.
 
+`canonical_encode(kind, payload)` uses a deterministic JSON encoding:
+
+* top‑level object:
+
+  ```json
+  {
+    "kind": "<kind>",
+    "payload": ...
+  }
+  ```
+
+* UTF‑8 encoding,
+
+* object/map keys serialized with lexicographically sorted keys,
+
+* no insignificant whitespace,
+
+* lists preserve order,
+
+* binary data in headers (if any) is represented as hex/base64 strings.
+
+Filesystem trees in payloads are normalized:
+
+* paths are relative and use `/` separators,
+* no absolute machine‑local paths,
+* entries are sorted lexicographically by path,
+* timestamps and other unstable metadata are stripped.
+
 Digest is **authoritative**:
 
 * On read, px may rehash and must reject any on-disk blob whose digest doesn’t match its path.
@@ -92,7 +140,7 @@ Digest is **authoritative**:
 * Bytes of a downloaded wheel or sdist as delivered by the index.
 * Payload:
 
-  * Raw bytes.
+  * Raw bytes (stored as the object body).
   * Minimal metadata baked into canonical header: `(name, version, filename, index_url, sha256_from_index)`.
 
 **2. `pkg-build`**
@@ -176,15 +224,17 @@ On disk, the store looks like:
 * Filenames are the full `oid` (no semantic suffix).
 * `index.sqlite` (or similar) stores:
 
+  * `meta(key PRIMARY KEY, value TEXT)` – e.g. CAS format/schema versions and px version info.
   * `objects(oid PRIMARY KEY, kind, size, created_at, last_accessed)`
   * `refs(owner_type, owner_id, oid, PRIMARY KEY(owner_type, owner_id, oid))`
 
-`owner_type` ∈ `{project-env, workspace-env, tool-env, runtime}`. `owner_id` is a stable, px-level identifier, e.g.:
+`owner_type` ∈ `{runtime, profile, project-env, workspace-env, tool-env}`. `owner_id` is a stable, px-level identifier, e.g.:
 
 * `project-env:<project_root_hash>:<l_id>:<runtime>`
 * `workspace-env:<workspace_root_hash>:<wl_id>:<runtime>`
 * `tool-env:<tool_name>:<tool_lock_id>:<runtime>`
 * `runtime:<version>:<platform>`
+* `profile:<profile_oid>`
 
 ---
 
@@ -205,6 +255,12 @@ px builds a profile payload and its `profile_oid`.
 For a fixed px version, runtime, lock, and build options, `profile_oid` is deterministic.
 
 #### 13.5.2 Env directories
+
+Env identity is:
+
+```text
+env_id := profile_oid
+```
 
 px maintains env directories at:
 
@@ -248,6 +304,11 @@ python -> runtime shim    # launcher that uses runtime_oid + profile_oid
   * invokes the runtime from `runtime_oid`,
   * sets `PYTHONPATH` / `sys.path` using the packages declared in the profile in a deterministic order.
 
+Env materialization is idempotent and manifest-driven:
+
+* Re-materializing an existing env ensures all files implied by `manifest.json` are present and correct.
+* Stale symlinks/entries in `bin/` and `site-packages` that are no longer implied by the profile are removed.
+
 Local symlinks under project/workspace `.px/envs/` keep your existing UX (“env belongs to project/workspace”), but all heavy content lives in `~/.px/envs` + `~/.px/store`.
 
 #### 13.5.3 Project state integration
@@ -288,27 +349,30 @@ Input:
 
 Behavior:
 
-1. Compute `source_oid` from:
+1. Download the artifact to a temporary path under `tmp/` and verify the expected hash from the index.
 
-   * canonical header (`name, version, filename, index_url, expected_sha256`).
+2. Compute `source_oid` from:
+
+   * canonical header (`name, version, filename, index_url, expected_sha256`),
    * downloaded bytes.
 
-2. Under lock for `source_oid`:
+3. Under lock for `source_oid`:
 
-   * If object exists and hash matches → reuse.
+   * If object exists and hash matches → reuse and discard the temp file.
    * Else:
 
-     * download to `tmp/<source_oid>.partial`,
-     * verify index hash,
-     * compute `source_oid`,
+     * pack header + bytes into canonical payload,
+     * write to `tmp/<source_oid>.partial`,
+     * `fsync`,
      * store blob at `objects/<prefix>/<source_oid>` via atomic rename,
      * record in `objects` table.
 
-3. Return `source_oid`.
+4. Return `source_oid`.
 
 On failure:
 
 * No partial blob is left referenced from `objects`.
+* Leftover `tmp/*.partial` is cleaned by startup self‑check / `px doctor`.
 
 #### 13.6.2 `cas.ensure_pkg_build(source_oid, runtime)`
 
@@ -320,27 +384,44 @@ Input:
 
 Behavior:
 
-1. Compute **build key**:
+1. Compute **build key** (for diagnostics/logging, not as the oid itself):
 
    ```text
    build_key := (source_oid, runtime_abi, build_options_hash)
-   pkg_build_oid := sha256("pkg-build" || canonical(build_key) || normalized_fs_tree)
    ```
 
-2. Under lock for `pkg_build_oid`:
+2. Materialize the build in an isolated temp dir (no writes to store or envs):
 
-   * If object exists → reuse.
+   * resolve `source_oid`,
+   * run build backend with the requested runtime/options,
+   * produce a filesystem tree.
+
+3. Normalize the tree:
+
+   * strip timestamps and unstable paths/metadata,
+   * normalize separators, ensure relative paths,
+   * sort entries.
+
+4. Compute `pkg_build_oid` from the canonical payload that includes `build_key` and the normalized tree, e.g.:
+
+   ```text
+   pkg_build_oid := sha256( canonical_encode("pkg-build", (build_key, normalized_fs_tree)) )
+   ```
+
+5. Under lock for `pkg_build_oid`:
+
+   * If object exists → reuse and discard the temp build.
    * Else:
 
-     * materialize build in an isolated temp dir (no writes to store or envs),
-     * normalize tree (strip timestamps, unstable paths),
-     * tar/pack it into canonical payload,
+     * tar/pack the normalized tree into canonical payload,
+     * write to `tmp/<pkg_build_oid>.partial`,
+     * `fsync`,
      * store as `objects/<prefix>/<pkg_build_oid>` via atomic rename,
      * record metadata in `objects`.
 
-3. Return `pkg_build_oid`.
+6. Return `pkg_build_oid`.
 
-All per‑env site‑packages are built **once** per `(source, runtime, options)`.
+All per‑env site‑packages are built **once** per `(source, runtime, options)` at the CAS level. In races, multiple processes may build, but only one result wins; others observe the existing object and discard their temp builds.
 
 #### 13.6.3 `cas.ensure_profile(L/WL, runtime)`
 
@@ -390,19 +471,17 @@ Behavior:
 
 1. Read profile payload and referenced `runtime_oid`/`pkg_build_oid`s.
 
-2. Verify each referenced oid exists; on missing → CAS corruption error (`PX3xx`).
+2. Verify each referenced oid exists; on missing → CAS corruption error (`PX8xx`).
 
 3. Create or refresh `~/.px/envs/<profile_oid>/`:
 
    * Create or update `manifest.json`.
-
    * Populate `bin/` with symlinks to `bin/` scripts inside pkg-build objects.
-
    * Configure `lib/pythonX.Y/site-packages` as:
 
-     * either symlink tree into pkg-build site-packages, or
+     * either a symlink tree into pkg-build site-packages, or
      * `.pth` pointing to each pkg-build’s site-packages in a deterministic order.
-
+   * Remove stale files/symlinks under `bin/` and `site-packages` that are not implied by the current profile.
    * Generate `python` shim that:
 
      * execs runtime from `runtime_oid`,
@@ -437,7 +516,7 @@ Rules:
 
 * `profile` owns `pkg-build` + `runtime` oids it references.
 * Higher‑level owners (project-env, workspace-env, tool-env) own the `profile_oid`s they use.
-* Runtime installation registers a `runtime` owner on its `runtime_oid`.
+* Runtime installation registers a `runtime` owner on its `runtime_oid` (runtime uninstall removes this owner).
 
 On env deletion (e.g. project removed or lock superseded):
 
@@ -463,12 +542,13 @@ GC is a **mark‑and‑sweep** over objects, driven by `refs`:
 
 3. Optionally enforce a store size limit:
 
-   * When store exceeds target size, prefer reclaiming the **oldest** unreferenced objects first (LRU).
+   * When store exceeds target size, prefer reclaiming the **oldest** unreferenced objects first (LRU), still subject to the grace period.
 
 Invariants:
 
 * An object with at least one `refs` row is never deleted.
 * GC operations are transactional: a crash mid‑GC never yields an object that’s “referenced but missing” (either the object or all its refs survive).
+* Size‑based GC does not violate the above invariants.
 
 ---
 
@@ -487,11 +567,14 @@ For each `oid` being created:
 
 * Creation is:
 
-  1. Write to `tmp/<oid>.partial`.
-  2. `fsync` the file, then parent dir.
-  3. `rename` to `objects/<prefix>/<oid>` (atomic).
-  4. Insert/update row in `objects` inside a DB transaction.
-  5. Release lock.
+  1. Build/compute the content and canonical payload in an isolated temp location.
+  2. Compute `oid`.
+  3. Acquire the per‑object lock for `oid`.
+  4. Write to `tmp/<oid>.partial`.
+  5. `fsync` the file, then parent dir.
+  6. `rename` to `objects/<prefix>/<oid>` (atomic).
+  7. Insert/update row in `objects` inside a DB transaction.
+  8. Release lock.
 
 * Other processes seeing a present `objects/<prefix>/<oid>` or `objects` row treat the object as complete.
 
@@ -516,6 +599,7 @@ Optional `px doctor` / background health checks:
 
 * Sweep `tmp/*.partial` and delete any leftover partials.
 * Sample existing objects and verify their digests; delete corrupt blobs and remove `refs` entries that point only to missing objects, prompting rebuild on next use.
+* Check CAS format/schema version in `index.sqlite` and fail cleanly on incompatibility.
 
 ---
 
@@ -544,13 +628,19 @@ px ships with:
   * Check local first.
   * If missing and remote configured:
 
-    * Try `remote.get(oid)` and, if present, populate local store.
+    * Try `remote.get(oid)` and, if present, populate local store (subject to digest verification).
     * Else build/download and then `remote.put(oid)` if policy allows.
+
+* For any `remote.get(oid)`:
+
+  * px must rehash the bytes and reject them if the digest doesn’t match `oid` (treat as `PX800`‑style corruption).
 
 * Remote errors:
 
   * Never corrupt local store.
-  * px surfaces them as non-fatal (falls back to local builds if possible) or as clear CAS‑level errors (`PX31x`).
+  * px surfaces them as non-fatal (falls back to local builds if possible) or as clear CAS‑level errors (`PX81x`).
+
+The digest is always authoritative; remote is a cache/replica, not a different source of truth.
 
 ---
 
@@ -558,7 +648,7 @@ px ships with:
 
 CAS introduces a new error family (example codes):
 
-* `PX300` – CAS object missing/corrupt.
+* `PX800` – CAS object missing/corrupt.
 
   * `Why`:
 
@@ -569,9 +659,13 @@ CAS introduces a new error family (example codes):
     * `• Run 'px sync' to rebuild environments from lockfiles.`
     * `• Or clear the CAS store and rerun if corruption persists.`
 
-* `PX301` – CAS store write failure (disk full, permissions, etc.).
+* `PX810` – CAS store write failure (disk full, permissions, etc.).
 
-* `PX302` – CAS index corruption.
+* `PX811` – CAS index corruption.
+
+* `PX812` – CAS format/schema incompatible with this px version.
+
+* `PX81x` – Remote CAS failures (network, auth, integrity).
 
 All CAS operations must:
 
@@ -582,3 +676,7 @@ All CAS operations must:
   * GC decisions,
 
 * Respect `--json` and non‑TTY rules (no spinners).
+
+* Be safe to retry on `PX800`/`PX810`/`PX81x` unless explicitly documented otherwise.
+
+Implementations may also expose basic CAS metrics (store size, per‑kind hit/miss, GC reclaimed bytes) where useful.
