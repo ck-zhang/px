@@ -4,7 +4,7 @@ use assert_cmd::cargo::cargo_bin_cmd;
 
 mod common;
 
-use common::{parse_json, prepare_fixture};
+use common::{parse_json, prepare_fixture, require_online};
 
 fn find_python() -> Option<String> {
     let candidates = [
@@ -27,6 +27,9 @@ fn find_python() -> Option<String> {
 
 #[test]
 fn fmt_bypasses_project_lock_env_gating() {
+    if !require_online() {
+        return;
+    }
     let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("fmt-bypass");
     let cache = project.join(".px-cache");

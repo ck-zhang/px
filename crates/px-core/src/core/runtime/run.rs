@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use tar::Archive;
 use tracing::{debug, warn};
 
-use crate::run_plan::{plan_run_target, PassthroughReason, PassthroughTarget, RunTargetPlan};
+use crate::run_plan::{plan_run_target, RunTargetPlan};
 use crate::tooling::{missing_pyproject_outcome, run_target_required_outcome};
 use crate::workspace::prepare_workspace_run_context;
 use crate::{
@@ -98,14 +98,6 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
                 &command_args,
                 interactive,
             )?,
-            RunTargetPlan::Passthrough(target) => run_passthrough(
-                ctx,
-                &ws_ctx.py_ctx,
-                target,
-                &request.args,
-                &command_args,
-                interactive,
-            )?,
             RunTargetPlan::Executable(program) => run_executable(
                 ctx,
                 &ws_ctx.py_ctx,
@@ -172,14 +164,6 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             &command_args,
             interactive,
         )?,
-        RunTargetPlan::Passthrough(target) => run_passthrough(
-            ctx,
-            &py_ctx,
-            target,
-            &request.args,
-            &command_args,
-            interactive,
-        )?,
         RunTargetPlan::Executable(program) => run_executable(
             ctx,
             &py_ctx,
@@ -221,6 +205,21 @@ fn run_pytest_runner(
         mark_reporter_rendered(&mut outcome);
     }
     Ok(outcome)
+}
+
+fn mark_reporter_rendered(outcome: &mut ExecutionOutcome) {
+    match &mut outcome.details {
+        Value::Object(map) => {
+            map.insert("reporter_rendered".into(), Value::Bool(true));
+        }
+        Value::Null => {
+            outcome.details = json!({ "reporter_rendered": true });
+        }
+        other => {
+            let prev = other.take();
+            outcome.details = json!({ "value": prev, "reporter_rendered": true });
+        }
+    }
 }
 
 fn build_pytest_invocation(
@@ -370,18 +369,34 @@ fn run_executable(
     interactive: bool,
 ) -> Result<ExecutionOutcome> {
     let (envs, _) = build_env_with_preflight(core_ctx, py_ctx, command_args)?;
+    let uses_px_python = {
+        let program_path = Path::new(program);
+        let python_path = Path::new(&py_ctx.python);
+        program_path == python_path
+            || program_path
+                .file_name()
+                .and_then(|p| python_path.file_name().filter(|q| q == &p))
+                .is_some()
+    };
+    let needs_stdin = uses_px_python && extra_args.first().map(|arg| arg == "-").unwrap_or(false);
     let runtime = core_ctx.python_runtime();
-    let output = if interactive {
+    let interactive = interactive || needs_stdin;
+    let output = if needs_stdin {
+        runtime.run_command_with_stdin(program, extra_args, &envs, &py_ctx.project_root, true)?
+    } else if interactive {
         runtime.run_command_passthrough(program, extra_args, &envs, &py_ctx.project_root)?
     } else {
         runtime.run_command(program, extra_args, &envs, &py_ctx.project_root)?
     };
-    let details = json!({
-        "mode": "executable",
+    let mut details = json!({
+        "mode": if uses_px_python { "passthrough" } else { "executable" },
         "program": program,
         "args": extra_args,
         "interactive": interactive,
     });
+    if uses_px_python {
+        details["uses_px_python"] = Value::Bool(true);
+    }
     Ok(outcome_from_output(
         "run",
         program,
@@ -792,98 +807,6 @@ fn test_details(
         }
     }
     details
-}
-
-fn mark_reporter_rendered(outcome: &mut ExecutionOutcome) {
-    match &mut outcome.details {
-        Value::Object(map) => {
-            map.insert("reporter_rendered".into(), Value::Bool(true));
-        }
-        Value::Null => {
-            outcome.details = json!({ "reporter_rendered": true });
-        }
-        other => {
-            let prev = other.take();
-            outcome.details = json!({ "value": prev, "reporter_rendered": true });
-        }
-    }
-}
-
-fn run_passthrough(
-    core_ctx: &CommandContext,
-    py_ctx: &PythonContext,
-    target: PassthroughTarget,
-    extra_args: &[String],
-    command_args: &Value,
-    interactive: bool,
-) -> Result<ExecutionOutcome> {
-    let PassthroughTarget {
-        program,
-        display,
-        reason,
-        resolved,
-    } = target;
-    let (envs, _) = build_env_with_preflight(core_ctx, py_ctx, command_args)?;
-    let program_args = match &reason {
-        PassthroughReason::PythonScript { script_arg, .. } => {
-            let mut args = Vec::with_capacity(extra_args.len() + 1);
-            args.push(script_arg.clone());
-            args.extend(extra_args.iter().cloned());
-            args
-        }
-        _ => extra_args.to_vec(),
-    };
-    let needs_stdin = match &reason {
-        PassthroughReason::PythonScript { script_arg, .. } => script_arg == "-",
-        PassthroughReason::PythonAlias => program_args.first().map(String::as_str) == Some("-"),
-        _ => false,
-    };
-    let mut interactive = interactive;
-    if needs_stdin {
-        // `python -` needs stdin; treat it as interactive even when not attached to a TTY.
-        interactive = true;
-    }
-    let runtime = core_ctx.python_runtime();
-    let output = if needs_stdin {
-        runtime.run_command_with_stdin(
-            &program,
-            &program_args,
-            &envs,
-            &py_ctx.project_root,
-            true,
-        )?
-    } else if interactive {
-        runtime.run_command_passthrough(&program, &program_args, &envs, &py_ctx.project_root)?
-    } else {
-        runtime.run_command(&program, &program_args, &envs, &py_ctx.project_root)?
-    };
-    let mut details = json!({
-        "mode": "passthrough",
-        "program": display.clone(),
-        "args": extra_args,
-        "interactive": interactive,
-    });
-    if let Some(resolved_path) = resolved {
-        details["resolved_program"] = Value::String(resolved_path);
-    }
-    match reason {
-        PassthroughReason::PythonAlias => {
-            details["uses_px_python"] = Value::Bool(true);
-        }
-        PassthroughReason::ExecutablePath => {}
-        PassthroughReason::PythonScript { script_path, .. } => {
-            details["uses_px_python"] = Value::Bool(true);
-            details["script"] = Value::String(script_path);
-        }
-    }
-
-    Ok(outcome_from_output(
-        "run",
-        &display,
-        &output,
-        "px run",
-        Some(details),
-    ))
 }
 
 fn missing_pytest(stderr: &str) -> bool {

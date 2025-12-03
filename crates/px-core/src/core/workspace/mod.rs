@@ -680,6 +680,7 @@ fn refresh_workspace_site(ctx: &CommandContext, workspace: &WorkspaceSnapshot) -
                                 owner_id: prev_profile.to_string(),
                             };
                             let _ = store.remove_owner_refs(&profile_owner)?;
+                            let _ = store.remove_env_materialization(prev_profile);
                         }
                     }
                 }

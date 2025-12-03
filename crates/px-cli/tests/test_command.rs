@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 mod common;
+use common::require_online;
 
 fn find_python() -> Option<String> {
     let candidates = [
@@ -27,6 +28,9 @@ fn find_python() -> Option<String> {
 
 #[test]
 fn px_test_streams_and_summarizes_runner_output() {
+    if !require_online() {
+        return;
+    }
     let _guard = common::test_env_guard();
     let (_tmp, project) = common::init_empty_project("test-streaming");
     let cache = project.join(".px-cache");

@@ -549,6 +549,7 @@ pub(crate) fn refresh_project_site(
                                 owner_id: prev_profile.to_string(),
                             };
                             let _ = store.remove_owner_refs(&profile_owner)?;
+                            let _ = store.remove_env_materialization(prev_profile);
                         }
                     }
                 }

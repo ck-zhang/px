@@ -102,3 +102,81 @@ scripts = { demo = "demo.cli:main" }
 
     Ok(())
 }
+
+#[test]
+fn resolves_existing_project_script_under_root() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let script = temp.path().join("scripts").join("app.py");
+    fs::create_dir_all(script.parent().expect("script parent"))?;
+    fs::write(&script, b"print('demo')")?;
+
+    let ctx = PythonContext {
+        project_root: temp.path().to_path_buf(),
+        project_name: "demo".into(),
+        python: "/usr/bin/python".into(),
+        pythonpath: String::new(),
+        allowed_paths: vec![],
+        site_bin: None,
+        pep582_bin: Vec::new(),
+        px_options: PxOptions::default(),
+    };
+
+    let plan = plan_run_target(&ctx, &temp.path().join("pyproject.toml"), "scripts/app.py")?;
+    match plan {
+        RunTargetPlan::Script(path) => {
+            assert_eq!(
+                path,
+                script.canonicalize()?,
+                "script plan should use canonical project path"
+            );
+        }
+        other => panic!("expected script plan, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn does_not_guess_missing_python_script_targets() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let ctx = PythonContext {
+        project_root: temp.path().to_path_buf(),
+        project_name: "demo".into(),
+        python: "/usr/bin/python".into(),
+        pythonpath: String::new(),
+        allowed_paths: vec![],
+        site_bin: None,
+        pep582_bin: Vec::new(),
+        px_options: PxOptions::default(),
+    };
+
+    let plan = plan_run_target(&ctx, &temp.path().join("pyproject.toml"), "missing.py")?;
+    match plan {
+        RunTargetPlan::Executable(target) => {
+            assert_eq!(target, "missing.py", "missing .py should be treated as executable");
+        }
+        other => panic!("expected executable plan, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn python_alias_runs_as_plain_executable() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let ctx = PythonContext {
+        project_root: temp.path().to_path_buf(),
+        project_name: "demo".into(),
+        python: "/usr/bin/python".into(),
+        pythonpath: String::new(),
+        allowed_paths: vec![],
+        site_bin: None,
+        pep582_bin: Vec::new(),
+        px_options: PxOptions::default(),
+    };
+
+    let plan = plan_run_target(&ctx, &temp.path().join("pyproject.toml"), "python")?;
+    match plan {
+        RunTargetPlan::Executable(target) => assert_eq!(target, "python"),
+        other => panic!("expected executable passthrough, got {other:?}"),
+    }
+    Ok(())
+}

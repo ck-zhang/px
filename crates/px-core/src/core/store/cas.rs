@@ -388,6 +388,12 @@ impl ContentAddressableStore {
         &self.root
     }
 
+    #[cfg(test)]
+    #[must_use]
+    pub fn envs_root(&self) -> &Path {
+        &self.envs_root
+    }
+
     /// Compute the oid for a given object payload using sha256 over the
     /// canonical encoding.
     pub fn compute_oid(payload: &ObjectPayload<'_>) -> Result<String> {
@@ -1903,6 +1909,23 @@ impl ContentAddressableStore {
         Ok(())
     }
 
+    /// Remove a materialized environment projection for the given profile oid.
+    pub(crate) fn remove_env_materialization(&self, profile_oid: &str) -> Result<()> {
+        let env_root = self.envs_root.join(profile_oid);
+        for path in [
+            env_root.clone(),
+            env_root.with_extension("partial"),
+            env_root.with_extension("backup"),
+        ] {
+            if path.exists() {
+                fs::remove_dir_all(&path).with_context(|| {
+                    format!("failed to remove env materialization {}", path.display())
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     fn verify_existing(&self, oid: &str, path: &Path) -> Result<()> {
         let bytes = fs::read(path)
             .with_context(|| format!("failed to read existing CAS object {}", path.display()))?;
@@ -3198,6 +3221,31 @@ mod tests {
                 .any(|owner| owner.owner_type == OwnerType::Runtime
                     && owner.owner_id == expected_owner),
             "expected reconstructed runtime owner reference"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remove_env_materialization_cleans_all_variants() -> Result<()> {
+        let (_temp, store) = new_store()?;
+        let env_root = store.envs_root().join("profile-123");
+        fs::create_dir_all(&env_root)?;
+        fs::create_dir_all(env_root.with_extension("partial"))?;
+        fs::create_dir_all(env_root.with_extension("backup"))?;
+
+        store.remove_env_materialization("profile-123")?;
+
+        assert!(
+            !env_root.exists(),
+            "env materialization should be removed when requested"
+        );
+        assert!(
+            !env_root.with_extension("partial").exists(),
+            "partial env materialization should be removed"
+        );
+        assert!(
+            !env_root.with_extension("backup").exists(),
+            "backup env materialization should be removed"
         );
         Ok(())
     }

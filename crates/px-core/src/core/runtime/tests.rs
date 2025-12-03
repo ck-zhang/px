@@ -6,7 +6,6 @@ use crate::core::python::python_sys::{
 use crate::core::runtime::artifacts::{parse_exact_pin, select_wheel};
 use crate::core::runtime::effects::Effects;
 use crate::core::runtime::materialize_project_site;
-use crate::core::runtime::run_plan::python_script_target;
 use crate::core::store::pypi::{PypiDigests, PypiFile};
 use crate::Config;
 use crate::SystemEffects;
@@ -19,7 +18,6 @@ use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
 use tempfile::tempdir;
 
 #[test]
@@ -235,30 +233,6 @@ fn parse_exact_pin_handles_extras_and_markers() {
             .is_some_and(|m| m.contains("python_version")),
         "marker should be preserved"
     );
-}
-
-#[test]
-fn python_script_target_detects_relative_paths() {
-    let root = PathBuf::from("/tmp/project");
-    let (arg, path) = python_script_target("src/app.py", &root).expect("relative script detected");
-    assert_eq!(arg, "src/app.py");
-    assert_eq!(PathBuf::from(path), root.join("src/app.py"));
-}
-
-#[test]
-fn python_script_target_detects_absolute_paths() {
-    let absolute = PathBuf::from("/opt/demo/main.py");
-    let entry = absolute.to_string_lossy().to_string();
-    let root = PathBuf::from("/tmp/project");
-    let (arg, path) = python_script_target(&entry, &root).expect("absolute script detected");
-    assert_eq!(arg, entry);
-    assert_eq!(PathBuf::from(path), absolute);
-}
-
-#[test]
-fn python_script_target_ignores_non_python_files() {
-    let root = PathBuf::from("/tmp/project");
-    assert!(python_script_target("bin/tool", &root).is_none());
 }
 
 #[test]
