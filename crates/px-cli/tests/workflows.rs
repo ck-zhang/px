@@ -2,7 +2,7 @@ use std::{fs, path::Path};
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::{json, Value};
-use toml_edit::{value, DocumentMut, Item, Table};
+use toml_edit::DocumentMut;
 
 mod common;
 
@@ -12,7 +12,6 @@ use common::{parse_json, prepare_fixture, require_online};
 fn run_prints_fixture_output() {
     let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("run-hello");
-    set_px_scripts(&project, &[("cli", "sample_px_app.cli:main")]);
     let Some(python) = find_python() else {
         eprintln!("skipping run test (python binary not found)");
         return;
@@ -20,7 +19,7 @@ fn run_prints_fixture_output() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
-        .args(["run", "cli", "--", "-n", "PxTest"])
+        .args(["run", "sample_px_app/cli.py", "--", "-n", "PxTest"])
         .assert()
         .success();
 
@@ -140,71 +139,36 @@ fn run_reads_stdin_and_python_source_dirs() {
 
 #[test]
 fn run_respects_explicit_entry_even_with_other_defaults() {
+    // px no longer resolves px-script aliases; explicit targets are required.
     let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("run-explicit-entry");
-    set_px_scripts(
-        &project,
-        &[
-            ("auto-default", "sample_px_app.default_entry:main"),
-            ("cli", "sample_px_app.cli:main"),
-        ],
-    );
-    let Some(python) = find_python() else {
-        eprintln!("skipping explicit entry test (python binary not found)");
-        return;
-    };
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
-        .env("PX_RUNTIME_PYTHON", &python)
-        .args(["--json", "run", "cli", "--", "-n", "Explicit"])
+        .arg("run")
         .assert()
-        .success();
+        .failure();
 
-    let payload = parse_json(&assert);
-    let details = payload["details"].as_object().expect("details object");
-    assert_eq!(
-        details.get("source"),
-        Some(&Value::String("px-scripts".into()))
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("px run requires a target"),
+        "expected missing-target error, got {stdout:?}"
     );
-    assert_eq!(
-        details.get("entry"),
-        Some(&Value::String("sample_px_app.cli:main".into()))
-    );
-    assert_eq!(details.get("script"), Some(&Value::String("cli".into())));
 }
 
 #[test]
 fn run_forwards_args_to_default_entry_when_no_entry_passed() {
+    // Default entries are no longer inferred; a target is required.
     let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("run-forward-default");
-    set_px_scripts(&project, &[("cli", "sample_px_app.cli:main")]);
-    let Some(python) = find_python() else {
-        eprintln!("skipping forward args test (python binary not found)");
-        return;
-    };
-
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
-        .env("PX_RUNTIME_PYTHON", &python)
-        .args(["--json", "run", "cli", "--", "Forwarded"])
+        .arg("run")
         .assert()
-        .success();
-
-    let payload = parse_json(&assert);
-    assert_eq!(payload["status"], "ok");
-    let details = payload["details"].as_object().expect("details object");
-    assert_eq!(
-        details.get("entry"),
-        Some(&Value::String("sample_px_app.cli:main".into()))
-    );
-    let args = details
-        .get("args")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+        .failure();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        args.contains(&Value::String("Forwarded".into())),
-        "expected forwarded args to include original token: {args:?}"
+        stdout.contains("px run requires a target"),
+        "expected missing-target error, got {stdout:?}"
     );
 }
 
@@ -236,7 +200,6 @@ fn run_frozen_errors_when_environment_missing() {
     if project.join(".px").exists() {
         fs::remove_dir_all(project.join(".px")).expect("clean .px");
     }
-    set_px_scripts(&project, &[("cli", "sample_px_app.cli:main")]);
     let Some(python) = find_python() else {
         eprintln!("skipping frozen env test (python binary not found)");
         return;
@@ -245,7 +208,7 @@ fn run_frozen_errors_when_environment_missing() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
-        .args(["--json", "run", "cli", "--frozen"])
+        .args(["--json", "run", "sample_px_app/cli.py", "--frozen"])
         .assert()
         .failure();
 
@@ -270,7 +233,6 @@ fn run_frozen_errors_when_lock_missing() {
     let (_tmp, project) = prepare_fixture("run-json-flag");
     let lock = project.join("px.lock");
     fs::remove_file(&lock).expect("remove lock");
-    set_px_scripts(&project, &[("cli", "sample_px_app.cli:main")]);
     let Some(python) = find_python() else {
         eprintln!("skipping frozen missing-lock test (python binary not found)");
         return;
@@ -279,7 +241,7 @@ fn run_frozen_errors_when_lock_missing() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
-        .args(["--json", "run", "cli", "--frozen"])
+        .args(["--json", "run", "sample_px_app/cli.py", "--frozen"])
         .assert()
         .failure();
 
@@ -303,7 +265,6 @@ fn run_frozen_errors_when_env_outdated() {
     let px_dir = project.join(".px");
     fs::create_dir_all(&px_dir).expect("px dir");
     write_stale_state(&project, "stale-lock-hash");
-    set_px_scripts(&project, &[("cli", "sample_px_app.cli:main")]);
     let Some(python) = find_python() else {
         eprintln!("skipping frozen outdated-env test (python binary not found)");
         return;
@@ -312,7 +273,7 @@ fn run_frozen_errors_when_env_outdated() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
-        .args(["--json", "run", "cli", "--frozen"])
+        .args(["--json", "run", "sample_px_app/cli.py", "--frozen"])
         .assert()
         .failure();
 
@@ -356,7 +317,6 @@ fn run_frozen_errors_on_runtime_mismatch() {
     buf.push(b'\n');
     fs::write(px_dir.join("state.json"), buf).expect("write state");
     assert!(lock.exists(), "fixture lockfile should exist");
-    set_px_scripts(&project, &[("cli", "sample_px_app.cli:main")]);
     let Some(python) = find_python() else {
         eprintln!("skipping frozen runtime mismatch test (python binary not found)");
         return;
@@ -365,7 +325,7 @@ fn run_frozen_errors_on_runtime_mismatch() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
-        .args(["--json", "run", "cli", "--frozen"])
+        .args(["--json", "run", "sample_px_app/cli.py", "--frozen"])
         .assert()
         .failure();
 
@@ -405,7 +365,6 @@ fn run_accepts_post_subcommand_json_flag() {
     let _guard = common::test_env_guard();
     use common::prepare_named_fixture;
     let (_tmp, project) = prepare_named_fixture("run-json-flag", "run-json-flag");
-    set_px_scripts(&project, &[("cli", "sample_px_app.cli:main")]);
     let Some(python) = find_python() else {
         eprintln!("skipping post-json test (python binary not found)");
         return;
@@ -413,21 +372,18 @@ fn run_accepts_post_subcommand_json_flag() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
-        .args(["run", "--json", "cli", "--", "JsonInline"])
+        .args([
+            "run",
+            "--json",
+            "sample_px_app/cli.py",
+            "--",
+            "JsonInline",
+        ])
         .assert()
         .success();
 
     let payload = parse_json(&assert);
     assert_eq!(payload.get("status"), Some(&Value::String("ok".into())));
-    let details = payload["details"].as_object().expect("details object");
-    assert_eq!(
-        details.get("entry"),
-        Some(&Value::String("sample_px_app.cli:main".into()))
-    );
-    assert_eq!(
-        details.get("source"),
-        Some(&Value::String("px-scripts".into()))
-    );
     let stdout = payload["details"]["stdout"].as_str().unwrap_or_default();
     assert!(
         stdout.contains("Hello, JsonInline!"),
@@ -440,7 +396,6 @@ fn run_emits_hint_when_requests_socks_missing_under_proxy() {
     let _guard = common::test_env_guard();
     use common::prepare_named_fixture;
     let (_tmp, project) = prepare_named_fixture("run-proxy-traceback", "run-proxy-traceback");
-    set_px_scripts(&project, &[("cli", "sample_px_app.cli:main")]);
     let Some(python) = find_python() else {
         eprintln!("skipping proxy traceback test (python binary not found)");
         return;
@@ -449,7 +404,7 @@ fn run_emits_hint_when_requests_socks_missing_under_proxy() {
         .current_dir(&project)
         .env("ALL_PROXY", "socks5h://127.0.0.1:9999")
         .env("PX_RUNTIME_PYTHON", &python)
-        .args(["--json", "run", "cli"])
+        .args(["--json", "run", "sample_px_app/cli.py"])
         .assert()
         .failure();
 
@@ -514,28 +469,6 @@ fn run_rejects_dry_run_flag() {
             || output.contains("unexpected argument '--dry-run'"),
         "run should reject unsupported dry-run flag, got output: {output:?}"
     );
-}
-
-fn set_px_scripts(project: &Path, entries: &[(&str, &str)]) {
-    let pyproject = project.join("pyproject.toml");
-    let contents = fs::read_to_string(&pyproject).expect("read pyproject");
-    let mut doc: DocumentMut = contents.parse().expect("parse pyproject");
-    let tool = doc
-        .entry("tool")
-        .or_insert(Item::Table(Table::new()))
-        .as_table_mut()
-        .expect("tool table");
-    let px = tool
-        .entry("px")
-        .or_insert(Item::Table(Table::new()))
-        .as_table_mut()
-        .expect("px table");
-    let mut scripts = Table::new();
-    for &(name, target) in entries {
-        scripts.insert(name, value(target));
-    }
-    px.insert("scripts", Item::Table(scripts));
-    fs::write(pyproject, doc.to_string()).expect("write pyproject");
 }
 
 fn remove_scripts_table(project: &Path) {

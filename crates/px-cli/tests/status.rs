@@ -297,9 +297,17 @@ fn status_brief_emits_one_line() {
         eprintln!("skipping status test (python binary not found)");
         return;
     };
+    let cache = root.join(".px-cache");
+    let store = cache.join("store");
+    let envs = cache.join("envs");
+    fs::create_dir_all(&envs).expect("create envs dir");
     cargo_bin_cmd!("px")
         .current_dir(&root)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
         .args(["sync"])
         .assert()
         .success();
@@ -307,6 +315,10 @@ fn status_brief_emits_one_line() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&root)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
         .args(["status", "--brief"])
         .assert()
         .success();

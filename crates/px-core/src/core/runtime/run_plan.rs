@@ -1,39 +1,8 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
-use toml_edit::{DocumentMut, Item, Value};
+use anyhow::Result;
 
 use crate::PythonContext;
-
-#[derive(Debug, Clone)]
-pub(crate) struct ResolvedEntry {
-    pub(crate) entry: String,
-    pub(crate) call: Option<String>,
-    pub(crate) source: EntrySource,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum EntrySource {
-    PxScript { script: String },
-    ProjectScript { script: String },
-}
-
-impl EntrySource {
-    pub(crate) fn label(&self) -> &'static str {
-        match self {
-            EntrySource::PxScript { .. } => "px-scripts",
-            EntrySource::ProjectScript { .. } => "project-scripts",
-        }
-    }
-
-    pub(crate) fn script_name(&self) -> Option<&str> {
-        match self {
-            EntrySource::PxScript { script } => Some(script.as_str()),
-            EntrySource::ProjectScript { script } => Some(script.as_str()),
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct PassthroughTarget {
@@ -55,7 +24,6 @@ pub(crate) enum PassthroughReason {
 
 #[derive(Debug, Clone)]
 pub(crate) enum RunTargetPlan {
-    PxScript(ResolvedEntry),
     Script(PathBuf),
     Passthrough(PassthroughTarget),
     Executable(String),
@@ -63,17 +31,9 @@ pub(crate) enum RunTargetPlan {
 
 pub(crate) fn plan_run_target(
     py_ctx: &PythonContext,
-    manifest: &Path,
+    _manifest: &Path,
     target: &str,
 ) -> Result<RunTargetPlan> {
-    if let Some(resolved) = resolve_px_script(manifest, target)? {
-        return Ok(RunTargetPlan::PxScript(resolved));
-    }
-
-    if let Some(resolved) = resolve_project_script(manifest, target)? {
-        return Ok(RunTargetPlan::PxScript(resolved));
-    }
-
     if let Some(script_path) = script_under_project_root(&py_ctx.project_root, target) {
         return Ok(RunTargetPlan::Script(script_path));
     }
@@ -87,88 +47,6 @@ pub(crate) fn plan_run_target(
     }
 
     Ok(RunTargetPlan::Executable(target.to_string()))
-}
-
-fn resolve_px_script(manifest: &Path, target: &str) -> Result<Option<ResolvedEntry>> {
-    if !manifest.exists() {
-        return Ok(None);
-    }
-    let contents = fs::read_to_string(manifest)?;
-    let doc: DocumentMut = contents.parse()?;
-    let scripts = doc
-        .get("tool")
-        .and_then(Item::as_table)
-        .and_then(|tool| tool.get("px"))
-        .and_then(Item::as_table)
-        .and_then(|px| px.get("scripts"))
-        .and_then(Item::as_table);
-    let Some(table) = scripts else {
-        return Ok(None);
-    };
-    let value = match table.get(target) {
-        Some(item) => item,
-        None => return Ok(None),
-    };
-    let Some(raw) = value.as_str() else {
-        return Ok(None);
-    };
-    let (entry, call) = parse_entry_value(raw)
-        .ok_or_else(|| anyhow!("invalid [tool.px.scripts] entry for `{target}`"))?;
-    Ok(Some(ResolvedEntry {
-        entry,
-        call,
-        source: EntrySource::PxScript {
-            script: target.to_string(),
-        },
-    }))
-}
-
-fn resolve_project_script(manifest: &Path, target: &str) -> Result<Option<ResolvedEntry>> {
-    if !manifest.exists() {
-        return Ok(None);
-    }
-    let contents = fs::read_to_string(manifest)?;
-    let doc: DocumentMut = contents.parse()?;
-    let Some(project_table) = doc.get("project").and_then(Item::as_table) else {
-        return Ok(None);
-    };
-
-    let from_table = |name: &str| {
-        project_table.get(name).and_then(|item| {
-            item.as_table()
-                .and_then(|table| table.get(target).and_then(Item::as_str))
-                .or_else(|| {
-                    item.as_inline_table()
-                        .and_then(|table| table.get(target).and_then(Value::as_str))
-                })
-                .map(|raw| (name.to_string(), raw.to_string()))
-        })
-    };
-    let candidate = from_table("scripts")
-        .or_else(|| from_table("gui-scripts"))
-        .or_else(|| {
-            project_table
-                .get("entry-points")
-                .and_then(Item::as_table)
-                .and_then(|entry_points| entry_points.get("console_scripts"))
-                .and_then(Item::as_table)
-                .and_then(|table| table.get(target))
-                .and_then(Item::as_str)
-                .map(|raw| ("entry-points.console_scripts".to_string(), raw.to_string()))
-        });
-
-    let Some((table, raw)) = candidate else {
-        return Ok(None);
-    };
-    let (entry, call) = parse_entry_value(&raw)
-        .ok_or_else(|| anyhow!("invalid script entry for `{target}` in [{table}]"))?;
-    Ok(Some(ResolvedEntry {
-        entry,
-        call,
-        source: EntrySource::ProjectScript {
-            script: target.to_string(),
-        },
-    }))
 }
 
 fn script_under_project_root(root: &Path, target: &str) -> Option<PathBuf> {
@@ -288,26 +166,4 @@ fn resolve_executable_path(entry: &str, root: &Path) -> (String, Option<String>)
         let display = resolved.display().to_string();
         (display.clone(), Some(display))
     }
-}
-
-fn parse_entry_value(value: &str) -> Option<(String, Option<String>)> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let token = trimmed.split_whitespace().next().unwrap_or("").trim();
-    if token.is_empty() {
-        return None;
-    }
-    let mut parts = token.splitn(2, ':');
-    let module = parts.next().unwrap_or("").trim();
-    if module.is_empty() {
-        return None;
-    }
-    let call = parts
-        .next()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    Some((module.to_string(), call))
 }

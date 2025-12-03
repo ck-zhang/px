@@ -10,9 +10,7 @@ use serde_json::{json, Value};
 use tar::Archive;
 use tracing::{debug, warn};
 
-use crate::run_plan::{
-    plan_run_target, PassthroughReason, PassthroughTarget, ResolvedEntry, RunTargetPlan,
-};
+use crate::run_plan::{plan_run_target, PassthroughReason, PassthroughTarget, RunTargetPlan};
 use crate::tooling::{missing_pyproject_outcome, run_target_required_outcome};
 use crate::workspace::prepare_workspace_run_context;
 use crate::{
@@ -92,14 +90,6 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         });
         let plan = plan_run_target(&ws_ctx.py_ctx, &ws_ctx.manifest_path, &target)?;
         let mut outcome = match plan {
-            RunTargetPlan::PxScript(resolved) => run_module_entry(
-                ctx,
-                &ws_ctx.py_ctx,
-                resolved,
-                &request.args,
-                &command_args,
-                interactive,
-            )?,
             RunTargetPlan::Script(path) => run_project_script(
                 ctx,
                 &ws_ctx.py_ctx,
@@ -174,14 +164,6 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
     });
     let plan = plan_run_target(&py_ctx, &manifest, &target)?;
     let mut outcome = match plan {
-        RunTargetPlan::PxScript(resolved) => run_module_entry(
-            ctx,
-            &py_ctx,
-            resolved,
-            &request.args,
-            &command_args,
-            interactive,
-        )?,
         RunTargetPlan::Script(path) => run_project_script(
             ctx,
             &py_ctx,
@@ -827,92 +809,6 @@ fn mark_reporter_rendered(outcome: &mut ExecutionOutcome) {
     }
 }
 
-fn run_module_entry(
-    core_ctx: &CommandContext,
-    py_ctx: &PythonContext,
-    resolved: ResolvedEntry,
-    extra_args: &[String],
-    command_args: &Value,
-    interactive: bool,
-) -> Result<ExecutionOutcome> {
-    let ResolvedEntry {
-        entry,
-        call,
-        source,
-    } = resolved;
-    let mut mode = "module";
-    let mut python_args;
-    let mut env_entry = entry.clone();
-    let argv0 = source
-        .script_name()
-        .map(std::string::ToString::to_string)
-        .unwrap_or_else(|| entry.clone());
-    let (mut envs, _) = build_env_with_preflight(core_ctx, py_ctx, command_args)?;
-    if let Some(call_name) = call.as_ref() {
-        mode = "console-script";
-        env_entry = format!("{entry}:{call_name}");
-        python_args = vec![
-            "-c".to_string(),
-            console_entry_payload(&entry, call_name, &argv0),
-        ];
-        python_args.extend(extra_args.iter().cloned());
-    } else {
-        python_args = vec!["-m".to_string(), entry.clone()];
-        python_args.extend(extra_args.iter().cloned());
-    }
-    envs.push(("PX_RUN_ENTRY".into(), env_entry.clone()));
-
-    let runtime = core_ctx.python_runtime();
-    let output = if interactive {
-        runtime.run_command_passthrough(
-            &py_ctx.python,
-            &python_args,
-            &envs,
-            &py_ctx.project_root,
-        )?
-    } else {
-        runtime.run_command(&py_ctx.python, &python_args, &envs, &py_ctx.project_root)?
-    };
-    let mut details = json!({
-        "mode": mode,
-        "entry": env_entry.clone(),
-        "args": extra_args,
-        "source": source.label(),
-        "interactive": interactive,
-    });
-    if let Some(script) = source.script_name() {
-        details["script"] = Value::String(script.to_string());
-    }
-    if let Some(call_name) = call {
-        details["call"] = Value::String(call_name);
-    }
-
-    Ok(outcome_from_output(
-        "run",
-        &env_entry,
-        &output,
-        "px run",
-        Some(details),
-    ))
-}
-
-fn console_entry_payload(module: &str, call: &str, argv0: &str) -> String {
-    let access = call
-        .split('.')
-        .filter_map(|part| {
-            let trimmed = part.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        })
-        .fold(String::new(), |mut acc, part| {
-            acc.push('.');
-            acc.push_str(&part);
-            acc
-        });
-    format!(
-        "import importlib, sys; sys.argv[0] = {argv0:?}; mod = importlib.import_module({module:?}); target = mod{access}; sys.exit(target())"
-    )
-}
-
 fn run_passthrough(
     core_ctx: &CommandContext,
     py_ctx: &PythonContext,
@@ -1380,6 +1276,7 @@ mod tests {
             quiet: false,
             verbose: 0,
             trace: false,
+            debug: false,
             json: false,
             config: None,
         };

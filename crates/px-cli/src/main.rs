@@ -26,7 +26,14 @@ fn main() -> Result<()> {
     }
 
     let cli = PxCli::parse();
-    init_tracing(cli.trace, cli.verbose);
+    let trace = cli.trace || cli.debug;
+    init_tracing(trace, cli.verbose);
+    if cli.debug {
+        env::set_var("PX_DEBUG", "1");
+        if env::var_os("RUST_BACKTRACE").is_none() {
+            env::set_var("RUST_BACKTRACE", "1");
+        }
+    }
 
     let subcommand_json = matches!(&cli.command, CommandGroupCli::Fmt(args) if args.json);
     if cli.json || subcommand_json {
@@ -37,7 +44,8 @@ fn main() -> Result<()> {
     let global = GlobalOptions {
         quiet: cli.quiet,
         verbose: cli.verbose,
-        trace: cli.trace,
+        trace,
+        debug: cli.debug,
         json: cli.json || subcommand_json,
         config: cli.config.as_ref().map(|p| p.to_string_lossy().to_string()),
     };

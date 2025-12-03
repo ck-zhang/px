@@ -2,13 +2,13 @@ version = 1
 
 [metadata]
 px_version = "0.1.0"
-created_at = "2025-11-27T11:49:19.127058064Z"
+created_at = "2025-12-03T04:49:01.872421958Z"
 mode = "p0-pinned"
-manifest_fingerprint = "6889558ed7972f2969f8d5ba029a1fe6b38733e277f454f2121b4a137badb50c"
-lock_id = "31f4a4dcf3f3ee6a2298b98bdcf616b9457e63f16e651296a98cd3178a27f5ba"
+manifest_fingerprint = "b6b09b042b6c30dac94897e6d5ac62bc66e737667cc7ea5f0c13700951a2c9ca"
+lock_id = "9ff9e42b6930f07c25c8d4ede5ba9343c6dd6e66a4b819a167d5791f985fea9e"
 
 [project]
 name = "traceback_lab"
 
 [python]
-requirement = ">=3.12"
+requirement = ">=3.8"

@@ -129,6 +129,8 @@ pub fn traceback_fixture_source() -> PathBuf {
 /// # Panics
 /// Panics if the temporary directory cannot be created or copying fails.
 pub fn prepare_traceback_fixture(prefix: &str) -> (TempDir, PathBuf) {
+    reset_test_store_env();
+    ensure_test_store_env();
     let temp = tempfile::Builder::new()
         .prefix(prefix)
         .tempdir()

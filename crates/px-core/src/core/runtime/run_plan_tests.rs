@@ -40,7 +40,38 @@ fn prefers_console_script_from_site_bin() -> anyhow::Result<()> {
 }
 
 #[test]
-fn resolves_project_scripts_without_installing_package() -> anyhow::Result<()> {
+fn ignores_px_script_entries() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let pyproject = temp.path().join("pyproject.toml");
+    std::fs::write(
+        &pyproject,
+        r#"[tool.px.scripts]
+demo = "demo.cli:main"
+"#,
+    )?;
+
+    let ctx = PythonContext {
+        project_root: temp.path().to_path_buf(),
+        project_name: "demo".into(),
+        python: "/usr/bin/python".into(),
+        pythonpath: String::new(),
+        allowed_paths: vec![],
+        site_bin: None,
+        pep582_bin: Vec::new(),
+        px_options: PxOptions::default(),
+    };
+
+    let plan = plan_run_target(&ctx, &pyproject, "demo")?;
+    match plan {
+        RunTargetPlan::Executable(target) => assert_eq!(target, "demo"),
+        other => panic!("expected passthrough executable, got {other:?}"),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn ignores_project_scripts_for_target_resolution() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let pyproject = temp.path().join("pyproject.toml");
     std::fs::write(
@@ -65,11 +96,8 @@ scripts = { demo = "demo.cli:main" }
 
     let plan = plan_run_target(&ctx, &pyproject, "demo")?;
     match plan {
-        RunTargetPlan::PxScript(resolved) => {
-            assert_eq!(resolved.entry, "demo.cli");
-            assert_eq!(resolved.call.as_deref(), Some("main"));
-        }
-        other => panic!("expected px script plan from project scripts, got {other:?}"),
+        RunTargetPlan::Executable(target) => assert_eq!(target, "demo"),
+        other => panic!("expected passthrough executable, got {other:?}"),
     }
 
     Ok(())

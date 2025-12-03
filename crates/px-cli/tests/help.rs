@@ -56,3 +56,12 @@ fn fmt_help_mentions_frozen_flag() {
         "fmt usage missing forwarded arg example: {output}"
     );
 }
+
+#[test]
+fn top_level_help_mentions_debug_flag() {
+    let output = help_output(&["--help"]);
+    assert!(
+        output.contains("--debug"),
+        "global help should surface the --debug flag: {output}"
+    );
+}

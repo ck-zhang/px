@@ -8,7 +8,7 @@ pub(crate) fn run_target_required_outcome() -> ExecutionOutcome {
     ExecutionOutcome::user_error(
         "px run requires a target",
         json!({
-            "hint": "pass a command or script explicitly, or define [tool.px.scripts].<name>",
+            "hint": "pass a command or script explicitly (file under the project or an executable on PATH)",
         }),
     )
 }

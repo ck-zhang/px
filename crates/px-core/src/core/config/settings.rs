@@ -11,6 +11,7 @@ pub struct GlobalOptions {
     pub quiet: bool,
     pub verbose: u8,
     pub trace: bool,
+    pub debug: bool,
     pub json: bool,
     pub config: Option<String>,
 }

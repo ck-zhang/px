@@ -603,21 +603,17 @@ Run a command using the project env, with deterministic state behavior and deter
 
 Given `px run <target> -- <args>…`:
 
-1. **Script alias (if configured)**
+1. **Direct command / script**
 
-   * If `[tool.px.scripts].<target>` exists, expand it to a concrete command line and run that inside the project env.
-
-2. **Direct command / script**
-
-   * Otherwise, treat `<target>` as an executable or script path to run with the project env’s PATH and Python:
+   * Treat `<target>` as an executable or script path to run with the project env’s PATH and Python:
 
      * If `<target>` resolves to a file under the project root, run it as a script with the project runtime.
      * Else, run `<target>` as a process, relying on PATH from the project env (so console scripts and `python` from the env take precedence).
 
-3. **No implicit module/CLI guessing**
+2. **No implicit module/CLI guessing**
 
    * px **must not** implicitly transform `<target>` into `python -m <target>` or `<target>.cli` or similar.
-   * If the user wants module execution, they must say so (`px run python -m myapp.cli`) or define a `[tool.px.scripts]` alias.
+   * If the user wants module execution, they must say so (`px run python -m myapp.cli`).
 
 This makes `px run` behavior fully deterministic and avoids surprising `ModuleNotFoundError` from “helpful” fallbacks.
 

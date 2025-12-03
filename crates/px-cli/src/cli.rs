@@ -51,6 +51,8 @@ pub struct PxCli {
     pub verbose: u8,
     #[arg(long, help = "Force trace logging regardless of -v/-q", global = true)]
     pub trace: bool,
+    #[arg(long, help = "Enable debug output and full tracebacks", global = true)]
+    pub debug: bool,
     #[arg(
         long,
         help = "Emit {status,message,details} JSON envelopes",

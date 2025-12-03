@@ -1752,6 +1752,7 @@ members = ["apps/a", "libs/b"]
             quiet: false,
             verbose: 0,
             trace: false,
+            debug: false,
             json: false,
             config: None,
         }));

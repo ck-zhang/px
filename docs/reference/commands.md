@@ -111,13 +111,10 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 * **Preconditions**: project root exists. In dev, lock must exist and match manifest (otherwise suggest `px sync`). In CI/`--frozen`, env must already be in sync; no repairs.
 * **Target resolution**:
 
-  1. If `[tool.px.scripts].<target>` exists, expand and run inside project env.
-  2. Otherwise treat `<target>` as an executable or script path with env PATH:
+  1. If `<target>` is a file under the project root, run it as a script with the project runtime.
+  2. Otherwise run `<target>` as an executable, relying on PATH from the project env (PEP 621 console/gui scripts and `python` from the env take precedence).
 
-     * If `<target>` is a file under the project root, run as a script with the project runtime.
-     * Else run `<target>` as a process, relying on PATH from the project env (console scripts and `python` from the env take precedence).
-
-  3. No implicit module/CLI guessing (`python -m`, `.cli`, etc.).
+  No implicit module/CLI guessing (`python -m`, `.cli`, etc.).
 
 * **Behavior (dev)**: if env missing/stale, rebuild from `px.lock` (no resolution) before running.
 * **Behavior (CI/`--frozen`)**: fail if lock drifted or env stale; never repairs.
