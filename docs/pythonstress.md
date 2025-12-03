@@ -1,7 +1,7 @@
 # px pythonstress status
 
 ## Core packaging / build tools
-- [x] pip — dependency-group defaults validated with `px sync`, `px run pip`, `px test`
+- [ ] pip
 - [ ] build
 - [ ] hatch
 - [ ] poetry
