@@ -23,6 +23,7 @@ Color: code + summary in error color; “Why” bullets normal; “Fix” bullet
 * **Missing import in `px run`** – suggest `px add <pkg>` or `px sync` depending on whether `<pkg>` is already in M/L.
 * **Wrong interpreter (user ran `python` directly)** – suggest `px run python ...`.
 * **Runtime mismatch for tool** – suggest `px tool install <tool>` again or `px python install`.
+* **Mutating pip under `px run`** – **Why**: px envs are immutable CAS materializations; `pip install/uninstall` cannot change them. **Fix**: use `px add/remove/update/sync` to update dependencies, then rerun the command with `px run`.
 
 ## Flags and CI behavior
 

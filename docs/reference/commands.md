@@ -119,6 +119,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 * **Behavior (dev)**: if env missing/stale, rebuild from `px.lock` (no resolution) before running.
 * **Behavior (CI/`--frozen`)**: fail if lock drifted or env stale; never repairs.
 * **Env prep**: PATH is rebuilt with the px env’s `site/bin` first (px materializes console/gui scripts there from wheels); exports `PYAPP_COMMAND_NAME` when `[tool.px].manage-command` is set; runs a lightweight import check for `[tool.px].plugin-imports` and sets `PX_PLUGIN_PREFLIGHT` to `1`/`0`; clears proxy env vars.
+* **Pip semantics**: px envs are immutable CAS materializations; mutating pip commands (`pip install`, `python -m pip uninstall`, etc.) are blocked with a PX error. Read-only pip invocations (`pip list/show/help/--version`) run normally.
 * **VCS version files**: if `[tool.hatch.build.hooks.vcs].version-file` points to a missing file, px writes one using `git describe --tags --dirty --long` (fallback `git rev-parse --short HEAD`); if git metadata is unavailable, px writes `0.0.0+unknown` as a safe fallback.
 * **Failure hints**: missing module during execution → if dep absent in M/L suggest `px add <pkg>`; if present suggest `px sync`.
 * **Stdin**: passthrough targets using `python -` keep stdin attached so piped scripts can run; other non-interactive runs keep stdin closed to avoid blocking.

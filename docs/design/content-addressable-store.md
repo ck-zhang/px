@@ -11,7 +11,7 @@ The px CAS is the **single source of truth** for all immutable build artifacts:
 Environments (E/WE) are **thin projections** over the CAS:
 
 * No traditional venvs.
-* No per‑env copies of site‑packages.
+* No per-env copies of site-packages.
 * A project/workspace/tool env is just:
 
   ```text
@@ -19,6 +19,8 @@ Environments (E/WE) are **thin projections** over the CAS:
   ```
 
 linked from `.px/envs/...`.
+
+These projections are **immutable**: they are content-addressed materializations of a profile and runtime. Tools like `pip install` cannot mutate them; dependency changes must flow through px (`px add/remove/update/sync`) so new artifacts are built into CAS and re-materialized. Envs are never “activated” directly—the supported entry points are `px run`, `px test`, and `px fmt`.
 
 The CAS must be:
 

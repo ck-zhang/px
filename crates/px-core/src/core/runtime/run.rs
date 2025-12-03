@@ -368,16 +368,11 @@ fn run_executable(
     command_args: &Value,
     interactive: bool,
 ) -> Result<ExecutionOutcome> {
+    if let Some(subcommand) = mutating_pip_invocation(program, extra_args, py_ctx) {
+        return Ok(pip_mutation_outcome(program, &subcommand, extra_args));
+    }
     let (envs, _) = build_env_with_preflight(core_ctx, py_ctx, command_args)?;
-    let uses_px_python = {
-        let program_path = Path::new(program);
-        let python_path = Path::new(&py_ctx.python);
-        program_path == python_path
-            || program_path
-                .file_name()
-                .and_then(|p| python_path.file_name().filter(|q| q == &p))
-                .is_some()
-    };
+    let uses_px_python = program_matches_python(program, py_ctx);
     let needs_stdin = uses_px_python && extra_args.first().map(|arg| arg == "-").unwrap_or(false);
     let runtime = core_ctx.python_runtime();
     let interactive = interactive || needs_stdin;
@@ -404,6 +399,124 @@ fn run_executable(
         "px run",
         Some(details),
     ))
+}
+
+fn program_matches_python(program: &str, py_ctx: &PythonContext) -> bool {
+    let program_path = Path::new(program);
+    let python_path = Path::new(&py_ctx.python);
+    program_path == python_path
+        || program_path
+            .file_name()
+            .and_then(|p| python_path.file_name().filter(|q| q == &p))
+            .is_some()
+}
+
+fn mutating_pip_invocation(
+    program: &str,
+    args: &[String],
+    py_ctx: &PythonContext,
+) -> Option<String> {
+    let pip_args = pip_args_for_invocation(program, args, py_ctx)?;
+    let subcommand = pip_subcommand(pip_args)?;
+    if is_mutating_pip_subcommand(&subcommand) {
+        Some(subcommand)
+    } else {
+        None
+    }
+}
+
+fn pip_args_for_invocation<'a>(
+    program: &'a str,
+    args: &'a [String],
+    py_ctx: &PythonContext,
+) -> Option<&'a [String]> {
+    if is_pip_program(Path::new(program)) {
+        return Some(args);
+    }
+    if program_matches_python(program, py_ctx) && args.len() >= 2 && args[0] == "-m" {
+        if is_pip_module(&args[1]) {
+            return Some(&args[2..]);
+        }
+    }
+    None
+}
+
+fn is_pip_program(program: &Path) -> bool {
+    program
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower
+                .strip_prefix("pip")
+                .map(|rest| rest.is_empty() || rest.chars().all(|ch| ch.is_ascii_digit() || ch == '.'))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+fn is_pip_module(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower == "pip.__main__" {
+        return true;
+    }
+    lower
+        .strip_prefix("pip")
+        .map(|rest| rest.is_empty() || rest.chars().all(|ch| ch.is_ascii_digit() || ch == '.'))
+        .unwrap_or(false)
+}
+
+fn pip_subcommand(args: &[String]) -> Option<String> {
+    const KNOWN_SUBCOMMANDS: &[&str] = &[
+        "install",
+        "uninstall",
+        "download",
+        "freeze",
+        "list",
+        "show",
+        "check",
+        "config",
+        "search",
+        "wheel",
+        "hash",
+        "completion",
+        "debug",
+        "help",
+        "cache",
+        "index",
+        "inspect",
+    ];
+    for arg in args {
+        if arg == "--" {
+            break;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        let lower = arg.to_ascii_lowercase();
+        if KNOWN_SUBCOMMANDS.contains(&lower.as_str()) {
+            return Some(lower);
+        }
+    }
+    None
+}
+
+fn is_mutating_pip_subcommand(subcommand: &str) -> bool {
+    matches!(subcommand, "install" | "uninstall")
+}
+
+fn pip_mutation_outcome(program: &str, subcommand: &str, args: &[String]) -> ExecutionOutcome {
+    ExecutionOutcome::user_error(
+        "pip cannot modify px-managed environments",
+        json!({
+            "code": crate::diag_commands::RUN,
+            "reason": "pip_mutation_forbidden",
+            "program": program,
+            "subcommand": subcommand,
+            "args": args,
+            "hint": "px envs are immutable CAS materializations; use `px add/remove/update/sync` to change dependencies."
+        }),
+    )
 }
 
 fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<ExecutionOutcome> {
@@ -1186,7 +1299,7 @@ def pytest_sessionstart(session):
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GlobalOptions, SystemEffects};
+    use crate::{CommandStatus, GlobalOptions, SystemEffects};
     use px_domain::PxOptions;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1204,6 +1317,107 @@ mod tests {
             config: None,
         };
         CommandContext::new(&GLOBAL, Arc::new(SystemEffects::new())).expect("ctx")
+    }
+
+    #[test]
+    fn detects_mutating_pip_invocation_for_install() {
+        let temp = tempdir().expect("tempdir");
+        let py_ctx = PythonContext {
+            project_root: temp.path().to_path_buf(),
+            project_name: "demo".into(),
+            python: "/usr/bin/python".into(),
+            pythonpath: String::new(),
+            allowed_paths: vec![temp.path().to_path_buf()],
+            site_bin: None,
+            pep582_bin: Vec::new(),
+            px_options: PxOptions::default(),
+        };
+
+        let args = vec!["install".to_string(), "demo".to_string()];
+        let subcommand = mutating_pip_invocation("pip", &args, &py_ctx);
+        assert_eq!(subcommand.as_deref(), Some("install"));
+    }
+
+    #[test]
+    fn detects_mutating_python_dash_m_pip_invocation() {
+        let temp = tempdir().expect("tempdir");
+        let py_ctx = PythonContext {
+            project_root: temp.path().to_path_buf(),
+            project_name: "demo".into(),
+            python: "/usr/bin/python".into(),
+            pythonpath: String::new(),
+            allowed_paths: vec![temp.path().to_path_buf()],
+            site_bin: None,
+            pep582_bin: Vec::new(),
+            px_options: PxOptions::default(),
+        };
+
+        let args = vec![
+            "-m".to_string(),
+            "pip".to_string(),
+            "uninstall".to_string(),
+            "demo".to_string(),
+        ];
+        let subcommand = mutating_pip_invocation(&py_ctx.python, &args, &py_ctx);
+        assert_eq!(subcommand.as_deref(), Some("uninstall"));
+    }
+
+    #[test]
+    fn read_only_pip_commands_are_allowed() {
+        let temp = tempdir().expect("tempdir");
+        let py_ctx = PythonContext {
+            project_root: temp.path().to_path_buf(),
+            project_name: "demo".into(),
+            python: "/usr/bin/python".into(),
+            pythonpath: String::new(),
+            allowed_paths: vec![temp.path().to_path_buf()],
+            site_bin: None,
+            pep582_bin: Vec::new(),
+            px_options: PxOptions::default(),
+        };
+
+        let list_args = vec!["list".to_string()];
+        assert!(mutating_pip_invocation("pip3", &list_args, &py_ctx).is_none());
+
+        let help_args = vec!["help".to_string(), "install".to_string()];
+        assert!(mutating_pip_invocation("pip", &help_args, &py_ctx).is_none());
+
+        let version_args = vec!["--version".to_string()];
+        assert!(mutating_pip_invocation("pip", &version_args, &py_ctx).is_none());
+    }
+
+    #[test]
+    fn run_executable_blocks_mutating_pip_commands() -> Result<()> {
+        let ctx = ctx_with_defaults();
+        let temp = tempdir()?;
+        let py_ctx = PythonContext {
+            project_root: temp.path().to_path_buf(),
+            project_name: "demo".into(),
+            python: "/usr/bin/python".into(),
+            pythonpath: String::new(),
+            allowed_paths: vec![temp.path().to_path_buf()],
+            site_bin: None,
+            pep582_bin: Vec::new(),
+            px_options: PxOptions::default(),
+        };
+
+        let args = vec!["install".to_string(), "demo".to_string()];
+        let outcome = run_executable(&ctx, &py_ctx, "pip", &args, &json!({}), false)?;
+
+        assert_eq!(outcome.status, CommandStatus::UserError);
+        assert_eq!(
+            outcome.details.get("reason").and_then(|value| value.as_str()),
+            Some("pip_mutation_forbidden")
+        );
+        assert_eq!(
+            outcome.details.get("subcommand").and_then(|value| value.as_str()),
+            Some("install")
+        );
+        assert_eq!(
+            outcome.details.get("program").and_then(|value| value.as_str()),
+            Some("pip")
+        );
+        Ok(())
     }
 
     #[test]
