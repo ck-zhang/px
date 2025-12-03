@@ -566,18 +566,9 @@ fn materialize_profile_env(
             for entry in fs::read_dir(&pkg_bin)? {
                 let entry = entry?;
                 if entry.file_type()?.is_file() {
+                    let src = entry.path();
                     let dest = bin_dir.join(entry.file_name());
-                    let _ = fs::remove_file(&dest);
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::symlink;
-                        symlink(entry.path(), &dest)
-                            .or_else(|_| fs::copy(entry.path(), &dest).map(|_| ()))?;
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        fs::copy(entry.path(), &dest)?;
-                    }
+                    link_bin_entry(&src, &dest)?;
                 }
             }
         }
@@ -653,6 +644,56 @@ fn materialize_profile_env(
     }
     let _ = fs::remove_dir_all(&backup_root);
     Ok(env_root)
+}
+
+fn link_bin_entry(src: &Path, dest: &Path) -> Result<()> {
+    if dest.exists() {
+        let _ = fs::remove_file(dest);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        if let Err(sym_err) = symlink(src, dest) {
+            fs::hard_link(src, dest).with_context(|| {
+                format!(
+                    "failed to link CAS bin entry {} -> {} (symlink error: {})",
+                    dest.display(),
+                    src.display(),
+                    sym_err
+                )
+            })?;
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        if let Err(hard_err) = fs::hard_link(src, dest) {
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::symlink_file;
+                symlink_file(src, dest).with_context(|| {
+                    format!(
+                        "failed to link CAS bin entry {} -> {} (hard link error: {})",
+                        dest.display(),
+                        src.display(),
+                        hard_err
+                    )
+                })?;
+            }
+            #[cfg(not(windows))]
+            {
+                return Err(hard_err).with_context(|| {
+                    format!(
+                        "failed to link CAS bin entry {} -> {}",
+                        dest.display(),
+                        src.display()
+                    )
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn materialize_pkg_archive(oid: &str, archive: &[u8]) -> Result<PathBuf> {
@@ -1002,6 +1043,8 @@ fn set_exec_permissions(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use px_domain::project::manifest::DependencyGroupSource;
+    use px_domain::PxOptions;
     use std::collections::BTreeMap;
     use tempfile::tempdir;
 
@@ -1081,6 +1124,144 @@ mod tests {
             shim.contains(&site.display().to_string()),
             "PYTHONPATH should include env site-packages"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn env_bin_entries_link_to_store_materialization() -> Result<()> {
+        let store = global_store();
+        let temp = tempdir()?;
+
+        // Minimal runtime executable.
+        let runtime_root = temp.path().join("runtime");
+        let runtime_bin = runtime_root.join("bin");
+        fs::create_dir_all(&runtime_bin)?;
+        let runtime_exe = runtime_bin.join("python");
+        fs::write(&runtime_exe, b"#!/bin/false")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&runtime_exe, fs::Permissions::from_mode(0o755))?;
+        }
+
+        // CAS pkg-build with a bin script.
+        let pkg_root = temp.path().join("pkg");
+        let pkg_bin = pkg_root.join("bin");
+        let pkg_site = pkg_root.join("site-packages");
+        fs::create_dir_all(&pkg_bin)?;
+        fs::create_dir_all(&pkg_site)?;
+        let script = pkg_bin.join("demo");
+        fs::write(&script, b"#!/bin/echo demo")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
+        }
+
+        let pkg_archive = archive_dir_canonical(&pkg_root)?;
+        let pkg_obj = store.store(&ObjectPayload::PkgBuild {
+            header: PkgBuildHeader {
+                source_oid: "src".into(),
+                runtime_abi: "abi".into(),
+                build_options_hash: "opts".into(),
+            },
+            archive: Cow::Owned(pkg_archive),
+        })?;
+
+        // Runtime object to back the profile.
+        let runtime_header = RuntimeHeader {
+            version: "3.11.0".to_string(),
+            abi: "cp311".to_string(),
+            platform: "linux".to_string(),
+            build_config_hash: "abc".to_string(),
+            exe_path: "bin/python".to_string(),
+        };
+        let runtime_obj = store.store(&ObjectPayload::Runtime {
+            header: runtime_header.clone(),
+            archive: Cow::Owned(archive_dir_canonical(&runtime_root)?),
+        })?;
+
+        let profile_header = ProfileHeader {
+            runtime_oid: runtime_obj.oid.clone(),
+            packages: vec![ProfilePackage {
+                name: "demo".to_string(),
+                version: "1.0.0".to_string(),
+                pkg_build_oid: pkg_obj.oid.clone(),
+            }],
+            sys_path_order: Vec::new(),
+            env_vars: BTreeMap::new(),
+        };
+        let profile_obj = store.store(&ObjectPayload::Profile {
+            header: profile_header.clone(),
+        })?;
+
+        let snapshot = ManifestSnapshot {
+            root: temp.path().to_path_buf(),
+            manifest_path: temp.path().join("pyproject.toml"),
+            lock_path: temp.path().join("px.lock"),
+            name: "demo".to_string(),
+            python_requirement: ">=3.11".to_string(),
+            dependencies: Vec::new(),
+            dependency_groups: Vec::new(),
+            declared_dependency_groups: Vec::new(),
+            dependency_group_source: DependencyGroupSource::None,
+            group_dependencies: Vec::new(),
+            requirements: Vec::new(),
+            python_override: None,
+            px_options: PxOptions::default(),
+            manifest_fingerprint: "fp".to_string(),
+        };
+
+        let env_root = materialize_profile_env(
+            &snapshot,
+            &RuntimeMetadata {
+                path: runtime_exe.display().to_string(),
+                version: "3.11.0".to_string(),
+                platform: "linux".to_string(),
+            },
+            &profile_header,
+            &profile_obj.oid,
+            &runtime_exe,
+        )?;
+
+        let env_bin = env_root.join("bin").join("demo");
+        let store_bin = store
+            .root()
+            .join(MATERIALIZED_PKG_BUILDS_DIR)
+            .join(&pkg_obj.oid)
+            .join("bin")
+            .join("demo");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = fs::symlink_metadata(&env_bin)?;
+            if meta.file_type().is_symlink() {
+                let target = fs::read_link(&env_bin)?;
+                assert_eq!(target, store_bin, "bin entry should be a symlink into CAS");
+            } else {
+                let src_meta = fs::metadata(&store_bin)?;
+                let dest_meta = fs::metadata(&env_bin)?;
+                assert_eq!(
+                    src_meta.ino(),
+                    dest_meta.ino(),
+                    "bin entry should be hard-linked to CAS materialization"
+                );
+                assert_eq!(
+                    src_meta.dev(),
+                    dest_meta.dev(),
+                    "bin entry should share the same device"
+                );
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            assert_eq!(
+                fs::metadata(&env_bin)?.len(),
+                fs::metadata(&store_bin)?.len(),
+                "bin entry should point to CAS materialization"
+            );
+        }
         Ok(())
     }
 
