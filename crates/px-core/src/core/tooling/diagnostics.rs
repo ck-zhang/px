@@ -23,5 +23,4 @@ pub mod cas {
     pub const STORE_WRITE_FAILURE: &str = "PX810";
     pub const INDEX_CORRUPT: &str = "PX811";
     pub const FORMAT_INCOMPATIBLE: &str = "PX812";
-    pub const REMOTE_FAILURE: &str = "PX813";
 }

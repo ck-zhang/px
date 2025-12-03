@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
 use serde_json::{json, Value};
 use tar::Archive;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::run_plan::{
     plan_run_target, PassthroughReason, PassthroughTarget, ResolvedEntry, RunTargetPlan,
@@ -18,7 +18,7 @@ use crate::workspace::prepare_workspace_run_context;
 use crate::{
     attach_autosync_details, is_missing_project_error, manifest_snapshot, missing_project_outcome,
     outcome_from_output, python_context_with_mode, state_guard::guard_for_execution,
-    CommandContext, ExecutionOutcome, InstallUserError, PythonContext,
+    CommandContext, ExecutionOutcome, PythonContext,
 };
 
 #[derive(Clone, Debug)]
@@ -254,10 +254,7 @@ fn build_pytest_invocation(
         let plugin_dir = plugin_path
             .parent()
             .unwrap_or(py_ctx.project_root.as_path());
-        append_pythonpath(
-            &mut envs,
-            plugin_dir,
-        );
+        append_pythonpath(&mut envs, plugin_dir);
         append_allowed_paths(&mut envs, plugin_dir);
         defaults.extend_from_slice(&["-p".to_string(), "px_pytest_plugin".to_string()]);
     }
@@ -598,21 +595,12 @@ fn ensure_stdlib_tests_available(py_ctx: &PythonContext) -> Result<Option<PathBu
         return Ok(Some(staged_root));
     }
 
-    Err(InstallUserError::new(
-        format!(
-            "python {} runtime is missing the stdlib test package at {}",
-            runtime_version,
-            tests_dir.display()
-        ),
-        json!({
-            "hint": format!(
-                "install a system python {}.{} with the standard library test suite to satisfy imports of the built-in `test` package",
-                major, minor
-            ),
-            "reason": "missing_stdlib_tests",
-        }),
-    )
-    .into())
+    warn!(
+        runtime = %runtime_version,
+        tests_dir = %tests_dir.display(),
+        "stdlib test suite missing; proceeding without staging tests"
+    );
+    Ok(None)
 }
 
 fn host_stdlib_tests(
@@ -1482,13 +1470,7 @@ mod tests {
             px_options: PxOptions::default(),
         };
         let envs = py_ctx.base_env(&json!({}))?;
-        let (envs, _cmd) = build_pytest_invocation(
-            &ctx,
-            &py_ctx,
-            envs,
-            &[],
-            TestReporter::Px,
-        )?;
+        let (envs, _cmd) = build_pytest_invocation(&ctx, &py_ctx, envs, &[], TestReporter::Px)?;
         let plugin_dir = temp.path().join(".px").join("plugins");
         let pythonpath = envs
             .iter()

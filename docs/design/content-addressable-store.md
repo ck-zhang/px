@@ -27,7 +27,6 @@ The CAS must be:
 * **Deduplicating** – identical content is stored once.
 * **Concurrency‑safe** – multi‑process use cannot corrupt the store.
 * **GC‑safe** – nothing with live references is ever reclaimed.
-* **Remote‑ready** – optional push/pull of objects between machines.
 * **Versioned** – store/index format is explicitly versioned for safe upgrades.
 
 ---
@@ -169,6 +168,12 @@ Digest is **authoritative**:
   * Normalized filesystem tree (bin, lib, include, etc.).
   * Build config hash (e.g. configure flags).
 
+*Host-only runtimes (`PX_RUNTIME_HOST_ONLY=1`)*
+
+* Opt-in escape hatch for local/dev use.
+* The CAS entry contains only the runtime header/metadata; the archive bytes are **not** stored in CAS.
+* Runtime bytes are assumed to come from the host path, so CAS immutability/replication guarantees do not apply in this mode.
+
 **4. `profile`**
 
 * A *logical env description*.
@@ -194,6 +199,8 @@ Digest is **authoritative**:
   * CAS mapping of lock entries → `pkg-build` oids.
 
 A profile is essentially “L + runtime” rewritten into CAS IDs.
+
+`env_vars` in the profile are applied when the env runtime is launched; they override any parent process values so that the materialized env matches the CAS-described configuration.
 
 **5. `meta`**
 
@@ -311,7 +318,9 @@ python -> runtime shim    # launcher that uses runtime_oid + profile_oid
     "packages": [
       {"name": "...", "version": "...", "pkg_build_oid": "..."},
       ...
-    ]
+    ],
+    "sys_path_order": [...],
+    "env_vars": {...}
   }
   ```
 
@@ -319,6 +328,7 @@ python -> runtime shim    # launcher that uses runtime_oid + profile_oid
 
   * invokes the runtime from `runtime_oid`,
   * sets `PYTHONPATH` / `sys.path` using the packages declared in the profile in a deterministic order.
+  * applies `env_vars` from the profile/env manifest, overriding any parent environment values when launching.
 
 Env materialization is idempotent and manifest-driven:
 
@@ -388,7 +398,7 @@ Behavior:
 On failure:
 
 * No partial blob is left referenced from `objects`.
-* Leftover `tmp/*.partial` is cleaned by startup self‑check / `px doctor`.
+* Leftover `tmp/*.partial` is cleaned by startup self‑check.
 
 #### 13.6.2 `cas.ensure_pkg_build(source_oid, runtime)`
 
@@ -615,7 +625,7 @@ On crash:
 
 #### 13.8.3 Startup / self‑check
 
-Optional `px doctor` / background health checks:
+Optional background health checks:
 
 * Sweep `tmp/*.partial` and delete any leftover partials.
 * Sample existing objects and verify their digests; delete corrupt blobs and remove `refs` entries that point only to missing objects, prompting rebuild on next use.
@@ -633,48 +643,9 @@ Optional `px doctor` / background health checks:
 
 ---
 
-### 13.9 Remote CAS (optional, but spec’d)
+### 13.9 Remote CAS
 
-The CAS is designed to support a remote backend without changing the high‑level semantics.
-
-#### 13.9.1 Backend abstraction
-
-Define an abstract `StoreBackend`:
-
-* `has(oid) -> bool`
-* `get(oid) -> bytes`
-* `put(oid, bytes) -> ()`
-* `list(kind?, prefix?) -> [oid]`
-
-px ships with:
-
-* `LocalBackend` (the on‑disk store above).
-* Optionally (later): `RemoteBackend` (HTTP, S3, etc.).
-
-#### 13.9.2 Push / pull behavior
-
-* On `cas.ensure_*`:
-
-  * Check local first.
-  * If missing and remote configured:
-
-    * Try `remote.get(oid)` and, if present, populate local store (subject to digest verification).
-    * Else build/download and then `remote.put(oid)` if policy allows.
-
-* For any `remote.get(oid)`:
-
-  * px must rehash the bytes and reject them if the digest doesn’t match `oid` (treat as `PX800`‑style corruption).
-
-* Remote errors:
-
-  * Never corrupt local store.
-  * px surfaces them as non-fatal (falls back to local builds if possible) or as clear CAS‑level errors (`PX81x`).
-
-* Implementation toggle:
-
-  * Remote push/pull is off by default; enable explicitly via `PX_CAS_REMOTE_ENABLE=1` plus `PX_CAS_REMOTE_URL`/`PX_CAS_REMOTE_PATH`.
-
-The digest is always authoritative; remote is a cache/replica, not a different source of truth.
+The current implementation only supports a local on-disk CAS. Remote backends (HTTP/S3/etc.) are not part of the current design and may be revisited in the future.
 
 ---
 
@@ -699,8 +670,6 @@ CAS introduces a new error family (example codes):
 
 * `PX812` – CAS format/schema incompatible with this px version.
 
-* `PX81x` – Remote CAS failures (network, auth, integrity).
-
 All CAS operations must:
 
 * Emit deterministic log lines about:
@@ -711,6 +680,6 @@ All CAS operations must:
 
 * Respect `--json` and non‑TTY rules (no spinners).
 
-* Be safe to retry on `PX800`/`PX810`/`PX81x` unless explicitly documented otherwise.
+* Be safe to retry on `PX800`/`PX810` unless explicitly documented otherwise.
 
 Implementations may also expose basic CAS metrics (store size, per‑kind hit/miss, GC reclaimed bytes) where useful.

@@ -62,6 +62,8 @@ pub(crate) fn ensure_profile_env(
     runtime: &RuntimeMetadata,
     env_owner: &OwnerId,
 ) -> Result<CasProfile> {
+    // Host-only escape hatch: when PX_RUNTIME_HOST_ONLY=1, skip archiving the
+    // runtime into CAS and rely on the host interpreter path directly.
     let host_runtime_passthrough = env::var("PX_RUNTIME_HOST_ONLY")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -73,6 +75,7 @@ pub(crate) fn ensure_profile_env(
     let runtime_payload = ObjectPayload::Runtime {
         header: runtime_header.clone(),
         archive: Cow::Owned(if host_runtime_passthrough {
+            // Header-only runtime in host passthrough mode; bytes live outside CAS.
             Vec::new()
         } else {
             runtime_archive(runtime)?
@@ -322,10 +325,7 @@ fn runtime_archive(runtime: &RuntimeMetadata) -> Result<Vec<u8>> {
     include_paths.sort();
     include_paths.dedup();
     if include_paths.is_empty() {
-        bail!(
-            "no runtime paths found to archive for {}",
-            runtime.path
-        );
+        bail!("no runtime paths found to archive for {}", runtime.path);
     }
     archive_selected(root_dir, &include_paths)
 }
@@ -471,7 +471,6 @@ print(json.dumps(paths))
     }
     Ok(paths)
 }
-
 
 fn stage_pkg_build(dist_dir: &Path) -> Result<(TempDir, PathBuf)> {
     let staging = TempDir::new()?;
@@ -626,7 +625,7 @@ fn materialize_profile_env(
         }))?,
     )?;
 
-    write_python_shim(&bin_dir, runtime_exe, &site_packages)?;
+    write_python_shim(&bin_dir, runtime_exe, &site_packages, &manifest.env_vars)?;
     install_python_links(&bin_dir, runtime_exe)?;
     let backup_root = env_root.with_extension("backup");
     if backup_root.exists() {
@@ -784,7 +783,12 @@ fn write_sitecustomize(env_root: &Path, site_packages: Option<&Path>) -> Result<
     Ok(())
 }
 
-pub(crate) fn write_python_shim(bin_dir: &Path, runtime: &Path, site: &Path) -> Result<()> {
+pub(crate) fn write_python_shim(
+    bin_dir: &Path,
+    runtime: &Path,
+    site: &Path,
+    env_vars: &BTreeMap<String, Value>,
+) -> Result<()> {
     fs::create_dir_all(bin_dir)?;
     let shim = bin_dir.join("python");
     let mut script = String::new();
@@ -811,6 +815,11 @@ pub(crate) fn write_python_shim(bin_dir: &Path, runtime: &Path, site: &Path) -> 
     script.push_str(&format!("export PX_PYTHON=\"{}\"\n", runtime.display()));
     script.push_str("export PYTHONUNBUFFERED=1\n");
     script.push_str("export PYTHONDONTWRITEBYTECODE=1\n");
+    // Profile env_vars override the parent environment for the launched runtime.
+    for (key, value) in env_vars {
+        let rendered = env_var_value(value);
+        script.push_str(&format!("export {key}={}\n", shell_escape(&rendered)));
+    }
     script.push_str(&format!("exec \"{}\" \"$@\"\n", runtime.display()));
     fs::write(&shim, script)?;
     #[cfg(unix)]
@@ -834,6 +843,29 @@ pub(crate) fn write_python_shim(bin_dir: &Path, runtime: &Path, site: &Path) -> 
         }
     }
     Ok(())
+}
+
+fn env_var_value(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+fn shell_escape(value: &str) -> String {
+    let mut escaped = String::from("'");
+    for ch in value.chars() {
+        if ch == '\'' {
+            escaped.push_str("'\\''");
+        } else {
+            escaped.push(ch);
+        }
+    }
+    escaped.push('\'');
+    escaped
 }
 
 fn install_python_links(bin_dir: &Path, runtime: &Path) -> Result<()> {
@@ -1034,7 +1066,7 @@ mod tests {
         let site = env_root.join("lib/python3.11/site-packages");
         fs::create_dir_all(&site)?;
 
-        write_python_shim(&env_bin, &runtime, &site)?;
+        write_python_shim(&env_bin, &runtime, &site, &BTreeMap::new())?;
         let shim = fs::read_to_string(env_bin.join("python"))?;
         assert!(
             shim.contains(&runtime_root.display().to_string()),
@@ -1048,6 +1080,49 @@ mod tests {
         assert!(
             shim.contains(&site.display().to_string()),
             "PYTHONPATH should include env site-packages"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn python_shim_applies_profile_env_vars() -> Result<()> {
+        let temp = tempdir()?;
+        let runtime_root = temp.path().join("runtime");
+        let bin_dir = runtime_root.join("bin");
+        fs::create_dir_all(&bin_dir)?;
+        let runtime = bin_dir.join("python");
+        fs::write(
+            &runtime,
+            "#!/usr/bin/env bash\nprintf \"%s\" \"$FOO_FROM_PROFILE\"\n",
+        )?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755))?;
+
+        let env_root = temp.path().join("env");
+        let env_bin = env_root.join("bin");
+        let site = env_root.join("lib/python3.11/site-packages");
+        fs::create_dir_all(&site)?;
+
+        let mut env_vars = BTreeMap::new();
+        env_vars.insert(
+            "FOO_FROM_PROFILE".to_string(),
+            Value::String("from_profile".to_string()),
+        );
+        write_python_shim(&env_bin, &runtime, &site, &env_vars)?;
+        let shim = env_bin.join("python");
+        let output = Command::new(&shim)
+            .env("FOO_FROM_PROFILE", "ignored")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "shim should run successfully: {:?}",
+            output
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            stdout, "from_profile",
+            "profile env vars should override parent values"
         );
         Ok(())
     }

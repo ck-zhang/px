@@ -7,10 +7,10 @@ use std::{
 };
 
 use assert_cmd::{assert::Assert, cargo::cargo_bin_cmd};
-use std::sync::OnceLock;
 use serde_json::Value;
-use std::env;
 use std::cell::RefCell;
+use std::env;
+use std::sync::OnceLock;
 use tempfile::TempDir;
 use toml_edit::DocumentMut;
 

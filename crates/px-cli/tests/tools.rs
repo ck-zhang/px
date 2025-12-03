@@ -190,11 +190,15 @@ fn tool_run_executes_happy_path_environment() {
     let stdout_text = String::from_utf8_lossy(&output.stdout);
     let stderr_text = String::from_utf8_lossy(&output.stderr);
     if output.status.code() != Some(0)
-        && (stdout_text.contains("runtime unavailable") || stderr_text.contains("runtime unavailable"))
+        && (stdout_text.contains("runtime unavailable")
+            || stderr_text.contains("runtime unavailable"))
     {
         return;
     }
-    assert!(output.status.success(), "tool run failed: {stdout_text:?} {stderr_text:?}");
+    assert!(
+        output.status.success(),
+        "tool run failed: {stdout_text:?} {stderr_text:?}"
+    );
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("parse tool run json");
     assert_eq!(payload["status"], "ok");

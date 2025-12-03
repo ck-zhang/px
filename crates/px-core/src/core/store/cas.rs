@@ -16,7 +16,6 @@ use anyhow::{anyhow, Context, Result};
 use base64::prelude::{Engine as _, BASE64_STANDARD_NO_PAD};
 use flate2::{write::GzEncoder, Compression};
 use fs4::FileExt;
-use reqwest::{blocking::Client, StatusCode};
 use rand::{seq::IteratorRandom, thread_rng};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -27,8 +26,7 @@ use std::sync::OnceLock;
 use tar::Header;
 #[cfg(test)]
 use tempfile::tempdir;
-use url::Url;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 const OBJECTS_DIR: &str = "objects";
 const LOCKS_DIR: &str = "locks";
@@ -81,8 +79,6 @@ pub enum StoreError {
     },
     #[error("[PX810] CAS store write failed: {0}")]
     StoreWriteFailure(String),
-    #[error("[PX81x] CAS remote failure: {0}")]
-    RemoteFailure(String),
     #[error("[PX800] Unknown object kind '{0}'")]
     UnknownKind(String),
     #[error("[PX800] Unknown owner type '{0}'")]
@@ -108,7 +104,6 @@ impl StoreError {
             Self::MissingMeta(_) | Self::IncompatibleFormat { .. } => {
                 crate::core::tooling::diagnostics::cas::FORMAT_INCOMPATIBLE
             }
-            Self::RemoteFailure(_) => crate::core::tooling::diagnostics::cas::REMOTE_FAILURE,
         }
     }
 }
@@ -337,306 +332,10 @@ pub struct DoctorSummary {
     pub locked_skipped: usize,
 }
 
-/// Backend abstraction that a remote store could implement.
-pub trait StoreBackend: Send + Sync {
-    fn has(&self, oid: &str) -> Result<bool>;
-    fn get(&self, oid: &str) -> Result<Option<Vec<u8>>>;
-    fn put(&self, oid: &str, bytes: &[u8]) -> Result<()>;
-    fn list(&self, kind: Option<ObjectKind>, prefix: Option<&str>) -> Result<Vec<String>>;
-}
-
 #[derive(Debug, Default)]
 struct StoreHealth {
     permissions_checked: AtomicBool,
     index_validated: AtomicBool,
-}
-
-/// Default backend that delegates to the local store for remote-less setups.
-#[derive(Debug)]
-pub struct NullBackend;
-
-impl StoreBackend for NullBackend {
-    fn has(&self, _oid: &str) -> Result<bool> {
-        Ok(false)
-    }
-
-    fn get(&self, _oid: &str) -> Result<Option<Vec<u8>>> {
-        Ok(None)
-    }
-
-    fn put(&self, _oid: &str, _bytes: &[u8]) -> Result<()> {
-        Ok(())
-    }
-
-    fn list(&self, _kind: Option<ObjectKind>, _prefix: Option<&str>) -> Result<Vec<String>> {
-        Ok(Vec::new())
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct RemotePolicy {
-    push: bool,
-    pull: bool,
-}
-
-impl RemotePolicy {
-    const fn both_enabled() -> Self {
-        Self {
-            push: true,
-            pull: true,
-        }
-    }
-
-    const fn disabled() -> Self {
-        Self {
-            push: false,
-            pull: false,
-        }
-    }
-}
-
-/// Simple filesystem-backed remote for push/pull semantics without a full service.
-#[derive(Debug)]
-pub struct FileBackend {
-    root: PathBuf,
-}
-
-impl FileBackend {
-    pub fn new(root: PathBuf) -> Result<Self> {
-        let backend = Self { root };
-        backend.ensure_layout()?;
-        Ok(backend)
-    }
-
-    fn ensure_layout(&self) -> Result<()> {
-        fs::create_dir_all(self.root.join(OBJECTS_DIR)).with_context(|| {
-            format!(
-                "failed to create CAS remote objects directory {}",
-                self.root.join(OBJECTS_DIR).display()
-            )
-        })
-    }
-
-    fn object_path(&self, oid: &str) -> PathBuf {
-        let shard = oid.get(0..2).unwrap_or("xx");
-        self.root.join(OBJECTS_DIR).join(shard).join(oid)
-    }
-}
-
-impl StoreBackend for FileBackend {
-    fn has(&self, oid: &str) -> Result<bool> {
-        Ok(self.object_path(oid).exists())
-    }
-
-    fn get(&self, oid: &str) -> Result<Option<Vec<u8>>> {
-        let path = self.object_path(oid);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let bytes = fs::read(&path)?;
-        let actual = hex::encode(Sha256::digest(&bytes));
-        if actual != oid {
-            return Err(StoreError::DigestMismatch {
-                oid: oid.to_string(),
-                expected: oid.to_string(),
-                actual,
-            }
-            .into());
-        }
-        let _ = canonical_kind(&bytes)?;
-        Ok(Some(bytes))
-    }
-
-    fn put(&self, oid: &str, bytes: &[u8]) -> Result<()> {
-        let actual = hex::encode(Sha256::digest(bytes));
-        if actual != oid {
-            return Err(StoreError::DigestMismatch {
-                oid: oid.to_string(),
-                expected: oid.to_string(),
-                actual,
-            }
-            .into());
-        }
-        let _ = canonical_kind(bytes)?;
-        let dest = self.object_path(oid);
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = dest.with_extension("partial");
-        if tmp.exists() {
-            let _ = fs::remove_file(&tmp);
-        }
-        {
-            let mut file = File::create(&tmp)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-        }
-        if let Some(parent) = tmp.parent() {
-            fsync_dir(parent).ok();
-        }
-        fs::rename(&tmp, &dest)?;
-        if let Some(parent) = dest.parent() {
-            fsync_dir(parent).ok();
-        }
-        make_read_only_recursive(&dest)?;
-        Ok(())
-    }
-
-    fn list(&self, kind: Option<ObjectKind>, prefix: Option<&str>) -> Result<Vec<String>> {
-        let objects_root = self.root.join(OBJECTS_DIR);
-        if !objects_root.exists() {
-            return Ok(Vec::new());
-        }
-        let mut results = Vec::new();
-        for entry in walkdir::WalkDir::new(&objects_root)
-            .min_depth(2)
-            .max_depth(2)
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if let Some(prefix) = prefix {
-                if !file_name.starts_with(prefix) {
-                    continue;
-                }
-            }
-            if let Some(expected_kind) = kind {
-                let Ok(bytes) = fs::read(path) else {
-                    continue;
-                };
-                let Ok(actual_kind) = canonical_kind(&bytes) else {
-                    continue;
-                };
-                if actual_kind != expected_kind {
-                    continue;
-                }
-            }
-            results.push(file_name.to_string());
-        }
-        results.sort();
-        Ok(results)
-    }
-}
-
-/// Simple HTTP backend using PUT/GET/HEAD against a prefix URL.
-#[derive(Debug)]
-pub struct HttpBackend {
-    base: Url,
-    client: Client,
-}
-
-impl HttpBackend {
-    pub fn new(base: Url) -> Result<Self> {
-        let mut url = base;
-        if !url.path().ends_with('/') {
-            let mut path = url.path().to_string();
-            if !path.ends_with('/') {
-                path.push('/');
-            }
-            url.set_path(&path);
-        }
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .context("failed to build HTTP CAS client")?;
-        Ok(Self { base: url, client })
-    }
-
-    fn object_url(&self, oid: &str) -> Result<Url> {
-        self.base
-            .join(oid)
-            .with_context(|| format!("failed to build CAS URL for {oid}"))
-    }
-}
-
-impl StoreBackend for HttpBackend {
-    fn has(&self, oid: &str) -> Result<bool> {
-        let url = self.object_url(oid)?;
-        match self.client.head(url.clone()).send() {
-            Ok(resp) if resp.status() == StatusCode::NOT_FOUND => Ok(false),
-            Ok(resp) if resp.status().is_success() => Ok(true),
-            Ok(resp) if resp.status() == StatusCode::METHOD_NOT_ALLOWED => {
-                let resp = self.client.get(url).send()?;
-                if resp.status() == StatusCode::NOT_FOUND {
-                    Ok(false)
-                } else {
-                    Ok(resp.status().is_success())
-                }
-            }
-            Ok(resp) => Err(anyhow!(
-                "remote HEAD failed with status {}",
-                resp.status()
-            )),
-            Err(err) => Err(err.into()),
-        }
-    }
-
-    fn get(&self, oid: &str) -> Result<Option<Vec<u8>>> {
-        let url = self.object_url(oid)?;
-        let resp = self
-            .client
-            .get(url.clone())
-            .send()
-            .with_context(|| format!("failed to GET {}", url))?;
-        if resp.status() == StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        if !resp.status().is_success() {
-            return Err(anyhow!(
-                "remote GET failed with status {}",
-                resp.status()
-            ));
-        }
-        let bytes = resp.bytes()?.to_vec();
-        let actual = hex::encode(Sha256::digest(&bytes));
-        if actual != oid {
-            return Err(StoreError::DigestMismatch {
-                oid: oid.to_string(),
-                expected: oid.to_string(),
-                actual,
-            }
-            .into());
-        }
-        let _ = canonical_kind(&bytes)?;
-        Ok(Some(bytes))
-    }
-
-    fn put(&self, oid: &str, bytes: &[u8]) -> Result<()> {
-        let actual = hex::encode(Sha256::digest(bytes));
-        if actual != oid {
-            return Err(StoreError::DigestMismatch {
-                oid: oid.to_string(),
-                expected: oid.to_string(),
-                actual,
-            }
-            .into());
-        }
-        let _ = canonical_kind(bytes)?;
-        let url = self.object_url(oid)?;
-        let resp = self
-            .client
-            .put(url.clone())
-            .body(bytes.to_vec())
-            .send()
-            .with_context(|| format!("failed to PUT {}", url))?;
-        if !resp.status().is_success() {
-            return Err(anyhow!(
-                "remote PUT failed with status {}",
-                resp.status()
-            ));
-        }
-        Ok(())
-    }
-
-    fn list(&self, _kind: Option<ObjectKind>, _prefix: Option<&str>) -> Result<Vec<String>> {
-        // Listing is optional for the HTTP backend; return an empty set when unsupported.
-        Ok(Vec::new())
-    }
 }
 
 /// Content-addressable store responsible for persisting immutable objects and
@@ -645,8 +344,6 @@ impl StoreBackend for HttpBackend {
 pub struct ContentAddressableStore {
     root: PathBuf,
     envs_root: PathBuf,
-    remote: Arc<dyn StoreBackend>,
-    remote_policy: RemotePolicy,
     health: Arc<StoreHealth>,
 }
 
@@ -655,63 +352,11 @@ impl std::fmt::Debug for ContentAddressableStore {
         f.debug_struct("ContentAddressableStore")
             .field("root", &self.root)
             .field("envs_root", &self.envs_root)
-            .field("remote_policy", &self.remote_policy)
             .field(
                 "health_checked",
                 &self.health.permissions_checked.load(Ordering::Relaxed),
             )
             .finish()
-    }
-}
-
-impl StoreBackend for ContentAddressableStore {
-    fn has(&self, oid: &str) -> Result<bool> {
-        Ok(self.object_path(oid).exists())
-    }
-
-    fn get(&self, oid: &str) -> Result<Option<Vec<u8>>> {
-        let path = self.object_path(oid);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let bytes = fs::read(&path)?;
-        self.verify_bytes(oid, &bytes)?;
-        Ok(Some(bytes))
-    }
-
-    fn put(&self, oid: &str, bytes: &[u8]) -> Result<()> {
-        self.verify_bytes(oid, bytes)?;
-        let kind = canonical_kind(bytes)?;
-        let runtime_header = if kind == ObjectKind::Runtime {
-            runtime_header_from_bytes(bytes)?
-        } else {
-            None
-        };
-        let _lock = self.acquire_lock(oid)?;
-        let path = self.object_path(oid);
-        if path.exists() {
-            self.verify_existing(oid, &path)?;
-            self.ensure_index_entry(oid, kind, bytes.len() as u64)?;
-            if let Some(header) = runtime_header.as_ref() {
-                self.write_runtime_manifest(oid, header)
-                    .map_err(store_write_error)?;
-            }
-            return Ok(());
-        }
-
-        self.write_new_object(oid, bytes, &path)
-            .map_err(store_write_error)?;
-        self.ensure_index_entry(oid, kind, bytes.len() as u64)
-            .map_err(store_write_error)?;
-        if let Some(header) = runtime_header.as_ref() {
-            self.write_runtime_manifest(oid, header)
-                .map_err(store_write_error)?;
-        }
-        Ok(())
-    }
-
-    fn list(&self, kind: Option<ObjectKind>, prefix: Option<&str>) -> Result<Vec<String>> {
-        ContentAddressableStore::list(self, kind, prefix)
     }
 }
 
@@ -724,20 +369,6 @@ impl ContentAddressableStore {
     /// Returns an error if the root cannot be created or the index schema
     /// cannot be initialized.
     pub fn new(root: Option<PathBuf>) -> Result<Self> {
-        Self::with_remote_and_policy(root, Arc::new(NullBackend), RemotePolicy::disabled())
-    }
-
-    /// Initialize a store with a remote backend for push/pull.
-    pub fn with_remote(root: Option<PathBuf>, remote: Arc<dyn StoreBackend>) -> Result<Self> {
-        Self::with_remote_and_policy(root, remote, RemotePolicy::both_enabled())
-    }
-
-    /// Initialize a store with a remote backend and an explicit push/pull policy.
-    pub(crate) fn with_remote_and_policy(
-        root: Option<PathBuf>,
-        remote: Arc<dyn StoreBackend>,
-        remote_policy: RemotePolicy,
-    ) -> Result<Self> {
         let root = match root {
             Some(path) => path,
             None => default_root()?,
@@ -746,8 +377,6 @@ impl ContentAddressableStore {
         let store = Self {
             root,
             envs_root,
-            remote,
-            remote_policy,
             health: Arc::default(),
         };
         store.ensure_layout()?;
@@ -801,11 +430,6 @@ impl ContentAddressableStore {
         if let ObjectPayload::Runtime { header, .. } = payload {
             let _ = self.write_runtime_manifest(&oid, header);
         }
-        if self.remote_policy.push {
-            if let Err(err) = self.remote.put(&oid, &canonical) {
-                warn!(%oid, %err, "cas remote push failed");
-            }
-        }
         debug!(%oid, kind=%payload.kind().as_str(), "cas store");
         Ok(StoredObject {
             oid,
@@ -819,12 +443,6 @@ impl ContentAddressableStore {
     /// metadata/payload.
     pub fn load(&self, oid: &str) -> Result<LoadedObject> {
         self.ensure_layout()?;
-        if let Some(remote_bytes) = self.pull_if_missing(oid)? {
-            self.verify_bytes(oid, &remote_bytes)?;
-            debug!(%oid, "cas remote fetch");
-            return self.decode_object(oid, &remote_bytes);
-        }
-
         let mut conn = self.connection()?;
         let info = match self.object_info_with_conn(&conn, oid)? {
             Some(info) => info,
@@ -937,7 +555,10 @@ impl ContentAddressableStore {
         if self.object_info_with_conn(&conn, oid)?.is_some() {
             return Ok(());
         }
-        if self.repair_object_index_from_disk(&mut conn, oid)?.is_some() {
+        if self
+            .repair_object_index_from_disk(&mut conn, oid)?
+            .is_some()
+        {
             return Ok(());
         }
         Err(StoreError::MissingObject {
@@ -1525,8 +1146,7 @@ impl ContentAddressableStore {
             Err(err) => {
                 if matches!(
                     err.downcast_ref::<StoreError>(),
-                    Some(StoreError::MissingMeta(_))
-                        | Some(StoreError::IncompatibleFormat { .. })
+                    Some(StoreError::MissingMeta(_)) | Some(StoreError::IncompatibleFormat { .. })
                 ) {
                     // Do not auto-repair on format/schema incompatibility; surface PX812 so the
                     // caller can migrate or clear the store per the spec.
@@ -1924,10 +1544,8 @@ impl ContentAddressableStore {
             let Some(runtime_version) = runtime_version else {
                 continue;
             };
-            let owner_id =
-                tool_owner_id(&tool_name, lock_id, runtime_version).unwrap_or_else(|_| {
-                    format!("tool-env:{tool_name}:{lock_id}:{runtime_version}")
-                });
+            let owner_id = tool_owner_id(&tool_name, lock_id, runtime_version)
+                .unwrap_or_else(|_| format!("tool-env:{tool_name}:{lock_id}:{runtime_version}"));
             self.insert_ref_if_known(
                 tx,
                 OwnerType::ToolEnv,
@@ -2521,46 +2139,6 @@ impl ContentAddressableStore {
             }),
         }
     }
-
-    fn pull_if_missing(&self, oid: &str) -> Result<Option<Vec<u8>>> {
-        if !self.remote_policy.pull {
-            return Ok(None);
-        }
-        let path = self.object_path(oid);
-        if path.exists() {
-            return Ok(None);
-        }
-        if !self.remote.has(oid).map_err(remote_error)? {
-            return Ok(None);
-        }
-        if let Some(bytes) = self.remote.get(oid).map_err(remote_error)? {
-            self.verify_bytes(oid, &bytes)?;
-            let kind = canonical_kind(&bytes)?;
-            let runtime_header = if kind == ObjectKind::Runtime {
-                runtime_header_from_bytes(&bytes)?
-            } else {
-                None
-            };
-            // Populate local cache.
-            let _lock = self.acquire_lock(oid)?;
-            if path.exists() {
-                self.verify_existing(oid, &path)?;
-                self.ensure_index_entry(oid, kind, bytes.len() as u64)
-                    .map_err(store_write_error)?;
-            } else {
-                self.write_new_object(oid, &bytes, &path)
-                    .map_err(store_write_error)?;
-                self.ensure_index_entry(oid, kind, bytes.len() as u64)
-                    .map_err(store_write_error)?;
-            };
-            if let Some(header) = runtime_header.as_ref() {
-                self.write_runtime_manifest(oid, header)
-                    .map_err(store_write_error)?;
-            }
-            return Ok(Some(bytes));
-        }
-        Ok(None)
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2663,14 +2241,6 @@ fn store_write_error(err: anyhow::Error) -> anyhow::Error {
         err
     } else {
         StoreError::StoreWriteFailure(err.to_string()).into()
-    }
-}
-
-fn remote_error(err: anyhow::Error) -> anyhow::Error {
-    if err.is::<StoreError>() {
-        err
-    } else {
-        StoreError::RemoteFailure(err.to_string()).into()
     }
 }
 
@@ -2806,25 +2376,6 @@ fn canonical_kind(bytes: &[u8]) -> Result<ObjectKind> {
     let canonical: CanonicalObject = serde_json::from_slice(bytes)
         .context("failed to decode canonical payload for kind detection")?;
     Ok(canonical.kind)
-}
-
-fn runtime_header_from_bytes(bytes: &[u8]) -> Result<Option<RuntimeHeader>> {
-    let value: Value =
-        serde_json::from_slice(bytes).context("failed to decode canonical CAS payload")?;
-    let is_runtime = value
-        .get("kind")
-        .and_then(Value::as_str)
-        .map(|kind| kind == ObjectKind::Runtime.as_str())
-        .unwrap_or(false);
-    if !is_runtime {
-        return Ok(None);
-    }
-    let Some(header_value) = value.get("header") else {
-        return Ok(None);
-    };
-    let header: RuntimeHeader = serde_json::from_value(header_value.clone())
-        .context("failed to decode runtime header from CAS object")?;
-    Ok(Some(header))
 }
 
 fn sort_json_value(value: &mut Value) {
@@ -3149,9 +2700,7 @@ pub fn global_store() -> &'static ContentAddressableStore {
     #[cfg(test)]
     ensure_test_store_env();
     GLOBAL_STORE.get_or_init(|| {
-        let (remote, policy) = remote_backend_from_env();
-        let store = ContentAddressableStore::with_remote_and_policy(None, remote, policy)
-            .expect("CAS initialization");
+        let store = ContentAddressableStore::new(None).expect("CAS initialization");
         // Best-effort cleanup of leftover partials to keep the store tidy.
         let _ = store.sweep_partials();
         store
@@ -3170,81 +2719,6 @@ fn ensure_test_store_env() {
     std::env::set_var("PX_STORE_PATH", &store);
     std::env::set_var("PX_ENVS_PATH", &envs);
 }
-
-fn remote_backend_from_env() -> (Arc<dyn StoreBackend>, RemotePolicy) {
-    if !env::var("PX_CAS_REMOTE_ENABLE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
-        return (Arc::new(NullBackend), RemotePolicy::disabled());
-    }
-    let policy = match env::var("PX_CAS_REMOTE_MODE")
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "none" | "off" | "disabled" => RemotePolicy::disabled(),
-        "push" => RemotePolicy {
-            push: true,
-            pull: false,
-        },
-        "pull" => RemotePolicy {
-            push: false,
-            pull: true,
-        },
-        "both" | "push-pull" | "pull-push" | "all" | "" => RemotePolicy::both_enabled(),
-        other => {
-            warn!(
-                mode = other,
-                "unknown PX_CAS_REMOTE_MODE; defaulting to push+pull"
-            );
-            RemotePolicy::both_enabled()
-        }
-    };
-
-    if !policy.push && !policy.pull {
-        return (Arc::new(NullBackend), RemotePolicy::disabled());
-    }
-
-    if let Some(url) = env::var_os("PX_CAS_REMOTE_URL") {
-        match Url::parse(&url.to_string_lossy())
-            .ok()
-            .and_then(|parsed| HttpBackend::new(parsed).ok())
-        {
-            Some(backend) => {
-                info!(
-                    remote = "http",
-                    push = policy.push,
-                    pull = policy.pull,
-                    "using PX_CAS_REMOTE_URL for CAS backend"
-                );
-                return (Arc::new(backend), policy);
-            }
-            None => {
-                warn!("failed to initialize PX_CAS_REMOTE_URL backend; falling back to local CAS");
-            }
-        }
-    }
-
-    if let Some(path) = env::var_os("PX_CAS_REMOTE_PATH") {
-        match FileBackend::new(PathBuf::from(path)) {
-            Ok(backend) => {
-                info!(
-                    remote = "file",
-                    push = policy.push,
-                    pull = policy.pull,
-                    "using PX_CAS_REMOTE_PATH for CAS backend"
-                );
-                return (Arc::new(backend), policy);
-            }
-            Err(err) => {
-                warn!(%err, "failed to initialize PX_CAS_REMOTE_PATH backend; falling back to local CAS");
-            }
-        }
-    }
-    (Arc::new(NullBackend), RemotePolicy::disabled())
-}
-
 /// Run GC with environment-driven policy. Returns `Ok(None)` when disabled via
 /// `PX_CAS_GC_DISABLE=1`.
 pub fn run_gc_with_env_policy(store: &ContentAddressableStore) -> Result<Option<GcSummary>> {
@@ -3398,16 +2872,15 @@ mod tests {
     #[cfg(unix)]
     use flate2::read::GzDecoder;
     use serde_json::json;
+    use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::io::Read;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Mutex, OnceLock};
-    use std::sync::Arc;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
     #[cfg(unix)]
     use std::path::Path;
-    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::{Mutex, OnceLock};
     use std::thread;
     use tempfile::tempdir;
 
@@ -3570,125 +3043,12 @@ mod tests {
         Ok(())
     }
 
-    #[derive(Debug)]
-    struct FailingBackend {
-        called: Arc<AtomicBool>,
-    }
-
-    impl Default for FailingBackend {
-        fn default() -> Self {
-            Self {
-                called: Arc::new(AtomicBool::new(false)),
-            }
-        }
-    }
-
-    impl StoreBackend for FailingBackend {
-        fn has(&self, _oid: &str) -> Result<bool> {
-            Ok(false)
-        }
-
-        fn get(&self, _oid: &str) -> Result<Option<Vec<u8>>> {
-            Ok(None)
-        }
-
-        fn put(&self, _oid: &str, _bytes: &[u8]) -> Result<()> {
-            self.called.store(true, Ordering::SeqCst);
-            Err(anyhow!("remote unavailable"))
-        }
-
-        fn list(&self, _kind: Option<ObjectKind>, _prefix: Option<&str>) -> Result<Vec<String>> {
-            Ok(Vec::new())
-        }
-    }
-
-    #[test]
-    fn remote_push_failures_are_non_fatal() -> Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path().join("store");
-        let envs_root = temp.path().join("envs");
-        std::env::set_var("PX_ENVS_PATH", &envs_root);
-        let backend = Arc::new(FailingBackend::default());
-        let store = ContentAddressableStore::with_remote_and_policy(
-            Some(root),
-            backend.clone(),
-            RemotePolicy {
-                push: true,
-                pull: false,
-            },
-        )?;
-
-        let stored = store.store(&demo_source_payload())?;
-        assert!(
-            stored.path.exists(),
-            "object should be persisted locally despite remote failure"
-        );
-        assert!(
-            backend.called.load(Ordering::SeqCst),
-            "remote backend should have been invoked"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn http_backend_round_trip() -> Result<()> {
-        use httptest::{matchers, responders, Expectation, Server};
-
-        let server = Server::run();
-        let payload = demo_source_payload();
-        let canonical = canonical_bytes(&payload)?;
-        let oid = ContentAddressableStore::compute_oid(&payload)?;
-        let path = format!("/cas/{oid}");
-        server.expect(
-            Expectation::matching(matchers::all_of![
-                matchers::request::method_path("PUT", path.clone()),
-                matchers::request::body(canonical.clone())
-            ])
-            .respond_with(responders::status_code(200)),
-        );
-        server.expect(
-            Expectation::matching(matchers::request::method_path("HEAD", path.clone()))
-                .respond_with(responders::status_code(200)),
-        );
-        server.expect(
-            Expectation::matching(matchers::request::method_path("GET", path.clone())).respond_with(
-                responders::status_code(200).body(canonical.clone()),
-            ),
-        );
-
-        let temp = tempdir()?;
-        let root = temp.path().join("store");
-        let envs_root = temp.path().join("envs");
-        std::env::set_var("PX_ENVS_PATH", &envs_root);
-        let remote_url = Url::parse(&server.url("/cas/").to_string())?;
-        let backend = Arc::new(HttpBackend::new(remote_url)?);
-        let store = ContentAddressableStore::with_remote_and_policy(
-            Some(root),
-            backend,
-            RemotePolicy::both_enabled(),
-        )?;
-
-        let stored = store.store(&payload)?;
-        assert_eq!(stored.oid, oid, "oid should be derived from canonical bytes");
-
-        let object_path = store.object_path(&oid);
-        fs::remove_file(&object_path)?;
-
-        let loaded = store.load(&oid)?;
-        match loaded {
-            LoadedObject::Source { oid: loaded_oid, .. } => assert_eq!(loaded_oid, oid),
-            other => bail!("unexpected object {other:?}"),
-        }
-        assert!(
-            store.object_path(&oid).exists(),
-            "remote fetch should repopulate local store"
-        );
-        Ok(())
-    }
-
     #[test]
     fn rebuild_restores_env_owner_refs_from_state() -> Result<()> {
-        let _dir_guard = CURRENT_DIR_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _dir_guard = CURRENT_DIR_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
         let (temp, store) = new_store()?;
         let runtime_oid = "runtime-oid".to_string();
         let profile_payload = ObjectPayload::Profile {
@@ -3736,8 +3096,9 @@ mod tests {
         let expected_owner =
             owner_id_from_state(StateFileKind::Project, &project_root, "lock-123", "3.11.0")?;
         assert!(
-            refs.iter().any(|owner| owner.owner_type == OwnerType::ProjectEnv
-                && owner.owner_id == expected_owner),
+            refs.iter()
+                .any(|owner| owner.owner_type == OwnerType::ProjectEnv
+                    && owner.owner_id == expected_owner),
             "expected reconstructed project-env owner reference"
         );
         Ok(())
@@ -3788,8 +3149,9 @@ mod tests {
         let refs = store.refs_for(&profile_oid)?;
         let expected_owner = tool_owner_id("demo-tool", "lock-abc", "3.11.0")?;
         assert!(
-            refs.iter().any(|owner| owner.owner_type == OwnerType::ToolEnv
-                && owner.owner_id == expected_owner),
+            refs.iter()
+                .any(|owner| owner.owner_type == OwnerType::ToolEnv
+                    && owner.owner_id == expected_owner),
             "expected reconstructed tool-env owner reference"
         );
         Ok(())
@@ -3832,8 +3194,9 @@ mod tests {
         let refs = store.refs_for(&runtime.oid)?;
         let expected_owner = "runtime:3.11.0:linux".to_string();
         assert!(
-            refs.iter().any(|owner| owner.owner_type == OwnerType::Runtime
-                && owner.owner_id == expected_owner),
+            refs.iter()
+                .any(|owner| owner.owner_type == OwnerType::Runtime
+                    && owner.owner_id == expected_owner),
             "expected reconstructed runtime owner reference"
         );
         Ok(())
@@ -4458,37 +3821,6 @@ mod tests {
     }
 
     #[test]
-    fn pulls_missing_object_from_remote_backend() -> Result<()> {
-        let temp = tempdir()?;
-        let remote_root = temp.path().join("remote");
-        let remote_store = ContentAddressableStore::new(Some(remote_root.clone()))?;
-        let payload = demo_source_payload();
-        let remote_obj = remote_store.store(&payload)?;
-
-        let remote_backend = FileBackend::new(remote_root.clone())?;
-        let local_root = temp.path().join("local");
-        let store = ContentAddressableStore::with_remote(
-            Some(local_root.clone()),
-            Arc::new(remote_backend),
-        )?;
-        assert!(
-            !store.object_path(&remote_obj.oid).exists(),
-            "local cache should start empty"
-        );
-
-        let loaded = store.load(&remote_obj.oid)?;
-        match loaded {
-            LoadedObject::Source { oid, .. } => assert_eq!(oid, remote_obj.oid),
-            other => bail!("unexpected object {other:?}"),
-        }
-        assert!(
-            store.object_path(&remote_obj.oid).exists(),
-            "remote fetch should populate local store"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn list_filters_by_kind_and_prefix() -> Result<()> {
         let (_temp, store) = new_store()?;
         let source = store.store(&demo_source_payload())?;
@@ -4605,24 +3937,6 @@ mod tests {
     }
 
     #[test]
-    fn put_rejects_malformed_payloads() -> Result<()> {
-        let (_temp, store) = new_store()?;
-        let bytes = b"not-json";
-        let oid = hex::encode(Sha256::digest(bytes));
-        let err = <ContentAddressableStore as StoreBackend>::put(&store, &oid, bytes).unwrap_err();
-        assert!(
-            !store.object_path(&oid).exists(),
-            "malformed payload should not be persisted"
-        );
-        assert!(
-            err.to_string()
-                .contains("failed to decode canonical payload for kind detection"),
-            "error should surface canonical decoding failure"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn reports_kind_mismatch_from_index() -> Result<()> {
         let (_temp, store) = new_store()?;
         let stored = store.store(&demo_source_payload())?;
@@ -4703,72 +4017,6 @@ mod tests {
             LoadedObject::Meta { bytes, .. } => assert_eq!(bytes, big),
             other => bail!("unexpected object {other:?}"),
         }
-        Ok(())
-    }
-
-    #[test]
-    fn remote_corruption_does_not_cache_locally() -> Result<()> {
-        let temp = tempdir()?;
-        let remote_root = temp.path().join("remote");
-        let backend = FileBackend::new(remote_root.clone())?;
-
-        let desired_bytes = b"expected";
-        let oid = hex::encode(Sha256::digest(desired_bytes));
-        let corrupt_path = remote_root.join("objects").join(&oid[0..2]).join(&oid);
-        if let Some(parent) = corrupt_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&corrupt_path, b"corrupt")?;
-
-        let store = ContentAddressableStore::with_remote(
-            Some(temp.path().join("local")),
-            Arc::new(backend),
-        )?;
-        let err = store.load(&oid).unwrap_err();
-        let store_err = err
-            .downcast_ref::<StoreError>()
-            .expect("should produce StoreError");
-        assert!(matches!(store_err, StoreError::DigestMismatch { .. }));
-        assert!(
-            !store.object_path(&oid).exists(),
-            "corrupt remote object should not populate local cache"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn remote_push_failure_surfaces_error() -> Result<()> {
-        #[derive(Debug)]
-        struct FailingBackend;
-        impl StoreBackend for FailingBackend {
-            fn has(&self, _oid: &str) -> Result<bool> {
-                Ok(false)
-            }
-            fn get(&self, _oid: &str) -> Result<Option<Vec<u8>>> {
-                Ok(None)
-            }
-            fn put(&self, _oid: &str, _bytes: &[u8]) -> Result<()> {
-                Err(anyhow!("boom"))
-            }
-            fn list(
-                &self,
-                _kind: Option<ObjectKind>,
-                _prefix: Option<&str>,
-            ) -> Result<Vec<String>> {
-                Ok(Vec::new())
-            }
-        }
-
-        let temp = tempdir()?;
-        let backend: Arc<dyn StoreBackend> = Arc::new(FailingBackend);
-        let store =
-            ContentAddressableStore::with_remote(Some(temp.path().join("local")), backend)?;
-        let payload = demo_source_payload();
-        let stored = store.store(&payload)?;
-        assert!(
-            stored.path.exists(),
-            "local store should succeed even if remote push fails"
-        );
         Ok(())
     }
 

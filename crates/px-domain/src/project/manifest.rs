@@ -898,9 +898,17 @@ pub fn px_options_from_doc(doc: &DocumentMut) -> PxOptions {
                     continue;
                 }
                 if let Some(val) = value.as_str() {
-                    options.env_vars.insert(key.to_string(), val.to_string());
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        options
+                            .env_vars
+                            .insert(key.to_string(), trimmed.to_string());
+                    }
                 } else if let Some(val) = value.as_value() {
-                    options.env_vars.insert(key.to_string(), val.to_string());
+                    let trimmed = val.to_string().trim().to_string();
+                    if !trimmed.is_empty() {
+                        options.env_vars.insert(key.to_string(), trimmed);
+                    }
                 }
             }
         }

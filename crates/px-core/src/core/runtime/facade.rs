@@ -8,7 +8,11 @@ use std::{
     str::FromStr,
 };
 #[cfg(test)]
-use std::{fs::File, io::Read, sync::{Mutex, OnceLock}};
+use std::{
+    fs::File,
+    io::Read,
+    sync::{Mutex, OnceLock},
+};
 
 use crate::context::{CommandContext, CommandInfo};
 use crate::core::tooling::diagnostics;
@@ -593,10 +597,7 @@ fn ensure_project_pip(
         ("PYTHONPATH".into(), paths.pythonpath.clone()),
         ("PYTHONUNBUFFERED".into(), "1".into()),
         ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
-        (
-            "PYTHONUSERBASE".into(),
-            site_dir.display().to_string(),
-        ),
+        ("PYTHONUSERBASE".into(), site_dir.display().to_string()),
         ("PYTHONNOUSERSITE".into(), "1".into()),
         ("PX_ALLOWED_PATHS".into(), allowed),
         (
@@ -646,7 +647,10 @@ fn ensure_project_pip(
             message.push_str(output.stdout.trim());
         }
         if debug_pip {
-            eprintln!("ensurepip failed stdout={}, stderr={}", output.stdout, output.stderr);
+            eprintln!(
+                "ensurepip failed stdout={}, stderr={}",
+                output.stdout, output.stderr
+            );
         }
         bail!(message);
     }
@@ -668,15 +672,13 @@ fn ensure_project_pip(
         eprintln!(
             "post-ensurepip pip_present={} entries={:?}",
             after_link,
-            fs::read_dir(&site_packages)
-                .ok()
-                .and_then(|iter| {
-                    Some(
-                        iter.flatten()
-                            .map(|e| e.file_name().to_string_lossy().to_string())
-                            .collect::<Vec<_>>(),
-                    )
-                })
+            fs::read_dir(&site_packages).ok().and_then(|iter| {
+                Some(
+                    iter.flatten()
+                        .map(|e| e.file_name().to_string_lossy().to_string())
+                        .collect::<Vec<_>>(),
+                )
+            })
         );
     }
     if !has_pip_in_site(&site_packages) {
@@ -1557,7 +1559,12 @@ pub(crate) fn write_python_environment_markers(
         .canonicalize(runtime_path)
         .unwrap_or_else(|_| runtime_path.to_path_buf());
     let site_packages = site_packages_dir(site_dir, &runtime.version);
-    write_python_shim(&bin_dir, &canonical_runtime, &site_packages)?;
+    write_python_shim(
+        &bin_dir,
+        &canonical_runtime,
+        &site_packages,
+        &BTreeMap::new(),
+    )?;
 
     let home = canonical_runtime
         .parent()

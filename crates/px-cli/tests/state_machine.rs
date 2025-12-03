@@ -103,6 +103,14 @@ fn frozen_test_refuses_autosync_for_missing_env() {
 fn test_repairs_missing_env_in_dev_mode() {
     let (_tmp, project) = prepare_fixture("dev-missing-env");
     fs::remove_dir_all(project.join(".px")).ok();
+    // Create a simple, guaranteed-core pytest to avoid environment-specific stdlib modules.
+    let tests_dir = project.join("tests");
+    fs::create_dir_all(&tests_dir).expect("create tests dir");
+    fs::write(
+        tests_dir.join("test_smoke.py"),
+        "def test_smoke():\n    import json\n    assert json.loads('123') == 123\n",
+    )
+    .expect("write smoke test");
     let Some(python) = find_python() else {
         eprintln!("skipping dev env repair test (python binary not found)");
         return;
@@ -111,7 +119,6 @@ fn test_repairs_missing_env_in_dev_mode() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_TEST_FALLBACK_STD", "1")
         .args(["--json", "test"])
         .assert()
         .success();
@@ -126,6 +133,31 @@ fn test_repairs_missing_env_in_dev_mode() {
         autosync.get("action").and_then(serde_json::Value::as_str),
         Some("env-recreate"),
         "expected env recreation autosync"
+    );
+
+    // Verify the repaired environment is usable by running a guaranteed-core module.
+    let shim = project
+        .join(".px")
+        .join("envs")
+        .join("current")
+        .join("bin")
+        .join("python");
+    let output = std::process::Command::new(&shim)
+        .arg("-c")
+        .arg("import json; print(123)")
+        .output()
+        .expect("run env python");
+    assert!(
+        output.status.success(),
+        "env python should run successfully: status {:?}, stdout {}, stderr {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "123",
+        "env python should execute core import correctly"
     );
 }
 
