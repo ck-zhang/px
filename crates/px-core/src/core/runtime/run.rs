@@ -1,29 +1,37 @@
 use std::env;
 use std::fs;
-use std::io::{Cursor, IsTerminal};
+use std::io::{Cursor, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
 use serde_json::{json, Value};
 use tar::Archive;
+use tempfile::TempDir;
 use tracing::{debug, warn};
 
+use super::cas_env::{ensure_profile_env, project_env_owner_id, workspace_env_owner_id};
 use super::script::{detect_inline_script, run_inline_script};
+use crate::core::runtime::facade::{
+    build_pythonpath, compute_lock_hash_bytes, detect_runtime_metadata, marker_env_for_snapshot,
+    select_python_from_site,
+};
 use crate::run_plan::{plan_run_target, RunTargetPlan};
 use crate::tooling::{missing_pyproject_outcome, run_target_required_outcome};
 use crate::workspace::prepare_workspace_run_context;
 use crate::{
     attach_autosync_details, is_missing_project_error, manifest_snapshot, missing_project_outcome,
     outcome_from_output, python_context_with_mode, state_guard::guard_for_execution,
-    CommandContext, ExecutionOutcome, PythonContext,
+    CommandContext, ExecutionOutcome, OwnerId, OwnerType, PythonContext,
 };
+use px_domain::detect_lock_drift;
 
 #[derive(Clone, Debug)]
 pub struct TestRequest {
     pub args: Vec<String>,
     pub frozen: bool,
+    pub at: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -33,6 +41,7 @@ pub struct RunRequest {
     pub args: Vec<String>,
     pub frozen: bool,
     pub interactive: Option<bool>,
+    pub at: Option<String>,
 }
 
 type EnvPairs = Vec<(String, String)>;
@@ -68,6 +77,9 @@ pub fn run_project(ctx: &CommandContext, request: &RunRequest) -> Result<Executi
 }
 
 fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<ExecutionOutcome> {
+    if let Some(at_ref) = &request.at {
+        return run_project_at_ref(ctx, request, at_ref);
+    }
     let strict = request.frozen || ctx.env_flag_enabled("CI");
     let target = request
         .entry
@@ -187,6 +199,1077 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
     };
     attach_autosync_details(&mut outcome, sync_report);
     Ok(outcome)
+}
+
+struct CommitRunContext {
+    py_ctx: PythonContext,
+    manifest_path: PathBuf,
+    _temp_guard: Option<TempDir>,
+}
+
+fn run_project_at_ref(
+    ctx: &CommandContext,
+    request: &RunRequest,
+    git_ref: &str,
+) -> Result<ExecutionOutcome> {
+    let strict = true;
+    let target = request
+        .entry
+        .clone()
+        .or_else(|| request.target.clone())
+        .unwrap_or_default();
+    let interactive = request
+        .interactive
+        .unwrap_or_else(|| std::io::stdin().is_terminal() && std::io::stdout().is_terminal());
+    let command_args = json!({
+        "target": &target,
+        "args": &request.args,
+        "git_ref": git_ref,
+    });
+
+    if !target.trim().is_empty() {
+        if let Some(inline) = match detect_inline_script(&target) {
+            Ok(result) => result,
+            Err(outcome) => return Ok(outcome),
+        } {
+            return match run_inline_script(
+                ctx,
+                inline,
+                &request.args,
+                &command_args,
+                interactive,
+                strict,
+            ) {
+                Ok(outcome) => Ok(outcome),
+                Err(outcome) => Ok(outcome),
+            };
+        }
+    }
+
+    let commit_ctx = match prepare_commit_python_context(ctx, git_ref) {
+        Ok(value) => value,
+        Err(outcome) => return Ok(outcome),
+    };
+
+    if target.trim().is_empty() {
+        return Ok(run_target_required_outcome());
+    }
+    let plan = plan_run_target(&commit_ctx.py_ctx, &commit_ctx.manifest_path, &target)?;
+    let outcome = match plan {
+        RunTargetPlan::Script(path) => run_project_script(
+            ctx,
+            &commit_ctx.py_ctx,
+            &path,
+            &request.args,
+            &command_args,
+            interactive,
+        )?,
+        RunTargetPlan::Executable(program) => run_executable(
+            ctx,
+            &commit_ctx.py_ctx,
+            &program,
+            &request.args,
+            &command_args,
+            interactive,
+        )?,
+    };
+    Ok(outcome)
+}
+
+fn run_tests_at_ref(
+    ctx: &CommandContext,
+    request: &TestRequest,
+    git_ref: &str,
+) -> Result<ExecutionOutcome> {
+    let commit_ctx = match prepare_commit_python_context(ctx, git_ref) {
+        Ok(value) => value,
+        Err(outcome) => return Ok(outcome),
+    };
+    let _stdlib_guard = commit_stdlib_guard(ctx, git_ref);
+    run_tests_for_context(ctx, &commit_ctx.py_ctx, request, None)
+}
+
+fn prepare_commit_python_context(
+    ctx: &CommandContext,
+    git_ref: &str,
+) -> Result<CommitRunContext, ExecutionOutcome> {
+    let repo_root = git_repo_root()?;
+    let scope = crate::workspace::discover_workspace_scope().map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to detect workspace for --at",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    if let Some(crate::workspace::WorkspaceScope::Member {
+        workspace,
+        member_root,
+    }) = scope
+    {
+        return commit_workspace_context(
+            ctx,
+            git_ref,
+            &repo_root,
+            &workspace.config.root,
+            &member_root,
+        );
+    }
+    commit_project_context(ctx, git_ref, &repo_root)
+}
+
+fn commit_project_context(
+    ctx: &CommandContext,
+    git_ref: &str,
+    repo_root: &Path,
+) -> Result<CommitRunContext, ExecutionOutcome> {
+    let project_root = match ctx.project_root() {
+        Ok(root) => root,
+        Err(err) => {
+            if is_missing_project_error(&err) {
+                return Err(missing_project_outcome());
+            }
+            return Err(ExecutionOutcome::failure(
+                "failed to resolve project root",
+                json!({ "error": err.to_string() }),
+            ));
+        }
+    };
+    let rel_root = match project_root.strip_prefix(repo_root) {
+        Ok(rel) => rel.to_path_buf(),
+        Err(_) => {
+            return Err(ExecutionOutcome::user_error(
+                "px --at requires running inside a git repository",
+                json!({
+                    "reason": "project_outside_repo",
+                    "project_root": project_root.display().to_string(),
+                    "repo_root": repo_root.display().to_string(),
+                }),
+            ))
+        }
+    };
+    let archive = materialize_ref_tree(repo_root, git_ref)?;
+    let project_root_at_ref = archive.path().join(&rel_root);
+    let manifest_rel = rel_root.join("pyproject.toml");
+    let manifest_path = project_root_at_ref.join("pyproject.toml");
+    let manifest_contents = fs::read_to_string(&manifest_path).map_err(|err| {
+        ExecutionOutcome::user_error(
+            "pyproject.toml not found at the requested git ref",
+            json!({
+                "git_ref": git_ref,
+                "path": manifest_rel.display().to_string(),
+                "reason": "pyproject_missing_at_ref",
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    let manifest_doc: toml_edit::DocumentMut = manifest_contents
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to parse pyproject.toml from git ref",
+                json!({
+                    "git_ref": git_ref,
+                    "path": manifest_rel.display().to_string(),
+                    "error": err.to_string(),
+                }),
+            )
+        })?;
+    if !manifest_has_px(&manifest_doc) {
+        return Err(ExecutionOutcome::user_error(
+            "px project not found at the requested git ref",
+            json!({
+                "git_ref": git_ref,
+                "path": manifest_rel.display().to_string(),
+                "reason": "missing_px_metadata",
+            }),
+        ));
+    }
+    let snapshot = px_domain::ProjectSnapshot::from_document(
+        &project_root_at_ref,
+        &manifest_path,
+        manifest_doc,
+    )
+    .map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to load pyproject.toml from git ref",
+            json!({
+                "git_ref": git_ref,
+                "path": manifest_rel.display().to_string(),
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    let lock_rel = rel_root.join("px.lock");
+    let lock_path = project_root_at_ref.join("px.lock");
+    let lock_contents = fs::read_to_string(&lock_path).map_err(|err| {
+        ExecutionOutcome::user_error(
+            "px.lock not found at the requested git ref",
+            json!({
+                "git_ref": git_ref,
+                "path": lock_rel.display().to_string(),
+                "reason": "px_lock_missing_at_ref",
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    let lock = px_domain::parse_lockfile(&lock_contents).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to parse px.lock from git ref",
+            json!({
+                "git_ref": git_ref,
+                "path": lock_rel.display().to_string(),
+                "error": err.to_string(),
+                "reason": "invalid_lock_at_ref",
+            }),
+        )
+    })?;
+    let marker_env = marker_env_for_snapshot(&snapshot);
+    let lock_id = validate_lock_for_ref(
+        &snapshot,
+        &lock,
+        &lock_contents,
+        git_ref,
+        &lock_rel,
+        marker_env.as_ref(),
+    )?;
+    let runtime = detect_runtime_metadata(ctx, &snapshot).map_err(|err| {
+        install_error_outcome(err, "python runtime unavailable for git-ref execution")
+    })?;
+    let owner_id =
+        project_env_owner_id(&project_root, &lock_id, &runtime.version).map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to compute project environment identity",
+                json!({ "error": err.to_string() }),
+            )
+        })?;
+    let env_owner = OwnerId {
+        owner_type: OwnerType::ProjectEnv,
+        owner_id,
+    };
+    let cas_profile =
+        ensure_profile_env(ctx, &snapshot, &lock, &runtime, &env_owner).map_err(|err| {
+            install_error_outcome(err, "failed to prepare environment for git-ref execution")
+        })?;
+    let paths = build_pythonpath(
+        ctx.fs(),
+        &project_root_at_ref,
+        Some(cas_profile.env_path.clone()),
+    )
+    .map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to assemble PYTHONPATH for git-ref execution",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    let runtime_path = cas_profile.runtime_path.display().to_string();
+    let python = select_python_from_site(&paths.site_bin, &runtime_path, &runtime.version);
+    Ok(CommitRunContext {
+        py_ctx: PythonContext {
+            project_root: project_root_at_ref,
+            project_name: snapshot.name.clone(),
+            python,
+            pythonpath: paths.pythonpath,
+            allowed_paths: paths.allowed_paths,
+            site_bin: paths.site_bin,
+            pep582_bin: paths.pep582_bin,
+            px_options: snapshot.px_options.clone(),
+        },
+        manifest_path,
+        _temp_guard: Some(archive),
+    })
+}
+
+fn commit_workspace_context(
+    ctx: &CommandContext,
+    git_ref: &str,
+    repo_root: &Path,
+    workspace_root: &Path,
+    member_root: &Path,
+) -> Result<CommitRunContext, ExecutionOutcome> {
+    let workspace_rel = match workspace_root.strip_prefix(repo_root) {
+        Ok(rel) => rel.to_path_buf(),
+        Err(_) => {
+            return Err(ExecutionOutcome::user_error(
+                "px --at requires running inside a git repository",
+                json!({
+                    "reason": "workspace_outside_repo",
+                    "workspace_root": workspace_root.display().to_string(),
+                    "repo_root": repo_root.display().to_string(),
+                }),
+            ))
+        }
+    };
+    let archive = materialize_ref_tree(repo_root, git_ref)?;
+    let archive_root = archive.path().to_path_buf();
+    let workspace_root_at_ref = archive_root.join(&workspace_rel);
+    let workspace_manifest_rel = workspace_rel.join("pyproject.toml");
+    let workspace_manifest_path = workspace_root_at_ref.join("pyproject.toml");
+    let workspace_manifest = fs::read_to_string(&workspace_manifest_path).map_err(|err| {
+        ExecutionOutcome::user_error(
+            "workspace manifest not found at the requested git ref",
+            json!({
+                "git_ref": git_ref,
+                "path": workspace_manifest_rel.display().to_string(),
+                "reason": "workspace_manifest_missing_at_ref",
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    let manifest_path = workspace_manifest_path.clone();
+    let workspace_doc: toml_edit::DocumentMut = workspace_manifest
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to parse workspace manifest from git ref",
+                json!({
+                    "git_ref": git_ref,
+                    "path": workspace_manifest_rel.display().to_string(),
+                    "error": err.to_string(),
+                }),
+            )
+        })?;
+    if !px_domain::workspace::manifest_has_workspace(&workspace_doc) {
+        return Err(ExecutionOutcome::user_error(
+            "px workspace not found at the requested git ref",
+            json!({
+                "git_ref": git_ref,
+                "path": workspace_manifest_rel.display().to_string(),
+                "reason": "missing_workspace_metadata",
+            }),
+        ));
+    }
+    let workspace_config = px_domain::workspace::workspace_config_from_doc(
+        &workspace_root_at_ref,
+        &manifest_path,
+        &workspace_doc,
+    )
+    .map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to load workspace manifest from git ref",
+            json!({
+                "git_ref": git_ref,
+                "path": workspace_manifest_rel.display().to_string(),
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    let member_rel = member_root
+        .strip_prefix(workspace_root)
+        .unwrap_or(member_root)
+        .to_path_buf();
+    let member_root_at_ref = workspace_root_at_ref.join(&member_rel);
+    if !workspace_config
+        .members
+        .iter()
+        .any(|member| member == &member_rel)
+    {
+        return Err(ExecutionOutcome::user_error(
+            "current directory is not a workspace member at the requested git ref",
+            json!({
+                "git_ref": git_ref,
+                "member": member_rel.display().to_string(),
+                "reason": "workspace_member_not_found",
+            }),
+        ));
+    }
+
+    let mut members = Vec::new();
+    for rel in &workspace_config.members {
+        let abs_root = workspace_root_at_ref.join(rel);
+        let member_manifest_rel = workspace_rel.join(rel).join("pyproject.toml");
+        let manifest_path = abs_root.join("pyproject.toml");
+        let contents = fs::read_to_string(&manifest_path).map_err(|err| {
+            ExecutionOutcome::user_error(
+                "workspace member manifest not found at git ref",
+                json!({
+                    "git_ref": git_ref,
+                    "path": member_manifest_rel.display().to_string(),
+                    "reason": "member_manifest_missing_at_ref",
+                    "error": err.to_string(),
+                }),
+            )
+        })?;
+        let doc: toml_edit::DocumentMut =
+            contents.parse::<toml_edit::DocumentMut>().map_err(|err| {
+                ExecutionOutcome::failure(
+                    "failed to parse workspace member manifest from git ref",
+                    json!({
+                        "git_ref": git_ref,
+                        "path": member_manifest_rel.display().to_string(),
+                        "error": err.to_string(),
+                    }),
+                )
+            })?;
+        if !manifest_has_px(&doc) {
+            return Err(ExecutionOutcome::user_error(
+                "px project not found in workspace member at git ref",
+                json!({
+                    "git_ref": git_ref,
+                    "path": member_manifest_rel.display().to_string(),
+                    "reason": "missing_px_metadata",
+                }),
+            ));
+        }
+        let snapshot = px_domain::ProjectSnapshot::from_document(&abs_root, &manifest_path, doc)
+            .map_err(|err| {
+                ExecutionOutcome::failure(
+                    "failed to load workspace member from git ref",
+                    json!({
+                        "git_ref": git_ref,
+                        "path": member_manifest_rel.display().to_string(),
+                        "error": err.to_string(),
+                    }),
+                )
+            })?;
+        let rel_path = abs_root
+            .strip_prefix(&workspace_root_at_ref)
+            .unwrap_or(&abs_root)
+            .display()
+            .to_string();
+        members.push(crate::workspace::WorkspaceMember {
+            rel_path,
+            root: abs_root,
+            snapshot,
+        });
+    }
+    let member_snapshot = members
+        .iter()
+        .find(|member| member.root == member_root_at_ref)
+        .map(|member| member.snapshot.clone());
+    let python_requirement = crate::workspace::derive_workspace_python(&workspace_config, &members)
+        .map_err(|err| {
+            ExecutionOutcome::failure(
+                "workspace python requirement is inconsistent at git ref",
+                json!({
+                    "git_ref": git_ref,
+                    "error": err.to_string(),
+                }),
+            )
+        })?;
+    let manifest_fingerprint = px_domain::workspace::workspace_manifest_fingerprint(
+        &workspace_config,
+        &members
+            .iter()
+            .map(|m| m.snapshot.clone())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to fingerprint workspace manifest from git ref",
+            json!({
+                "git_ref": git_ref,
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    let mut dependencies = Vec::new();
+    for member in &members {
+        dependencies.extend(member.snapshot.requirements.clone());
+    }
+    dependencies.retain(|dep| !dep.trim().is_empty());
+    let workspace_name = workspace_config
+        .name
+        .clone()
+        .or_else(|| {
+            workspace_root_at_ref
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(std::string::ToString::to_string)
+        })
+        .unwrap_or_else(|| "workspace".to_string());
+    let px_options = px_domain::project::manifest::px_options_from_doc(&workspace_doc);
+    let workspace_snapshot = crate::workspace::WorkspaceSnapshot {
+        config: workspace_config.clone(),
+        members,
+        manifest_fingerprint,
+        lock_path: workspace_root_at_ref.join("px.workspace.lock"),
+        python_requirement,
+        python_override: workspace_config.python.clone(),
+        dependencies,
+        name: workspace_name,
+        px_options,
+    };
+
+    let lock_rel = workspace_rel.join("px.workspace.lock");
+    let lock_path = workspace_root_at_ref.join("px.workspace.lock");
+    let lock_contents = fs::read_to_string(&lock_path).map_err(|err| {
+        ExecutionOutcome::user_error(
+            "workspace lockfile not found at the requested git ref",
+            json!({
+                "git_ref": git_ref,
+                "path": lock_rel.display().to_string(),
+                "reason": "workspace_lock_missing_at_ref",
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    let lock = px_domain::parse_lockfile(&lock_contents).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to parse px.workspace.lock from git ref",
+            json!({
+                "git_ref": git_ref,
+                "path": lock_rel.display().to_string(),
+                "error": err.to_string(),
+                "reason": "invalid_lock_at_ref",
+            }),
+        )
+    })?;
+    let marker_env = ctx.marker_environment().ok();
+    let lock_id = validate_lock_for_ref(
+        &workspace_snapshot.lock_snapshot(),
+        &lock,
+        &lock_contents,
+        git_ref,
+        &lock_rel,
+        marker_env.as_ref(),
+    )?;
+    let runtime =
+        detect_runtime_metadata(ctx, &workspace_snapshot.lock_snapshot()).map_err(|err| {
+            install_error_outcome(
+                err,
+                "python runtime unavailable for git-ref workspace execution",
+            )
+        })?;
+    let owner_id =
+        workspace_env_owner_id(workspace_root, &lock_id, &runtime.version).map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to compute workspace environment identity",
+                json!({ "error": err.to_string() }),
+            )
+        })?;
+    let env_owner = OwnerId {
+        owner_type: OwnerType::WorkspaceEnv,
+        owner_id,
+    };
+    let cas_profile = ensure_profile_env(
+        ctx,
+        &workspace_snapshot.lock_snapshot(),
+        &lock,
+        &runtime,
+        &env_owner,
+    )
+    .map_err(|err| {
+        install_error_outcome(
+            err,
+            "failed to prepare workspace environment for git-ref execution",
+        )
+    })?;
+    let paths = build_pythonpath(
+        ctx.fs(),
+        &member_root_at_ref,
+        Some(cas_profile.env_path.clone()),
+    )
+    .map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to assemble PYTHONPATH for git-ref execution",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    let mut combined = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push_unique = |path: PathBuf| {
+        if seen.insert(path.clone()) {
+            combined.push(path);
+        }
+    };
+    let current_src = member_root_at_ref.join("src");
+    if current_src.exists() {
+        push_unique(current_src);
+    }
+    push_unique(member_root_at_ref.to_path_buf());
+    for member in &workspace_snapshot.config.members {
+        let abs = workspace_snapshot.config.root.join(member);
+        let src = abs.join("src");
+        if src.exists() {
+            push_unique(src);
+        }
+        push_unique(abs);
+    }
+    for path in paths.allowed_paths {
+        push_unique(path);
+    }
+    let runtime_path = cas_profile.runtime_path.display().to_string();
+    let python = select_python_from_site(&paths.site_bin, &runtime_path, &runtime.version);
+    let px_options = member_snapshot
+        .as_ref()
+        .map(|member| member.px_options.clone())
+        .unwrap_or_default();
+    let project_name = member_snapshot
+        .as_ref()
+        .map(|member| member.name.clone())
+        .unwrap_or_else(|| {
+            member_root_at_ref
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string()
+        });
+    Ok(CommitRunContext {
+        py_ctx: PythonContext {
+            project_root: member_root_at_ref.clone(),
+            project_name,
+            python,
+            pythonpath: paths.pythonpath,
+            allowed_paths: combined,
+            site_bin: paths.site_bin,
+            pep582_bin: paths.pep582_bin,
+            px_options,
+        },
+        manifest_path: member_root_at_ref.join("pyproject.toml"),
+        _temp_guard: Some(archive),
+    })
+}
+
+fn validate_lock_for_ref(
+    snapshot: &px_domain::ProjectSnapshot,
+    lock: &px_domain::LockSnapshot,
+    contents: &str,
+    git_ref: &str,
+    lock_rel: &Path,
+    marker_env: Option<&pep508_rs::MarkerEnvironment>,
+) -> Result<String, ExecutionOutcome> {
+    if lock.manifest_fingerprint.is_none() {
+        return Err(ExecutionOutcome::user_error(
+            "lockfile at git ref is missing a manifest fingerprint",
+            json!({
+                "git_ref": git_ref,
+                "lock_path": lock_rel.display().to_string(),
+                "reason": "lock_missing_fingerprint_at_ref",
+            }),
+        ));
+    }
+    let drift = detect_lock_drift(snapshot, lock, marker_env);
+    let manifest_match = lock
+        .manifest_fingerprint
+        .as_deref()
+        .is_some_and(|fp| fp == snapshot.manifest_fingerprint);
+    if !drift.is_empty() || !manifest_match {
+        let mut details = json!({
+            "git_ref": git_ref,
+            "lock_path": lock_rel.display().to_string(),
+            "reason": "lock_drift_at_ref",
+            "manifest_fingerprint": snapshot.manifest_fingerprint,
+            "lock_fingerprint": lock.manifest_fingerprint,
+        });
+        if !drift.is_empty() {
+            details["drift"] = json!(drift);
+        }
+        return Err(ExecutionOutcome::user_error(
+            "px lockfile is out of sync with the manifest at that git ref",
+            details,
+        ));
+    }
+
+    Ok(lock
+        .lock_id
+        .clone()
+        .unwrap_or_else(|| compute_lock_hash_bytes(contents.as_bytes())))
+}
+
+fn git_repo_root() -> Result<PathBuf, ExecutionOutcome> {
+    let output = Command::new("git")
+        .arg("rev-parse")
+        .arg("--show-toplevel")
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Ok(PathBuf::from(path))
+        }
+        Ok(output) => Err(ExecutionOutcome::user_error(
+            "px --at requires a git repository",
+            json!({
+                "reason": "not_a_git_repo",
+                "stderr": String::from_utf8_lossy(&output.stderr),
+            }),
+        )),
+        Err(err) => Err(ExecutionOutcome::failure(
+            "failed to invoke git",
+            json!({ "error": err.to_string() }),
+        )),
+    }
+}
+
+fn materialize_ref_tree(repo_root: &Path, git_ref: &str) -> Result<TempDir, ExecutionOutcome> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("archive")
+        .arg(git_ref)
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let temp = tempfile::tempdir().map_err(|err| {
+                ExecutionOutcome::failure(
+                    "failed to create temp directory for git-ref execution",
+                    json!({ "error": err.to_string() }),
+                )
+            })?;
+            Archive::new(Cursor::new(output.stdout))
+                .unpack(temp.path())
+                .map_err(|err| {
+                    ExecutionOutcome::failure(
+                        "failed to extract git ref for --at execution",
+                        json!({
+                            "git_ref": git_ref,
+                            "error": err.to_string(),
+                        }),
+                    )
+                })?;
+            populate_submodules(repo_root, git_ref, temp.path())?;
+            restore_lfs_pointers(repo_root, git_ref, temp.path())?;
+            Ok(temp)
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let reason = if stderr.contains("not a valid object name")
+                || stderr.contains("unknown revision")
+                || stderr.contains("bad revision")
+            {
+                "invalid_git_ref"
+            } else {
+                "archive_failed"
+            };
+            Err(ExecutionOutcome::user_error(
+                format!("failed to read files from git ref {git_ref}"),
+                json!({
+                    "git_ref": git_ref,
+                    "stderr": stderr,
+                    "reason": reason,
+                }),
+            ))
+        }
+        Err(err) => Err(ExecutionOutcome::failure(
+            "failed to invoke git",
+            json!({ "error": err.to_string() }),
+        )),
+    }
+}
+
+fn populate_submodules(
+    repo_root: &Path,
+    git_ref: &str,
+    dest_root: &Path,
+) -> Result<(), ExecutionOutcome> {
+    let submodules = list_submodules(repo_root, git_ref)?;
+    if submodules.is_empty() {
+        return Ok(());
+    }
+    let mut missing = Vec::new();
+    for (path, sha) in submodules {
+        let dest = dest_root.join(&path);
+        let worktree_path = repo_root.join(&path);
+        let mut reason = None;
+        if !worktree_path.exists() {
+            reason = Some("submodule not checked out in working tree".to_string());
+        } else if !worktree_path.is_dir() {
+            reason = Some("submodule path is not a directory in working tree".to_string());
+        }
+        if reason.is_none() {
+            let commit = Command::new("git")
+                .arg("-C")
+                .arg(&worktree_path)
+                .arg("rev-parse")
+                .arg("HEAD")
+                .output();
+            match commit {
+                Ok(output) if output.status.success() => {
+                    let found = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if found != sha {
+                        reason = Some(format!("submodule checked out at {found}, expected {sha}"));
+                    }
+                }
+                Ok(output) => {
+                    reason = Some(format!(
+                        "failed to read submodule commit: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                Err(err) => {
+                    reason = Some(format!("failed to invoke git for submodule: {err}"));
+                }
+            }
+        }
+        if let Some(reason) = reason {
+            missing.push(json!({ "path": path.display().to_string(), "reason": reason }));
+            continue;
+        }
+        if let Err(err) = copy_tree(&worktree_path, &dest) {
+            missing.push(json!({
+                "path": path.display().to_string(),
+                "reason": format!("failed to copy submodule: {err}"),
+            }));
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(ExecutionOutcome::user_error(
+            "submodules from the requested git ref are not available",
+            json!({
+                "git_ref": git_ref,
+                "missing_submodules": missing,
+                "hint": "run `git submodule update --init --recursive` to populate them, then retry"
+            }),
+        ))
+    }
+}
+
+fn list_submodules(
+    repo_root: &Path,
+    git_ref: &str,
+) -> Result<Vec<(PathBuf, String)>, ExecutionOutcome> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("ls-tree")
+        .arg("-rz")
+        .arg(git_ref)
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => {
+            return Err(ExecutionOutcome::failure(
+                "failed to invoke git",
+                json!({ "error": err.to_string() }),
+            ))
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ExecutionOutcome::user_error(
+            "failed to list files at git ref",
+            json!({
+                "git_ref": git_ref,
+                "stderr": stderr,
+                "reason": "git_ls_tree_failed",
+            }),
+        ));
+    }
+    let mut results = Vec::new();
+    for record in output.stdout.split(|b| *b == 0) {
+        if record.is_empty() {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(record) else {
+            continue;
+        };
+        let mut parts = text.splitn(2, '\t');
+        let Some(meta) = parts.next() else { continue };
+        let Some(path) = parts.next() else { continue };
+        let mut fields = meta.split_whitespace();
+        let _mode = fields.next();
+        let Some(kind) = fields.next() else { continue };
+        let Some(sha) = fields.next() else { continue };
+        if kind == "commit" {
+            results.push((PathBuf::from(path), sha.to_string()));
+        }
+    }
+    Ok(results)
+}
+
+fn restore_lfs_pointers(
+    repo_root: &Path,
+    git_ref: &str,
+    root: &Path,
+) -> Result<(), ExecutionOutcome> {
+    let mut missing = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                missing.push(json!({
+                    "path": dir.display().to_string(),
+                    "reason": format!("failed to read directory: {err}"),
+                }));
+                continue;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !meta.is_file() {
+                continue;
+            }
+            let Ok(bytes) = fs::read(&path) else { continue };
+            if !is_lfs_pointer(&bytes) {
+                continue;
+            }
+            match smudge_lfs_pointer(repo_root, &bytes) {
+                Ok(contents) => {
+                    if let Err(err) = fs::write(&path, contents) {
+                        missing.push(json!({
+                            "path": path.display().to_string(),
+                            "reason": format!("failed to write LFS content: {err}"),
+                        }));
+                    }
+                }
+                Err(err) => {
+                    missing.push(json!({
+                        "path": path.display().to_string(),
+                        "reason": err,
+                    }));
+                }
+            }
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(ExecutionOutcome::user_error(
+            "git LFS content for the requested ref is unavailable",
+            json!({
+                "git_ref": git_ref,
+                "missing_lfs_objects": missing,
+                "hint": "ensure git LFS is installed and fetchable, then retry"
+            }),
+        ))
+    }
+}
+
+fn smudge_lfs_pointer(repo_root: &Path, pointer: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("lfs")
+        .arg("smudge")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to invoke git-lfs smudge: {err}"))?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        if let Err(err) = stdin.write_all(pointer) {
+            return Err(format!("failed to write LFS pointer to smudge: {err}"));
+        }
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to read git-lfs smudge output: {err}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(output.stdout)
+}
+
+fn is_lfs_pointer(bytes: &[u8]) -> bool {
+    let prefix = b"version https://git-lfs.github.com/spec/v1";
+    bytes.starts_with(prefix)
+}
+
+fn copy_tree(src: &Path, dest: &Path) -> anyhow::Result<()> {
+    if dest.exists() {
+        fs::remove_dir_all(dest).ok();
+    }
+    for entry in walkdir::WalkDir::new(src) {
+        let entry = entry?;
+        let rel = match entry.path().strip_prefix(src) {
+            Ok(rel) => rel,
+            Err(_) => continue,
+        };
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        if rel.components().any(|c| c.as_os_str() == ".git") {
+            // Skip .git contents to avoid nested repository metadata.
+            continue;
+        }
+        let target = dest.join(rel);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&target)?;
+            continue;
+        }
+        if entry.file_type().is_symlink() {
+            let link = fs::read_link(entry.path())?;
+            create_symlink(&link, &target)?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(entry.path(), &target)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs as win_fs;
+    let metadata = fs::metadata(target)?;
+    if metadata.is_dir() {
+        win_fs::symlink_dir(target, link)
+    } else {
+        win_fs::symlink_file(target, link)
+    }
+}
+
+fn manifest_has_px(doc: &toml_edit::DocumentMut) -> bool {
+    doc.get("tool")
+        .and_then(toml_edit::Item::as_table)
+        .and_then(|tool| tool.get("px"))
+        .is_some()
+}
+
+fn sanitize_ref_for_path(git_ref: &str) -> String {
+    git_ref
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: String) -> Self {
+        let previous = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(prev) => std::env::set_var(self.key, prev),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+fn commit_stdlib_guard(ctx: &CommandContext, git_ref: &str) -> Option<EnvVarGuard> {
+    if std::env::var("PX_STDLIB_STAGING_ROOT").is_ok() {
+        return None;
+    }
+    let root = ctx
+        .cache()
+        .path
+        .join("stdlib-tests")
+        .join(sanitize_ref_for_path(git_ref));
+    Some(EnvVarGuard::set(
+        "PX_STDLIB_STAGING_ROOT",
+        root.display().to_string(),
+    ))
+}
+
+fn install_error_outcome(err: anyhow::Error, context: &str) -> ExecutionOutcome {
+    match err.downcast::<crate::InstallUserError>() {
+        Ok(user) => {
+            ExecutionOutcome::user_error(user.message().to_string(), user.details().clone())
+        }
+        Err(other) => ExecutionOutcome::failure(context, json!({ "error": other.to_string() })),
+    }
 }
 
 fn run_pytest_runner(
@@ -445,10 +1528,12 @@ fn pip_args_for_invocation<'a>(
     if is_pip_program(Path::new(program)) {
         return Some(args);
     }
-    if program_matches_python(program, py_ctx) && args.len() >= 2 && args[0] == "-m" {
-        if is_pip_module(&args[1]) {
-            return Some(&args[2..]);
-        }
+    if program_matches_python(program, py_ctx)
+        && args.len() >= 2
+        && args[0] == "-m"
+        && is_pip_module(&args[1])
+    {
+        return Some(&args[2..]);
     }
     None
 }
@@ -461,7 +1546,9 @@ fn is_pip_program(program: &Path) -> bool {
             let lower = name.to_ascii_lowercase();
             lower
                 .strip_prefix("pip")
-                .map(|rest| rest.is_empty() || rest.chars().all(|ch| ch.is_ascii_digit() || ch == '.'))
+                .map(|rest| {
+                    rest.is_empty() || rest.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+                })
                 .unwrap_or(false)
         })
         .unwrap_or(false)
@@ -532,6 +1619,9 @@ fn pip_mutation_outcome(program: &str, subcommand: &str, args: &[String]) -> Exe
 }
 
 fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<ExecutionOutcome> {
+    if let Some(at_ref) = &request.at {
+        return run_tests_at_ref(ctx, request, at_ref);
+    }
     let strict = request.frozen || ctx.env_flag_enabled("CI");
 
     if let Some(ws_ctx) = match prepare_workspace_run_context(ctx, strict, "test") {
@@ -698,11 +1788,10 @@ fn ensure_stdlib_tests_available(py_ctx: &PythonContext) -> Result<Option<PathBu
     }
 
     // Avoid mutating the system stdlib; stage tests under the project .px directory.
-    let staged_root = py_ctx
-        .project_root
-        .join(".px")
-        .join("stdlib-tests")
-        .join(format!("{major}.{minor}"));
+    let staging_base = env::var_os("PX_STDLIB_STAGING_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| py_ctx.project_root.join(".px").join("stdlib-tests"));
+    let staged_root = staging_base.join(format!("{major}.{minor}"));
     let staged_tests = staged_root.join("test");
     if staged_tests.exists() {
         return Ok(Some(staged_root));
@@ -1399,6 +2488,110 @@ mod tests {
     }
 
     #[test]
+    fn detects_lfs_pointer_format() {
+        let pointer = b"version https://git-lfs.github.com/spec/v1\n\
+oid sha256:1234567890abcdef\nsize 12\n";
+        assert!(is_lfs_pointer(pointer));
+        assert!(!is_lfs_pointer(b"plain file"));
+    }
+
+    #[test]
+    fn copy_tree_skips_git_metadata() {
+        let src = tempdir().expect("src");
+        let dest = tempdir().expect("dest");
+        let normal = src.path().join("data.txt");
+        fs::write(&normal, b"hello").expect("write");
+        let git_dir = src.path().join(".git");
+        fs::create_dir_all(&git_dir).expect("git dir");
+        fs::write(git_dir.join("config"), b"ignore").expect("git config");
+
+        copy_tree(src.path(), dest.path()).expect("copy");
+        assert!(dest.path().join("data.txt").is_file());
+        assert!(!dest.path().join(".git").exists());
+    }
+
+    #[test]
+    fn list_submodules_reports_commits() -> Result<()> {
+        let workspace = tempdir()?;
+        let root = workspace.path();
+
+        // Create a tiny submodule repo.
+        let subrepo = root.join("subrepo");
+        fs::create_dir_all(&subrepo)?;
+        git(&subrepo, &["init"])?;
+        fs::write(subrepo.join("data.txt"), "demo")?;
+        git(&subrepo, &["add", "data.txt"])?;
+        git(&subrepo, &["commit", "-m", "init"])?;
+        let sub_head = git(&subrepo, &["rev-parse", "HEAD"])?;
+        let sub_head = sub_head.trim().to_string();
+
+        // Main repo with submodule.
+        git(root, &["init"])?;
+        fs::write(root.join("pyproject.toml"), "")?;
+        fs::write(root.join("px.lock"), "")?;
+        git(
+            root,
+            &["submodule", "add", subrepo.to_str().unwrap(), "libs/data"],
+        )?;
+        git(root, &["commit", "-am", "add submodule"])?;
+
+        let subs = list_submodules(root, "HEAD").expect("list submodules");
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].0, PathBuf::from("libs/data"));
+        assert_eq!(subs[0].1, sub_head);
+        Ok(())
+    }
+
+    #[test]
+    fn restore_lfs_pointers_smudges_with_git_lfs() -> Result<()> {
+        let workspace = tempdir()?;
+        let root = workspace.path();
+
+        git(root, &["init"])?;
+        fs::write(root.join("pyproject.toml"), "")?;
+        fs::write(root.join("px.lock"), "")?;
+        fs::create_dir_all(root.join("assets"))?;
+        let pointer = root.join("assets").join("file.bin");
+        fs::write(
+            &pointer,
+            "version https://git-lfs.github.com/spec/v1\n\
+oid sha256:deadbeef\nsize 4\n",
+        )?;
+        git(root, &["add", "."])?;
+        git(root, &["commit", "-m", "add lfs pointer"])?;
+
+        // Fake git-lfs subcommand on PATH.
+        let fake_bin = workspace.path().join("bin");
+        fs::create_dir_all(&fake_bin)?;
+        let fake = fake_bin.join("git-lfs");
+        fs::write(
+            &fake,
+            "#!/bin/sh\nif [ \"$1\" = \"smudge\" ]; then cat >/dev/null; echo \"SMUDGED\"; else exit 1; fi\n",
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&fake)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&fake, perms)?;
+        }
+        let _path_guard = EnvVarGuard::set(
+            "PATH",
+            format!(
+                "{}:{}",
+                fake_bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+
+        restore_lfs_pointers(root, "HEAD", root).expect("smudge lfs pointers");
+        let contents = fs::read_to_string(&pointer)?;
+        assert_eq!(contents.trim(), "SMUDGED");
+
+        Ok(())
+    }
+
+    #[test]
     fn run_executable_blocks_mutating_pip_commands() -> Result<()> {
         let ctx = ctx_with_defaults();
         let temp = tempdir()?;
@@ -1418,15 +2611,24 @@ mod tests {
 
         assert_eq!(outcome.status, CommandStatus::UserError);
         assert_eq!(
-            outcome.details.get("reason").and_then(|value| value.as_str()),
+            outcome
+                .details
+                .get("reason")
+                .and_then(|value| value.as_str()),
             Some("pip_mutation_forbidden")
         );
         assert_eq!(
-            outcome.details.get("subcommand").and_then(|value| value.as_str()),
+            outcome
+                .details
+                .get("subcommand")
+                .and_then(|value| value.as_str()),
             Some("install")
         );
         assert_eq!(
-            outcome.details.get("program").and_then(|value| value.as_str()),
+            outcome
+                .details
+                .get("program")
+                .and_then(|value| value.as_str()),
             Some("pip")
         );
         Ok(())
@@ -1619,5 +2821,17 @@ mod tests {
             "tests/runtests.py should be preferred over root runtests.py"
         );
         Ok(())
+    }
+
+    fn git(cwd: &Path, args: &[&str]) -> Result<String> {
+        let output = Command::new("git").args(args).current_dir(cwd).output()?;
+        if !output.status.success() {
+            bail!(
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 }

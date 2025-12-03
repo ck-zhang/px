@@ -993,9 +993,9 @@ impl ContentAddressableStore {
             } else {
                 match fs::read(&path) {
                     Ok(bytes) => {
-                        if self.verify_bytes(&oid, &bytes).is_err() {
-                            Some(true)
-                        } else if canonical_kind(&bytes).ok() != Some(kind) {
+                        if self.verify_bytes(&oid, &bytes).is_err()
+                            || canonical_kind(&bytes).ok() != Some(kind)
+                        {
                             Some(true)
                         } else {
                             None
@@ -1073,9 +1073,9 @@ impl ContentAddressableStore {
         let path = self.index_path();
         let conn = Connection::open(&path)
             .with_context(|| format!("failed to open CAS index at {}", path.display()))?;
-        conn.pragma_update(None, "journal_mode", &"WAL")
+        conn.pragma_update(None, "journal_mode", "WAL")
             .context("failed to enable WAL for CAS index")?;
-        conn.pragma_update(None, "foreign_keys", &"ON")
+        conn.pragma_update(None, "foreign_keys", "ON")
             .context("failed to enable foreign keys for CAS index")?;
         Ok(conn)
     }
@@ -1199,7 +1199,7 @@ impl ContentAddressableStore {
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let result: String = row.get(0)?;
-            if result.to_ascii_lowercase() != "ok" {
+            if !result.eq_ignore_ascii_case("ok") {
                 return Err(StoreError::IndexCorrupt(result).into());
             }
         }
@@ -1216,7 +1216,7 @@ impl ContentAddressableStore {
         let missing: Vec<&str> = ["meta", "objects", "refs", "keys"]
             .iter()
             .copied()
-            .filter(|name| !found.contains(&name.to_string()))
+            .filter(|name| !found.contains(*name))
             .collect();
         if missing.is_empty() {
             Ok(())
@@ -1241,9 +1241,9 @@ impl ContentAddressableStore {
                 temp_index.display()
             )
         })?;
-        conn.pragma_update(None, "journal_mode", &"WAL")
+        conn.pragma_update(None, "journal_mode", "WAL")
             .context("failed to enable WAL for rebuilt CAS index")?;
-        conn.pragma_update(None, "foreign_keys", &"ON")
+        conn.pragma_update(None, "foreign_keys", "ON")
             .context("failed to enable foreign keys for rebuilt CAS index")?;
         self.init_schema(&conn)?;
         self.ensure_meta(&mut conn)?;
@@ -1541,11 +1541,11 @@ impl ContentAddressableStore {
             let runtime_version = state
                 .runtime
                 .as_ref()
-                .and_then(|r| (!r.version.is_empty()).then(|| r.version.as_str()))
+                .and_then(|r| (!r.version.is_empty()).then_some(r.version.as_str()))
                 .or_else(|| {
                     env.python
                         .as_ref()
-                        .and_then(|py| (!py.version.is_empty()).then(|| py.version.as_str()))
+                        .and_then(|py| (!py.version.is_empty()).then_some(py.version.as_str()))
                 });
             let Some(runtime_version) = runtime_version else {
                 continue;
@@ -1611,11 +1611,11 @@ impl ContentAddressableStore {
             let runtime_version = state
                 .runtime
                 .as_ref()
-                .and_then(|r| (!r.version.is_empty()).then(|| r.version.as_str()))
+                .and_then(|r| (!r.version.is_empty()).then_some(r.version.as_str()))
                 .or_else(|| {
                     env.python
                         .as_ref()
-                        .and_then(|py| (!py.version.is_empty()).then(|| py.version.as_str()))
+                        .and_then(|py| (!py.version.is_empty()).then_some(py.version.as_str()))
                 });
             let Some(runtime_version) = runtime_version else {
                 continue;
@@ -1852,7 +1852,7 @@ impl ContentAddressableStore {
             }
         }
 
-        Ok((refs_count as usize, keys_removed as usize))
+        Ok((refs_count as usize, keys_removed))
     }
 
     fn prune_orphans(&self, conn: &mut Connection) -> Result<(usize, usize)> {
@@ -1864,7 +1864,7 @@ impl ContentAddressableStore {
             "DELETE FROM keys WHERE oid NOT IN (SELECT oid FROM objects)",
             [],
         )?;
-        Ok((refs_pruned as usize, keys_pruned as usize))
+        Ok((refs_pruned, keys_pruned))
     }
 
     fn runtime_manifest_path(&self, oid: &str) -> PathBuf {
@@ -2092,6 +2092,7 @@ impl ContentAddressableStore {
             .create(true)
             .read(true)
             .write(true)
+            .truncate(true)
             .open(&path)
             .with_context(|| format!("failed to open CAS lock {}", path.display()))?;
         file.lock_exclusive()
@@ -2108,6 +2109,7 @@ impl ContentAddressableStore {
             .create(true)
             .read(true)
             .write(true)
+            .truncate(true)
             .open(&path)?;
         match file.try_lock_exclusive() {
             Ok(()) => Ok(Some(file)),
@@ -2708,7 +2710,7 @@ fn is_executable(metadata: &fs::Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        return metadata.permissions().mode() & 0o111 != 0;
+        metadata.permissions().mode() & 0o111 != 0
     }
     #[cfg(not(unix))]
     {

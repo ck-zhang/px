@@ -542,15 +542,15 @@ pub(crate) fn refresh_project_site(
                         owner_type: OwnerType::ProjectEnv,
                         owner_id: prev_owner_id,
                     };
-                    if store.remove_ref(&prev_owner, prev_profile)? {
-                        if store.refs_for(prev_profile)?.is_empty() {
-                            let profile_owner = OwnerId {
-                                owner_type: OwnerType::Profile,
-                                owner_id: prev_profile.to_string(),
-                            };
-                            let _ = store.remove_owner_refs(&profile_owner)?;
-                            let _ = store.remove_env_materialization(prev_profile);
-                        }
+                    if store.remove_ref(&prev_owner, prev_profile)?
+                        && store.refs_for(prev_profile)?.is_empty()
+                    {
+                        let profile_owner = OwnerId {
+                            owner_type: OwnerType::Profile,
+                            owner_id: prev_profile.to_string(),
+                        };
+                        let _ = store.remove_owner_refs(&profile_owner)?;
+                        let _ = store.remove_env_materialization(prev_profile);
                     }
                 }
             }
@@ -673,12 +673,10 @@ fn ensure_project_pip(
         eprintln!(
             "post-ensurepip pip_present={} entries={:?}",
             after_link,
-            fs::read_dir(&site_packages).ok().and_then(|iter| {
-                Some(
-                    iter.flatten()
-                        .map(|e| e.file_name().to_string_lossy().to_string())
-                        .collect::<Vec<_>>(),
-                )
+            fs::read_dir(&site_packages).ok().map(|iter| {
+                iter.flatten()
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
             })
         );
     }
@@ -992,9 +990,7 @@ fn write_record_file(
         if !path.exists() {
             continue;
         }
-        let rel = path
-            .strip_prefix(site_dir)
-            .unwrap_or_else(|_| path.as_path());
+        let rel = path.strip_prefix(site_dir).unwrap_or(path.as_path());
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         if !seen.insert(rel_str.clone()) {
             continue;
@@ -1115,9 +1111,9 @@ fn infer_version_from_versioneer(
         project_root.join("src").join(&module).join("_version.py"),
         project_root.join(&module).join("_version.py"),
     ];
-    let Some(path) = candidates.iter().find(|path| fs_ops.metadata(path).is_ok()) else {
-        return None;
-    };
+    let path = candidates
+        .iter()
+        .find(|path| fs_ops.metadata(path).is_ok())?;
 
     let python = detect_interpreter().ok()?;
     let script = format!(
@@ -1872,9 +1868,13 @@ pub(crate) fn detect_runtime_metadata(
 
 pub(crate) fn compute_lock_hash(lock_path: &Path) -> Result<String> {
     let contents = fs::read(lock_path)?;
+    Ok(compute_lock_hash_bytes(&contents))
+}
+
+pub(crate) fn compute_lock_hash_bytes(contents: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(contents);
-    Ok(format!("{:x}", hasher.finalize()))
+    format!("{:x}", hasher.finalize())
 }
 
 fn probe_python_version(
@@ -2412,11 +2412,12 @@ impl PythonContext {
     }
 
     pub(crate) fn base_env(&self, command_args: &Value) -> Result<Vec<(String, String)>> {
-        let mut envs = Vec::new();
-        envs.push(("PYTHONPATH".into(), self.pythonpath.clone()));
-        envs.push(("PYTHONUNBUFFERED".into(), "1".into()));
-        envs.push(("PYTHONDONTWRITEBYTECODE".into(), "1".into()));
-        envs.push(("PYTHONSAFEPATH".into(), "1".into()));
+        let mut envs = vec![
+            ("PYTHONPATH".into(), self.pythonpath.clone()),
+            ("PYTHONUNBUFFERED".into(), "1".into()),
+            ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
+            ("PYTHONSAFEPATH".into(), "1".into()),
+        ];
         let allowed =
             env::join_paths(&self.allowed_paths).context("allowed path contains invalid UTF-8")?;
         let allowed = allowed
@@ -2527,7 +2528,7 @@ fn ensure_inline_version_module(manifest_dir: &Path, doc: &toml_edit::DocumentMu
     if project
         .get("dynamic")
         .and_then(Item::as_array)
-        .map_or(false, |items| {
+        .is_some_and(|items| {
             items
                 .iter()
                 .any(|item| item.as_str().is_some_and(|value| value == "version"))

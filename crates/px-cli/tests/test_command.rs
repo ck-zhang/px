@@ -101,6 +101,7 @@ fn px_test_streams_and_summarizes_runner_output() {
     {
         if line.contains("missing_pytest") || line.contains("pytest is not available") {
             // Environment setup flaked (offline or resolver failure); skip streaming checks.
+            let _ = child.wait();
             return;
         }
         stdout_lines.push(line.clone());

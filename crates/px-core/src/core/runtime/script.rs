@@ -11,8 +11,8 @@ use crate::core::project::evaluate_project_state;
 use crate::core::runtime::facade::{
     attach_autosync_details, auto_sync_environment, build_pythonpath,
     ensure_environment_with_guard, manifest_snapshot_at, prepare_project_runtime,
-    select_python_from_site, EnvironmentIssue, EnvironmentSyncReport,
-    ManifestSnapshot, PythonContext,
+    select_python_from_site, EnvironmentIssue, EnvironmentSyncReport, ManifestSnapshot,
+    PythonContext,
 };
 use crate::core::runtime::run::run_project_script;
 use crate::core::runtime::EnvGuard;
@@ -123,10 +123,7 @@ pub(crate) fn run_inline_script(
             .map_err(|err| map_install_error(err, "failed to prepare inline script environment"))?;
     }
 
-    let (py_ctx, report) = match inline_python_context(ctx, &snapshot, EnvGuard::Strict, &script) {
-        Ok(result) => result,
-        Err(outcome) => return Err(outcome),
-    };
+    let (py_ctx, report) = inline_python_context(ctx, &snapshot, EnvGuard::Strict, &script)?;
     if sync_report.is_none() {
         sync_report = report;
     }
@@ -193,10 +190,9 @@ fn inline_strict_outcome(script_path: &Path, issue: EnvironmentIssue) -> Executi
             "missing_env",
             "inline script environment is missing in strict mode",
         ),
-        EnvironmentIssue::EnvOutdated => (
-            "env_outdated",
-            "inline script environment is out of sync",
-        ),
+        EnvironmentIssue::EnvOutdated => {
+            ("env_outdated", "inline script environment is out of sync")
+        }
         EnvironmentIssue::RuntimeMismatch => (
             "runtime_mismatch",
             "inline script environment uses the wrong runtime",
@@ -219,16 +215,21 @@ fn prepare_inline_snapshot(
     let identity = script_identity(&script.canonical_path);
     let project_name = script_project_name(&script.path, &identity);
     let dependencies = sanitized_dependencies(&script.metadata.dependencies)?;
-    let doc = build_inline_manifest_doc(&project_name, &script.metadata.requires_python, &dependencies);
-    let fingerprint = manifest_fingerprint(&doc, &dependencies, &[], &PxOptions::default()).map_err(|err| {
-        ExecutionOutcome::failure(
-            "failed to fingerprint inline px metadata",
-            json!({
-                "script": script.path.display().to_string(),
-                "error": err.to_string(),
-            }),
-        )
-    })?;
+    let doc = build_inline_manifest_doc(
+        &project_name,
+        &script.metadata.requires_python,
+        &dependencies,
+    );
+    let fingerprint = manifest_fingerprint(&doc, &dependencies, &[], &PxOptions::default())
+        .map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to fingerprint inline px metadata",
+                json!({
+                    "script": script.path.display().to_string(),
+                    "error": err.to_string(),
+                }),
+            )
+        })?;
     let root = script_root(ctx, &identity, &fingerprint);
     write_manifest(&root.join("pyproject.toml"), doc.to_string())?;
     manifest_snapshot_at(&root).map_err(|err| {
@@ -249,7 +250,8 @@ fn inline_python_context(
     guard: EnvGuard,
     script: &InlineScript,
 ) -> Result<(PythonContext, Option<EnvironmentSyncReport>), ExecutionOutcome> {
-    let runtime = prepare_project_runtime(snapshot).map_err(|err| map_install_error(err, "failed to prepare inline script runtime"))?;
+    let runtime = prepare_project_runtime(snapshot)
+        .map_err(|err| map_install_error(err, "failed to prepare inline script runtime"))?;
     let sync_report = ensure_environment_with_guard(ctx, snapshot, guard)
         .map_err(|err| map_install_error(err, "failed to prepare inline script environment"))?;
     let paths = build_pythonpath(ctx.fs(), &snapshot.root, None).map_err(|err| {
@@ -262,7 +264,13 @@ fn inline_python_context(
         )
     })?;
     let mut allowed_paths = paths.allowed_paths;
-    push_unique_path(&mut allowed_paths, script.canonical_path.parent().unwrap_or_else(|| Path::new(".")));
+    push_unique_path(
+        &mut allowed_paths,
+        script
+            .canonical_path
+            .parent()
+            .unwrap_or_else(|| Path::new(".")),
+    );
     push_unique_path(&mut allowed_paths, &script.working_dir);
     let pythonpath = env::join_paths(&allowed_paths)
         .map_err(|err| {
@@ -278,7 +286,11 @@ fn inline_python_context(
                 json!({ "error": "contains non-utf8 data" }),
             )
         })?;
-    let python = select_python_from_site(&paths.site_bin, &runtime.record.path, &runtime.record.full_version);
+    let python = select_python_from_site(
+        &paths.site_bin,
+        &runtime.record.path,
+        &runtime.record.full_version,
+    );
     let py_ctx = PythonContext {
         project_root: script.working_dir.clone(),
         project_name: snapshot.name.clone(),
@@ -292,7 +304,10 @@ fn inline_python_context(
     Ok((py_ctx, sync_report))
 }
 
-fn extract_inline_block(contents: &str, script_path: &Path) -> Result<Option<String>, ExecutionOutcome> {
+fn extract_inline_block(
+    contents: &str,
+    script_path: &Path,
+) -> Result<Option<String>, ExecutionOutcome> {
     let mut started = false;
     let mut body = String::new();
     for line in contents.lines() {
@@ -346,7 +361,10 @@ fn extract_inline_block(contents: &str, script_path: &Path) -> Result<Option<Str
     Ok(None)
 }
 
-fn parse_inline_metadata(block: &str, script_path: &Path) -> Result<InlineScriptMetadata, ExecutionOutcome> {
+fn parse_inline_metadata(
+    block: &str,
+    script_path: &Path,
+) -> Result<InlineScriptMetadata, ExecutionOutcome> {
     let raw: RawInlineMetadata = toml_edit::de::from_str(block).map_err(|err| {
         ExecutionOutcome::user_error(
             "invalid inline px metadata",
@@ -438,7 +456,11 @@ fn script_root(ctx: &CommandContext, identity: &str, fingerprint: &str) -> PathB
         .join(fingerprint)
 }
 
-fn build_inline_manifest_doc(name: &str, requires_python: &str, dependencies: &[String]) -> DocumentMut {
+fn build_inline_manifest_doc(
+    name: &str,
+    requires_python: &str,
+    dependencies: &[String],
+) -> DocumentMut {
     let mut doc = DocumentMut::new();
     let mut project = Table::new();
     project.insert("name", Item::Value(TomlValue::from(name)));

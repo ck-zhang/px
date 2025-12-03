@@ -152,7 +152,10 @@ fn does_not_guess_missing_python_script_targets() -> anyhow::Result<()> {
     let plan = plan_run_target(&ctx, &temp.path().join("pyproject.toml"), "missing.py")?;
     match plan {
         RunTargetPlan::Executable(target) => {
-            assert_eq!(target, "missing.py", "missing .py should be treated as executable");
+            assert_eq!(
+                target, "missing.py",
+                "missing .py should be treated as executable"
+            );
         }
         other => panic!("expected executable plan, got {other:?}"),
     }

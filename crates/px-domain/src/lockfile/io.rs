@@ -24,6 +24,11 @@ pub fn load_lockfile(path: &Path) -> Result<LockSnapshot> {
     Ok(parse_lock_snapshot(&doc))
 }
 
+pub fn parse_lockfile(contents: &str) -> Result<LockSnapshot> {
+    let doc: DocumentMut = contents.parse().context("failed to parse lockfile")?;
+    Ok(parse_lock_snapshot(&doc))
+}
+
 pub fn load_lockfile_optional(path: &Path) -> Result<Option<LockSnapshot>> {
     if path.exists() {
         Ok(Some(load_lockfile(path)?))

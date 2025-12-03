@@ -6,8 +6,8 @@ pub(crate) mod fmt_runner;
 pub(crate) mod process;
 pub(crate) mod run;
 pub(crate) mod run_plan;
-pub(crate) mod script;
 pub(crate) mod runtime_manager;
+pub(crate) mod script;
 pub(crate) mod traceback;
 
 mod facade;

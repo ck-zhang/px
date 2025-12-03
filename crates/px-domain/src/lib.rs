@@ -12,9 +12,9 @@ pub mod workspace;
 
 pub use lockfile::{
     analyze_lock_diff, canonical_extras, collect_resolved_dependencies, detect_lock_drift,
-    format_specifier, load_lockfile_optional, render_lockfile, render_lockfile_with_workspace,
-    verify_locked_artifacts, LockSnapshot, LockedArtifact, ResolvedDependency, WorkspaceLock,
-    WorkspaceMember, WorkspaceOwner,
+    format_specifier, load_lockfile_optional, parse_lockfile, render_lockfile,
+    render_lockfile_with_workspace, verify_locked_artifacts, LockSnapshot, LockedArtifact,
+    ResolvedDependency, WorkspaceLock, WorkspaceMember, WorkspaceOwner,
 };
 pub use project::{
     collect_pyproject_packages, collect_requirement_packages, collect_setup_cfg_packages,

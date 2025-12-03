@@ -15,7 +15,7 @@ use tempfile::TempDir;
 use toml_edit::DocumentMut;
 
 thread_local! {
-    static TEST_CACHE: RefCell<Option<TempDir>> = RefCell::new(None);
+    static TEST_CACHE: RefCell<Option<TempDir>> = const { RefCell::new(None) };
 }
 
 fn env_lock() -> &'static Mutex<()> {
@@ -34,7 +34,6 @@ pub fn reset_test_store_env() {
     // PX_* environment variables mid-execution.
 }
 
-#[must_use]
 pub fn test_env_guard() -> std::sync::MutexGuard<'static, ()> {
     serial_lock().lock().unwrap()
 }

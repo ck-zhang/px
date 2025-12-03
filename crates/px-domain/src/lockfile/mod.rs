@@ -17,7 +17,7 @@ pub use analysis::{
     ProjectMismatch, PythonMismatch, VersionMismatch,
 };
 pub use io::{
-    load_lockfile, load_lockfile_optional, render_lockfile, render_lockfile_v2,
+    load_lockfile, load_lockfile_optional, parse_lockfile, render_lockfile, render_lockfile_v2,
     render_lockfile_with_workspace,
 };
 pub use spec::{canonical_extras, format_specifier};

@@ -41,9 +41,29 @@ impl ProjectSnapshot {
         let manifest_path = root.join("pyproject.toml");
         ensure_pyproject_exists(&manifest_path)?;
         let contents = fs::read_to_string(&manifest_path)?;
+        Self::from_contents(root, manifest_path, &contents)
+    }
+
+    pub fn from_contents(
+        root: impl AsRef<Path>,
+        manifest_path: impl AsRef<Path>,
+        contents: &str,
+    ) -> Result<Self> {
+        let root = root.as_ref();
+        let manifest_path = manifest_path.as_ref();
         let doc: DocumentMut = contents
             .parse()
             .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+        Self::from_document(root, manifest_path, doc)
+    }
+
+    pub fn from_document(
+        root: impl AsRef<Path>,
+        manifest_path: impl AsRef<Path>,
+        doc: DocumentMut,
+    ) -> Result<Self> {
+        let root = root.as_ref();
+        let manifest_path = manifest_path.as_ref();
         let project = project_table(&doc)?;
         let name = project
             .get("name")
@@ -83,7 +103,7 @@ impl ProjectSnapshot {
         )?;
         Ok(Self {
             root: root.to_path_buf(),
-            manifest_path,
+            manifest_path: manifest_path.to_path_buf(),
             lock_path: root.join("px.lock"),
             name,
             python_requirement,

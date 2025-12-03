@@ -38,13 +38,16 @@ fn pyproject_has_workspace(path: &Path) -> Result<bool> {
     let doc: DocumentMut = contents
         .parse()
         .with_context(|| format!("failed to parse {}", path.display()))?;
-    Ok(doc
-        .get("tool")
-        .and_then(|item| item.as_table())
+    Ok(manifest_has_workspace(&doc))
+}
+
+pub fn manifest_has_workspace(doc: &DocumentMut) -> bool {
+    doc.get("tool")
+        .and_then(Item::as_table)
         .and_then(|table| table.get("px"))
         .and_then(Item::as_table)
         .and_then(|px| px.get("workspace"))
-        .is_some())
+        .is_some()
 }
 
 /// Parses `[tool.px.workspace]` from `pyproject.toml` at `root`.
@@ -57,9 +60,22 @@ pub fn read_workspace_config(root: &Path) -> Result<WorkspaceConfig> {
         ));
     }
     let contents = fs::read_to_string(&manifest_path)?;
+    read_workspace_config_from_str(root, &contents)
+}
+
+pub fn read_workspace_config_from_str(root: &Path, contents: &str) -> Result<WorkspaceConfig> {
+    let manifest_path = root.join("pyproject.toml");
     let doc: DocumentMut = contents
         .parse()
         .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    workspace_config_from_doc(root, &manifest_path, &doc)
+}
+
+pub fn workspace_config_from_doc(
+    root: &Path,
+    manifest_path: &Path,
+    doc: &DocumentMut,
+) -> Result<WorkspaceConfig> {
     let workspace = doc
         .get("tool")
         .and_then(Item::as_table)
@@ -92,7 +108,7 @@ pub fn read_workspace_config(root: &Path) -> Result<WorkspaceConfig> {
 
     Ok(WorkspaceConfig {
         root: root.to_path_buf(),
-        manifest_path,
+        manifest_path: manifest_path.to_path_buf(),
         members,
         python,
         name,

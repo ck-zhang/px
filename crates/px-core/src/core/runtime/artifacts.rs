@@ -106,7 +106,7 @@ fn download_artifact(
     force_sdist: bool,
 ) -> Result<ResolvedDependency> {
     let release = pypi.fetch_release(&pin.normalized, &pin.version, &pin.specifier)?;
-    let default_build_hash = wheel_build_options_hash(&python)?;
+    let default_build_hash = wheel_build_options_hash(python)?;
     let artifact = if force_sdist {
         build_wheel_via_sdist(
             cache_store,

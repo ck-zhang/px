@@ -118,6 +118,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 
 * **Behavior (dev)**: if env missing/stale, rebuild from `px.lock` (no resolution) before running.
 * **Behavior (CI/`--frozen`)**: fail if lock drifted or env stale; never repairs.
+* **Commit-scoped**: `px run --at <git-ref>` uses the `pyproject.toml` + lock from that ref (project or workspace) without checking it out; locks are treated as frozen (fail if missing/drifted), and envs are reused/materialized in the global cache without touching the working tree.
 * **Env prep**: PATH is rebuilt with the px env’s `site/bin` first (px materializes console/gui scripts there from wheels); exports `PYAPP_COMMAND_NAME` when `[tool.px].manage-command` is set; runs a lightweight import check for `[tool.px].plugin-imports` and sets `PX_PLUGIN_PREFLIGHT` to `1`/`0`; clears proxy env vars.
 * **Pip semantics**: px envs are immutable CAS materializations; mutating pip commands (`pip install`, `python -m pip uninstall`, etc.) are blocked with a PX error. Read-only pip invocations (`pip list/show/help/--version`) run normally.
 * **VCS version files**: if `[tool.hatch.build.hooks.vcs].version-file` points to a missing file, px writes one using `git describe --tags --dirty --long` (fallback `git rev-parse --short HEAD`); if git metadata is unavailable, px writes `0.0.0+unknown` as a safe fallback.
@@ -127,6 +128,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 ### `px test`
 
 * Same consistency semantics as `px run`. Prefers project-provided runners like `tests/runtests.py` (or `runtests.py`) and otherwise runs `pytest` inside the project env.
+* `--at <git-ref>` mirrors `px run --at …`, using the manifest + lock at that ref with frozen semantics (no re-resolution; fail if lock is missing or drifted).
 * Output style (default): px streams the runner stdout/stderr live and renders a compact report:
 
   ```

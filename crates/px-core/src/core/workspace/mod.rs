@@ -63,7 +63,7 @@ pub struct WorkspaceSnapshot {
 }
 
 impl WorkspaceSnapshot {
-    fn lock_snapshot(&self) -> ManifestSnapshot {
+    pub(crate) fn lock_snapshot(&self) -> ManifestSnapshot {
         ProjectSnapshot {
             root: self.config.root.clone(),
             manifest_path: self.config.manifest_path.clone(),
@@ -208,7 +208,7 @@ fn load_workspace_snapshot(root: &Path) -> Result<WorkspaceSnapshot> {
     })
 }
 
-fn derive_workspace_python(
+pub(crate) fn derive_workspace_python(
     config: &WorkspaceConfig,
     members: &[WorkspaceMember],
 ) -> Result<String> {
@@ -673,15 +673,15 @@ fn refresh_workspace_site(ctx: &CommandContext, workspace: &WorkspaceSnapshot) -
                         owner_type: OwnerType::WorkspaceEnv,
                         owner_id: prev_owner_id,
                     };
-                    if store.remove_ref(&prev_owner, prev_profile)? {
-                        if store.refs_for(prev_profile)?.is_empty() {
-                            let profile_owner = OwnerId {
-                                owner_type: OwnerType::Profile,
-                                owner_id: prev_profile.to_string(),
-                            };
-                            let _ = store.remove_owner_refs(&profile_owner)?;
-                            let _ = store.remove_env_materialization(prev_profile);
-                        }
+                    if store.remove_ref(&prev_owner, prev_profile)?
+                        && store.refs_for(prev_profile)?.is_empty()
+                    {
+                        let profile_owner = OwnerId {
+                            owner_type: OwnerType::Profile,
+                            owner_id: prev_profile.to_string(),
+                        };
+                        let _ = store.remove_owner_refs(&profile_owner)?;
+                        let _ = store.remove_env_materialization(prev_profile);
                     }
                 }
             }

@@ -180,6 +180,7 @@ fn test_request_from_args(args: &TestArgs) -> TestRequest {
     TestRequest {
         args: args.args.clone(),
         frozen: args.frozen,
+        at: args.at.clone(),
     }
 }
 
@@ -197,6 +198,7 @@ fn run_request_from_args(args: &RunArgs) -> RunRequest {
         } else {
             None
         },
+        at: args.at.clone(),
     }
 }
 

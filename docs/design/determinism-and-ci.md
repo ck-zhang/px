@@ -56,3 +56,9 @@ For a fixed px version, runtime set, platform, and index configuration, the foll
 * No prompts or implicit mutations. Output must be non-interactive; follow the non-TTY rules above.
 
 These rules keep local development and CI reproducible and make state drift visible instead of silently patched.
+
+## Commit-scoped environments
+
+* `px run --at <git-ref>` / `px test --at <git-ref>` execute using the manifest + lock at that ref without checking it out.
+* Env/profile identity is a function of the git ref, manifest/lock content, and runtime; environments are materialized/reused from the global CAS cache and never touch the working tree.
+* Frozen semantics: if the ref lacks a lock or it drifts from the manifest fingerprint at that ref, the command fails instead of re-resolving.

@@ -372,13 +372,7 @@ fn run_accepts_post_subcommand_json_flag() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
-        .args([
-            "run",
-            "--json",
-            "sample_px_app/cli.py",
-            "--",
-            "JsonInline",
-        ])
+        .args(["run", "--json", "sample_px_app/cli.py", "--", "JsonInline"])
         .assert()
         .success();
 

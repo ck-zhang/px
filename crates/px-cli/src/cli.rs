@@ -368,6 +368,12 @@ pub struct RunArgs {
     )]
     pub frozen: bool,
     #[arg(
+        long,
+        value_name = "GIT_REF",
+        help = "Run using the manifest and lock at a past git ref without checking it out"
+    )]
+    pub at: Option<String>,
+    #[arg(
         value_name = "ARG",
         trailing_var_arg = true,
         allow_hyphen_values = true,
@@ -383,6 +389,12 @@ pub struct TestArgs {
         help = "Fail if px.lock is missing or the environment is out of sync"
     )]
     pub frozen: bool,
+    #[arg(
+        long,
+        value_name = "GIT_REF",
+        help = "Run tests using the manifest and lock at a past git ref"
+    )]
+    pub at: Option<String>,
     #[arg(last = true, value_name = "TEST_ARG")]
     pub args: Vec<String>,
 }
