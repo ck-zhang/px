@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use tar::Archive;
 use tracing::{debug, warn};
 
+use super::script::{detect_inline_script, run_inline_script};
 use crate::run_plan::{plan_run_target, RunTargetPlan};
 use crate::tooling::{missing_pyproject_outcome, run_target_required_outcome};
 use crate::workspace::prepare_workspace_run_context;
@@ -68,26 +69,46 @@ pub fn run_project(ctx: &CommandContext, request: &RunRequest) -> Result<Executi
 
 fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<ExecutionOutcome> {
     let strict = request.frozen || ctx.env_flag_enabled("CI");
+    let target = request
+        .entry
+        .clone()
+        .or_else(|| request.target.clone())
+        .unwrap_or_default();
+
+    let interactive = request.interactive.unwrap_or_else(|| {
+        !strict && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+    });
+    let command_args = json!({
+        "target": &target,
+        "args": &request.args,
+    });
+
+    if !target.trim().is_empty() {
+        if let Some(inline) = match detect_inline_script(&target) {
+            Ok(result) => result,
+            Err(outcome) => return Ok(outcome),
+        } {
+            return match run_inline_script(
+                ctx,
+                inline,
+                &request.args,
+                &command_args,
+                interactive,
+                strict,
+            ) {
+                Ok(outcome) => Ok(outcome),
+                Err(outcome) => Ok(outcome),
+            };
+        }
+    }
 
     if let Some(ws_ctx) = match prepare_workspace_run_context(ctx, strict, "run") {
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
     } {
-        let target = request
-            .entry
-            .clone()
-            .or_else(|| request.target.clone())
-            .unwrap_or_default();
         if target.trim().is_empty() {
             return Ok(run_target_required_outcome());
         }
-        let command_args = json!({
-            "target": &target,
-            "args": &request.args,
-        });
-        let interactive = request.interactive.unwrap_or_else(|| {
-            !strict && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
-        });
         let plan = plan_run_target(&ws_ctx.py_ctx, &ws_ctx.manifest_path, &target)?;
         let mut outcome = match plan {
             RunTargetPlan::Script(path) => run_project_script(
@@ -125,11 +146,6 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             return Err(err);
         }
     };
-    let target = request
-        .entry
-        .clone()
-        .or_else(|| request.target.clone())
-        .unwrap_or_default();
     if target.trim().is_empty() {
         return Ok(run_target_required_outcome());
     }
@@ -145,15 +161,11 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
     };
-    let command_args = json!({
-        "target": &target,
-        "args": &request.args,
-    });
     let manifest = py_ctx.project_root.join("pyproject.toml");
 
-    let interactive = request.interactive.unwrap_or_else(|| {
-        !strict && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
-    });
+    if target.trim().is_empty() {
+        return Ok(run_target_required_outcome());
+    }
     let plan = plan_run_target(&py_ctx, &manifest, &target)?;
     let mut outcome = match plan {
         RunTargetPlan::Script(path) => run_project_script(
@@ -327,7 +339,7 @@ fn run_python_command(
     }
 }
 
-fn run_project_script(
+pub(crate) fn run_project_script(
     core_ctx: &CommandContext,
     py_ctx: &PythonContext,
     script: &Path,

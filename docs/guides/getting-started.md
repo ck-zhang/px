@@ -25,6 +25,28 @@ px currently supports Linux and macOS only; Windows is not supported yet. Use WS
 * Env missing/outdated? `px sync` rebuilds it (unless `--frozen`).
 * Missing import in `px run`? Add it (`px add <pkg>`) or resync if already declared.
 
+## Running scripts
+
+px understands inline metadata blocks at the top of a script (PEP 723 style):
+
+```
+# /// px
+# requires-python = ">=3.11"
+# dependencies = ["httpx"]
+# ///
+```
+
+You can also pin more than one dependency:
+
+```
+# /// px
+# requires-python = ">=3.10"
+# dependencies = ["rich==13.9.2", "requests<3"]
+# ///
+```
+
+Run the file with `px run script.py`; px resolves the inline deps, builds an isolated env in its cache, and reuses it next time.
+
 ## Going further
 
 * Multi-project repo? See `docs/guides/workspaces.md`.

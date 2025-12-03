@@ -1638,7 +1638,7 @@ fn install_python_link(source: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn select_python_from_site(
+pub(crate) fn select_python_from_site(
     site_bin: &Option<PathBuf>,
     runtime_path: &str,
     runtime_version: &str,
@@ -3349,7 +3349,7 @@ pub fn ensure_env_matches_lock(
     Ok(())
 }
 
-fn ensure_environment_with_guard(
+pub(crate) fn ensure_environment_with_guard(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
     guard: EnvGuard,

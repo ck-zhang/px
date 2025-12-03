@@ -719,7 +719,7 @@ pub(crate) fn select_dependency_groups(doc: &DocumentMut) -> DependencyGroupSele
     }
 }
 
-pub(crate) fn manifest_fingerprint(
+pub fn manifest_fingerprint(
     doc: &DocumentMut,
     requirements: &[String],
     groups: &[String],

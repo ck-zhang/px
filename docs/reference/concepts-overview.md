@@ -10,6 +10,7 @@ px is the **front door for Python**. It owns **projects**, **tools**, and **runt
 * **Runtime** – a Python interpreter (e.g. 3.10, 3.11) that px knows about and can assign to projects, tools, and workspaces.
 
 Everything else – envs, lockfiles, caches – are implementation details.
+Inline `px`-annotated scripts are treated internally as tiny, cached px projects backed by the CAS; you don't need to think about them as a new noun.
 
 ## Core loops
 
