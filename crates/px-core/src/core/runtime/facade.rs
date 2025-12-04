@@ -242,6 +242,10 @@ except Exception:
 
 pub(crate) type ManifestSnapshot = ProjectSnapshot;
 
+fn is_inline_snapshot(ctx: &CommandContext, snapshot: &ManifestSnapshot) -> bool {
+    snapshot.root.starts_with(ctx.cache().path.join("scripts"))
+}
+
 #[cfg(unix)]
 fn set_exec_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -369,6 +373,7 @@ pub(crate) fn install_snapshot(
     frozen: bool,
     override_pins: Option<&InstallOverride>,
 ) -> Result<InstallOutcome> {
+    let inline = is_inline_snapshot(ctx, snapshot);
     let mut snapshot = snapshot.clone();
     let lockfile = snapshot.lock_path.display().to_string();
     let _ = prepare_project_runtime(&snapshot)?;
@@ -401,15 +406,17 @@ pub(crate) fn install_snapshot(
         if override_pins.is_none() && ctx.config().resolver.enabled {
             let resolved = resolve_dependencies(ctx, &snapshot)?;
             if !resolved.specs.is_empty() {
-                manifest_dependencies = merge_resolved_dependencies(
-                    &manifest_dependencies,
-                    &resolved.specs,
-                    &marker_env,
-                );
-                persist_resolved_dependencies(&snapshot, &manifest_dependencies)?;
-                manifest_updated = true;
-                requirements =
-                    merge_requirements(&manifest_dependencies, &snapshot.group_dependencies);
+                if !inline {
+                    manifest_dependencies = merge_resolved_dependencies(
+                        &manifest_dependencies,
+                        &resolved.specs,
+                        &marker_env,
+                    );
+                    persist_resolved_dependencies(&snapshot, &manifest_dependencies)?;
+                    manifest_updated = true;
+                    requirements =
+                        merge_requirements(&manifest_dependencies, &snapshot.group_dependencies);
+                }
             }
             resolved_override = Some(resolved.pins);
         }
