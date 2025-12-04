@@ -2539,8 +2539,20 @@ pub(crate) fn ensure_version_file(manifest_path: &Path) -> Result<()> {
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
 
+    let hatch_describe = hatch_git_describe_command(&doc);
+    let hatch_simplified_semver = hatch_prefers_simplified_semver(&doc);
+    let hatch_drop_local = hatch_drops_local_version(&doc);
     if let Some(version_file) = hatch_version_file(&doc) {
-        ensure_version_stub(&manifest_dir, &version_file, VersionFileStyle::HatchVcsHook)?;
+        ensure_version_stub(
+            &manifest_dir,
+            &version_file,
+            VersionFileStyle::HatchVcsHook,
+            VersionDeriveOptions {
+                git_describe_command: hatch_describe.as_deref(),
+                simplified_semver: hatch_simplified_semver,
+                drop_local: hatch_drop_local,
+            },
+        )?;
     }
 
     if let Some(version_file) = setuptools_scm_version_file(&doc) {
@@ -2548,11 +2560,17 @@ pub(crate) fn ensure_version_file(manifest_path: &Path) -> Result<()> {
             &manifest_dir,
             &version_file,
             VersionFileStyle::SetuptoolsScm,
+            VersionDeriveOptions::default(),
         )?;
     }
 
     if let Some(version_file) = pdm_version_file(&doc) {
-        ensure_version_stub(&manifest_dir, &version_file, VersionFileStyle::Plain)?;
+        ensure_version_stub(
+            &manifest_dir,
+            &version_file,
+            VersionFileStyle::Plain,
+            VersionDeriveOptions::default(),
+        )?;
     }
 
     ensure_inline_version_module(&manifest_dir, &doc)?;
@@ -2569,6 +2587,67 @@ fn hatch_version_file(doc: &toml_edit::DocumentMut) -> Option<PathBuf> {
         .and_then(|vcs| vcs.get("version-file"))
         .and_then(|item| item.as_str())
         .map(PathBuf::from)
+}
+
+fn hatch_git_describe_command(doc: &toml_edit::DocumentMut) -> Option<Vec<String>> {
+    doc.get("tool")
+        .and_then(|tool| tool.get("hatch"))
+        .and_then(|hatch| hatch.get("version"))
+        .and_then(|version| version.get("raw-options"))
+        .and_then(|raw| raw.get("git_describe_command"))
+        .and_then(string_vec_from_item)
+}
+
+fn hatch_prefers_simplified_semver(doc: &toml_edit::DocumentMut) -> bool {
+    hatch_version_raw_option(doc, "version_scheme")
+        .map(|value| value == "python-simplified-semver")
+        .unwrap_or(false)
+}
+
+fn hatch_drops_local_version(doc: &toml_edit::DocumentMut) -> bool {
+    hatch_version_raw_option(doc, "local_scheme")
+        .map(|value| value == "no-local-version")
+        .unwrap_or(false)
+}
+
+fn hatch_version_raw_option(doc: &toml_edit::DocumentMut, key: &str) -> Option<String> {
+    doc.get("tool")
+        .and_then(|tool| tool.get("hatch"))
+        .and_then(|hatch| hatch.get("version"))
+        .and_then(|version| version.get("raw-options"))
+        .and_then(|raw| raw.get(key))
+        .and_then(|item| item.as_str())
+        .map(str::to_string)
+}
+
+fn string_vec_from_item(item: &Item) -> Option<Vec<String>> {
+    match item {
+        Item::Value(TomlValue::Array(items)) => {
+            let mut values = Vec::new();
+            for entry in items.iter() {
+                let value = entry.as_str()?.to_string();
+                values.push(value);
+            }
+            if values.is_empty() {
+                None
+            } else {
+                Some(values)
+            }
+        }
+        Item::Value(TomlValue::String(value)) => {
+            let values: Vec<String> = value
+                .value()
+                .split_whitespace()
+                .map(|entry| entry.to_string())
+                .collect();
+            if values.is_empty() {
+                None
+            } else {
+                Some(values)
+            }
+        }
+        _ => None,
+    }
 }
 
 fn setuptools_scm_version_file(doc: &toml_edit::DocumentMut) -> Option<PathBuf> {
@@ -2711,7 +2790,19 @@ enum VersionFileStyle {
     Plain,
 }
 
-fn ensure_version_stub(root: &Path, target: &Path, style: VersionFileStyle) -> Result<()> {
+#[derive(Default)]
+struct VersionDeriveOptions<'a> {
+    git_describe_command: Option<&'a [String]>,
+    simplified_semver: bool,
+    drop_local: bool,
+}
+
+fn ensure_version_stub(
+    root: &Path,
+    target: &Path,
+    style: VersionFileStyle,
+    derive_opts: VersionDeriveOptions<'_>,
+) -> Result<()> {
     let version_path = root.join(target);
     let mut rewrite = false;
     if version_path.exists() {
@@ -2798,7 +2889,7 @@ fn ensure_version_stub(root: &Path, target: &Path, style: VersionFileStyle) -> R
         }
     }
 
-    let derived = match derive_vcs_version(root) {
+    let derived = match derive_vcs_version(root, &derive_opts) {
         Ok(version) => version,
         Err(err) => {
             warn!(
@@ -2832,17 +2923,28 @@ __all__ = [\"__version__\", \"version\", \"version_tuple\"]\n"
     Ok(())
 }
 
-fn derive_vcs_version(manifest_dir: &Path) -> Result<String> {
-    if let Ok(output) = Command::new("git")
-        .args(["describe", "--tags", "--dirty", "--long"])
-        .current_dir(manifest_dir)
-        .output()
-    {
-        if output.status.success() {
-            let desc = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if let Some(version) = pep440_from_describe(&desc) {
+fn derive_vcs_version(
+    manifest_dir: &Path,
+    derive_opts: &VersionDeriveOptions<'_>,
+) -> Result<String> {
+    if let Some(command) = derive_opts.git_describe_command {
+        if let Some(info) = describe_with_command(command, manifest_dir) {
+            if let Some(version) = format_version_from_describe(&info, derive_opts) {
                 return Ok(version);
             }
+        }
+    }
+
+    let default_describe = [
+        "git".to_string(),
+        "describe".to_string(),
+        "--tags".to_string(),
+        "--dirty".to_string(),
+        "--long".to_string(),
+    ];
+    if let Some(info) = describe_with_command(&default_describe, manifest_dir) {
+        if let Some(version) = format_version_from_describe(&info, derive_opts) {
+            return Ok(version);
         }
     }
 
@@ -2867,7 +2969,93 @@ fn derive_vcs_version(manifest_dir: &Path) -> Result<String> {
     ))
 }
 
+fn describe_with_command(command: &[String], manifest_dir: &Path) -> Option<GitDescribeInfo> {
+    let (program, args) = command.split_first()?;
+    if program.trim().is_empty() {
+        return None;
+    }
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(manifest_dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_git_describe(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+fn format_version_from_describe(
+    info: &GitDescribeInfo,
+    derive_opts: &VersionDeriveOptions<'_>,
+) -> Option<String> {
+    if derive_opts.simplified_semver {
+        if let Some(version) = simplified_semver_from_describe(info, derive_opts.drop_local) {
+            return Some(version);
+        }
+    }
+    pep440_from_info(info, derive_opts.drop_local)
+}
+
+#[cfg(test)]
 fn pep440_from_describe(desc: &str) -> Option<String> {
+    parse_git_describe(desc).and_then(|info| pep440_from_info(&info, false))
+}
+
+fn pep440_from_info(info: &GitDescribeInfo, drop_local: bool) -> Option<String> {
+    let tag = info.tag.trim_start_matches('v');
+    let mut version = tag.to_string();
+    if !drop_local {
+        version.push_str(&format!("+{}.g{}", info.commits_since_tag, info.sha));
+        if info.dirty {
+            version.push_str(".dirty");
+        }
+    }
+    Some(version)
+}
+
+fn simplified_semver_from_describe(info: &GitDescribeInfo, drop_local: bool) -> Option<String> {
+    let numeric_start = info
+        .tag
+        .find(|ch: char| ch.is_ascii_digit())
+        .or_else(|| info.tag.find('v').map(|index| index + 1))?;
+    let base = info.tag[numeric_start..]
+        .trim_start_matches('v')
+        .to_string();
+    if base.is_empty() {
+        return None;
+    }
+    let mut release_parts: Vec<u64> = base
+        .split('.')
+        .map(|part| part.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    if release_parts.is_empty() {
+        return None;
+    }
+    if info.commits_since_tag > 0 {
+        if let Some(last) = release_parts.last_mut() {
+            *last += 1;
+        }
+    }
+    let mut version = release_parts
+        .iter()
+        .map(|part| part.to_string())
+        .collect::<Vec<_>>()
+        .join(".");
+    if info.commits_since_tag > 0 {
+        version.push_str(&format!(".dev{}", info.commits_since_tag));
+    }
+    let has_local = !drop_local && (info.commits_since_tag > 0 || info.dirty);
+    if has_local {
+        version.push_str(&format!("+g{}", info.sha));
+        if info.dirty {
+            version.push_str(".dirty");
+        }
+    }
+    Some(version)
+}
+
+fn parse_git_describe(desc: &str) -> Option<GitDescribeInfo> {
     let trimmed = desc.trim();
     if trimmed.is_empty() {
         return None;
@@ -2883,13 +3071,19 @@ fn pep440_from_describe(desc: &str) -> Option<String> {
     let commits_part = iter.next()?;
     let tag_part = iter.next()?;
 
-    let sha = sha_part.trim_start_matches('g');
-    let tag = tag_part.trim_start_matches('v');
-    let mut version = format!("{tag}+{commits_part}.g{sha}");
-    if dirty {
-        version.push_str(".dirty");
-    }
-    Some(version)
+    Some(GitDescribeInfo {
+        tag: tag_part.to_string(),
+        commits_since_tag: commits_part.parse::<usize>().ok()?,
+        sha: sha_part.trim_start_matches('g').to_string(),
+        dirty,
+    })
+}
+
+struct GitDescribeInfo {
+    tag: String,
+    commits_since_tag: usize,
+    sha: String,
+    dirty: bool,
 }
 
 pub(crate) struct PythonPathInfo {
@@ -4097,9 +4291,7 @@ build-backend = "setuptools.build_meta"
         if !version.status.success() {
             return Ok(());
         }
-        let version = String::from_utf8_lossy(&version.stdout)
-            .trim()
-            .to_string();
+        let version = String::from_utf8_lossy(&version.stdout).trim().to_string();
 
         let user_base = temp.path().join("userbase");
         let user_site = user_base
@@ -4626,6 +4818,128 @@ version-file = "demo/_version.py"
         assert!(
             contents.contains("__version__ = version"),
             "git stub should alias __version__ to version"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_version_file_respects_hatch_git_describe_command() -> Result<()> {
+        if Command::new("git").arg("--version").status().is_err() {
+            return Ok(());
+        }
+        let temp = tempdir()?;
+        let manifest = temp.path().join("pyproject.toml");
+        fs::write(
+            &manifest,
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.hatch.version.raw-options]
+git_describe_command = ["git", "describe", "--tags", "--dirty", "--long", "--match", "demo-v*"]
+
+[tool.hatch.build.hooks.vcs]
+version-file = "demo/_version.py"
+"#,
+        )?;
+        let demo_dir = temp.path().join("demo");
+        fs::create_dir_all(&demo_dir)?;
+        fs::write(demo_dir.join("__init__.py"), "")?;
+
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git init failed"
+        );
+        assert!(
+            Command::new("git")
+                .args(["config", "user.email", "ci@example.com"])
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git config email failed"
+        );
+        assert!(
+            Command::new("git")
+                .args(["config", "user.name", "CI"])
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git config name failed"
+        );
+        assert!(
+            Command::new("git")
+                .args(["add", "."])
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git add failed"
+        );
+        assert!(
+            Command::new("git")
+                .args(["commit", "-m", "init"])
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git commit failed"
+        );
+        assert!(
+            Command::new("git")
+                .args(["tag", "demo-v1.0.0"])
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "tag demo-v1.0.0 failed"
+        );
+
+        fs::write(demo_dir.join("__init__.py"), "__version__ = '0.1.1'\n")?;
+        assert!(
+            Command::new("git")
+                .args(["add", "."])
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git add second commit failed"
+        );
+        assert!(
+            Command::new("git")
+                .args(["commit", "-m", "second"])
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git commit second failed"
+        );
+        assert!(
+            Command::new("git")
+                .args(["tag", "other-v9.9.9"])
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "tag other-v9.9.9 failed"
+        );
+
+        ensure_version_file(&manifest)?;
+        let contents = fs::read_to_string(temp.path().join("demo/_version.py"))?;
+        assert!(
+            contents.contains("demo-v1.0.0"),
+            "custom git_describe_command should prefer matching tags"
+        );
+        assert!(
+            !contents.contains("other-v9.9.9"),
+            "custom describe command should ignore non-matching tags"
         );
         Ok(())
     }
