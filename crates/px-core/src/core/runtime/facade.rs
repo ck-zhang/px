@@ -1734,26 +1734,42 @@ fn validate_project_state(state: &ProjectState) -> Result<()> {
 fn resolve_project_site(
     filesystem: &dyn effects::FileSystem,
     project_root: &Path,
-) -> Result<Option<PathBuf>> {
+) -> Result<PathBuf> {
     let state = load_project_state(filesystem, project_root)?;
-    if let Some(env) = state.current_env {
-        if let Some(env_root) = env.env_path.as_ref() {
-            let root = PathBuf::from(env_root);
-            if root.exists() {
-                return Ok(Some(root));
-            }
-        }
-        let path = PathBuf::from(env.site_packages);
-        if path.exists() {
-            return Ok(Some(path));
-        }
+    let env = state.current_env.ok_or_else(|| {
+        InstallUserError::new(
+            "project environment missing",
+            json!({
+                "project_root": project_root.display().to_string(),
+                "reason": "missing_env",
+                "hint": "run `px sync` to rebuild the environment",
+            }),
+        )
+    })?;
+    let env_root = env.env_path.ok_or_else(|| {
+        InstallUserError::new(
+            "project environment missing",
+            json!({
+                "project_root": project_root.display().to_string(),
+                "reason": "missing_env",
+                "hint": "run `px sync` to rebuild the environment",
+            }),
+        )
+    })?;
+    let root = PathBuf::from(env_root);
+    if !root.exists() {
+        return Err(InstallUserError::new(
+            "project environment missing",
+            json!({
+                "project_root": project_root.display().to_string(),
+                "env_path": root.display().to_string(),
+                "reason": "missing_env",
+                "hint": "run `px sync` to rebuild the environment",
+            }),
+        )
+        .into());
     }
-    let fallback = project_root.join(".px").join("site");
-    if fallback.exists() {
-        Ok(Some(fallback))
-    } else {
-        Ok(None)
-    }
+    Ok(root)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2876,33 +2892,33 @@ pub(crate) fn build_pythonpath(
     project_root: &Path,
     site_override: Option<PathBuf>,
 ) -> Result<PythonPathInfo> {
+    let site_dir = match site_override {
+        Some(dir) => dir,
+        None => resolve_project_site(fs, project_root)?,
+    };
+
     let mut site_paths = Vec::new();
-    let mut site_dir_used = None;
     let mut site_packages_used = None;
     let code_paths = discover_code_generator_paths(fs, project_root, 3);
 
-    if let Some(site_dir) =
-        site_override.or_else(|| resolve_project_site(fs, project_root).ok().flatten())
-    {
-        let canonical = fs.canonicalize(&site_dir).unwrap_or(site_dir.clone());
-        site_dir_used = Some(canonical.clone());
-        site_paths.push(canonical.clone());
-        if let Some(site_packages) = detect_local_site_packages(fs, &canonical) {
-            site_packages_used = Some(site_packages.clone());
-            site_paths.push(site_packages);
-        }
-        let pth = canonical.join("px.pth");
-        if pth.exists() {
-            if let Ok(contents) = fs.read_to_string(&pth) {
-                for line in contents.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    let entry_path = PathBuf::from(trimmed);
-                    if entry_path.exists() {
-                        site_paths.push(entry_path);
-                    }
+    let canonical = fs.canonicalize(&site_dir).unwrap_or(site_dir.clone());
+    let site_dir_used = Some(canonical.clone());
+    site_paths.push(canonical.clone());
+    if let Some(site_packages) = detect_local_site_packages(fs, &canonical) {
+        site_packages_used = Some(site_packages.clone());
+        site_paths.push(site_packages);
+    }
+    let pth = canonical.join("px.pth");
+    if pth.exists() {
+        if let Ok(contents) = fs.read_to_string(&pth) {
+            for line in contents.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let entry_path = PathBuf::from(trimmed);
+                if entry_path.exists() {
+                    site_paths.push(entry_path);
                 }
             }
         }
@@ -3787,6 +3803,29 @@ build-backend = "setuptools.build_meta"
         assert!(
             file.contains(dep_mod.to_string_lossy().as_ref()),
             "expected module to load from site packages, got {file}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_pythonpath_refuses_legacy_site_fallback() -> Result<()> {
+        let temp = tempdir()?;
+        let project_root = temp.path();
+        fs::create_dir_all(project_root.join(".px").join("site"))?;
+
+        let err = match build_pythonpath(SystemEffects::new().fs(), project_root, None) {
+            Ok(_) => panic!("missing CAS environment should be an error"),
+            Err(err) => err,
+        };
+        let user = err
+            .downcast::<InstallUserError>()
+            .expect("expected user-facing error");
+        assert_eq!(
+            user.details
+                .get("reason")
+                .and_then(serde_json::Value::as_str),
+            Some("missing_env"),
+            "missing env should not fall back to .px/site"
         );
         Ok(())
     }
