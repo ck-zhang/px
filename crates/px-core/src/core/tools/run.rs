@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::env;
 use std::io::{self, Write};
 
@@ -62,7 +62,31 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
     env::set_var("PX_RUNTIME_PYTHON", &runtime_selection.record.path);
     if let Err(err) = ensure_project_environment_synced(ctx, &snapshot) {
         return match err.downcast::<InstallUserError>() {
-            Ok(user) => Ok(ExecutionOutcome::user_error(user.message, user.details)),
+            Ok(user) => {
+                let mut details = match user.details {
+                    Value::Object(map) => map,
+                    other => {
+                        let mut map = serde_json::Map::new();
+                        map.insert("reason".into(), Value::String("tool_env_unavailable".into()));
+                        map.insert("details".into(), other);
+                        map
+                    }
+                };
+                details.insert(
+                    "tool".into(),
+                    Value::String(normalized.clone()),
+                );
+                details.insert(
+                    "hint".into(),
+                    Value::String(format!(
+                        "run `px tool install {normalized}` to rebuild the tool environment"
+                    )),
+                );
+                Ok(ExecutionOutcome::user_error(
+                    format!("tool '{normalized}' is not ready"),
+                    Value::Object(details),
+                ))
+            }
             Err(other) => Err(other),
         };
     }

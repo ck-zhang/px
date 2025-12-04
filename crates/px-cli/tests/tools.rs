@@ -138,13 +138,13 @@ fn tool_run_requires_lock_and_env() {
     }
     assert_eq!(payload["status"], "user-error");
     assert!(
-        message.contains("px.lock"),
+        message.contains("not ready"),
         "expected missing lock error, got {message:?}"
     );
     let hint = payload["details"]["hint"].as_str().unwrap_or_default();
     assert!(
-        hint.to_ascii_lowercase().contains("px sync"),
-        "hint should recommend px sync, got {hint:?}"
+        hint.to_ascii_lowercase().contains("px tool install ruff"),
+        "hint should recommend reinstalling the tool, got {hint:?}"
     );
     assert_eq!(
         payload["details"]["reason"], "missing_lock",
