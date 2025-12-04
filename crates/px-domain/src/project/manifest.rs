@@ -1028,7 +1028,7 @@ fn caret_version_bounds(raw: &str) -> Option<String> {
     while parts.len() < 3 {
         parts.push(0);
     }
-    let major = parts.get(0).copied().unwrap_or(0);
+    let major = parts.first().copied().unwrap_or(0);
     let minor = parts.get(1).copied().unwrap_or(0);
     let patch = parts.get(2).copied().unwrap_or(0);
 

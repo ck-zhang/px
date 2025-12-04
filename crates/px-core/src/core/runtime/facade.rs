@@ -174,8 +174,6 @@ if _FILTER_PATHS:
         _push(_argv_dir)
     if _cwd and _cwd not in _seen:
         _push(_cwd)
-    for path in _original:
-        _push(path)
 
     sys.path[:] = _new_path
     # Ensure child processes inherit the px path set instead of a mutated sys.path
@@ -405,18 +403,16 @@ pub(crate) fn install_snapshot(
         let mut resolved_override = None;
         if override_pins.is_none() && ctx.config().resolver.enabled {
             let resolved = resolve_dependencies(ctx, &snapshot)?;
-            if !resolved.specs.is_empty() {
-                if !inline {
-                    manifest_dependencies = merge_resolved_dependencies(
-                        &manifest_dependencies,
-                        &resolved.specs,
-                        &marker_env,
-                    );
-                    persist_resolved_dependencies(&snapshot, &manifest_dependencies)?;
-                    manifest_updated = true;
-                    requirements =
-                        merge_requirements(&manifest_dependencies, &snapshot.group_dependencies);
-                }
+            if !resolved.specs.is_empty() && !inline {
+                manifest_dependencies = merge_resolved_dependencies(
+                    &manifest_dependencies,
+                    &resolved.specs,
+                    &marker_env,
+                );
+                persist_resolved_dependencies(&snapshot, &manifest_dependencies)?;
+                manifest_updated = true;
+                requirements =
+                    merge_requirements(&manifest_dependencies, &snapshot.group_dependencies);
             }
             resolved_override = Some(resolved.pins);
         }
@@ -4078,6 +4074,67 @@ build-backend = "setuptools.build_meta"
             proj_pos < site_pos,
             "project path should precede site-packages in sys.path, got {:?}",
             prefix
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sitecustomize_filters_out_unallowed_paths() -> Result<()> {
+        let temp = tempdir()?;
+        let site_dir = temp.path().join("site");
+        fs::create_dir_all(&site_dir)?;
+        fs::write(site_dir.join("sitecustomize.py"), SITE_CUSTOMIZE)?;
+
+        let effects = SystemEffects::new();
+        let python = match effects.python().detect_interpreter() {
+            Ok(path) => path,
+            Err(_) => return Ok(()),
+        };
+        let version = Command::new(&python)
+            .arg("-c")
+            .arg("import sys; print(f\"{sys.version_info[0]}.{sys.version_info[1]}\")")
+            .output()?;
+        if !version.status.success() {
+            return Ok(());
+        }
+        let version = String::from_utf8_lossy(&version.stdout)
+            .trim()
+            .to_string();
+
+        let user_base = temp.path().join("userbase");
+        let user_site = user_base
+            .join("lib")
+            .join(format!("python{version}"))
+            .join("site-packages");
+        fs::create_dir_all(&user_site)?;
+
+        let mut cmd = Command::new(&python);
+        cmd.current_dir(temp.path());
+        cmd.env_clear();
+        cmd.env("PYTHONPATH", site_dir.display().to_string());
+        cmd.env("PX_ALLOWED_PATHS", site_dir.display().to_string());
+        cmd.env("PYTHONUSERBASE", user_base.display().to_string());
+        cmd.arg("-c")
+            .arg("import json, sys; print(json.dumps(sys.path))");
+
+        let output = cmd.output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "python exited with {}: {}\n{}",
+            output.status,
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let allowed_user_base = fs::canonicalize(&user_base)?;
+        let paths: Vec<PathBuf> = serde_json::from_str(stdout.trim())?;
+        assert!(
+            paths
+                .iter()
+                .filter_map(|entry| fs::canonicalize(entry).ok())
+                .all(|entry| !entry.starts_with(&allowed_user_base)),
+            "user site paths should be filtered out of sys.path: {paths:?}"
         );
         Ok(())
     }
