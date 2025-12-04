@@ -355,26 +355,25 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         )
     });
 
-    if !foreign_owners.is_empty() {
+    let foreign_owner_hint = (!foreign_owners.is_empty()).then(|| {
         details["foreign_owners"] = Value::Array(
             foreign_owners
                 .iter()
                 .map(|t| Value::String(t.clone()))
                 .collect(),
         );
-        details["hint"] = Value::String(format!(
-            "pyproject managed by {}; remove tool-managed dependencies or export requirements first",
+        format!(
+            "pyproject declares dependency ownership by {}; preserving those sections while migrating",
             foreign_owners.join(", ")
-        ));
-        return Ok(ExecutionOutcome::failure(
-            "px migrate: pyproject managed by another tool",
-            details,
-        ));
-    }
+        )
+    });
 
     if !write_requested {
         let mut hint = "Preview confirmed; rerun with --apply to write changes".to_string();
         if let Some(extra) = foreign_hint.as_ref() {
+            hint = format!("{hint} • {extra}");
+        }
+        if let Some(extra) = foreign_owner_hint.as_ref() {
             hint = format!("{hint} • {extra}");
         }
         details["hint"] = Value::String(hint);
@@ -593,6 +592,13 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
                 hint = format!("{hint} • {extra}");
             }
         }
+        if let Some(extra) = foreign_owner_hint.as_ref() {
+            if hint.is_empty() {
+                hint = extra.clone();
+            } else {
+                hint = format!("{hint} • {extra}");
+            }
+        }
         if !hint.is_empty() {
             details["hint"] = Value::String(hint);
         }
@@ -605,6 +611,9 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
             hint = format!("{hint} • {extra}");
         }
         if let Some(extra) = foreign_hint.as_ref() {
+            hint = format!("{hint} • {extra}");
+        }
+        if let Some(extra) = foreign_owner_hint.as_ref() {
             hint = format!("{hint} • {extra}");
         }
         details["hint"] = Value::String(hint);

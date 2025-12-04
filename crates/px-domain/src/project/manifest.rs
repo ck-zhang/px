@@ -990,7 +990,144 @@ fn collect_dependency_group_entries(
             return Ok(true);
         }
     }
+    if let Some(table) = doc
+        .get("tool")
+        .and_then(Item::as_table)
+        .and_then(|tool| tool.get("poetry"))
+        .and_then(Item::as_table)
+        .and_then(|poetry| poetry.get("group"))
+        .and_then(Item::as_table)
+        .and_then(|groups| groups.get(normalized_group))
+        .and_then(Item::as_table)
+        .and_then(|group| group.get("dependencies"))
+        .and_then(Item::as_table)
+    {
+        for (name, entry) in table.iter() {
+            if let Some(spec) = poetry_dependency_spec(name, entry) {
+                collected.push(spec);
+            }
+        }
+        return Ok(true);
+    }
     Ok(false)
+}
+
+fn normalize_poetry_version_spec(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(spec) = trimmed.strip_prefix('^').and_then(caret_version_bounds) {
+        return spec;
+    }
+    trimmed.to_string()
+}
+
+fn caret_version_bounds(raw: &str) -> Option<String> {
+    let mut parts: Vec<u64> = raw
+        .split('.')
+        .map(|piece| piece.parse::<u64>().unwrap_or(0))
+        .collect();
+    while parts.len() < 3 {
+        parts.push(0);
+    }
+    let major = parts.get(0).copied().unwrap_or(0);
+    let minor = parts.get(1).copied().unwrap_or(0);
+    let patch = parts.get(2).copied().unwrap_or(0);
+
+    if major > 0 {
+        Some(format!(">={raw},<{}.0.0", major + 1))
+    } else if minor > 0 {
+        Some(format!(">={raw},<0.{}.0", minor + 1))
+    } else {
+        Some(format!(">={raw},<0.0.{}", patch + 1))
+    }
+}
+
+fn poetry_python_marker_expr(raw: &str) -> Option<String> {
+    let mut clauses = Vec::new();
+    for part in raw.split(',') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (op, value) = match [">=", "<=", "==", "!=", "~=", ">", "<"]
+            .iter()
+            .find_map(|op| {
+                trimmed
+                    .strip_prefix(op)
+                    .map(|rest| (*op, rest.trim_start()))
+            }) {
+            Some(pair) => pair,
+            None => continue,
+        };
+        if value.is_empty() {
+            continue;
+        }
+        clauses.push(format!(r#"python_version {op} "{value}""#));
+    }
+    if clauses.is_empty() {
+        None
+    } else {
+        Some(clauses.join(" and "))
+    }
+}
+
+fn poetry_dependency_spec(name: &str, item: &Item) -> Option<String> {
+    if let Some(version) = item.as_str() {
+        let trimmed = version.trim();
+        return Some(if trimmed.is_empty() || trimmed == "*" {
+            name.to_string()
+        } else {
+            format!("{name} {}", normalize_poetry_version_spec(trimmed))
+        });
+    }
+    let (extras, version, python, marker_expr) = if let Some(table) = item.as_table() {
+        (
+            table.get("extras").and_then(Item::as_array),
+            table.get("version").and_then(Item::as_str),
+            table.get("python").and_then(Item::as_str),
+            table.get("markers").and_then(Item::as_str),
+        )
+    } else if let Some(inline) = item.as_value().and_then(TomlValue::as_inline_table) {
+        (
+            inline.get("extras").and_then(TomlValue::as_array),
+            inline.get("version").and_then(TomlValue::as_str),
+            inline.get("python").and_then(TomlValue::as_str),
+            inline.get("markers").and_then(TomlValue::as_str),
+        )
+    } else {
+        return None;
+    };
+    let mut spec = name.to_string();
+    if let Some(extras) = extras {
+        let extras: Vec<String> = extras
+            .iter()
+            .filter_map(|val| val.as_str().map(std::string::ToString::to_string))
+            .collect();
+        if !extras.is_empty() {
+            spec = format!("{spec}[{}]", extras.join(","));
+        }
+    }
+    if let Some(version) = version {
+        let trimmed = version.trim();
+        if !trimmed.is_empty() && trimmed != "*" {
+            spec = format!("{spec} {}", normalize_poetry_version_spec(trimmed));
+        }
+    }
+    let mut markers = Vec::new();
+    if let Some(python) = python {
+        if let Some(expr) = poetry_python_marker_expr(python) {
+            markers.push(expr);
+        }
+    }
+    if let Some(marker) = marker_expr {
+        let trimmed = marker.trim();
+        if !trimmed.is_empty() {
+            markers.push(trimmed.to_string());
+        }
+    }
+    if !markers.is_empty() {
+        spec = format!("{spec}; {}", markers.join(" and "));
+    }
+    Some(spec)
 }
 
 fn find_optional_dependency_group<'a>(
@@ -1490,6 +1627,32 @@ mypy = "^1.11.0"
             .expect("include-groups array");
         let values: Vec<_> = groups.iter().filter_map(|val| val.as_str()).collect();
         assert_eq!(values, vec!["dev", "test", "typing"]);
+        Ok(())
+    }
+
+    #[test]
+    fn poetry_group_dependencies_resolve() -> Result<()> {
+        let mut doc: DocumentMut = r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.poetry.group.test.dependencies]
+pytest = "^8.3.3"
+pytest-xdist = { version = ">=3.1.0", extras = ["psutil"] }
+pytest-github-actions-annotate-failures = "^0.1.7"
+"#
+        .parse()?;
+
+        let deps = resolve_dependency_groups(&mut doc, &[String::from("test")])?;
+        assert_eq!(
+            deps,
+            vec![
+                "pytest >=8.3.3,<9.0.0",
+                "pytest-github-actions-annotate-failures >=0.1.7,<0.2.0",
+                "pytest-xdist[psutil] >=3.1.0"
+            ]
+        );
         Ok(())
     }
 
