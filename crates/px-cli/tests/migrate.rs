@@ -198,6 +198,78 @@ fn migrate_apply_builds_environment() {
 }
 
 #[test]
+fn migrate_prefers_poetry_lock_pins() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(
+        &temp,
+        "pyproject.toml",
+        r#"[project]
+name = "poetry-lock-demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "cachecontrol[filecache]>=0.14,<0.15",
+    "requests>=2.30,<3.0",
+]
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.poetry]
+package-mode = false
+"#,
+    );
+    write_file(
+        &temp,
+        "poetry.lock",
+        r#"[[package]]
+name = "cachecontrol"
+version = "0.14.3"
+category = "main"
+optional = false
+python-versions = ">=3.8"
+files = []
+
+[[package]]
+name = "requests"
+version = "2.31.0"
+category = "main"
+optional = false
+python-versions = ">=3.8"
+files = []
+
+[metadata]
+lock-version = "2.0"
+python-versions = ">=3.11"
+content-hash = "dev"
+
+[metadata.files]
+cachecontrol = []
+requests = []
+"#,
+    );
+
+    px_command(&temp)
+        .args(["migrate", "--apply", "--allow-dirty"])
+        .assert()
+        .success();
+
+    let lock_contents = fs::read_to_string(temp.path().join("px.lock")).expect("px.lock contents");
+    assert!(
+        lock_contents.contains("cachecontrol[filecache]==0.14.3"),
+        "px.lock should prefer versions from poetry.lock for cachecontrol"
+    );
+    assert!(
+        lock_contents.contains("requests==2.31.0"),
+        "px.lock should prefer versions from poetry.lock for requests"
+    );
+}
+
+#[test]
 fn migrate_errors_without_project_files() {
     let temp = tempfile::tempdir().expect("tempdir");
     cargo_bin_cmd!("px")

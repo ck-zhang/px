@@ -1,13 +1,23 @@
-use std::{env, fs, path::PathBuf};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    env, fs,
+    path::{Path, PathBuf},
+    str::FromStr,
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
+use pep440_rs::{Version, VersionSpecifiers};
+use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement};
 use serde_json::{json, Value};
-use toml_edit::DocumentMut;
+use toml_edit::{DocumentMut, Item};
 
 use px_domain::{
-    collect_pyproject_packages, collect_requirement_packages, collect_setup_cfg_packages,
-    plan_autopin, prepare_pyproject_plan, resolve_onboard_path, AutopinEntry, AutopinPending,
-    AutopinState, BackupManager, InstallOverride, PinSpec,
+    autopin_pin_key, collect_pyproject_packages, collect_requirement_packages,
+    collect_setup_cfg_packages, format_specifier, normalize_dist_name, plan_autopin,
+    prepare_pyproject_plan, resolve_onboard_path, AutopinEntry, AutopinPending, AutopinState,
+    BackupManager, InstallOverride, PinSpec,
 };
 
 use crate::runtime_manager;
@@ -440,30 +450,59 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     let mut install_override: Option<InstallOverride> = None;
     let mut autopin_changed_pyproject = false;
     let mut autopin_hint = None;
+    let poetry_pins = poetry_lock_versions(&root)?.map(Arc::new);
+    let marker_env = Arc::new(ctx.marker_environment()?);
+    let reused_from_poetry = Arc::new(RefCell::new(Vec::new()));
+    let skipped_poetry = Arc::new(RefCell::new(Vec::new()));
 
     if pyproject_path.exists() {
-        let marker_env = ctx.marker_environment()?;
         let autopin_snapshot = px_domain::ProjectSnapshot::read_from(&root)?;
         let effects = ctx.shared_effects();
-        let resolver = move |snap: &ManifestSnapshot, specs: &[String]| -> Result<Vec<PinSpec>> {
-            let mut override_snapshot = snap.clone();
-            override_snapshot.dependencies = specs.to_vec();
-            override_snapshot.dependency_groups.clear();
-            override_snapshot.declared_dependency_groups.clear();
-            override_snapshot.dependency_group_source = px_domain::DependencyGroupSource::None;
-            override_snapshot.group_dependencies.clear();
-            override_snapshot.requirements = override_snapshot.dependencies.clone();
-            let resolved =
-                resolve_dependencies_with_effects(effects.as_ref(), &override_snapshot, false)?;
-            Ok(resolved.pins)
-        };
         let autopin_state = match plan_autopin(
             &autopin_snapshot,
             &pyproject_path,
             lock_only,
             no_autopin,
-            &resolver,
-            &marker_env,
+            &{
+                let lock_lookup = poetry_pins.clone();
+                let marker_env = marker_env.clone();
+                let reused_from_poetry = reused_from_poetry.clone();
+                let skipped_poetry = skipped_poetry.clone();
+                move |snap: &ManifestSnapshot, specs: &[String]| -> Result<Vec<PinSpec>> {
+                    let mut pins = Vec::new();
+                    let mut needs_resolution = false;
+                    if let Some(locked) = lock_lookup.as_ref() {
+                        for spec in specs {
+                            match pin_from_poetry_lock(spec, locked, marker_env.as_ref()) {
+                                PoetryPinChoice::Reuse { pin, source } => {
+                                    reused_from_poetry.borrow_mut().push(source);
+                                    pins.push(pin);
+                                }
+                                PoetryPinChoice::Skip(reason) => {
+                                    needs_resolution = true;
+                                    skipped_poetry.borrow_mut().push(json!({
+                                        "spec": spec,
+                                        "reason": reason,
+                                    }));
+                                }
+                            }
+                        }
+                    } else {
+                        needs_resolution = true;
+                    }
+                    if !needs_resolution {
+                        return Ok(pins);
+                    }
+                    let resolved =
+                        resolve_dependencies_with_effects(effects.as_ref(), snap, false)?;
+                    if pins.is_empty() {
+                        return Ok(resolved.pins);
+                    }
+                    merge_pin_sets(&mut pins, resolved.pins);
+                    Ok(pins)
+                }
+            },
+            marker_env.as_ref(),
         ) {
             Ok(state) => state,
             Err(err) => {
@@ -519,6 +558,20 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         if autopin_hint.is_none() {
             autopin_hint = summarize_autopins(&autopin_entries);
         }
+    }
+    let reused_poetry_refs = reused_from_poetry.borrow();
+    if !reused_poetry_refs.is_empty() {
+        details["autopin_poetry_lock_used"] = Value::Array(
+            reused_poetry_refs
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        );
+    }
+    let skipped_poetry_refs = skipped_poetry.borrow();
+    if !skipped_poetry_refs.is_empty() {
+        details["autopin_poetry_lock_skipped"] = Value::Array(skipped_poetry_refs.clone());
     }
 
     let snapshot = match manifest_snapshot_at(&root) {
@@ -709,4 +762,111 @@ fn rollback_failed_migration(backups: &BackupManager, created_files: &[PathBuf])
         }
     }
     Ok(())
+}
+
+fn poetry_lock_versions(root: &Path) -> Result<Option<HashMap<String, String>>> {
+    let path = root.join("poetry.lock");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read poetry.lock at {}", path.display()))?;
+    let doc: DocumentMut = contents
+        .parse()
+        .with_context(|| format!("failed to parse poetry.lock at {}", path.display()))?;
+    let Some(packages) = doc.get("package").and_then(Item::as_array_of_tables) else {
+        return Ok(None);
+    };
+    let mut versions = HashMap::new();
+    for package in packages.iter() {
+        let Some(name) = package.get("name").and_then(Item::as_str) else {
+            continue;
+        };
+        let Some(version) = package.get("version").and_then(Item::as_str) else {
+            continue;
+        };
+        versions
+            .entry(normalize_dist_name(name))
+            .or_insert_with(|| version.to_string());
+    }
+    Ok(Some(versions))
+}
+
+fn merge_pin_sets(existing: &mut Vec<PinSpec>, extra: Vec<PinSpec>) {
+    let mut seen: HashSet<String> = existing.iter().map(autopin_pin_key).collect();
+    for pin in extra {
+        let key = autopin_pin_key(&pin);
+        if seen.insert(key) {
+            existing.push(pin);
+        }
+    }
+}
+
+enum PoetryPinChoice {
+    Reuse { pin: PinSpec, source: String },
+    Skip(String),
+}
+
+fn pin_from_poetry_lock(
+    spec: &str,
+    versions: &HashMap<String, String>,
+    marker_env: &MarkerEnvironment,
+) -> PoetryPinChoice {
+    let requirement = match PepRequirement::from_str(spec.trim()) {
+        Ok(req) => req,
+        Err(err) => return PoetryPinChoice::Skip(err.to_string()),
+    };
+    if !requirement.evaluate_markers(marker_env, &[]) {
+        return PoetryPinChoice::Skip("markers_do_not_apply".to_string());
+    }
+    let name = requirement.name.to_string();
+    let normalized = normalize_dist_name(&name);
+    let Some(version) = versions.get(&normalized) else {
+        return PoetryPinChoice::Skip("not_in_poetry_lock".to_string());
+    };
+
+    // Ensure the locked version satisfies the current specifiers.
+    let satisfies = match &requirement.version_or_url {
+        Some(pep508_rs::VersionOrUrl::VersionSpecifier(specifiers)) => {
+            VersionSpecifiers::from_str(&specifiers.to_string())
+                .ok()
+                .and_then(|specs| {
+                    Version::from_str(version)
+                        .ok()
+                        .map(|ver| specs.contains(&ver))
+                })
+                .unwrap_or(false)
+        }
+        Some(pep508_rs::VersionOrUrl::Url(_)) => false,
+        None => false,
+    };
+    if !satisfies {
+        return PoetryPinChoice::Skip(format!(
+            "poetry.lock has {version} which does not satisfy current spec"
+        ));
+    }
+
+    let extras = px_domain::canonical_extras(
+        &requirement
+            .extras
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>(),
+    );
+    let marker = requirement.marker.as_ref().map(ToString::to_string);
+    let specifier = format_specifier(&normalized, &extras, version, marker.as_deref());
+    let source_normalized = normalized.clone();
+    PoetryPinChoice::Reuse {
+        pin: PinSpec {
+            name,
+            specifier,
+            version: version.clone(),
+            normalized,
+            extras,
+            marker,
+            direct: true,
+            requires: Vec::new(),
+        },
+        source: format!("{source_normalized}=={version} (poetry.lock)"),
+    }
 }
