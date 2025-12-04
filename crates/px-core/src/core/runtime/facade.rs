@@ -577,15 +577,17 @@ fn ensure_project_pip(
     }
     let site_packages = site_packages_dir(site_dir, &runtime.version);
     let pip_installed = has_pip_in_site(&site_packages);
+    let pip_editable = has_px_editable_stub(site_dir, &normalize_project_name("pip"));
     let pip_entrypoints =
         site_dir.join("bin").join("pip").exists() || site_dir.join("bin").join("pip3").exists();
     if debug_pip {
         eprintln!(
-            "pip bootstrap: installed={pip_installed} entrypoints={pip_entrypoints} site={}",
-            site_packages.display()
+            "pip bootstrap: installed={pip_installed} editable={pip_editable} entrypoints={pip_entrypoints} site={} root={}",
+            site_packages.display(),
+            site_dir.display()
         );
     }
-    if pip_installed && pip_entrypoints {
+    if (pip_installed || pip_editable) && pip_entrypoints {
         return Ok(());
     }
 
@@ -698,6 +700,25 @@ fn has_pip_in_site(site_packages: &Path) -> bool {
                 if name.starts_with("pip-") && name.ends_with(".dist-info") {
                     return true;
                 }
+            }
+        }
+    }
+    false
+}
+
+fn has_px_editable_stub(site_root: &Path, normalized_name: &str) -> bool {
+    let prefix = format!("{normalized_name}-");
+    if let Ok(entries) = fs::read_dir(site_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !name.starts_with(&prefix) || !name.ends_with(".dist-info") {
+                continue;
+            }
+            if path.join("PX-EDITABLE").exists() {
+                return true;
             }
         }
     }
@@ -1067,13 +1088,25 @@ fn infer_version_from_version_file(
     doc: &DocumentMut,
     fs_ops: &dyn effects::FileSystem,
 ) -> Option<String> {
-    let candidates = [hatch_version_file(doc), setuptools_scm_version_file(doc)];
+    let candidates = [
+        hatch_version_file(doc),
+        setuptools_scm_version_file(doc),
+        pdm_version_file(doc),
+    ];
     for relative in candidates.into_iter().flatten() {
         let path = manifest_root.join(relative);
         if fs_ops.metadata(&path).is_err() {
             continue;
         }
         if let Ok(contents) = fs_ops.read_to_string(&path) {
+            let trimmed = contents.trim();
+            if !trimmed.is_empty()
+                && !trimmed.contains('=')
+                && !trimmed.contains("__version__")
+                && !trimmed.contains('\n')
+            {
+                return Some(trimmed.to_string());
+            }
             for line in contents.lines() {
                 let trimmed = line.trim_start();
                 if let Some(raw) = trimmed.strip_prefix("version =") {
@@ -2513,6 +2546,10 @@ pub(crate) fn ensure_version_file(manifest_path: &Path) -> Result<()> {
         )?;
     }
 
+    if let Some(version_file) = pdm_version_file(&doc) {
+        ensure_version_stub(&manifest_dir, &version_file, VersionFileStyle::Plain)?;
+    }
+
     ensure_inline_version_module(&manifest_dir, &doc)?;
 
     Ok(())
@@ -2533,6 +2570,15 @@ fn setuptools_scm_version_file(doc: &toml_edit::DocumentMut) -> Option<PathBuf> 
     doc.get("tool")
         .and_then(|tool| tool.get("setuptools_scm"))
         .and_then(|cfg| cfg.get("write_to").or_else(|| cfg.get("version_file")))
+        .and_then(|item| item.as_str())
+        .map(PathBuf::from)
+}
+
+fn pdm_version_file(doc: &toml_edit::DocumentMut) -> Option<PathBuf> {
+    doc.get("tool")
+        .and_then(|tool| tool.get("pdm"))
+        .and_then(|pdm| pdm.get("version"))
+        .and_then(|version| version.get("write_to"))
         .and_then(|item| item.as_str())
         .map(PathBuf::from)
 }
@@ -2657,6 +2703,7 @@ fn latest_git_commit(manifest_dir: &Path) -> Option<(String, String)> {
 enum VersionFileStyle {
     HatchVcsHook,
     SetuptoolsScm,
+    Plain,
 }
 
 fn ensure_version_stub(root: &Path, target: &Path, style: VersionFileStyle) -> Result<()> {
@@ -2721,6 +2768,20 @@ fn ensure_version_stub(root: &Path, target: &Path, style: VersionFileStyle) -> R
                     rewrite = true;
                 }
             }
+            VersionFileStyle::Plain => {
+                if let Ok(contents) = fs::read_to_string(&version_path) {
+                    let trimmed = contents.trim();
+                    if trimmed.is_empty()
+                        || trimmed == "unknown"
+                        || trimmed.starts_with("0.0.0+")
+                        || trimmed.starts_with("0+")
+                    {
+                        rewrite = true;
+                    }
+                } else {
+                    rewrite = true;
+                }
+            }
         }
         if !rewrite {
             return Ok(());
@@ -2758,6 +2819,7 @@ _v = _Version(version)\n\
 version_tuple = tuple(_v.release)\n\
 __all__ = [\"__version__\", \"version\", \"version_tuple\"]\n"
         ),
+        VersionFileStyle::Plain => format!("{derived}\n"),
     };
     if rewrite || !version_path.exists() {
         fs::write(&version_path, contents)?;
@@ -3723,6 +3785,105 @@ build-backend = "setuptools.build_meta"
     }
 
     #[test]
+    fn refresh_project_site_preserves_editable_pip_entrypoints() -> Result<()> {
+        let _lock = PIP_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let saved_env = vec![
+            ("PX_CACHE_PATH", env::var("PX_CACHE_PATH").ok()),
+            ("PX_STORE_PATH", env::var("PX_STORE_PATH").ok()),
+            ("PX_ENVS_PATH", env::var("PX_ENVS_PATH").ok()),
+        ];
+        let temp_env = tempdir()?;
+        let env_root = temp_env.path();
+        env::set_var("PX_CACHE_PATH", env_root.join("cache"));
+        env::set_var("PX_STORE_PATH", env_root.join("store"));
+        env::set_var("PX_ENVS_PATH", env_root.join("envs"));
+
+        let temp = tempdir()?;
+        let project_root = temp.path();
+        fs::write(
+            project_root.join("pyproject.toml"),
+            r#"[project]
+name = "pip"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+pip = "pip._internal.cli.main:main"
+pip3 = "pip._internal.cli.main:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.px]
+"#,
+        )?;
+        let pkg_root = project_root
+            .join("src")
+            .join("pip")
+            .join("_internal")
+            .join("cli");
+        fs::create_dir_all(&pkg_root)?;
+        fs::write(pkg_root.join("__init__.py"), "")?;
+        fs::write(pkg_root.join("main.py"), "def main():\n    return 0\n")?;
+        let pkg_base = project_root.join("src").join("pip").join("_internal");
+        fs::write(pkg_base.join("__init__.py"), "")?;
+        fs::write(project_root.join("src").join("pip").join("__init__.py"), "")?;
+
+        let snapshot = px_domain::project::snapshot::ProjectSnapshot::read_from(project_root)?;
+        let lock = render_lockfile(&snapshot, &Vec::<ResolvedDependency>::new(), PX_VERSION)?;
+        fs::write(project_root.join("px.lock"), lock)?;
+
+        let global = GlobalOptions::default();
+        let ctx = CommandContext::new(&global, Arc::new(SystemEffects::new()))?;
+        refresh_project_site(&snapshot, &ctx)?;
+
+        let state = load_project_state(ctx.fs(), project_root)?;
+        let env = state.current_env.expect("env stored");
+        let site_packages = PathBuf::from(&env.site_packages);
+        let env_root = env
+            .env_path
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(|| {
+                site_packages
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::parent)
+                    .map(PathBuf::from)
+            })
+            .unwrap_or_else(|| PathBuf::from(&env.site_packages));
+
+        let pip_entry = env_root.join("bin").join("pip");
+        let pip_contents = fs::read_to_string(&pip_entry)?;
+        assert!(
+            pip_contents.contains("pip._internal.cli.main"),
+            "editable pip entrypoint should target project module"
+        );
+        assert!(
+            !pip_contents.starts_with("#!/bin/sh"),
+            "runtime ensurepip shim should not replace project pip script"
+        );
+        assert!(
+            env_root
+                .read_dir()?
+                .flatten()
+                .any(|entry| entry.path().join("PX-EDITABLE").exists()),
+            "editable dist-info should be preserved for pip"
+        );
+
+        for (key, value) in saved_env {
+            match value {
+                Some(prev) => env::set_var(key, prev),
+                None => env::remove_var(key),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn site_dir_precedes_project_root_in_sys_path() -> Result<()> {
         let temp = tempdir()?;
         let project_root = temp.path();
@@ -4504,6 +4665,94 @@ write_to = "demo/_version.py"
         assert!(
             contents.contains("version_tuple = tuple(_v.release)"),
             "setuptools_scm stub should export version_tuple from parsed release"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_version_file_supports_pdm_write_to() -> Result<()> {
+        if Command::new("git").arg("--version").status().is_err() {
+            return Ok(());
+        }
+        let temp = tempdir()?;
+        let manifest = temp.path().join("pyproject.toml");
+        fs::write(
+            &manifest,
+            r#"[project]
+name = "pdm-demo"
+dynamic = ["version"]
+requires-python = ">=3.11"
+
+[tool.pdm.version]
+write_to = "pdm/VERSION"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+"#,
+        )?;
+        let pkg_dir = temp.path().join("pdm");
+        fs::create_dir_all(&pkg_dir)?;
+        fs::write(pkg_dir.join("__init__.py"), "")?;
+
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git init failed"
+        );
+        assert!(
+            Command::new("git")
+                .args(["config", "user.email", "ci@example.com"])
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git config email failed"
+        );
+        assert!(
+            Command::new("git")
+                .args(["config", "user.name", "CI"])
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git config name failed"
+        );
+        assert!(
+            Command::new("git")
+                .args(["add", "."])
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git add failed"
+        );
+        assert!(
+            Command::new("git")
+                .args(["commit", "-m", "init"])
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git commit failed"
+        );
+
+        ensure_version_file(&manifest)?;
+        let contents = fs::read_to_string(pkg_dir.join("VERSION"))?;
+        assert!(
+            contents.trim().starts_with("0.0.0+g"),
+            "pdm VERSION file should be derived from git rev"
+        );
+
+        let metadata =
+            load_editable_project_metadata(&manifest, SystemEffects::new().fs()).unwrap();
+        assert!(
+            metadata.version.starts_with("0.0.0+g"),
+            "editable metadata should use pdm VERSION contents"
         );
         Ok(())
     }
