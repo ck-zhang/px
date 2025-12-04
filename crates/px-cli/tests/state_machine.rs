@@ -165,25 +165,78 @@ fn test_repairs_missing_env_in_dev_mode() {
 }
 
 #[test]
-fn test_requires_lock_before_running_tests() {
+fn test_bootstraps_lock_before_running_tests() {
+    if !require_online() {
+        return;
+    }
     let (_tmp, project) = prepare_fixture("test-missing-lock");
     let lock = project.join("px.lock");
     if lock.exists() {
         fs::remove_file(&lock).expect("remove px.lock");
     }
+    fs::remove_dir_all(project.join(".px")).ok();
+    let Some(python) = find_python() else {
+        eprintln!("skipping lock bootstrap test (python binary not found)");
+        return;
+    };
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_TEST_FALLBACK_STD", "1")
         .args(["--json", "test"])
         .assert()
-        .failure();
+        .success();
 
     let payload = parse_json(&assert);
-    assert_eq!(payload["status"], "user-error");
+    assert_eq!(payload["status"], "ok");
+    let autosync = payload["details"]
+        .get("autosync")
+        .and_then(serde_json::Value::as_object)
+        .expect("autosync details present");
     assert_eq!(
-        payload["details"].get("reason"),
-        Some(&serde_json::Value::String("missing_lock".into()))
+        autosync.get("action").and_then(serde_json::Value::as_str),
+        Some("lock-bootstrap"),
+        "expected missing lock to trigger bootstrap"
     );
+    assert!(lock.exists(), "px.lock should be created during autosync");
+}
+
+#[test]
+fn run_bootstraps_lock_before_execution() {
+    if !require_online() {
+        return;
+    }
+    let (_tmp, project) = prepare_fixture("run-missing-lock");
+    let lock = project.join("px.lock");
+    if lock.exists() {
+        fs::remove_file(&lock).expect("remove px.lock");
+    }
+    fs::remove_dir_all(project.join(".px")).ok();
+    let Some(python) = find_python() else {
+        eprintln!("skipping run autosync test (python binary not found)");
+        return;
+    };
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["--json", "run", "python", "--", "-c", "print('ok')"])
+        .assert()
+        .success();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    let autosync = payload["details"]
+        .get("autosync")
+        .and_then(serde_json::Value::as_object)
+        .expect("autosync details present");
+    assert_eq!(
+        autosync.get("action").and_then(serde_json::Value::as_str),
+        Some("lock-bootstrap"),
+        "expected missing lock to trigger bootstrap"
+    );
+    assert!(lock.exists(), "px.lock should be created during autosync");
 }
 
 #[test]

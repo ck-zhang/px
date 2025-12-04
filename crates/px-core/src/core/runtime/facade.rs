@@ -2405,7 +2405,9 @@ impl EnvironmentIssue {
     fn auto_fixable(self) -> bool {
         matches!(
             self,
-            EnvironmentIssue::MissingArtifacts
+            EnvironmentIssue::MissingLock
+                | EnvironmentIssue::LockDrift
+                | EnvironmentIssue::MissingArtifacts
                 | EnvironmentIssue::MissingEnv
                 | EnvironmentIssue::EnvOutdated
                 | EnvironmentIssue::RuntimeMismatch

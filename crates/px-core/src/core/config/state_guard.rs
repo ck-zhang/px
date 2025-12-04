@@ -98,21 +98,22 @@ pub(crate) fn guard_for_execution(
     state_report: &ProjectStateReport,
     command: &'static str,
 ) -> Result<crate::EnvGuard, ExecutionOutcome> {
-    if !state_report.lock_exists {
-        return Err(StateViolation::MissingLock.into_outcome(snapshot, command, state_report));
-    }
-
-    if matches!(state_report.canonical, ProjectStateKind::NeedsLock) {
-        return Err(StateViolation::LockDrift.into_outcome(snapshot, command, state_report));
-    }
-
     if strict {
+        if !state_report.lock_exists {
+            return Err(StateViolation::MissingLock.into_outcome(snapshot, command, state_report));
+        }
+        if matches!(state_report.canonical, ProjectStateKind::NeedsLock) {
+            return Err(StateViolation::LockDrift.into_outcome(snapshot, command, state_report));
+        }
         if matches!(state_report.canonical, ProjectStateKind::NeedsEnv) {
             return Err(StateViolation::EnvDrift.into_outcome(snapshot, command, state_report));
         }
         return Ok(crate::EnvGuard::Strict);
     }
 
+    if !state_report.lock_exists || matches!(state_report.canonical, ProjectStateKind::NeedsLock) {
+        return Ok(crate::EnvGuard::AutoSync);
+    }
     if state_report.env_clean {
         Ok(crate::EnvGuard::Strict)
     } else {
@@ -260,30 +261,18 @@ mod tests {
     }
 
     #[test]
-    fn guard_rejects_needs_lock_for_run_and_test() {
+    fn guard_autosyncs_missing_lock_in_dev_and_blocks_in_strict() {
         let snap = dummy_snapshot();
-        let rpt = ProjectStateReport::new(
-            true,
-            true,
-            true,
-            true,
-            true,
-            false,
-            Some("mf".into()),
-            Some("mf".into()),
-            Some("lid".into()),
-            Some(vec!["mode mismatch".into()]),
-            None,
-        );
-        assert_eq!(rpt.canonical, ProjectStateKind::NeedsLock);
-        let run_outcome = guard_for_execution(false, &snap, &rpt, "run").unwrap_err();
-        assert_eq!(run_outcome.status, CommandStatus::UserError);
-        let test_outcome = guard_for_execution(true, &snap, &rpt, "test").unwrap_err();
-        assert_eq!(test_outcome.status, CommandStatus::UserError);
+        let rpt = report(true, false, false, false, false);
+        let guard =
+            guard_for_execution(false, &snap, &rpt, "run").expect("missing lock should autosync");
+        assert!(matches!(guard, crate::EnvGuard::AutoSync));
+        let outcome = guard_for_execution(true, &snap, &rpt, "run").unwrap_err();
+        assert_eq!(outcome.status, CommandStatus::UserError);
     }
 
     #[test]
-    fn guard_rejects_lock_issue_even_when_clean() {
+    fn guard_autosyncs_needs_lock_in_dev_and_blocks_in_strict() {
         let snap = dummy_snapshot();
         let rpt = ProjectStateReport::new(
             true,
@@ -299,7 +288,10 @@ mod tests {
             None,
         );
         assert_eq!(rpt.canonical, ProjectStateKind::NeedsLock);
-        let outcome = guard_for_execution(false, &snap, &rpt, "run").unwrap_err();
+        let guard =
+            guard_for_execution(false, &snap, &rpt, "run").expect("lock drift should autosync");
+        assert!(matches!(guard, crate::EnvGuard::AutoSync));
+        let outcome = guard_for_execution(true, &snap, &rpt, "test").unwrap_err();
         assert_eq!(outcome.status, CommandStatus::UserError);
     }
 }
