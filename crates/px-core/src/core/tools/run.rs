@@ -67,15 +67,15 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
                     Value::Object(map) => map,
                     other => {
                         let mut map = serde_json::Map::new();
-                        map.insert("reason".into(), Value::String("tool_env_unavailable".into()));
+                        map.insert(
+                            "reason".into(),
+                            Value::String("tool_env_unavailable".into()),
+                        );
                         map.insert("details".into(), other);
                         map
                     }
                 };
-                details.insert(
-                    "tool".into(),
-                    Value::String(normalized.clone()),
-                );
+                details.insert("tool".into(), Value::String(normalized.clone()));
                 details.insert(
                     "hint".into(),
                     Value::String(format!(

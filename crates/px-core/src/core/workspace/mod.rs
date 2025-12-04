@@ -1530,6 +1530,8 @@ pub struct WorkspaceRunContext {
     pub(crate) py_ctx: PythonContext,
     pub(crate) manifest_path: PathBuf,
     pub(crate) sync_report: Option<crate::EnvironmentSyncReport>,
+    pub(crate) workspace_deps: Vec<String>,
+    pub(crate) lock_path: PathBuf,
 }
 
 pub fn prepare_workspace_run_context(
@@ -1704,6 +1706,8 @@ pub fn prepare_workspace_run_context(
         py_ctx,
         manifest_path: member_root.join("pyproject.toml"),
         sync_report,
+        workspace_deps: workspace.dependencies.clone(),
+        lock_path: workspace.lock_path.clone(),
     }))
 }
 

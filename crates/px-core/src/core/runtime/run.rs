@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{Cursor, IsTerminal, Write};
@@ -13,6 +14,7 @@ use tracing::{debug, warn};
 
 use super::cas_env::{ensure_profile_env, project_env_owner_id, workspace_env_owner_id};
 use super::script::{detect_inline_script, run_inline_script};
+use crate::core::runtime::artifacts::dependency_name;
 use crate::core::runtime::facade::{
     build_pythonpath, compute_lock_hash_bytes, detect_runtime_metadata, marker_env_for_snapshot,
     select_python_from_site,
@@ -25,7 +27,7 @@ use crate::{
     outcome_from_output, python_context_with_mode, state_guard::guard_for_execution,
     CommandContext, ExecutionOutcome, OwnerId, OwnerType, PythonContext,
 };
-use px_domain::detect_lock_drift;
+use px_domain::{detect_lock_drift, load_lockfile_optional};
 
 #[derive(Clone, Debug)]
 pub struct TestRequest {
@@ -59,6 +61,67 @@ enum TestRunner {
     Script(PathBuf),
 }
 
+#[derive(Clone, Default)]
+struct DependencyContext {
+    manifest: HashSet<String>,
+    locked: HashSet<String>,
+}
+
+impl DependencyContext {
+    fn from_sources(manifest_specs: &[String], lock_path: Option<&Path>) -> Self {
+        let mut manifest = HashSet::new();
+        for spec in manifest_specs {
+            let name = dependency_name(spec);
+            if !name.is_empty() {
+                manifest.insert(name);
+            }
+        }
+
+        let mut locked = HashSet::new();
+        if let Some(path) = lock_path {
+            if let Ok(Some(lock)) = load_lockfile_optional(path) {
+                for spec in lock.dependencies {
+                    let name = dependency_name(&spec);
+                    if !name.is_empty() {
+                        locked.insert(name);
+                    }
+                }
+                for dep in lock.resolved {
+                    let name = dep.name.trim();
+                    if !name.is_empty() {
+                        locked.insert(name.to_lowercase());
+                    }
+                }
+            }
+        }
+
+        Self { manifest, locked }
+    }
+
+    fn inject(&self, args: &mut Value) {
+        if let Value::Object(map) = args {
+            if !self.manifest.is_empty() {
+                map.insert(
+                    "manifest_deps".into(),
+                    serde_json::to_value(sorted_list(&self.manifest)).unwrap_or(Value::Null),
+                );
+            }
+            if !self.locked.is_empty() {
+                map.insert(
+                    "locked_deps".into(),
+                    serde_json::to_value(sorted_list(&self.locked)).unwrap_or(Value::Null),
+                );
+            }
+        }
+    }
+}
+
+fn sorted_list(values: &HashSet<String>) -> Vec<String> {
+    let mut items: Vec<String> = values.iter().cloned().collect();
+    items.sort();
+    items
+}
+
 /// Runs the project's tests using a project-provided runner or pytest, with an
 /// optional px fallback runner.
 ///
@@ -90,16 +153,16 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
     let interactive = request.interactive.unwrap_or_else(|| {
         !strict && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
     });
-    let command_args = json!({
-        "target": &target,
-        "args": &request.args,
-    });
 
     if !target.trim().is_empty() {
         if let Some(inline) = match detect_inline_script(&target) {
             Ok(result) => result,
             Err(outcome) => return Ok(outcome),
         } {
+            let command_args = json!({
+                "target": &target,
+                "args": &request.args,
+            });
             return match run_inline_script(
                 ctx,
                 inline,
@@ -121,6 +184,12 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         if target.trim().is_empty() {
             return Ok(run_target_required_outcome());
         }
+        let deps = DependencyContext::from_sources(&ws_ctx.workspace_deps, Some(&ws_ctx.lock_path));
+        let mut command_args = json!({
+            "target": &target,
+            "args": &request.args,
+        });
+        deps.inject(&mut command_args);
         let plan = plan_run_target(&ws_ctx.py_ctx, &ws_ctx.manifest_path, &target)?;
         let mut outcome = match plan {
             RunTargetPlan::Script(path) => run_project_script(
@@ -174,6 +243,12 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         Err(outcome) => return Ok(outcome),
     };
     let manifest = py_ctx.project_root.join("pyproject.toml");
+    let deps = DependencyContext::from_sources(&snapshot.requirements, Some(&snapshot.lock_path));
+    let mut command_args = json!({
+        "target": &target,
+        "args": &request.args,
+    });
+    deps.inject(&mut command_args);
 
     if target.trim().is_empty() {
         return Ok(run_target_required_outcome());
@@ -204,6 +279,7 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
 struct CommitRunContext {
     py_ctx: PythonContext,
     manifest_path: PathBuf,
+    deps: DependencyContext,
     _temp_guard: Option<TempDir>,
 }
 
@@ -250,6 +326,8 @@ fn run_project_at_ref(
         Ok(value) => value,
         Err(outcome) => return Ok(outcome),
     };
+    let mut command_args = command_args;
+    commit_ctx.deps.inject(&mut command_args);
 
     if target.trim().is_empty() {
         return Ok(run_target_required_outcome());
@@ -462,6 +540,7 @@ fn commit_project_context(
     })?;
     let runtime_path = cas_profile.runtime_path.display().to_string();
     let python = select_python_from_site(&paths.site_bin, &runtime_path, &runtime.version);
+    let deps = DependencyContext::from_sources(&snapshot.requirements, Some(&lock_path));
     Ok(CommitRunContext {
         py_ctx: PythonContext {
             project_root: project_root_at_ref,
@@ -474,6 +553,7 @@ fn commit_project_context(
             px_options: snapshot.px_options.clone(),
         },
         manifest_path,
+        deps,
         _temp_guard: Some(archive),
     })
 }
@@ -803,6 +883,7 @@ fn commit_workspace_context(
                 .unwrap_or_default()
                 .to_string()
         });
+    let deps = DependencyContext::from_sources(&workspace_snapshot.dependencies, Some(&lock_path));
     Ok(CommitRunContext {
         py_ctx: PythonContext {
             project_root: member_root_at_ref.clone(),
@@ -815,6 +896,7 @@ fn commit_workspace_context(
             px_options,
         },
         manifest_path: member_root_at_ref.join("pyproject.toml"),
+        deps,
         _temp_guard: Some(archive),
     })
 }

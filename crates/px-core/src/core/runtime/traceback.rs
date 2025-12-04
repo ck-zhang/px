@@ -1,5 +1,6 @@
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashSet;
 
 const TRACEBACK_HEADER: &str = "Traceback (most recent call last):";
 
@@ -39,6 +40,8 @@ pub struct TracebackContext {
     pub target: String,
     pub entry: Option<String>,
     pub mode: Option<String>,
+    manifest_deps: HashSet<String>,
+    locked_deps: HashSet<String>,
 }
 
 impl TracebackContext {
@@ -54,8 +57,29 @@ impl TracebackContext {
                 .and_then(|value| value.get("mode"))
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            manifest_deps: dep_set(extra, "manifest_deps"),
+            locked_deps: dep_set(extra, "locked_deps"),
         }
     }
+
+    fn dependency_declared(&self, package: &str) -> bool {
+        let needle = package.to_lowercase();
+        self.manifest_deps.contains(&needle) || self.locked_deps.contains(&needle)
+    }
+}
+
+fn dep_set(extra: Option<&Value>, key: &str) -> HashSet<String> {
+    extra
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|value| value.to_lowercase())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +124,16 @@ fn missing_import(
         return None;
     }
     let package = module_to_package(&module);
+    if ctx.dependency_declared(&package) {
+        return Some(TracebackRecommendation {
+            reason: "missing_import",
+            hint: format!(
+                "dependency '{package}' is declared; run `px sync` to rebuild the environment"
+            ),
+            command: Some("px sync".to_string()),
+            confidence: Some("high"),
+        });
+    }
     let dev_tool = should_treat_as_dev_tool(&package, ctx);
     let command = if dev_tool {
         format!("px add --dev {package}")
@@ -297,6 +331,7 @@ fn is_stdlib(module: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn parses_traceback_frames_and_error() {
@@ -310,6 +345,49 @@ mod tests {
         let rec = report.recommendation.expect("recommendation");
         assert_eq!(rec.reason, "missing_import");
         assert!(rec.hint.contains("missing_pkg"));
+    }
+
+    #[test]
+    fn missing_import_prefers_sync_when_declared() {
+        let stderr = "Traceback (most recent call last):\n  File \"/tmp/app/main.py\", line 1, in <module>\n    import requests\nModuleNotFoundError: No module named 'requests'\n";
+        let ctx = TracebackContext::new(
+            "run",
+            "main",
+            Some(&json!({
+                "manifest_deps": ["requests>=2.0"],
+                "locked_deps": ["requests"],
+            })),
+        );
+        let report = analyze_python_traceback(stderr, &ctx).expect("report");
+        let rec = report.recommendation.expect("recommendation");
+        assert_eq!(rec.reason, "missing_import");
+        assert_eq!(rec.command.as_deref(), Some("px sync"));
+        assert!(
+            rec.hint.contains("px sync"),
+            "hint should encourage syncing: {}",
+            rec.hint
+        );
+    }
+
+    #[test]
+    fn missing_import_suggests_add_when_undeclared() {
+        let stderr = "Traceback (most recent call last):\n  File \"/tmp/app/main.py\", line 1, in <module>\n    import newpkg\nModuleNotFoundError: No module named 'newpkg'\n";
+        let ctx = TracebackContext::new(
+            "run",
+            "main",
+            Some(&json!({
+                "manifest_deps": [],
+                "locked_deps": [],
+            })),
+        );
+        let report = analyze_python_traceback(stderr, &ctx).expect("report");
+        let rec = report.recommendation.expect("recommendation");
+        assert!(
+            rec.command
+                .as_deref()
+                .is_some_and(|cmd| cmd.contains("px add")),
+            "missing dependency should suggest px add, got {rec:?}"
+        );
     }
 
     #[test]
