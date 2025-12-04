@@ -14,7 +14,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use base64::prelude::{Engine as _, BASE64_STANDARD_NO_PAD};
-use flate2::{write::GzEncoder, Compression};
+use flate2::{Compression, GzBuilder};
 use fs4::FileExt;
 use rand::{seq::IteratorRandom, thread_rng};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -2436,6 +2436,15 @@ fn normalize_archive_path(path: &Path) -> Result<String> {
     Ok(normalized)
 }
 
+fn gzip_deterministic(bytes: &[u8]) -> Result<Vec<u8>> {
+    // Zero mtime keeps CAS digests stable across runs.
+    let mut encoder = GzBuilder::new()
+        .mtime(0)
+        .write(Vec::new(), Compression::default());
+    encoder.write_all(bytes)?;
+    Ok(encoder.finish()?)
+}
+
 /// Produce a deterministic, gzip-compressed tar archive for a directory tree.
 pub fn archive_dir_canonical(root: &Path) -> Result<Vec<u8>> {
     let mut builder = tar::Builder::new(Vec::new());
@@ -2558,9 +2567,7 @@ pub fn archive_dir_canonical(root: &Path) -> Result<Vec<u8>> {
     }
     builder.finish()?;
     let tar_bytes = builder.into_inner()?;
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&tar_bytes)?;
-    Ok(encoder.finish()?)
+    gzip_deterministic(&tar_bytes)
 }
 
 /// Archive a subset of paths under a shared root, skipping unreadable entries.
@@ -2701,9 +2708,7 @@ pub fn archive_selected(root: &Path, paths: &[PathBuf]) -> Result<Vec<u8>> {
     }
 
     let tar_bytes = builder.into_inner()?;
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&tar_bytes)?;
-    Ok(encoder.finish()?)
+    gzip_deterministic(&tar_bytes)
 }
 
 fn is_executable(metadata: &fs::Metadata) -> bool {
@@ -3064,6 +3069,45 @@ mod tests {
         assert!(
             matches!(store_err, StoreError::DigestMismatch { .. }),
             "expected digest mismatch when data is corrupted"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn archive_dir_canonical_is_deterministic() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path().join("tree");
+        fs::create_dir_all(&root)?;
+        fs::write(root.join("a.txt"), b"hello")?;
+
+        let first = archive_dir_canonical(&root)?;
+        thread::sleep(Duration::from_secs(1));
+        let second = archive_dir_canonical(&root)?;
+
+        assert_eq!(
+            first, second,
+            "canonical archive should be stable across runs"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn archive_selected_is_deterministic() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path().join("tree");
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested)?;
+        fs::write(root.join("a.txt"), b"hello")?;
+        fs::write(nested.join("b.txt"), b"there")?;
+
+        let selection = vec![root.join("a.txt"), nested.clone()];
+        let first = archive_selected(&root, &selection)?;
+        thread::sleep(Duration::from_secs(1));
+        let second = archive_selected(&root, &selection)?;
+
+        assert_eq!(
+            first, second,
+            "selected archive should be stable across runs"
         );
         Ok(())
     }
