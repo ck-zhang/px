@@ -336,12 +336,12 @@ fn python_use_request_from_args(args: &PythonUseArgs) -> px_core::PythonUseReque
 }
 
 fn normalize_run_invocation(args: &RunArgs) -> (Option<String>, Vec<String>) {
-    let mut forwarded = args.args.clone();
-    match &args.entry {
-        Some(value) if value.starts_with('-') => {
-            forwarded.insert(0, value.clone());
-            (None, forwarded)
-        }
-        _ => (args.entry.clone(), forwarded),
+    if args.target.is_some() {
+        return (None, args.target_args.clone());
+    }
+    match args.target_args.split_first() {
+        Some((first, _rest)) if first.starts_with('-') => (None, args.target_args.clone()),
+        Some((first, rest)) => (Some(first.clone()), rest.to_vec()),
+        None => (None, Vec::new()),
     }
 }

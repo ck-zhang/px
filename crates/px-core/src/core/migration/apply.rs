@@ -1,5 +1,4 @@
 use std::{
-    cell::RefCell,
     collections::{HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
@@ -463,8 +462,8 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     let mut autopin_hint = None;
     let poetry_pins = poetry_lock_versions(&root)?.map(Arc::new);
     let marker_env = Arc::new(ctx.marker_environment()?);
-    let reused_from_poetry = Arc::new(RefCell::new(Vec::new()));
-    let skipped_poetry = Arc::new(RefCell::new(Vec::new()));
+    let reused_from_poetry = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let skipped_poetry = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     if pyproject_path.exists() {
         let autopin_snapshot = px_domain::ProjectSnapshot::read_from(&root)?;
@@ -486,15 +485,19 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
                         for spec in specs {
                             match pin_from_poetry_lock(spec, locked, marker_env.as_ref()) {
                                 PoetryPinChoice::Reuse { pin, source } => {
-                                    reused_from_poetry.borrow_mut().push(source);
+                                    if let Ok(mut reused) = reused_from_poetry.lock() {
+                                        reused.push(source);
+                                    }
                                     pins.push(pin);
                                 }
                                 PoetryPinChoice::Skip(reason) => {
                                     needs_resolution = true;
-                                    skipped_poetry.borrow_mut().push(json!({
-                                        "spec": spec,
-                                        "reason": reason,
-                                    }));
+                                    if let Ok(mut skipped) = skipped_poetry.lock() {
+                                        skipped.push(json!({
+                                            "spec": spec,
+                                            "reason": reason,
+                                        }));
+                                    }
                                 }
                             }
                         }
@@ -570,7 +573,7 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
             autopin_hint = summarize_autopins(&autopin_entries);
         }
     }
-    let reused_poetry_refs = reused_from_poetry.borrow();
+    let reused_poetry_refs = reused_from_poetry.lock().unwrap();
     if !reused_poetry_refs.is_empty() {
         details["autopin_poetry_lock_used"] = Value::Array(
             reused_poetry_refs
@@ -580,7 +583,7 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
                 .collect(),
         );
     }
-    let skipped_poetry_refs = skipped_poetry.borrow();
+    let skipped_poetry_refs = skipped_poetry.lock().unwrap();
     if !skipped_poetry_refs.is_empty() {
         details["autopin_poetry_lock_skipped"] = Value::Array(skipped_poetry_refs.clone());
     }

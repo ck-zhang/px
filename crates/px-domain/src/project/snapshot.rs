@@ -12,6 +12,12 @@ use super::manifest::{
     DependencyGroupSource, PxOptions,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingProjectGuidance {
+    pub message: String,
+    pub hint: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct ProjectSnapshot {
     pub root: PathBuf,
@@ -123,10 +129,23 @@ impl ProjectSnapshot {
 pub fn current_project_root() -> Result<PathBuf> {
     match discover_project_root()? {
         Some(root) => Ok(root),
-        None => Err(anyhow!(
-            "No px project found. Run `px init` in your project directory first."
-        )),
+        None => {
+            let guidance = missing_project_guidance()?;
+            Err(anyhow!(guidance.message))
+        }
     }
+}
+
+pub fn missing_project_guidance() -> Result<MissingProjectGuidance> {
+    let hint = if discover_nearest_pyproject()?.is_some() {
+        "Run `px migrate --apply` in your project directory first.".to_string()
+    } else {
+        "Run `px init` in your project directory first.".to_string()
+    };
+    Ok(MissingProjectGuidance {
+        message: format!("No px project found. {hint}"),
+        hint,
+    })
 }
 
 pub fn discover_project_root() -> Result<Option<PathBuf>> {
@@ -137,6 +156,19 @@ pub fn discover_project_root() -> Result<Option<PathBuf>> {
         }
         let pyproject = dir.join("pyproject.toml");
         if pyproject.exists() && pyproject_has_tool_px(&pyproject)? {
+            return Ok(Some(dir));
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    Ok(None)
+}
+
+fn discover_nearest_pyproject() -> Result<Option<PathBuf>> {
+    let mut dir = env::current_dir().context("unable to determine project root")?;
+    loop {
+        if dir.join("pyproject.toml").exists() {
             return Ok(Some(dir));
         }
         if !dir.pop() {

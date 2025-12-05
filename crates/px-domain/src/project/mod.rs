@@ -14,7 +14,7 @@ pub use onboard::{
     prepare_pyproject_plan, resolve_onboard_path, BackupManager, BackupSummary, PyprojectPlan,
 };
 pub use snapshot::{
-    current_project_root, discover_project_root, ensure_pyproject_exists,
-    project_name_from_pyproject, ProjectSnapshot,
+    current_project_root, discover_project_root, ensure_pyproject_exists, missing_project_guidance,
+    project_name_from_pyproject, MissingProjectGuidance, ProjectSnapshot,
 };
 pub use state::{canonical_state, ProjectStateKind, ProjectStateReport};

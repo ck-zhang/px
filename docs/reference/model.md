@@ -20,7 +20,7 @@ Workspace and project roots may coincide, but they are conceptually separate.
 1. Starting from CWD, walk upward until you find a workspace root.
 2. If found and CWD is inside a listed member project, that project is workspace-governed: project commands use the workspace state machine.
 3. Otherwise, walk upward to find a project root (no workspace above).
-4. If none is found: `No px project found. Run "px init" in your project directory first.`
+4. If none is found: `No px project found. Run "px init" in your project directory first.` (or `px migrate --apply` when a non-px `pyproject.toml` already exists).
 
 **Workspace-level discovery**
 

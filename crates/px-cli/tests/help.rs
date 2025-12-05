@@ -13,8 +13,7 @@ fn run_help_mentions_usage_and_examples() {
         "run help missing updated about: {output}"
     );
     assert!(
-        output.contains("px run [ENTRY] [-- <ARG>...]")
-            || output.contains("px run [entry] [-- <arg>...]")
+        output.contains("px run <TARGET> [ARG...]") || output.contains("px run <target> [arg...]")
     );
     assert!(
         output.contains("--frozen"),

@@ -16,11 +16,14 @@ use crate::{
     RuntimeSource, RuntimeStatus, StatusContext, StatusContextKind, StatusPayload,
 };
 use px_domain::{
-    discover_project_root, discover_workspace_root, load_lockfile_optional, ProjectStateKind,
+    discover_project_root, discover_workspace_root, load_lockfile_optional,
+    missing_project_guidance, MissingProjectGuidance, ProjectStateKind,
 };
 
 use super::evaluate_project_state;
-use crate::core::runtime::{StoredEnvironment, StoredRuntime};
+use crate::core::runtime::{
+    StoredEnvironment, StoredRuntime, MISSING_PROJECT_HINT, MISSING_PROJECT_MESSAGE,
+};
 use crate::{EnvHealth, EnvStatus, LockHealth, LockStatus, NextAction, NextActionKind};
 
 /// Reports whether the manifest, lockfile, and environment are consistent.
@@ -270,18 +273,19 @@ fn format_system_time(time: SystemTime) -> Option<String> {
 }
 
 fn missing_project_status(cwd: &Path) -> ExecutionOutcome {
+    let guidance = missing_project_guidance().unwrap_or_else(|_| MissingProjectGuidance {
+        message: format!("{MISSING_PROJECT_MESSAGE} {MISSING_PROJECT_HINT}"),
+        hint: MISSING_PROJECT_HINT.to_string(),
+    });
     let details = json!({
         "code": "PX001",
         "reason": "missing_project",
         "searched": cwd.display().to_string(),
         "why": ["No pyproject.toml with [tool.px] and no px.lock found in parent directories."],
-        "fix": ["Run `px init` in your project directory to start a new px project."],
-        "hint": "Run `px init` in your project directory to start a new px project.",
+        "fix": [guidance.hint.clone()],
+        "hint": guidance.hint,
     });
-    ExecutionOutcome::user_error(
-        "PX001  No px project found. Run `px init` in your project directory first.",
-        details,
-    )
+    ExecutionOutcome::user_error(format!("PX001  {}", guidance.message), details)
 }
 
 pub(crate) fn issue_id_for(message: &str) -> String {

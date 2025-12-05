@@ -105,7 +105,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 * **Behavior**: update all deps or named ones within constraints; write updated `px.lock`; rebuild env.
 * **Failure**: on resolution failure, no change; errors describe conflicting constraints and how to relax them.
 
-### `px run <target> [-- …args]`
+### `px run <target> […args]`
 
 * **Intent**: run a command using the project env with deterministic state behavior and deterministic target resolution.
 * **Preconditions**: project root exists. In dev, lock must exist and match manifest (otherwise suggest `px sync`). In CI/`--frozen`, env must already be in sync; no repairs.
@@ -115,6 +115,8 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
   2. Otherwise run `<target>` as an executable, relying on PATH from the project env (PEP 621 console/gui scripts and `python` from the env take precedence).
 
   No implicit module/CLI guessing (`python -m`, `.cli`, etc.).
+
+* **Argument parsing**: px flags must appear before `<target>`; once `<target>` is seen, all following tokens are forwarded verbatim (no `--` needed).
 
 * **Behavior (dev)**: if env missing/stale, rebuild from `px.lock` (no resolution) before running.
 * **Behavior (CI/`--frozen`)**: fail if lock drifted or env stale; never repairs.

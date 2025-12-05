@@ -608,6 +608,49 @@ fn px_commands_require_project_root() {
 }
 
 #[test]
+fn missing_project_hint_recommends_migrate_when_pyproject_exists() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pyproject = temp.path().join("pyproject.toml");
+    fs::write(
+        &pyproject,
+        "[project]\nname = \"demo\"\nversion = \"0.0.1\"\n",
+    )
+    .expect("write pyproject");
+
+    let json_assert = px_cmd()
+        .current_dir(temp.path())
+        .args(["--json", "status"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&json_assert);
+    let message = payload["message"].as_str().unwrap_or_default().to_string();
+    let hint = payload["details"]["hint"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        message.contains("px migrate"),
+        "expected migrate suggestion in message when pyproject exists without px metadata: {message:?}"
+    );
+    assert!(
+        hint.contains("px migrate"),
+        "expected migrate hint when pyproject exists without px metadata: {hint:?}"
+    );
+
+    let human = px_cmd()
+        .current_dir(temp.path())
+        .arg("status")
+        .assert()
+        .failure();
+    let stdout = String::from_utf8(human.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("px migrate"),
+        "human output should recommend px migrate when pyproject exists without px metadata: {stdout:?}"
+    );
+}
+
+#[test]
 fn all_project_commands_surface_missing_project_errors() {
     let temp = tempfile::tempdir().expect("tempdir");
     let message = "No px project found. Run `px init` in your project directory first.";

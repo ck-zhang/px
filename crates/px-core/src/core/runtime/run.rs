@@ -1360,6 +1360,7 @@ fn run_pytest_runner(
     envs: EnvPairs,
     test_args: &[String],
     stream_runner: bool,
+    allow_builtin_fallback: bool,
 ) -> Result<ExecutionOutcome> {
     let reporter = test_reporter_from_env();
     let (envs, pytest_cmd) = build_pytest_invocation(ctx, py_ctx, envs, test_args, reporter)?;
@@ -1372,7 +1373,7 @@ fn run_pytest_runner(
         return Ok(outcome);
     }
     if missing_pytest(&output.stderr) {
-        if ctx.config().test.fallback_builtin {
+        if ctx.config().test.fallback_builtin || allow_builtin_fallback {
             return run_builtin_tests(ctx, py_ctx, envs, stream_runner);
         }
         return Ok(missing_pytest_outcome(output, test_args));
@@ -1768,6 +1769,10 @@ fn run_tests_for_context(
     let command_args = json!({ "test_args": request.args });
     let (mut envs, _preflight) = build_env_with_preflight(ctx, py_ctx, &command_args)?;
     let stream_runner = !ctx.global.json;
+    let allow_missing_pytest_fallback = sync_report
+        .as_ref()
+        .map(|report| report.action() == "env-recreate")
+        .unwrap_or(false);
 
     let mut outcome = match select_test_runner(ctx, py_ctx) {
         TestRunner::Builtin => run_builtin_tests(ctx, py_ctx, envs, stream_runner)?,
@@ -1776,7 +1781,14 @@ fn run_tests_for_context(
         }
         TestRunner::Pytest => {
             envs.push(("PX_TEST_RUNNER".into(), "pytest".into()));
-            run_pytest_runner(ctx, py_ctx, envs, &request.args, stream_runner)?
+            run_pytest_runner(
+                ctx,
+                py_ctx,
+                envs,
+                &request.args,
+                stream_runner,
+                allow_missing_pytest_fallback,
+            )?
         }
     };
     attach_autosync_details(&mut outcome, sync_report);

@@ -30,9 +30,10 @@ use pep508_rs::MarkerEnvironment;
 use px_domain::LockSnapshot;
 use px_domain::{
     analyze_lock_diff, autopin_pin_key, autopin_spec_key, detect_lock_drift, format_specifier,
-    load_lockfile_optional, marker_applies, merge_resolved_dependencies, render_lockfile, resolve,
-    spec_requires_pin, verify_locked_artifacts, AutopinEntry, InstallOverride, PinSpec,
-    ProjectSnapshot, PxOptions, ResolverRequest, ResolverTags,
+    load_lockfile_optional, marker_applies, merge_resolved_dependencies, missing_project_guidance,
+    render_lockfile, resolve, spec_requires_pin, verify_locked_artifacts, AutopinEntry,
+    InstallOverride, MissingProjectGuidance, PinSpec, ProjectSnapshot, PxOptions, ResolverRequest,
+    ResolverTags,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -295,8 +296,7 @@ impl fmt::Display for CommandGroup {
     }
 }
 
-pub const MISSING_PROJECT_MESSAGE: &str =
-    "No px project found. Run `px init` in your project directory first.";
+pub const MISSING_PROJECT_MESSAGE: &str = "No px project found.";
 pub const MISSING_PROJECT_HINT: &str = "Run `px init` in your project directory first.";
 
 pub(crate) struct InstallOutcome {
@@ -2337,6 +2337,10 @@ impl EnvironmentSyncReport {
         }
     }
 
+    pub(crate) fn action(&self) -> &str {
+        self.action
+    }
+
     fn to_json(&self) -> Value {
         json!({
             "action": self.action,
@@ -3856,11 +3860,15 @@ pub(crate) fn python_context_with_mode(
 }
 
 pub fn missing_project_outcome() -> ExecutionOutcome {
+    let guidance = missing_project_guidance().unwrap_or_else(|_| MissingProjectGuidance {
+        message: MISSING_PROJECT_MESSAGE.to_string(),
+        hint: MISSING_PROJECT_HINT.to_string(),
+    });
     ExecutionOutcome::user_error(
-        MISSING_PROJECT_MESSAGE,
+        guidance.message.clone(),
         json!({
             "reason": "missing_project",
-            "hint": MISSING_PROJECT_HINT,
+            "hint": guidance.hint,
         }),
     )
 }

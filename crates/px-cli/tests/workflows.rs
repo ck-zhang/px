@@ -19,7 +19,7 @@ fn run_prints_fixture_output() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
-        .args(["run", "sample_px_app/cli.py", "--", "-n", "PxTest"])
+        .args(["run", "sample_px_app/cli.py", "-n", "PxTest"])
         .assert()
         .success();
 
@@ -27,6 +27,61 @@ fn run_prints_fixture_output() {
     assert!(
         stdout.contains("Hello, PxTest!"),
         "run should print greeting, got {stdout:?}"
+    );
+}
+
+#[test]
+fn run_forwards_arguments_without_separator() {
+    let _guard = common::test_env_guard();
+    let (_tmp, project) = prepare_fixture("run-no-separator");
+    let Some(python) = find_python() else {
+        eprintln!("skipping separator test (python binary not found)");
+        return;
+    };
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["run", "sample_px_app/cli.py", "-n", "DirectName"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("Hello, DirectName!"),
+        "run should forward args without requiring -- separator: {stdout:?}"
+    );
+}
+
+#[test]
+fn run_treats_flags_after_target_as_script_args() {
+    let _guard = common::test_env_guard();
+    let (_tmp, project) = prepare_fixture("run-forward-flags");
+    let Some(python) = find_python() else {
+        eprintln!("skipping flag-forwarding test (python binary not found)");
+        return;
+    };
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args([
+            "run",
+            "python",
+            "-c",
+            "import sys; print(' '.join(sys.argv[1:]))",
+            "--json",
+            "--frozen",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("--json") && stdout.contains("--frozen"),
+        "flags after the target should be forwarded verbatim: {stdout:?}"
+    );
+    assert!(
+        !stdout.trim_start().starts_with('{'),
+        "px should not enable JSON output when --json follows the target: {stdout:?}"
     );
 }
 
@@ -83,7 +138,6 @@ fn run_supports_python_passthrough_invocations() {
             "--json",
             "run",
             "python",
-            "--",
             "-m",
             "sample_px_app.cli",
             "-n",
@@ -208,7 +262,7 @@ fn run_frozen_errors_when_environment_missing() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
-        .args(["--json", "run", "sample_px_app/cli.py", "--frozen"])
+        .args(["--json", "run", "--frozen", "sample_px_app/cli.py"])
         .assert()
         .failure();
 
@@ -241,7 +295,7 @@ fn run_frozen_errors_when_lock_missing() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
-        .args(["--json", "run", "sample_px_app/cli.py", "--frozen"])
+        .args(["--json", "run", "--frozen", "sample_px_app/cli.py"])
         .assert()
         .failure();
 
@@ -273,7 +327,7 @@ fn run_frozen_errors_when_env_outdated() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
-        .args(["--json", "run", "sample_px_app/cli.py", "--frozen"])
+        .args(["--json", "run", "--frozen", "sample_px_app/cli.py"])
         .assert()
         .failure();
 
@@ -325,7 +379,7 @@ fn run_frozen_errors_on_runtime_mismatch() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
-        .args(["--json", "run", "sample_px_app/cli.py", "--frozen"])
+        .args(["--json", "run", "--frozen", "sample_px_app/cli.py"])
         .assert()
         .failure();
 
@@ -372,7 +426,7 @@ fn run_accepts_post_subcommand_json_flag() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
-        .args(["run", "--json", "sample_px_app/cli.py", "--", "JsonInline"])
+        .args(["run", "--json", "sample_px_app/cli.py", "JsonInline"])
         .assert()
         .success();
 
@@ -459,9 +513,8 @@ fn run_rejects_dry_run_flag() {
         String::from_utf8_lossy(assert.get_output().stderr.as_slice())
     );
     assert!(
-        output.contains("Found argument '--dry-run'")
-            || output.contains("unexpected argument '--dry-run'"),
-        "run should reject unsupported dry-run flag, got output: {output:?}"
+        output.contains("No px project found"),
+        "run without a project should report missing project for trailing --dry-run: {output:?}"
     );
 }
 

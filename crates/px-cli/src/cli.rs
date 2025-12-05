@@ -138,7 +138,7 @@ pub enum CommandGroupCli {
     Update(SpecArgs),
     #[command(
         about = "Run scripts/tasks with auto-sync unless --frozen or CI=1.",
-        override_usage = "px run [ENTRY] [-- <ARG>...]"
+        override_usage = "px run <TARGET> [ARG...]"
     )]
     Run(RunArgs),
     #[command(
@@ -347,11 +347,6 @@ pub struct SyncArgs {
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
-    #[arg(
-        value_name = "ENTRY",
-        help = "Module or script name (omit to use the inferred default)"
-    )]
-    pub entry: Option<String>,
     #[arg(long)]
     pub target: Option<String>,
     #[arg(long, help = "Force interactive stdio (inherit stdin/stdout/stderr)")]
@@ -374,12 +369,13 @@ pub struct RunArgs {
     )]
     pub at: Option<String>,
     #[arg(
-        value_name = "ARG",
+        value_name = "TARGET",
         trailing_var_arg = true,
         allow_hyphen_values = true,
-        help = "Arguments forwarded to the entry or executable"
+        num_args = 0..,
+        help = "Target to run followed by any arguments to pass through"
     )]
-    pub args: Vec<String>,
+    pub target_args: Vec<String>,
 }
 
 #[derive(Args, Debug)]

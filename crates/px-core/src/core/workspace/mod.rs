@@ -634,7 +634,12 @@ fn refresh_workspace_site(ctx: &CommandContext, workspace: &WorkspaceSnapshot) -
         id: cas_profile.profile_oid.clone(),
         lock_id,
         platform: runtime.platform.clone(),
-        site_packages: cas_profile.env_path.display().to_string(),
+        site_packages: crate::core::runtime::site_packages_dir(
+            &cas_profile.env_path,
+            &runtime.version,
+        )
+        .display()
+        .to_string(),
         env_path: Some(cas_profile.env_path.display().to_string()),
         profile_oid: Some(cas_profile.profile_oid.clone()),
         python: crate::StoredPython {
