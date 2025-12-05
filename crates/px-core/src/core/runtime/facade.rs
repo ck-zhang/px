@@ -3409,17 +3409,26 @@ fn expected_pxpth_entries(manifest: &EnvManifest, store_root: &Path) -> Vec<Path
 }
 
 fn is_allowed_site_entry(name: &str) -> bool {
-    if name == "px.pth" || name == "sitecustomize.py" || name == "__pycache__" {
-        return true;
-    }
-    name.strip_prefix("pip")
-        .map(|suffix| {
-            suffix.is_empty()
-                || suffix
-                    .chars()
-                    .all(|ch| ch.is_ascii_digit() || ch == '.' || ch == '-')
+    matches!(name, "px.pth" | "sitecustomize.py" | "__pycache__")
+        || name.strip_prefix("pip").map_or(false, |suffix| {
+            if suffix.is_empty() {
+                return true;
+            }
+            let mut suffix = suffix;
+            if let Some(rest) = suffix.strip_prefix('-') {
+                suffix = rest;
+            }
+            if let Some(rest) = suffix
+                .strip_suffix(".dist-info")
+                .or_else(|| suffix.strip_suffix(".data"))
+                .or_else(|| suffix.strip_suffix(".egg-info"))
+            {
+                suffix = rest;
+            }
+            suffix
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || ch == '.' || ch == '-')
         })
-        .unwrap_or(false)
 }
 
 fn validate_env_site_packages(
@@ -4138,6 +4147,8 @@ build-backend = "setuptools.build_meta"
             env_root.join("bin").join("pip").exists() || env_root.join("bin").join("pip3").exists(),
             "pip entrypoint should be generated under site/bin"
         );
+        validate_cas_environment(&env)
+            .expect("pip bootstrap should keep CAS site in a clean state");
 
         for (key, value) in saved_env {
             match value {
