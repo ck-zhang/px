@@ -19,7 +19,8 @@ pep440_rs.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 pep508_rs = "0.5"
-flate2 = "1.0"
+# flate2 1.1.6 introduced ambiguous re-exports; pin to the last good release for stable builds.
+flate2 = "=1.1.5"
 tar = "0.4"
 zip.workspace = true
 time.workspace = true

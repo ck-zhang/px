@@ -8,11 +8,7 @@ use std::{
     str::FromStr,
 };
 #[cfg(test)]
-use std::{
-    fs::File,
-    io::Read,
-    sync::{Mutex, OnceLock},
-};
+use std::{fs::File, io::Read};
 
 use crate::context::{CommandContext, CommandInfo};
 use crate::core::tooling::diagnostics;
@@ -24,6 +20,7 @@ use crate::progress::ProgressReporter;
 use crate::python_sys::{detect_interpreter, detect_interpreter_tags, detect_marker_environment};
 use crate::store::cas::{
     global_store, run_gc_with_env_policy, LoadedObject, OwnerId, OwnerType, ProfilePackage,
+    MATERIALIZED_PKG_BUILDS_DIR,
 };
 use crate::tools::disable_proxy_env;
 use crate::traceback::{analyze_python_traceback, TracebackContext};
@@ -3354,17 +3351,158 @@ pub(crate) fn ensure_project_environment_synced(
     ensure_env_matches_lock(ctx, snapshot, &lock_id)
 }
 
+#[derive(Deserialize)]
+struct EnvManifest {
+    profile_oid: String,
+    runtime_oid: String,
+    packages: Vec<ProfilePackage>,
+    #[serde(default)]
+    sys_path_order: Vec<String>,
+}
+
+fn expected_pxpth_entries(manifest: &EnvManifest, store_root: &Path) -> Vec<PathBuf> {
+    let mut expected = Vec::new();
+    let mut seen = HashSet::new();
+    let ordered: Vec<String> = if manifest.sys_path_order.is_empty() {
+        manifest
+            .packages
+            .iter()
+            .map(|pkg| pkg.pkg_build_oid.clone())
+            .collect()
+    } else {
+        manifest.sys_path_order.clone()
+    };
+    for oid in ordered {
+        if seen.insert(oid.clone()) {
+            let path = store_root
+                .join(MATERIALIZED_PKG_BUILDS_DIR)
+                .join(&oid)
+                .join("site-packages");
+            if path.exists() {
+                expected.push(path);
+            }
+        }
+    }
+    for pkg in &manifest.packages {
+        if seen.insert(pkg.pkg_build_oid.clone()) {
+            let path = store_root
+                .join(MATERIALIZED_PKG_BUILDS_DIR)
+                .join(&pkg.pkg_build_oid)
+                .join("site-packages");
+            if path.exists() {
+                expected.push(path);
+            }
+        }
+    }
+    expected
+}
+
+fn is_allowed_site_entry(name: &str) -> bool {
+    if name == "px.pth" || name == "sitecustomize.py" || name == "__pycache__" {
+        return true;
+    }
+    name.strip_prefix("pip")
+        .map(|suffix| {
+            suffix.is_empty()
+                || suffix
+                    .chars()
+                    .all(|ch| ch.is_ascii_digit() || ch == '.' || ch == '-')
+        })
+        .unwrap_or(false)
+}
+
+fn validate_env_site_packages(
+    site_packages: &Path,
+    manifest: &EnvManifest,
+    store_root: &Path,
+) -> Result<(), InstallUserError> {
+    let entries = fs::read_dir(site_packages).map_err(|err| {
+        InstallUserError::new(
+            "unable to read environment site-packages",
+            json!({
+                "site": site_packages.display().to_string(),
+                "error": err.to_string(),
+                "reason": "missing_env",
+                "code": diagnostics::cas::MISSING_OR_CORRUPT,
+                "hint": "run `px sync` to refresh the environment",
+            }),
+        )
+    })?;
+    let mut unexpected = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_allowed_site_entry(name) {
+            unexpected.push(name.to_string());
+        }
+    }
+    if !unexpected.is_empty() {
+        return Err(InstallUserError::new(
+            "environment site-packages drifted from CAS profile",
+            json!({
+                "site": site_packages.display().to_string(),
+                "unexpected": unexpected,
+                "reason": "env_outdated",
+                "code": diagnostics::cas::MISSING_OR_CORRUPT,
+                "hint": "run `px sync` to refresh the environment",
+            }),
+        ));
+    }
+
+    let pth_path = site_packages.join("px.pth");
+    let contents = fs::read_to_string(&pth_path).map_err(|err| {
+        InstallUserError::new(
+            "environment px.pth missing or unreadable",
+            json!({
+                "site": site_packages.display().to_string(),
+                "pth": pth_path.display().to_string(),
+                "error": err.to_string(),
+                "reason": "missing_env",
+                "code": diagnostics::cas::MISSING_OR_CORRUPT,
+                "hint": "run `px sync` to refresh the environment",
+            }),
+        )
+    })?;
+    let actual_paths: HashSet<PathBuf> = contents
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(trimmed))
+            }
+        })
+        .collect();
+    let expected_paths = expected_pxpth_entries(manifest, store_root);
+    let expected_set: HashSet<PathBuf> = expected_paths.iter().cloned().collect();
+    if actual_paths != expected_set {
+        return Err(InstallUserError::new(
+            "environment px.pth drifted from CAS profile",
+            json!({
+                "site": site_packages.display().to_string(),
+                "expected_px_pth": expected_paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>(),
+                "px_pth": actual_paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>(),
+                "reason": "env_outdated",
+                "code": diagnostics::cas::MISSING_OR_CORRUPT,
+                "hint": "run `px sync` to refresh the environment",
+            }),
+        ));
+    }
+
+    Ok(())
+}
+
 pub(crate) fn validate_cas_environment(env: &StoredEnvironment) -> Result<()> {
     if let Some(profile_oid) = env.profile_oid.as_deref() {
-        #[derive(Deserialize)]
-        struct EnvManifest {
-            profile_oid: String,
-            runtime_oid: String,
-            packages: Vec<ProfilePackage>,
-            #[serde(default)]
-            sys_path_order: Vec<String>,
-        }
-
         let store = global_store();
         let profile = match store.load(profile_oid) {
             Ok(LoadedObject::Profile { header, .. }) => header,
@@ -3447,6 +3585,9 @@ pub(crate) fn validate_cas_environment(env: &StoredEnvironment) -> Result<()> {
             )
             .into());
         }
+
+        validate_env_site_packages(&PathBuf::from(&env.site_packages), &manifest, store.root())
+            .map_err(anyhow::Error::from)?;
 
         let mut expected = profile.packages.clone();
         expected.sort_by(|a, b| {
@@ -3831,7 +3972,7 @@ mod tests {
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, OnceLock};
     use tempfile::tempdir;
     use zip::write::FileOptions;
 
@@ -4070,6 +4211,75 @@ build-backend = "setuptools.build_meta"
                 .flatten()
                 .any(|entry| entry.path().join("PX-EDITABLE").exists()),
             "editable dist-info should be preserved for pip"
+        );
+
+        for (key, value) in saved_env {
+            match value {
+                Some(prev) => env::set_var(key, prev),
+                None => env::remove_var(key),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn validate_env_detects_untracked_site_packages_entries() -> Result<()> {
+        let _lock = PIP_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let saved_env = vec![
+            ("PX_CACHE_PATH", env::var("PX_CACHE_PATH").ok()),
+            ("PX_STORE_PATH", env::var("PX_STORE_PATH").ok()),
+            ("PX_ENVS_PATH", env::var("PX_ENVS_PATH").ok()),
+        ];
+        let temp_env = tempdir()?;
+        let env_root = temp_env.path();
+        env::set_var("PX_CACHE_PATH", env_root.join("cache"));
+        env::set_var("PX_STORE_PATH", env_root.join("store"));
+        env::set_var("PX_ENVS_PATH", env_root.join("envs"));
+
+        let temp = tempdir()?;
+        let project_root = temp.path();
+        fs::write(
+            project_root.join("pyproject.toml"),
+            r#"[project]
+name = "drift-demo"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+"#,
+        )?;
+        let snapshot = px_domain::project::snapshot::ProjectSnapshot::read_from(project_root)?;
+        let lock = render_lockfile(&snapshot, &Vec::<ResolvedDependency>::new(), PX_VERSION)?;
+        fs::write(project_root.join("px.lock"), lock)?;
+
+        let global = GlobalOptions::default();
+        let ctx = CommandContext::new(&global, Arc::new(SystemEffects::new()))?;
+        refresh_project_site(&snapshot, &ctx)?;
+
+        let state = load_project_state(ctx.fs(), project_root)?;
+        let env = state.current_env.expect("env stored");
+        let site_packages = PathBuf::from(&env.site_packages);
+        fs::create_dir_all(&site_packages)?;
+        fs::write(site_packages.join("stray.py"), "print('oops')\n")?;
+
+        let err = validate_cas_environment(&env).unwrap_err();
+        let user = err
+            .downcast::<InstallUserError>()
+            .expect("user-facing error");
+        assert_eq!(
+            user.details
+                .get("reason")
+                .and_then(serde_json::Value::as_str),
+            Some("env_outdated")
+        );
+        assert!(
+            user.message.contains("site-packages"),
+            "expected site-packages drift message, got {}",
+            user.message
         );
 
         for (key, value) in saved_env {

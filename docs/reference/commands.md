@@ -186,7 +186,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 ### `px migrate` / `px migrate --apply`
 
 * `px migrate` – reads legacy inputs (requirements.txt, Pipfile, poetry.lock, existing venv) and prints a proposed manifest/lock/env plan; no writes.
-* `px migrate --apply` – applies the plan: updates `pyproject.toml`, writes `px.lock`, builds env under `.px/`; leaves legacy files untouched; must not leave partial state on failure. When px scaffolds or migrates a Hatch/Hatchling project and writes `pyproject.toml`, it ensures the `px-dev` group includes `tomli-w>=1.0.0` so px can emit TOML; expect that dev helper to be added if it was missing.
+* `px migrate --apply` – applies the plan: updates `pyproject.toml`, writes `px.lock`, builds env under `.px/`; leaves legacy files untouched; must not leave partial state on failure. When px scaffolds or migrates a Hatch/Hatchling project and writes `pyproject.toml`, it ensures the `px-dev` group includes `tomli-w>=1.0.0` so px can emit TOML; expect that dev helper to be added if it was missing. If `pyproject.toml` declares dependency ownership under another tool (e.g. `[tool.poetry.dependencies]`), px refuses to apply and asks you to remove/convert those sections first.
 
 ### Workspace-aware semantics
 

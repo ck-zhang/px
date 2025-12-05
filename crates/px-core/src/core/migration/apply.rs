@@ -390,6 +390,17 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         return Ok(ExecutionOutcome::success(message, details));
     }
 
+    if write_requested && !foreign_owners.is_empty() {
+        let owners = foreign_owners.join(", ");
+        details["hint"] = Value::String(format!(
+            "pyproject is still owned by {owners}; remove or convert those dependency sections before migrating with px.",
+        ));
+        return Ok(ExecutionOutcome::failure(
+            "px migrate: pyproject managed by a foreign tool; aborting",
+            details,
+        ));
+    }
+
     if write_requested && !ctx.config().network.online {
         details["hint"] = Value::String(
             "PX_ONLINE=1 required for `px migrate --apply`; rerun with network access or drop --apply for preview.".to_string(),
