@@ -505,7 +505,10 @@ mod tests {
         let second = compute_build_options_hash(&python, BuildMethod::PipWheel)?;
 
         restore_env(key, original);
-        assert_ne!(first, second, "hash should change when rust build env changes");
+        assert_ne!(
+            first, second,
+            "hash should change when rust build env changes"
+        );
         Ok(())
     }
 

@@ -23,7 +23,7 @@ use crate::store::cas::{
     source_lookup_key, LoadedObject, ObjectKind, ObjectPayload, OwnerId, OwnerType, PkgBuildHeader,
     ProfilePackage, SourceHeader, MATERIALIZED_PKG_BUILDS_DIR,
 };
-use crate::store::{ensure_wheel_dist, wheel_build_options_hash};
+use crate::store::{ensure_wheel_dist, wheel_build_options_hash, ArtifactRequest};
 use crate::traceback::{analyze_python_traceback, TracebackContext};
 use anyhow::{anyhow, bail, Context, Result};
 use hex;
@@ -238,6 +238,8 @@ except Exception:
     pass
 
 "#;
+
+const SETUPTOOLS_SEED_VERSION: &str = "80.9.0";
 
 pub(crate) type ManifestSnapshot = ProjectSnapshot;
 
@@ -572,36 +574,12 @@ pub(crate) fn refresh_project_site(
     Ok(())
 }
 
-fn ensure_project_pip(
+fn project_site_env(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
     site_dir: &Path,
-    runtime: &RuntimeMetadata,
     env_python: &Path,
-) -> Result<()> {
-    let debug_pip = std::env::var("PX_DEBUG_PIP").is_ok();
-    if std::env::var("PX_NO_ENSUREPIP")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
-        return Ok(());
-    }
-    let site_packages = site_packages_dir(site_dir, &runtime.version);
-    let pip_installed = has_pip_in_site(&site_packages);
-    let pip_editable = has_px_editable_stub(site_dir, &normalize_project_name("pip"));
-    let pip_entrypoints =
-        site_dir.join("bin").join("pip").exists() || site_dir.join("bin").join("pip3").exists();
-    if debug_pip {
-        eprintln!(
-            "pip bootstrap: installed={pip_installed} editable={pip_editable} entrypoints={pip_entrypoints} site={} root={}",
-            site_packages.display(),
-            site_dir.display()
-        );
-    }
-    if (pip_installed || pip_editable) && pip_entrypoints {
-        return Ok(());
-    }
-
+) -> Result<Vec<(String, String)>> {
     let paths = build_pythonpath(ctx.fs(), &snapshot.root, Some(site_dir.to_path_buf()))?;
     let allowed = env::join_paths(&paths.allowed_paths)
         .context("allowed path contains invalid UTF-8")?
@@ -635,6 +613,203 @@ fn ensure_project_pip(
         }
     }
     disable_proxy_env(&mut envs);
+    Ok(envs)
+}
+
+fn ensure_project_pip(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+    site_dir: &Path,
+    runtime: &RuntimeMetadata,
+    env_python: &Path,
+) -> Result<()> {
+    let debug_pip = std::env::var("PX_DEBUG_PIP").is_ok();
+    if std::env::var("PX_NO_ENSUREPIP")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let site_packages = site_packages_dir(site_dir, &runtime.version);
+    let pip_installed = has_pip_in_site(&site_packages);
+    let pip_editable = has_px_editable_stub(site_dir, &normalize_project_name("pip"));
+    let pip_entrypoints =
+        site_dir.join("bin").join("pip").exists() || site_dir.join("bin").join("pip3").exists();
+    if debug_pip {
+        eprintln!(
+            "pip bootstrap: installed={pip_installed} editable={pip_editable} entrypoints={pip_entrypoints} site={} root={}",
+            site_packages.display(),
+            site_dir.display()
+        );
+    }
+
+    let envs = project_site_env(ctx, snapshot, site_dir, env_python)?;
+    if !(pip_installed || pip_editable) || !pip_entrypoints {
+        let output = ctx.python_runtime().run_command(
+            env_python
+                .to_str()
+                .ok_or_else(|| anyhow!("invalid python path"))?,
+            &[
+                "-m".to_string(),
+                "ensurepip".to_string(),
+                "--default-pip".to_string(),
+                "--upgrade".to_string(),
+                "--user".to_string(),
+            ],
+            &envs,
+            &snapshot.root,
+        )?;
+        if output.code != 0 {
+            let mut message = String::from("failed to bootstrap pip in the px environment");
+            if !output.stderr.trim().is_empty() {
+                message.push_str(": ");
+                message.push_str(output.stderr.trim());
+            }
+            if output.stderr.trim().is_empty() && !output.stdout.trim().is_empty() {
+                message.push_str(": ");
+                message.push_str(output.stdout.trim());
+            }
+            if debug_pip {
+                eprintln!(
+                    "ensurepip failed stdout={}, stderr={}",
+                    output.stdout, output.stderr
+                );
+            }
+            bail!(message);
+        }
+        if debug_pip {
+            eprintln!(
+                "ensurepip ok stdout={}, stderr={}",
+                output.stdout.trim(),
+                output.stderr.trim()
+            );
+        }
+        link_runtime_pip(
+            &site_packages,
+            &site_dir.join("bin"),
+            Path::new(&runtime.path),
+            &runtime.version,
+        )?;
+        if debug_pip {
+            let after_link = has_pip_in_site(&site_packages);
+            eprintln!(
+                "post-ensurepip pip_present={} entries={:?}",
+                after_link,
+                fs::read_dir(&site_packages).ok().map(|iter| {
+                    iter.flatten()
+                        .map(|e| e.file_name().to_string_lossy().to_string())
+                        .collect::<Vec<_>>()
+                })
+            );
+        }
+        if !has_pip_in_site(&site_packages) {
+            bail!("failed to bootstrap pip in the px environment: pip not installed");
+        }
+    }
+    ensure_setuptools_seed(ctx, snapshot, &site_packages, env_python, &envs)?;
+
+    Ok(())
+}
+
+fn module_available(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+    env_python: &Path,
+    envs: &[(String, String)],
+    module: &str,
+) -> Result<bool> {
+    let script = format!(
+        "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec({module:?}) else 1)"
+    );
+    let output = ctx.python_runtime().run_command(
+        env_python
+            .to_str()
+            .ok_or_else(|| anyhow!("invalid python path"))?,
+        &["-c".to_string(), script],
+        envs,
+        &snapshot.root,
+    )?;
+    Ok(output.code == 0)
+}
+
+fn ensure_setuptools_seed(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+    site_packages: &Path,
+    env_python: &Path,
+    envs: &[(String, String)],
+) -> Result<()> {
+    if module_available(ctx, snapshot, env_python, envs, "setuptools")? {
+        return Ok(());
+    }
+
+    let release = ctx
+        .pypi()
+        .fetch_release(
+            "setuptools",
+            SETUPTOOLS_SEED_VERSION,
+            &format!("setuptools=={SETUPTOOLS_SEED_VERSION}"),
+        )
+        .map_err(|err| {
+            InstallUserError::new(
+                "failed to locate setuptools for the px environment",
+                json!({
+                    "package": "setuptools",
+                    "version": SETUPTOOLS_SEED_VERSION,
+                    "error": err.to_string(),
+                    "reason": "missing_artifacts",
+                    "hint": "ensure network access or prefetch artifacts, then rerun `px sync`",
+                }),
+            )
+        })?;
+    let wheel = release
+        .urls
+        .iter()
+        .filter(|file| file.packagetype == "bdist_wheel" && !file.yanked.unwrap_or(false))
+        .find(|file| file.filename.ends_with("py3-none-any.whl"))
+        .or_else(|| {
+            release
+                .urls
+                .iter()
+                .find(|file| file.packagetype == "bdist_wheel" && !file.yanked.unwrap_or(false))
+        })
+        .cloned()
+        .ok_or_else(|| {
+            InstallUserError::new(
+                "setuptools wheel unavailable for the px environment",
+                json!({
+                    "package": "setuptools",
+                    "version": SETUPTOOLS_SEED_VERSION,
+                    "reason": "missing_artifacts",
+                    "hint": "rerun with network access to refresh the wheel cache",
+                }),
+            )
+        })?;
+    let filename = wheel.filename.clone();
+    let url = wheel.url.clone();
+    let sha256 = wheel.digests.sha256.clone();
+    let request = ArtifactRequest {
+        name: "setuptools",
+        version: SETUPTOOLS_SEED_VERSION,
+        filename: &filename,
+        url: &url,
+        sha256: &sha256,
+    };
+    let cached = ctx
+        .cache_store()
+        .cache_wheel(&ctx.cache().path, &request)
+        .map_err(|err| {
+            InstallUserError::new(
+                "failed to cache setuptools for the px environment",
+                json!({
+                    "package": "setuptools",
+                    "version": SETUPTOOLS_SEED_VERSION,
+                    "error": err.to_string(),
+                    "reason": "missing_artifacts",
+                    "hint": "rerun with network access to refresh the cache",
+                }),
+            )
+        })?;
 
     let output = ctx.python_runtime().run_command(
         env_python
@@ -642,16 +817,22 @@ fn ensure_project_pip(
             .ok_or_else(|| anyhow!("invalid python path"))?,
         &[
             "-m".to_string(),
-            "ensurepip".to_string(),
-            "--default-pip".to_string(),
-            "--upgrade".to_string(),
-            "--user".to_string(),
+            "pip".to_string(),
+            "install".to_string(),
+            "--no-deps".to_string(),
+            "--no-index".to_string(),
+            "--disable-pip-version-check".to_string(),
+            "--no-compile".to_string(),
+            "--no-warn-script-location".to_string(),
+            "--target".to_string(),
+            site_packages.display().to_string(),
+            cached.wheel_path.display().to_string(),
         ],
-        &envs,
+        envs,
         &snapshot.root,
     )?;
     if output.code != 0 {
-        let mut message = String::from("failed to bootstrap pip in the px environment");
+        let mut message = String::from("failed to seed setuptools in the px environment");
         if !output.stderr.trim().is_empty() {
             message.push_str(": ");
             message.push_str(output.stderr.trim());
@@ -660,41 +841,28 @@ fn ensure_project_pip(
             message.push_str(": ");
             message.push_str(output.stdout.trim());
         }
-        if debug_pip {
-            eprintln!(
-                "ensurepip failed stdout={}, stderr={}",
-                output.stdout, output.stderr
-            );
-        }
-        bail!(message);
+        return Err(InstallUserError::new(
+            message,
+            json!({
+                "package": "setuptools",
+                "version": SETUPTOOLS_SEED_VERSION,
+                "reason": "missing_artifacts",
+            }),
+        )
+        .into());
     }
-    if debug_pip {
-        eprintln!(
-            "ensurepip ok stdout={}, stderr={}",
-            output.stdout.trim(),
-            output.stderr.trim()
-        );
-    }
-    link_runtime_pip(
-        &site_packages,
-        &site_dir.join("bin"),
-        Path::new(&runtime.path),
-        &runtime.version,
-    )?;
-    if debug_pip {
-        let after_link = has_pip_in_site(&site_packages);
-        eprintln!(
-            "post-ensurepip pip_present={} entries={:?}",
-            after_link,
-            fs::read_dir(&site_packages).ok().map(|iter| {
-                iter.flatten()
-                    .map(|e| e.file_name().to_string_lossy().to_string())
-                    .collect::<Vec<_>>()
-            })
-        );
-    }
-    if !has_pip_in_site(&site_packages) {
-        bail!("failed to bootstrap pip in the px environment: pip not installed");
+
+    if !module_available(ctx, snapshot, env_python, envs, "setuptools")? {
+        return Err(InstallUserError::new(
+            "setuptools seed did not install correctly",
+            json!({
+                "package": "setuptools",
+                "version": SETUPTOOLS_SEED_VERSION,
+                "reason": "missing_artifacts",
+                "hint": "rerun `px sync` to refresh the environment",
+            }),
+        )
+        .into());
     }
 
     Ok(())
@@ -1141,13 +1309,8 @@ fn ensure_project_wheel_scripts(
     let sha256 = compute_file_sha256(&wheel_path)?;
     let dist_dir = ensure_wheel_dist(&wheel_path, &sha256)?;
     let (pkg_name, pkg_version) = wheel_metadata(&dist_dir)?;
-    let pkg_oid = store_project_wheel_in_cas(
-        &wheel_path,
-        &sha256,
-        &dist_dir,
-        &python_path,
-        &build_hash,
-    )?;
+    let pkg_oid =
+        store_project_wheel_in_cas(&wheel_path, &sha256, &dist_dir, &python_path, &build_hash)?;
 
     materialize_wheel_scripts(&dist_dir, &bin_dir, python_for_scripts)
         .with_context(|| format!("installing project scripts from {}", wheel_path.display()))?;
@@ -3891,27 +4054,39 @@ fn expected_pxpth_entries(manifest: &EnvManifest, store_root: &Path) -> Vec<Path
     expected
 }
 
+fn matches_versioned_entry(name: &str, base: &str) -> bool {
+    let Some(mut suffix) = name.strip_prefix(base) else {
+        return false;
+    };
+    if suffix.is_empty() {
+        return true;
+    }
+    if let Some(rest) = suffix.strip_prefix('-') {
+        suffix = rest;
+    }
+    if let Some(rest) = suffix
+        .strip_suffix(".dist-info")
+        .or_else(|| suffix.strip_suffix(".data"))
+        .or_else(|| suffix.strip_suffix(".egg-info"))
+    {
+        suffix = rest;
+    }
+    suffix
+        .chars()
+        .all(|ch| ch.is_ascii_digit() || ch == '.' || ch == '-')
+}
+
 fn is_allowed_site_entry(name: &str) -> bool {
-    matches!(name, "px.pth" | "sitecustomize.py" | "__pycache__")
-        || name.strip_prefix("pip").is_some_and(|suffix| {
-            if suffix.is_empty() {
-                return true;
-            }
-            let mut suffix = suffix;
-            if let Some(rest) = suffix.strip_prefix('-') {
-                suffix = rest;
-            }
-            if let Some(rest) = suffix
-                .strip_suffix(".dist-info")
-                .or_else(|| suffix.strip_suffix(".data"))
-                .or_else(|| suffix.strip_suffix(".egg-info"))
-            {
-                suffix = rest;
-            }
-            suffix
-                .chars()
-                .all(|ch| ch.is_ascii_digit() || ch == '.' || ch == '-')
-        })
+    matches!(
+        name,
+        "px.pth"
+            | "sitecustomize.py"
+            | "__pycache__"
+            | "distutils-precedence.pth"
+            | "pkg_resources"
+    ) || matches_versioned_entry(name, "pip")
+        || matches_versioned_entry(name, "setuptools")
+        || matches_versioned_entry(name, "_distutils_hack")
 }
 
 fn validate_env_site_packages(
@@ -4267,8 +4442,48 @@ pub fn ensure_env_matches_lock(
     }
 
     validate_cas_environment(&env)?;
+    ensure_packaging_seeds_present(ctx, snapshot, &env)?;
 
     Ok(())
+}
+
+fn env_root_from_site_packages(site_packages: &Path) -> Option<PathBuf> {
+    site_packages
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(PathBuf::from)
+}
+
+fn ensure_packaging_seeds_present(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+    env: &StoredEnvironment,
+) -> Result<()> {
+    let env_root = env
+        .env_path
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| env_root_from_site_packages(Path::new(&env.site_packages)));
+    let Some(site_dir) = env_root else {
+        return Ok(());
+    };
+    let env_python = PathBuf::from(&env.python.path);
+    let envs = project_site_env(ctx, snapshot, &site_dir, &env_python)?;
+    if module_available(ctx, snapshot, &env_python, &envs, "setuptools")? {
+        return Ok(());
+    }
+
+    Err(InstallUserError::new(
+        "environment missing baseline packaging support",
+        json!({
+            "missing": ["setuptools"],
+            "reason": "env_outdated",
+            "code": diagnostics::cas::MISSING_OR_CORRUPT,
+            "hint": "run `px sync` to refresh the environment",
+        }),
+    )
+    .into())
 }
 
 pub(crate) fn ensure_environment_with_guard(
@@ -4645,7 +4860,10 @@ build-backend = "maturin"
             None => env::remove_var(key),
         }
 
-        assert_ne!(first_hash, second_hash, "build hash should reflect build env");
+        assert_ne!(
+            first_hash, second_hash,
+            "build hash should reflect build env"
+        );
 
         let first_dir = project_wheel_cache_dir(
             &cache_root,
@@ -4663,7 +4881,10 @@ build-backend = "maturin"
             false,
             &second_hash,
         );
-        assert_ne!(first_dir, second_dir, "cache dir should vary when build hash changes");
+        assert_ne!(
+            first_dir, second_dir,
+            "cache dir should vary when build hash changes"
+        );
         Ok(())
     }
 
@@ -4697,18 +4918,16 @@ build-backend = "maturin"
             version: "3.12.0".into(),
             platform: "test-platform".into(),
         };
-        let build_hash =
-            project_build_hash(&runtime, &snapshot, Path::new(&python), false)?;
+        let build_hash = project_build_hash(&runtime, &snapshot, Path::new(&python), false)?;
         let cache_root = temp.path().join("cache");
-        let cache_dir =
-            project_wheel_cache_dir(
-                &cache_root,
-                &snapshot,
-                &runtime,
-                Path::new(&python),
-                false,
-                &build_hash,
-            );
+        let cache_dir = project_wheel_cache_dir(
+            &cache_root,
+            &snapshot,
+            &runtime,
+            Path::new(&python),
+            false,
+            &build_hash,
+        );
         let ensure_dir = project_wheel_cache_dir(
             &cache_root,
             &snapshot,
@@ -4888,6 +5107,88 @@ build-backend = "setuptools.build_meta"
         );
         validate_cas_environment(&env)
             .expect("pip bootstrap should keep CAS site in a clean state");
+
+        for (key, value) in saved_env {
+            match value {
+                Some(prev) => env::set_var(key, prev),
+                None => env::remove_var(key),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn refresh_project_site_bootstraps_setuptools() -> Result<()> {
+        let _lock = PIP_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        if env::var("PX_ONLINE").unwrap_or_default() != "1" {
+            eprintln!("skipping setuptools bootstrap test (PX_ONLINE!=1)");
+            return Ok(());
+        }
+        let saved_env = vec![
+            ("PX_CACHE_PATH", env::var("PX_CACHE_PATH").ok()),
+            ("PX_STORE_PATH", env::var("PX_STORE_PATH").ok()),
+            ("PX_ENVS_PATH", env::var("PX_ENVS_PATH").ok()),
+        ];
+        let temp_env = tempdir()?;
+        let env_root = temp_env.path();
+        env::set_var("PX_CACHE_PATH", env_root.join("cache"));
+        env::set_var("PX_STORE_PATH", env_root.join("store"));
+        env::set_var("PX_ENVS_PATH", env_root.join("envs"));
+
+        let temp = tempdir()?;
+        let project_root = temp.path();
+        fs::write(
+            project_root.join("pyproject.toml"),
+            r#"[project]
+name = "seed-demo"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+"#,
+        )?;
+        let snapshot = px_domain::project::snapshot::ProjectSnapshot::read_from(project_root)?;
+        let lock = render_lockfile(&snapshot, &Vec::<ResolvedDependency>::new(), PX_VERSION)?;
+        fs::write(project_root.join("px.lock"), lock)?;
+
+        let global = GlobalOptions::default();
+        let ctx = CommandContext::new(&global, Arc::new(SystemEffects::new()))?;
+        refresh_project_site(&snapshot, &ctx)?;
+
+        let state = load_project_state(ctx.fs(), project_root)?;
+        let env = state.current_env.expect("env stored");
+        let site_packages = PathBuf::from(&env.site_packages);
+        let env_root = env
+            .env_path
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(|| env_root_from_site_packages(&site_packages))
+            .unwrap_or_else(|| site_packages.clone());
+        let env_python = PathBuf::from(&env.python.path);
+        let envs = project_site_env(&ctx, &snapshot, &env_root, &env_python)?;
+        let script = "import importlib.metadata, pkg_resources, setuptools; print(importlib.metadata.version('setuptools'))";
+        let output = ctx.python_runtime().run_command(
+            env_python
+                .to_str()
+                .ok_or_else(|| anyhow!("invalid python path"))?,
+            &["-c".to_string(), script.to_string()],
+            &envs,
+            project_root,
+        )?;
+        assert_eq!(
+            output.code, 0,
+            "setuptools import should succeed: {} {}",
+            output.stdout, output.stderr
+        );
+        assert_eq!(
+            output.stdout.trim(),
+            SETUPTOOLS_SEED_VERSION,
+            "expected seeded setuptools version"
+        );
+        validate_cas_environment(&env).expect("setuptools bootstrap should leave CAS site clean");
 
         for (key, value) in saved_env {
             match value {
