@@ -385,42 +385,36 @@ fn classify_artifact(filename: &str) -> Result<ArtifactUploadKind, InstallUserEr
                 )
             })?;
         let mut parts = stem.rsplit('-');
-        let platform = parts
-            .next()
-            .ok_or_else(|| {
-                InstallUserError::new(
-                    "wheel filename missing platform tag",
-                    json!({
-                        "reason": "invalid_wheel_filename",
-                        "file": filename,
-                        "hint": "Wheel names must include platform and ABI tags (e.g. py3-none-any).",
-                    }),
-                )
-            })?;
-        let abi = parts
-            .next()
-            .ok_or_else(|| {
-                InstallUserError::new(
-                    "wheel filename missing abi tag",
-                    json!({
-                        "reason": "invalid_wheel_filename",
-                        "file": filename,
-                        "hint": "Wheel names must include ABI tags (e.g. cp311-cp311-manylinux).",
-                    }),
-                )
-            })?;
-        let pyversion = parts
-            .next()
-            .ok_or_else(|| {
-                InstallUserError::new(
-                    "wheel filename missing python tag",
-                    json!({
-                        "reason": "invalid_wheel_filename",
-                        "file": filename,
-                        "hint": "Wheel names must include a python tag (e.g. py3).",
-                    }),
-                )
-            })?;
+        let platform = parts.next().ok_or_else(|| {
+            InstallUserError::new(
+                "wheel filename missing platform tag",
+                json!({
+                    "reason": "invalid_wheel_filename",
+                    "file": filename,
+                    "hint": "Wheel names must include platform and ABI tags (e.g. py3-none-any).",
+                }),
+            )
+        })?;
+        let abi = parts.next().ok_or_else(|| {
+            InstallUserError::new(
+                "wheel filename missing abi tag",
+                json!({
+                    "reason": "invalid_wheel_filename",
+                    "file": filename,
+                    "hint": "Wheel names must include ABI tags (e.g. cp311-cp311-manylinux).",
+                }),
+            )
+        })?;
+        let pyversion = parts.next().ok_or_else(|| {
+            InstallUserError::new(
+                "wheel filename missing python tag",
+                json!({
+                    "reason": "invalid_wheel_filename",
+                    "file": filename,
+                    "hint": "Wheel names must include a python tag (e.g. py3).",
+                }),
+            )
+        })?;
         return Ok(ArtifactUploadKind::Wheel {
             pyversion: pyversion.to_string(),
             abi: abi.to_string(),

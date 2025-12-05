@@ -517,8 +517,7 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
                 }
             },
             marker_env.as_ref(),
-        )
-        {
+        ) {
             Ok(state) => state,
             Err(err) => {
                 if pyproject_modified {

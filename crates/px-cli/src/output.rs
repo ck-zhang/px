@@ -193,8 +193,8 @@ fn handle_run_output(
                 printed_trace = true;
             }
             if let Some(stderr) = stderr {
-                if !stderr.trim().is_empty()
-                    && !(printed_trace && stderr.contains("Traceback (most recent call last):"))
+                if !(stderr.trim().is_empty()
+                    || (printed_trace && stderr.contains("Traceback (most recent call last):")))
                 {
                     println!("{stderr}");
                 }

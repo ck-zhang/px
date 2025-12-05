@@ -439,6 +439,18 @@ fn build_env_fingerprint() -> BTreeMap<String, String> {
         "PYTHONWARNINGS",
         "SETUPTOOLS_USE_DISTUTILS",
         "SOURCE_DATE_EPOCH",
+        "CARGO_BUILD_TARGET",
+        "CARGO_HOME",
+        "CARGO_TARGET_DIR",
+        "MATURIN_BUILD_ARGS",
+        "MATURIN_CARGO_FLAGS",
+        "MATURIN_CARGO_PROFILE",
+        "MATURIN_FEATURES",
+        "MATURIN_PEP517_ARGS",
+        "MATURIN_PEP517_FEATURES",
+        "PYO3_CONFIG_FILE",
+        "RUSTFLAGS",
+        "RUSTUP_TOOLCHAIN",
     ];
     let mut env = BTreeMap::new();
     for key in BUILD_ENV_VARS {
@@ -477,6 +489,23 @@ mod tests {
 
         restore_env(key, original);
         assert_ne!(first, second, "hash should change when build env changes");
+        Ok(())
+    }
+
+    #[test]
+    fn build_options_hash_reflects_rust_env() -> Result<()> {
+        let key = "RUSTFLAGS";
+        let original = env::var(key).ok();
+        env::set_var(key, "value-1");
+        let temp_python = env::temp_dir().join("python");
+        let python = temp_python.display().to_string();
+
+        let first = compute_build_options_hash(&python, BuildMethod::PipWheel)?;
+        env::set_var(key, "value-2");
+        let second = compute_build_options_hash(&python, BuildMethod::PipWheel)?;
+
+        restore_env(key, original);
+        assert_ne!(first, second, "hash should change when rust build env changes");
         Ok(())
     }
 
