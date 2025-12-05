@@ -125,28 +125,24 @@ pub fn emit_output(
                     println!("{}", style.fix_bullet(&format!("  • {fix}")));
                 }
             }
-            if let Some(stdout) = output_from_details(&outcome.details, "stdout") {
+            let stdout = output_from_details(&outcome.details, "stdout");
+            let stderr = output_from_details(&outcome.details, "stderr");
+            if let Some(stdout) = stdout {
                 println!();
                 println!("stdout:");
                 println!("{stdout}");
             }
-            let mut printed_stderr = false;
-            if let Some(stderr) = output_from_details(&outcome.details, "stderr") {
-                println!();
-                println!("stderr:");
-                println!("{stderr}");
-                printed_stderr = true;
-            }
             if let Some(trace) = trace.as_ref() {
-                if !printed_stderr {
-                    println!();
-                    println!("{}", trace.body);
-                    if let Some(line) = trace.hint_line.as_ref() {
-                        println!("{line}");
-                    }
-                } else if let Some(line) = trace.hint_line.as_ref() {
-                    println!();
+                println!();
+                println!("{}", trace.body);
+                if let Some(line) = trace.hint_line.as_ref() {
                     println!("{line}");
+                }
+            } else if let Some(stderr) = stderr {
+                if !stderr.trim().is_empty() {
+                    println!();
+                    println!("stderr:");
+                    println!("{stderr}");
                 }
             }
         }
@@ -164,6 +160,9 @@ fn handle_run_output(
     info: CommandInfo,
     outcome: &ExecutionOutcome,
 ) -> bool {
+    let trace = traceback_from_details(style, &outcome.details);
+    let stdout = output_from_details(&outcome.details, "stdout");
+    let stderr = output_from_details(&outcome.details, "stderr");
     if info.group != CommandGroup::Run {
         return false;
     }
@@ -180,13 +179,23 @@ fn handle_run_output(
             true
         }
         CommandStatus::Failure => {
-            if let Some(stdout) = output_from_details(&outcome.details, "stdout") {
+            if let Some(stdout) = stdout {
                 if !stdout.trim().is_empty() {
                     println!("{stdout}");
                 }
             }
-            if let Some(stderr) = output_from_details(&outcome.details, "stderr") {
-                if !stderr.trim().is_empty() {
+            let mut printed_trace = false;
+            if let Some(trace) = trace.as_ref() {
+                println!("{}", trace.body);
+                if let Some(line) = trace.hint_line.as_ref() {
+                    println!("{line}");
+                }
+                printed_trace = true;
+            }
+            if let Some(stderr) = stderr {
+                if !stderr.trim().is_empty()
+                    && !(printed_trace && stderr.contains("Traceback (most recent call last):"))
+                {
                     println!("{stderr}");
                 }
             }

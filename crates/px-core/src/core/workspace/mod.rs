@@ -1765,7 +1765,6 @@ members = ["apps/a", "libs/b"]
             trace: false,
             debug: false,
             json: false,
-            config: None,
         }));
         CommandContext::new(global, Arc::new(SystemEffects::new())).unwrap()
     }

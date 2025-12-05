@@ -6,7 +6,10 @@ use reqwest::{blocking::Client, StatusCode};
 use serde_json::json;
 use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
 
-use crate::{build_http_client, project_table, python_context, CommandContext, ExecutionOutcome};
+use crate::{
+    build_http_client, project_table, python_context, CommandContext, ExecutionOutcome,
+    InstallUserError,
+};
 
 use super::artifacts::ArtifactSummary;
 use super::plan::{plan_publish, PublishPlanning, PublishRegistry, PublishRequest};
@@ -240,10 +243,15 @@ fn upload_artifact(
         .send()
         .with_context(|| format!("failed to upload {filename}"))?;
     if response.status() == StatusCode::FORBIDDEN {
-        return Err(anyhow!(
-            "registry {} rejected the provided credentials",
-            registry.label
-        ));
+        return Err(InstallUserError::new(
+            format!("registry {} rejected the provided credentials", registry.label),
+            json!({
+                "registry": registry.label,
+                "reason": "auth_forbidden",
+                "hint": "Confirm the token environment variable and permissions for this repository.",
+            }),
+        )
+        .into());
     }
     response
         .error_for_status()
@@ -360,23 +368,59 @@ fn has_case_insensitive_extension(path: &Path, extension: &str) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
 }
 
-fn classify_artifact(filename: &str) -> Result<ArtifactUploadKind> {
+fn classify_artifact(filename: &str) -> Result<ArtifactUploadKind, InstallUserError> {
     let path = Path::new(filename);
     if has_case_insensitive_extension(path, "whl") {
         let stem = path
             .file_stem()
             .and_then(|stem| stem.to_str())
-            .ok_or_else(|| anyhow!("wheel filename missing python tag"))?;
+            .ok_or_else(|| {
+                InstallUserError::new(
+                    "wheel filename missing python tag",
+                    json!({
+                        "reason": "invalid_wheel_filename",
+                        "file": filename,
+                        "hint": "Wheel names must include tags like py3-none-any (PEP 427).",
+                    }),
+                )
+            })?;
         let mut parts = stem.rsplit('-');
         let platform = parts
             .next()
-            .ok_or_else(|| anyhow!("wheel filename missing platform tag"))?;
+            .ok_or_else(|| {
+                InstallUserError::new(
+                    "wheel filename missing platform tag",
+                    json!({
+                        "reason": "invalid_wheel_filename",
+                        "file": filename,
+                        "hint": "Wheel names must include platform and ABI tags (e.g. py3-none-any).",
+                    }),
+                )
+            })?;
         let abi = parts
             .next()
-            .ok_or_else(|| anyhow!("wheel filename missing abi tag"))?;
+            .ok_or_else(|| {
+                InstallUserError::new(
+                    "wheel filename missing abi tag",
+                    json!({
+                        "reason": "invalid_wheel_filename",
+                        "file": filename,
+                        "hint": "Wheel names must include ABI tags (e.g. cp311-cp311-manylinux).",
+                    }),
+                )
+            })?;
         let pyversion = parts
             .next()
-            .ok_or_else(|| anyhow!("wheel filename missing python tag"))?;
+            .ok_or_else(|| {
+                InstallUserError::new(
+                    "wheel filename missing python tag",
+                    json!({
+                        "reason": "invalid_wheel_filename",
+                        "file": filename,
+                        "hint": "Wheel names must include a python tag (e.g. py3).",
+                    }),
+                )
+            })?;
         return Ok(ArtifactUploadKind::Wheel {
             pyversion: pyversion.to_string(),
             abi: abi.to_string(),
@@ -393,7 +437,14 @@ fn classify_artifact(filename: &str) -> Result<ArtifactUploadKind> {
     if has_case_insensitive_extension(path, "zip") {
         return Ok(ArtifactUploadKind::Sdist);
     }
-    Err(anyhow!("unsupported artifact type: {filename}"))
+    Err(InstallUserError::new(
+        format!("unsupported artifact type: {filename}"),
+        json!({
+            "reason": "unsupported_artifact",
+            "file": filename,
+            "hint": "Only wheels (.whl) and source distributions (.tar.gz/.zip) can be published.",
+        }),
+    ))
 }
 
 #[cfg(test)]

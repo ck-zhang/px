@@ -517,16 +517,25 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
                 }
             },
             marker_env.as_ref(),
-        ) {
+        )
+        {
             Ok(state) => state,
             Err(err) => {
                 if pyproject_modified {
                     rollback_failed_migration(&backups, &created_files)?;
                 }
-                return match err.downcast::<InstallUserError>() {
-                    Ok(user) => Ok(ExecutionOutcome::user_error(user.message, user.details)),
-                    Err(other) => Err(other),
+                let user = match err.downcast::<InstallUserError>() {
+                    Ok(user) => user,
+                    Err(other) => InstallUserError::new(
+                        "px migrate: failed to autopin dependencies",
+                        json!({
+                            "reason": "autopin_failed",
+                            "error": other.to_string(),
+                            "hint": "Re-run with --no-autopin to manage pins manually.",
+                        }),
+                    ),
                 };
+                return Ok(ExecutionOutcome::user_error(user.message, user.details));
             }
         };
         match autopin_state {

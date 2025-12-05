@@ -13,7 +13,6 @@ pub struct GlobalOptions {
     pub trace: bool,
     pub debug: bool,
     pub json: bool,
-    pub config: Option<String>,
 }
 
 #[derive(Debug, Clone)]

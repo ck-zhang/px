@@ -2509,7 +2509,6 @@ mod tests {
             trace: false,
             debug: false,
             json: false,
-            config: None,
         };
         CommandContext::new(&GLOBAL, Arc::new(SystemEffects::new())).expect("ctx")
     }

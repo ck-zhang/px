@@ -61,8 +61,6 @@ pub struct PxCli {
     pub json: bool,
     #[arg(long, help = "Disable colored human output", global = true)]
     pub no_color: bool,
-    #[arg(long, value_parser = value_parser!(PathBuf), help = "Optional px config file path", global = true)]
-    pub config: Option<PathBuf>,
     #[arg(
         long,
         help = "Force px to run offline for this invocation (sets PX_ONLINE=0)",

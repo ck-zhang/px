@@ -322,7 +322,6 @@ dependencies = []
             trace: false,
             debug: false,
             json: false,
-            config: None,
         };
         let ctx = CommandContext::new(&globals, Arc::new(SystemEffects::new()))?;
         let snapshot = px_domain::ProjectSnapshot::read_from(root)?;

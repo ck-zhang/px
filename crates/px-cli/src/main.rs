@@ -47,7 +47,6 @@ fn main() -> Result<()> {
         trace,
         debug: cli.debug,
         json: cli.json || subcommand_json,
-        config: cli.config.as_ref().map(|p| p.to_string_lossy().to_string()),
     };
 
     let ctx = CommandContext::new(&global, Arc::new(SystemEffects::new()))
