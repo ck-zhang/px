@@ -57,6 +57,9 @@ fn main() -> Result<()> {
         quiet: cli.quiet,
         json: cli.json,
         no_color: cli.no_color,
+        verbose: cli.verbose,
+        debug: cli.debug,
+        trace,
     };
     let status_opts = match &cli.command {
         CommandGroupCli::Status(args) => Some(StatusRenderOptions { brief: args.brief }),

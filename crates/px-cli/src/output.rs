@@ -1,7 +1,8 @@
 use atty::Stream;
 use color_eyre::Result;
 use px_core::{
-    diag_commands, CommandGroup, CommandInfo, CommandStatus, ExecutionOutcome, StatusPayload,
+    diag_commands, format_status_message, CommandGroup, CommandInfo, CommandStatus,
+    ExecutionOutcome, StatusPayload,
 };
 use serde_json::Value;
 use std::path::Path;
@@ -14,6 +15,9 @@ pub struct OutputOptions {
     pub quiet: bool,
     pub json: bool,
     pub no_color: bool,
+    pub verbose: u8,
+    pub debug: bool,
+    pub trace: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -47,6 +51,9 @@ pub fn emit_output(
         let payload = px_core::to_json_response(info, outcome, code);
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else if !opts.quiet {
+        if handle_run_output(opts, &style, info, outcome) {
+            return Ok(code);
+        }
         if let Some(note) = autosync_note_from_details(&outcome.details) {
             let line = format!("px {}: {}", info.name, note);
             println!("{}", style.info(&line));
@@ -149,6 +156,66 @@ pub fn emit_output(
     }
 
     Ok(code)
+}
+
+fn handle_run_output(
+    opts: &OutputOptions,
+    style: &Style,
+    info: CommandInfo,
+    outcome: &ExecutionOutcome,
+) -> bool {
+    if info.group != CommandGroup::Run {
+        return false;
+    }
+    match outcome.status {
+        CommandStatus::Ok => {
+            if is_passthrough(&outcome.details) {
+                if !outcome.message.is_empty() {
+                    println!("{}", outcome.message);
+                }
+            } else if opts.verbose > 0 || opts.debug || opts.trace {
+                let message = format_status_message(info, &outcome.message);
+                println!("{}", style.status(&outcome.status, &message));
+            }
+            true
+        }
+        CommandStatus::Failure => {
+            if let Some(stdout) = output_from_details(&outcome.details, "stdout") {
+                if !stdout.trim().is_empty() {
+                    println!("{stdout}");
+                }
+            }
+            if let Some(stderr) = output_from_details(&outcome.details, "stderr") {
+                if !stderr.trim().is_empty() {
+                    println!("{stderr}");
+                }
+            }
+            let summary = format_run_failure_summary(info, outcome);
+            println!("{}", style.status(&CommandStatus::Failure, &summary));
+            true
+        }
+        CommandStatus::UserError => false,
+    }
+}
+
+fn format_run_failure_summary(info: CommandInfo, outcome: &ExecutionOutcome) -> String {
+    let target = outcome
+        .details
+        .as_object()
+        .and_then(|map| map.get("target"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("target");
+    let code = outcome
+        .details
+        .as_object()
+        .and_then(|map| map.get("code"))
+        .and_then(Value::as_i64);
+    let mut summary = format!("px {} {target} failed", info.name);
+    if let Some(code) = code {
+        summary.push_str(&format!(" (exit code {code})"));
+    }
+    summary
 }
 
 fn emit_status_output(

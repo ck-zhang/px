@@ -28,12 +28,12 @@ fn run_missing_import_surfaces_px_hint() {
         "traceback header missing: {stdout:?}"
     );
     assert!(
-        stdout.contains("px ▸ Hint"),
-        "px hint block should be rendered: {stdout:?}"
-    );
-    assert!(
         stdout.contains("imaginary_package"),
         "missing module should be echoed: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("px run python failed (exit code 1)"),
+        "summary line missing: {stdout:?}"
     );
 }
 

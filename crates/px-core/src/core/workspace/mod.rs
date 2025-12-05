@@ -1591,6 +1591,7 @@ pub fn prepare_workspace_run_context(
 
     let mut sync_report = None;
     if !strict && !state.env_clean {
+        eprintln!("px ▸ Syncing workspace environment…");
         refresh_workspace_site(ctx, &workspace).map_err(|err| {
             ExecutionOutcome::failure(
                 "failed to prepare workspace environment",

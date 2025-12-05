@@ -2377,22 +2377,29 @@ impl EnvironmentIssue {
     }
 
     fn note(self) -> &'static str {
+        self.lock_message().unwrap_or_else(|| self.env_message())
+    }
+
+    fn lock_message(self) -> Option<&'static str> {
         match self {
-            EnvironmentIssue::MissingLock => "No px.lock found, resolving dependencies…",
-            EnvironmentIssue::LockDrift => {
-                "Manifest drift detected; syncing px.lock and environment…"
-            }
-            EnvironmentIssue::MissingArtifacts => {
-                "Cached artifacts missing; rehydrating environment…"
-            }
-            EnvironmentIssue::MissingEnv => "Environment missing; rebuilding from px.lock…",
-            EnvironmentIssue::EnvOutdated => {
-                "Environment stale; syncing with latest lock and runtime…"
-            }
-            EnvironmentIssue::RuntimeMismatch => {
-                "Environment runtime mismatch; rebuilding for current Python…"
-            }
+            EnvironmentIssue::MissingLock => Some("Updating px.lock (missing lock)"),
+            EnvironmentIssue::LockDrift => Some("Updating px.lock (manifest changed)"),
+            _ => None,
         }
+    }
+
+    fn env_message(self) -> &'static str {
+        match self {
+            EnvironmentIssue::MissingLock | EnvironmentIssue::LockDrift => "Syncing environment…",
+            EnvironmentIssue::MissingArtifacts => "Syncing environment (rehydrating cache)…",
+            EnvironmentIssue::MissingEnv => "Syncing environment…",
+            EnvironmentIssue::EnvOutdated => "Syncing environment…",
+            EnvironmentIssue::RuntimeMismatch => "Syncing environment (runtime changed)…",
+        }
+    }
+
+    fn needs_lock_resolution(self) -> bool {
+        self.lock_message().is_some()
     }
 
     fn action_key(self) -> &'static str {
@@ -3799,12 +3806,22 @@ pub(crate) fn ensure_environment_with_guard(
     }
 }
 
+fn log_autosync_step(message: &str) {
+    eprintln!("px ▸ {message}");
+}
+
 pub(crate) fn auto_sync_environment(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
     issue: EnvironmentIssue,
 ) -> Result<Option<EnvironmentSyncReport>> {
-    install_snapshot(ctx, snapshot, false, None)?;
+    if issue.needs_lock_resolution() {
+        if let Some(message) = issue.lock_message() {
+            log_autosync_step(message);
+        }
+        install_snapshot(ctx, snapshot, false, None)?;
+    }
+    log_autosync_step(issue.env_message());
     refresh_project_site(snapshot, ctx)?;
     Ok(Some(EnvironmentSyncReport::new(issue)))
 }
