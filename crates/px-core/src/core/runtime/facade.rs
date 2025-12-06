@@ -11,6 +11,7 @@ use std::{
 };
 
 use crate::context::{CommandContext, CommandInfo};
+use crate::core::runtime::artifacts::select_wheel;
 use crate::core::tooling::diagnostics;
 use crate::diagnostics::commands as diag_commands;
 use crate::effects;
@@ -240,6 +241,7 @@ except Exception:
 "#;
 
 const SETUPTOOLS_SEED_VERSION: &str = "80.9.0";
+const UV_SEED_VERSION: &str = "0.9.15";
 
 pub(crate) type ManifestSnapshot = ProjectSnapshot;
 
@@ -672,6 +674,7 @@ fn ensure_project_pip(
             .into());
         }
         ensure_setuptools_seed(ctx, snapshot, &site_packages, env_python, &envs)?;
+        ensure_uv_seed(ctx, snapshot, site_dir, env_python, &envs)?;
         return Ok(());
     }
 
@@ -738,6 +741,7 @@ fn ensure_project_pip(
         }
     }
     ensure_setuptools_seed(ctx, snapshot, &site_packages, env_python, &envs)?;
+    ensure_uv_seed(ctx, snapshot, site_dir, env_python, &envs)?;
 
     Ok(())
 }
@@ -889,6 +893,142 @@ fn ensure_setuptools_seed(
             json!({
                 "package": "setuptools",
                 "version": SETUPTOOLS_SEED_VERSION,
+                "reason": "missing_artifacts",
+                "hint": "rerun `px sync` to refresh the environment",
+            }),
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+fn uv_seed_required(snapshot: &ManifestSnapshot) -> bool {
+    snapshot.root.join("uv.lock").exists()
+}
+
+fn uv_cli_candidates(site_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        site_dir.join("bin").join("uv"),
+        site_dir.join("bin").join("uvx"),
+        site_dir.join("Scripts").join("uv.exe"),
+        site_dir.join("Scripts").join("uvx.exe"),
+    ]
+}
+
+fn has_uv_cli(site_dir: &Path) -> bool {
+    uv_cli_candidates(site_dir)
+        .into_iter()
+        .any(|path| path.exists())
+}
+
+fn ensure_uv_seed(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+    site_dir: &Path,
+    env_python: &Path,
+    envs: &[(String, String)],
+) -> Result<()> {
+    if !uv_seed_required(snapshot) {
+        return Ok(());
+    }
+    if has_uv_cli(site_dir)
+        || module_available(ctx, snapshot, env_python, envs, "uv").unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    let release = ctx
+        .pypi()
+        .fetch_release("uv", UV_SEED_VERSION, &format!("uv=={UV_SEED_VERSION}"))
+        .map_err(|err| {
+            InstallUserError::new(
+                "failed to locate uv for the px environment",
+                json!({
+                    "package": "uv",
+                    "version": UV_SEED_VERSION,
+                    "error": err.to_string(),
+                    "reason": "missing_artifacts",
+                    "hint": "ensure network access or prefetch artifacts, then rerun `px sync`",
+                }),
+            )
+        })?;
+    let tags = detect_interpreter_tags(
+        env_python
+            .to_str()
+            .ok_or_else(|| anyhow!("invalid python path"))?,
+    )?;
+    let wheel = select_wheel(&release.urls, &tags, &format!("uv=={UV_SEED_VERSION}"))?;
+    let request = ArtifactRequest {
+        name: "uv",
+        version: UV_SEED_VERSION,
+        filename: &wheel.filename,
+        url: &wheel.url,
+        sha256: &wheel.sha256,
+    };
+    let cached = ctx
+        .cache_store()
+        .cache_wheel(&ctx.cache().path, &request)
+        .map_err(|err| {
+            InstallUserError::new(
+                "failed to cache uv for the px environment",
+                json!({
+                    "package": "uv",
+                    "version": UV_SEED_VERSION,
+                    "error": err.to_string(),
+                    "reason": "missing_artifacts",
+                    "hint": "ensure network access or prefetch artifacts, then rerun `px sync`",
+                }),
+            )
+        })?;
+
+    let output = ctx.python_runtime().run_command(
+        env_python
+            .to_str()
+            .ok_or_else(|| anyhow!("invalid python path"))?,
+        &[
+            "-m".into(),
+            "pip".into(),
+            "install".into(),
+            "--no-deps".into(),
+            "--no-index".into(),
+            "--disable-pip-version-check".into(),
+            "--no-compile".into(),
+            "--no-warn-script-location".into(),
+            "--prefix".into(),
+            site_dir.display().to_string(),
+            cached.wheel_path.display().to_string(),
+        ],
+        envs,
+        &snapshot.root,
+    )?;
+    if output.code != 0 {
+        let mut message = String::from("failed to seed uv in the px environment");
+        if !output.stderr.trim().is_empty() {
+            message.push_str(": ");
+            message.push_str(output.stderr.trim());
+        }
+        if output.stderr.trim().is_empty() && !output.stdout.trim().is_empty() {
+            message.push_str(": ");
+            message.push_str(output.stdout.trim());
+        }
+        return Err(InstallUserError::new(
+            message,
+            json!({
+                "package": "uv",
+                "version": UV_SEED_VERSION,
+                "reason": "missing_artifacts",
+            }),
+        )
+        .into());
+    }
+
+    if !has_uv_cli(site_dir) {
+        return Err(InstallUserError::new(
+            "uv seed did not install correctly",
+            json!({
+                "package": "uv",
+                "version": UV_SEED_VERSION,
                 "reason": "missing_artifacts",
                 "hint": "rerun `px sync` to refresh the environment",
             }),
@@ -1295,7 +1435,10 @@ fn reuse_cached_project_wheel(
         .join("project-wheels")
         .join(normalize_project_name(&snapshot.name));
     let mut candidates = match fs::read_dir(project_dir) {
-        Ok(entries) => entries.flatten().map(|entry| entry.path()).collect::<Vec<_>>(),
+        Ok(entries) => entries
+            .flatten()
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>(),
         Err(_) => Vec::new(),
     };
     candidates.sort();
@@ -3629,7 +3772,11 @@ fn ensure_version_stub(
                 path = %root.display(),
                 "git metadata unavailable; writing fallback vcs version"
             );
-            "0.0.0+unknown".to_string()
+            if derive_opts.drop_local {
+                "0.0.0".to_string()
+            } else {
+                "0.0.0+unknown".to_string()
+            }
         }
     };
 
@@ -3691,6 +3838,9 @@ fn derive_vcs_version(
                 .trim_start_matches('g')
                 .to_string();
             if !hash.is_empty() {
+                if derive_opts.drop_local {
+                    return Ok("0.0.0".to_string());
+                }
                 return Ok(format!("0.0.0+g{hash}"));
             }
         }
@@ -4166,6 +4316,7 @@ fn is_allowed_site_entry(name: &str) -> bool {
         || matches_versioned_entry(name, "setuptools")
         || matches_versioned_entry(name, "_distutils_hack")
         || matches_versioned_entry(name, "pipx")
+        || matches_versioned_entry(name, "uv")
 }
 
 fn validate_env_site_packages(
@@ -4549,20 +4700,29 @@ fn ensure_packaging_seeds_present(
     };
     let env_python = PathBuf::from(&env.python.path);
     let envs = project_site_env(ctx, snapshot, &site_dir, &env_python)?;
-    if module_available(ctx, snapshot, &env_python, &envs, "setuptools")? {
+    let setuptools_ok = module_available(ctx, snapshot, &env_python, &envs, "setuptools")?;
+    let uv_needed = uv_seed_required(snapshot);
+    let uv_ok = !uv_needed
+        || has_uv_cli(&site_dir)
+        || module_available(ctx, snapshot, &env_python, &envs, "uv")?;
+
+    if setuptools_ok && uv_ok {
         return Ok(());
     }
+    if !setuptools_ok {
+        return Err(InstallUserError::new(
+            "environment missing baseline packaging support",
+            json!({
+                "missing": ["setuptools"],
+                "reason": "env_outdated",
+                "code": diagnostics::cas::MISSING_OR_CORRUPT,
+                "hint": "run `px sync` to refresh the environment",
+            }),
+        )
+        .into());
+    }
 
-    Err(InstallUserError::new(
-        "environment missing baseline packaging support",
-        json!({
-            "missing": ["setuptools"],
-            "reason": "env_outdated",
-            "code": diagnostics::cas::MISSING_OR_CORRUPT,
-            "hint": "run `px sync` to refresh the environment",
-        }),
-    )
-    .into())
+    ensure_uv_seed(ctx, snapshot, &site_dir, &env_python, &envs)
 }
 
 pub(crate) fn ensure_environment_with_guard(
@@ -5157,8 +5317,7 @@ build-backend = "maturin"
             platform: "test-platform".into(),
         };
         let cache_root = temp.path().join("cache");
-        let first_hash =
-            project_build_hash(&runtime, &snapshot, Path::new(&runtime.path), false)?;
+        let first_hash = project_build_hash(&runtime, &snapshot, Path::new(&runtime.path), false)?;
         let first_dir = project_wheel_cache_dir(
             &cache_root,
             &snapshot,
@@ -5174,18 +5333,14 @@ build-backend = "maturin"
         let opts = FileOptions::default();
         zip.start_file("maturin_change-0.1.0.dist-info/METADATA", opts)?;
         zip.write_all(b"Name: maturin-change\nVersion: 0.1.0\n")?;
-        zip.start_file(
-            "maturin_change-0.1.0.dist-info/entry_points.txt",
-            opts,
-        )?;
+        zip.start_file("maturin_change-0.1.0.dist-info/entry_points.txt", opts)?;
         zip.write_all(b"[console_scripts]\nmaturin-change = demo.cli:main\n")?;
         zip.finish()?;
         let sha256 = compute_file_sha256(&wheel_path)?;
         persist_wheel_metadata(&first_dir, &wheel_path, &sha256, "maturin-change", "0.1.0")?;
 
         env::set_var("RUSTFLAGS", "second-hash");
-        let second_hash =
-            project_build_hash(&runtime, &snapshot, Path::new(&runtime.path), false)?;
+        let second_hash = project_build_hash(&runtime, &snapshot, Path::new(&runtime.path), false)?;
         assert_ne!(
             first_hash, second_hash,
             "build hash should vary with build env"
@@ -5368,6 +5523,105 @@ build-backend = "setuptools.build_meta"
             "expected seeded setuptools version"
         );
         validate_cas_environment(&env).expect("setuptools bootstrap should leave CAS site clean");
+
+        for (key, value) in saved_env {
+            match value {
+                Some(prev) => env::set_var(key, prev),
+                None => env::remove_var(key),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn refresh_project_site_bootstraps_uv_when_uv_lock_present() -> Result<()> {
+        let _lock = PIP_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        if env::var("PX_ONLINE").unwrap_or_default() != "1" {
+            eprintln!("skipping uv bootstrap test (PX_ONLINE!=1)");
+            return Ok(());
+        }
+        let saved_env = vec![
+            ("PX_CACHE_PATH", env::var("PX_CACHE_PATH").ok()),
+            ("PX_STORE_PATH", env::var("PX_STORE_PATH").ok()),
+            ("PX_ENVS_PATH", env::var("PX_ENVS_PATH").ok()),
+        ];
+        let temp_env = tempdir()?;
+        let env_root = temp_env.path();
+        env::set_var("PX_CACHE_PATH", env_root.join("cache"));
+        env::set_var("PX_STORE_PATH", env_root.join("store"));
+        env::set_var("PX_ENVS_PATH", env_root.join("envs"));
+
+        let temp = tempdir()?;
+        let project_root = temp.path();
+        fs::write(
+            project_root.join("pyproject.toml"),
+            r#"[project]
+name = "uv-seed-demo"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+"#,
+        )?;
+        fs::write(project_root.join("uv.lock"), "version = 1\n")?;
+        let snapshot = px_domain::project::snapshot::ProjectSnapshot::read_from(project_root)?;
+        let lock = render_lockfile(&snapshot, &Vec::<ResolvedDependency>::new(), PX_VERSION)?;
+        fs::write(project_root.join("px.lock"), lock)?;
+
+        let global = GlobalOptions::default();
+        let ctx = CommandContext::new(&global, Arc::new(SystemEffects::new()))?;
+        refresh_project_site(&snapshot, &ctx)?;
+
+        let state = load_project_state(ctx.fs(), project_root)?;
+        let env = state.current_env.expect("env stored");
+        let site_packages = PathBuf::from(&env.site_packages);
+        let env_root = env
+            .env_path
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(|| env_root_from_site_packages(&site_packages))
+            .unwrap_or_else(|| site_packages.clone());
+        let env_python = PathBuf::from(&env.python.path);
+        let envs = project_site_env(&ctx, &snapshot, &env_root, &env_python)?;
+        let uv_path = uv_cli_candidates(&env_root)
+            .into_iter()
+            .find(|path| path.exists())
+            .expect("uv cli available");
+        let output = Command::new(&uv_path).arg("--version").output()?;
+        assert!(
+            output.status.success(),
+            "uv cli should execute: stdout={} stderr={}",
+            output.stdout.escape_ascii(),
+            output.stderr.escape_ascii()
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(UV_SEED_VERSION),
+            "uv version should match seed; stdout={stdout}"
+        );
+        let script = "import importlib.metadata as im; print(im.version('uv'))";
+        let probe = ctx.python_runtime().run_command(
+            env_python
+                .to_str()
+                .ok_or_else(|| anyhow!("invalid python path"))?,
+            &["-c".to_string(), script.to_string()],
+            &envs,
+            project_root,
+        )?;
+        assert_eq!(
+            probe.code, 0,
+            "uv module should import: {} {}",
+            probe.stdout, probe.stderr
+        );
+        assert_eq!(
+            probe.stdout.trim(),
+            UV_SEED_VERSION,
+            "expected uv module version from seed"
+        );
+        validate_cas_environment(&env).expect("uv bootstrap should leave CAS site clean");
 
         for (key, value) in saved_env {
             match value {
@@ -6494,6 +6748,90 @@ version-file = "demo/_version.py"
     }
 
     #[test]
+    fn ensure_version_file_drops_local_suffix_for_hatch() -> Result<()> {
+        if Command::new("git").arg("--version").status().is_err() {
+            return Ok(());
+        }
+        let temp = tempdir()?;
+        let manifest = temp.path().join("pyproject.toml");
+        fs::write(
+            &manifest,
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.hatch.version.raw-options]
+local_scheme = "no-local-version"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "demo/_version.py"
+"#,
+        )?;
+        let demo_dir = temp.path().join("demo");
+        fs::create_dir_all(&demo_dir)?;
+        fs::write(demo_dir.join("__init__.py"), "")?;
+
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git init failed"
+        );
+        assert!(
+            Command::new("git")
+                .args(["config", "user.email", "ci@example.com"])
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git config email failed"
+        );
+        assert!(
+            Command::new("git")
+                .args(["config", "user.name", "CI"])
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git config name failed"
+        );
+        assert!(
+            Command::new("git")
+                .args(["add", "."])
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git add failed"
+        );
+        assert!(
+            Command::new("git")
+                .args(["commit", "-m", "init"])
+                .current_dir(temp.path())
+                .output()?
+                .status
+                .success(),
+            "git commit failed"
+        );
+
+        ensure_version_file(&manifest)?;
+        let contents = fs::read_to_string(temp.path().join("demo/_version.py"))?;
+        assert!(
+            contents.contains("version = \"0.0.0\""),
+            "no-local-version should strip the git hash suffix when no tags exist"
+        );
+        assert!(
+            !contents.contains('+'),
+            "no-local-version should omit local version segments"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn ensure_version_file_falls_back_without_git_metadata() -> Result<()> {
         let temp = tempdir()?;
         let manifest = temp.path().join("pyproject.toml");
@@ -6521,6 +6859,41 @@ version-file = "demo/_version.py"
         assert!(
             contents.contains("__version__ = version"),
             "fallback stub should alias __version__ to version"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_version_file_honors_no_local_without_git_metadata() -> Result<()> {
+        let temp = tempdir()?;
+        let manifest = temp.path().join("pyproject.toml");
+        fs::write(
+            &manifest,
+            r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.hatch.version.raw-options]
+local_scheme = "no-local-version"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "demo/_version.py"
+"#,
+        )?;
+        let demo_dir = temp.path().join("demo");
+        fs::create_dir_all(&demo_dir)?;
+        fs::write(demo_dir.join("__init__.py"), "")?;
+
+        ensure_version_file(&manifest)?;
+        let contents = fs::read_to_string(temp.path().join("demo/_version.py"))?;
+        assert!(
+            contents.contains("version = \"0.0.0\""),
+            "no-local-version should drop local suffix when git metadata is unavailable"
+        );
+        assert!(
+            !contents.contains('+'),
+            "no-local-version fallback should not include local components"
         );
         Ok(())
     }

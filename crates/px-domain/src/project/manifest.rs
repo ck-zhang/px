@@ -1644,7 +1644,7 @@ pytest-github-actions-annotate-failures = "^0.1.7"
 "#
         .parse()?;
 
-        let deps = resolve_dependency_groups(&mut doc, &[String::from("test")])?;
+        let deps = resolve_dependency_groups(&doc, &[String::from("test")])?;
         assert_eq!(
             deps,
             vec![

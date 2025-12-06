@@ -1528,8 +1528,12 @@ fn run_python_command(
         envs.push(("PYTHONPATH".into(), merged));
     }
     if stream_runner {
-        ctx.python_runtime()
-            .run_command_streaming(&py_ctx.python, args, &envs, &py_ctx.project_root)
+        ctx.python_runtime().run_command_streaming(
+            &py_ctx.python,
+            args,
+            &envs,
+            &py_ctx.project_root,
+        )
     } else {
         ctx.python_runtime()
             .run_command(&py_ctx.python, args, &envs, &py_ctx.project_root)
@@ -1611,9 +1615,12 @@ fn run_executable(
     if let Some(subcommand) = mutating_pip_invocation(program, extra_args, py_ctx) {
         return Ok(pip_mutation_outcome(program, &subcommand, extra_args));
     }
-    let (envs, _) = build_env_with_preflight(core_ctx, py_ctx, command_args)?;
+    let (mut envs, _) = build_env_with_preflight(core_ctx, py_ctx, command_args)?;
     let uses_px_python = program_matches_python(program, py_ctx);
     let needs_stdin = uses_px_python && extra_args.first().map(|arg| arg == "-").unwrap_or(false);
+    if !uses_px_python {
+        envs.retain(|(key, _)| key != "PX_PYTHON" && key != "PX_ALLOWED_PATHS");
+    }
     let runtime = core_ctx.python_runtime();
     let interactive = interactive || needs_stdin;
     let output = if needs_stdin {

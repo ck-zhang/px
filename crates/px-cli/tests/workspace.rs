@@ -154,11 +154,8 @@ fn workspace_run_at_ref_uses_workspace_identity() {
 
     let member = root.join("apps/a");
     let workspace_py = member.join("app.py");
-    fs::write(
-        &workspace_py,
-        "import b\nprint('A sees', b.VALUE)\n",
-    )
-    .expect("write workspace script");
+    fs::write(&workspace_py, "import b\nprint('A sees', b.VALUE)\n")
+        .expect("write workspace script");
     let lib_pkg = root.join("libs/b/src/b");
     fs::create_dir_all(&lib_pkg).expect("lib package dirs");
     fs::write(lib_pkg.join("__init__.py"), "VALUE = 'ok'\n").expect("write lib package");

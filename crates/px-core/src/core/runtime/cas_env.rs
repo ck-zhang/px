@@ -642,7 +642,12 @@ fn materialize_profile_env(
     let _ = fs::remove_dir_all(&backup_root);
 
     let final_site = site_packages_dir(&env_root, &runtime.version);
-    write_python_shim(&env_root.join("bin"), runtime_exe, &final_site, &manifest.env_vars)?;
+    write_python_shim(
+        &env_root.join("bin"),
+        runtime_exe,
+        &final_site,
+        &manifest.env_vars,
+    )?;
     install_python_links(&env_root.join("bin"), runtime_exe)?;
     Ok(env_root)
 }
