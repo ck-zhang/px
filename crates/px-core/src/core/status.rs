@@ -184,15 +184,106 @@ fn runtime_root() -> Option<PathBuf> {
     }
 }
 
+fn cas_runtime_root() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("PX_STORE_PATH") {
+        return Some(PathBuf::from(path).join("runtimes"));
+    }
+    home_dir().map(|home| home.join(".px").join("store").join("runtimes"))
+}
+
 /// Best-effort classification of a runtime path.
 #[must_use]
 pub fn runtime_source_for(path: &str) -> RuntimeSource {
-    let Some(root) = runtime_root() else {
-        return RuntimeSource::Unknown;
-    };
-    if Path::new(path).starts_with(root) {
-        RuntimeSource::PxManaged
-    } else {
+    let candidate = Path::new(path);
+    if let Some(root) = runtime_root() {
+        if candidate.starts_with(root) {
+            return RuntimeSource::PxManaged;
+        }
+    }
+    if let Some(store_root) = cas_runtime_root() {
+        if candidate.starts_with(store_root) {
+            return RuntimeSource::PxManaged;
+        }
+    }
+    if candidate.is_absolute() {
         RuntimeSource::System
+    } else {
+        RuntimeSource::Unknown
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::ffi::OsString;
+    use tempfile::tempdir;
+
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let original = env::var_os(key);
+            env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.original.take() {
+                env::set_var(self.key, value);
+            } else {
+                env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn runtime_source_marks_registry_runtimes_as_managed() {
+        let temp = tempdir().unwrap();
+        let registry = temp.path().join("nested").join("registry.json");
+        let _guard = EnvGuard::set("PX_RUNTIME_REGISTRY", &registry);
+        let runtime_path = registry
+            .parent()
+            .expect("registry parent")
+            .join("runtimes")
+            .join("cpython-3.12")
+            .join("bin")
+            .join("python3.12");
+
+        assert_eq!(runtime_source_for(&runtime_path.display().to_string()), RuntimeSource::PxManaged);
+    }
+
+    #[test]
+    #[serial]
+    fn runtime_source_marks_cas_runtimes_as_managed() {
+        let temp = tempdir().unwrap();
+        let store = temp.path().join("store");
+        let _guard = EnvGuard::set("PX_STORE_PATH", &store);
+        let runtime_path = store
+            .join("runtimes")
+            .join("abc123")
+            .join("bin")
+            .join("python3.11");
+
+        assert_eq!(runtime_source_for(&runtime_path.display().to_string()), RuntimeSource::PxManaged);
+    }
+
+    #[test]
+    #[serial]
+    fn runtime_source_defaults_to_system_for_other_paths() {
+        let temp = tempdir().unwrap();
+        let registry = temp.path().join("registry.json");
+        let store = temp.path().join("store");
+        let _guard_store = EnvGuard::set("PX_STORE_PATH", &store);
+        let _guard_registry = EnvGuard::set("PX_RUNTIME_REGISTRY", &registry);
+        let system_like = temp.path().join("usr").join("bin").join("python3");
+
+        assert_eq!(runtime_source_for(&system_like.display().to_string()), RuntimeSource::System);
     }
 }
