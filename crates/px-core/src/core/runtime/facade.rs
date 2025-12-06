@@ -624,12 +624,9 @@ fn ensure_project_pip(
     env_python: &Path,
 ) -> Result<()> {
     let debug_pip = std::env::var("PX_DEBUG_PIP").is_ok();
-    if std::env::var("PX_NO_ENSUREPIP")
+    let skip_ensurepip = std::env::var("PX_NO_ENSUREPIP")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
-        return Ok(());
-    }
+        .unwrap_or(false);
     let site_packages = site_packages_dir(site_dir, &runtime.version);
     let pip_installed = has_pip_in_site(&site_packages);
     let pip_editable = has_px_editable_stub(site_dir, &normalize_project_name("pip"));
@@ -643,8 +640,42 @@ fn ensure_project_pip(
         );
     }
 
+    if pip_editable {
+        return Ok(());
+    }
+
     let envs = project_site_env(ctx, snapshot, site_dir, env_python)?;
-    if !(pip_installed || pip_editable) || !pip_entrypoints {
+    let mut pip_main_available =
+        module_available(ctx, snapshot, env_python, &envs, "pip.__main__")?;
+
+    if skip_ensurepip {
+        if !(pip_installed || pip_editable) || !pip_entrypoints || !pip_main_available {
+            link_runtime_pip(
+                &site_packages,
+                &site_dir.join("bin"),
+                Path::new(&runtime.path),
+                &runtime.version,
+            )?;
+            pip_main_available =
+                module_available(ctx, snapshot, env_python, &envs, "pip.__main__")?;
+        }
+        if !module_available(ctx, snapshot, env_python, &envs, "pip")? || !pip_main_available {
+            return Err(InstallUserError::new(
+                "environment missing baseline packaging support",
+                json!({
+                    "missing": ["pip"],
+                    "reason": "missing_pip",
+                    "hint": "unset PX_NO_ENSUREPIP or ensure the runtime provides pip so px can seed setuptools",
+                    "code": diagnostics::cas::MISSING_OR_CORRUPT,
+                }),
+            )
+            .into());
+        }
+        ensure_setuptools_seed(ctx, snapshot, &site_packages, env_python, &envs)?;
+        return Ok(());
+    }
+
+    if !(pip_installed || pip_editable) || !pip_entrypoints || !pip_main_available {
         let output = ctx.python_runtime().run_command(
             env_python
                 .to_str()
@@ -1255,6 +1286,42 @@ fn cached_project_wheel(dir: &Path) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
+fn reuse_cached_project_wheel(
+    cache_root: &Path,
+    snapshot: &ManifestSnapshot,
+    target_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    let project_dir = cache_root
+        .join("project-wheels")
+        .join(normalize_project_name(&snapshot.name));
+    let mut candidates = match fs::read_dir(project_dir) {
+        Ok(entries) => entries.flatten().map(|entry| entry.path()).collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+    candidates.sort();
+
+    for candidate in candidates {
+        if candidate == target_dir || !candidate.is_dir() {
+            continue;
+        }
+        if let Some(existing) = cached_project_wheel(&candidate)? {
+            let Some(filename) = existing.file_name() else {
+                continue;
+            };
+            fs::create_dir_all(target_dir)?;
+            let dest = target_dir.join(filename);
+            fs::copy(&existing, &dest)?;
+            let sha256 = compute_file_sha256(&dest)?;
+            let dist_dir = ensure_wheel_dist(&dest, &sha256)?;
+            let (name, version) = wheel_metadata(&dist_dir)?;
+            persist_wheel_metadata(target_dir, &dest, &sha256, &name, &version)?;
+            return Ok(Some(dest));
+        }
+    }
+
+    Ok(None)
+}
+
 fn ensure_project_wheel_scripts(
     cache_root: &Path,
     snapshot: &ManifestSnapshot,
@@ -1300,7 +1367,10 @@ fn ensure_project_wheel_scripts(
 
     let wheel_path = match cached_project_wheel(&cache_dir)? {
         Some(path) => path,
-        None => build_project_wheel(&python_path, &snapshot.root, &cache_dir, keep_proxies)?,
+        None => match reuse_cached_project_wheel(cache_root, snapshot, &cache_dir)? {
+            Some(path) => path,
+            None => build_project_wheel(&python_path, &snapshot.root, &cache_dir, keep_proxies)?,
+        },
     };
 
     let bin_dir = env_root.join("bin");
@@ -3120,17 +3190,25 @@ impl PythonContext {
     }
 
     pub(crate) fn base_env(&self, command_args: &Value) -> Result<Vec<(String, String)>> {
-        let mut envs = vec![
-            ("PYTHONPATH".into(), self.pythonpath.clone()),
-            ("PYTHONUNBUFFERED".into(), "1".into()),
-            ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
-            ("PYTHONSAFEPATH".into(), "1".into()),
-        ];
         let allowed =
             env::join_paths(&self.allowed_paths).context("allowed path contains invalid UTF-8")?;
         let allowed = allowed
             .into_string()
             .map_err(|_| anyhow!("allowed path contains non-utf8 data"))?;
+        let mut python_paths: Vec<_> = env::split_paths(&allowed).collect();
+        if !self.pythonpath.is_empty() {
+            python_paths.extend(env::split_paths(&self.pythonpath));
+        }
+        let pythonpath = env::join_paths(&python_paths)
+            .context("failed to assemble PYTHONPATH")?
+            .into_string()
+            .map_err(|_| anyhow!("pythonpath contains non-utf8 data"))?;
+        let mut envs = vec![
+            ("PYTHONPATH".into(), pythonpath),
+            ("PYTHONUNBUFFERED".into(), "1".into()),
+            ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
+            ("PYTHONSAFEPATH".into(), "1".into()),
+        ];
         envs.push(("PX_ALLOWED_PATHS".into(), allowed));
         envs.push((
             "PX_PROJECT_ROOT".into(),
@@ -4087,6 +4165,7 @@ fn is_allowed_site_entry(name: &str) -> bool {
     ) || matches_versioned_entry(name, "pip")
         || matches_versioned_entry(name, "setuptools")
         || matches_versioned_entry(name, "_distutils_hack")
+        || matches_versioned_entry(name, "pipx")
 }
 
 fn validate_env_site_packages(
@@ -5023,6 +5102,8 @@ build-backend = "maturin"
         zip.start_file("maturin_demo-0.1.0.data/scripts/maturin-demo", opts)?;
         zip.write_all(b"echo built\n")?;
         zip.finish()?;
+        let sha256 = compute_file_sha256(&wheel_path)?;
+        persist_wheel_metadata(&wheel_dir, &wheel_path, &sha256, "maturin-demo", "0.1.0")?;
 
         let env_root = project_root.join(".px").join("env");
         fs::create_dir_all(env_root.join("bin"))?;
@@ -5043,6 +5124,104 @@ build-backend = "maturin"
             contents.contains("built"),
             "wheel script should be copied into env bin"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn reuses_cached_maturin_wheel_when_build_env_changes() -> Result<()> {
+        use std::io::Write as _;
+
+        let saved_rustflags = env::var("RUSTFLAGS").ok();
+        env::set_var("RUSTFLAGS", "first-hash");
+
+        let temp = tempdir()?;
+        let project_root = temp.path().join("maturin-change");
+        fs::create_dir_all(&project_root)?;
+        fs::write(
+            project_root.join("pyproject.toml"),
+            r#"[project]
+name = "maturin-change"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["maturin>=1.0"]
+build-backend = "maturin"
+"#,
+        )?;
+
+        let snapshot = ProjectSnapshot::read_from(&project_root)?;
+        let runtime = RuntimeMetadata {
+            path: "/usr/bin/python".into(),
+            version: "3.12.0".into(),
+            platform: "test-platform".into(),
+        };
+        let cache_root = temp.path().join("cache");
+        let first_hash =
+            project_build_hash(&runtime, &snapshot, Path::new(&runtime.path), false)?;
+        let first_dir = project_wheel_cache_dir(
+            &cache_root,
+            &snapshot,
+            &runtime,
+            Path::new(&runtime.path),
+            false,
+            &first_hash,
+        );
+        fs::create_dir_all(&first_dir)?;
+        let wheel_path = first_dir.join("maturin_change-0.1.0-py3-none-any.whl");
+        let file = File::create(&wheel_path)?;
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = FileOptions::default();
+        zip.start_file("maturin_change-0.1.0.dist-info/METADATA", opts)?;
+        zip.write_all(b"Name: maturin-change\nVersion: 0.1.0\n")?;
+        zip.start_file(
+            "maturin_change-0.1.0.dist-info/entry_points.txt",
+            opts,
+        )?;
+        zip.write_all(b"[console_scripts]\nmaturin-change = demo.cli:main\n")?;
+        zip.finish()?;
+        let sha256 = compute_file_sha256(&wheel_path)?;
+        persist_wheel_metadata(&first_dir, &wheel_path, &sha256, "maturin-change", "0.1.0")?;
+
+        env::set_var("RUSTFLAGS", "second-hash");
+        let second_hash =
+            project_build_hash(&runtime, &snapshot, Path::new(&runtime.path), false)?;
+        assert_ne!(
+            first_hash, second_hash,
+            "build hash should vary with build env"
+        );
+        let second_dir = project_wheel_cache_dir(
+            &cache_root,
+            &snapshot,
+            &runtime,
+            Path::new(&runtime.path),
+            false,
+            &second_hash,
+        );
+
+        let env_root = project_root.join(".px").join("env");
+        fs::create_dir_all(env_root.join("bin"))?;
+        let owner = OwnerId {
+            owner_type: OwnerType::ProjectEnv,
+            owner_id: "test-owner".into(),
+        };
+        ensure_project_wheel_scripts(&cache_root, &snapshot, &env_root, &runtime, &owner, None)?;
+
+        let script = env_root.join("bin").join("maturin-change");
+        assert!(
+            script.exists(),
+            "script should be installed from cached wheel even when build env changes"
+        );
+        assert!(
+            second_dir.join("wheel.json").exists(),
+            "cached wheel should be copied into the current build cache directory"
+        );
+
+        match saved_rustflags {
+            Some(prev) => env::set_var("RUSTFLAGS", prev),
+            None => env::remove_var("RUSTFLAGS"),
+        }
+
         Ok(())
     }
 
@@ -5189,6 +5368,90 @@ build-backend = "setuptools.build_meta"
             "expected seeded setuptools version"
         );
         validate_cas_environment(&env).expect("setuptools bootstrap should leave CAS site clean");
+
+        for (key, value) in saved_env {
+            match value {
+                Some(prev) => env::set_var(key, prev),
+                None => env::remove_var(key),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn refresh_project_site_seeds_setuptools_with_no_ensurepip() -> Result<()> {
+        let _lock = PIP_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        if env::var("PX_ONLINE").unwrap_or_default() != "1" {
+            eprintln!("skipping setuptools bootstrap test (PX_ONLINE!=1)");
+            return Ok(());
+        }
+        let saved_env = vec![
+            ("PX_CACHE_PATH", env::var("PX_CACHE_PATH").ok()),
+            ("PX_STORE_PATH", env::var("PX_STORE_PATH").ok()),
+            ("PX_ENVS_PATH", env::var("PX_ENVS_PATH").ok()),
+            ("PX_NO_ENSUREPIP", env::var("PX_NO_ENSUREPIP").ok()),
+        ];
+        let temp_env = tempdir()?;
+        let env_root = temp_env.path();
+        env::set_var("PX_CACHE_PATH", env_root.join("cache"));
+        env::set_var("PX_STORE_PATH", env_root.join("store"));
+        env::set_var("PX_ENVS_PATH", env_root.join("envs"));
+        env::set_var("PX_NO_ENSUREPIP", "1");
+
+        let temp = tempdir()?;
+        let project_root = temp.path();
+        fs::write(
+            project_root.join("pyproject.toml"),
+            r#"[project]
+name = "seed-demo"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+"#,
+        )?;
+        let snapshot = px_domain::project::snapshot::ProjectSnapshot::read_from(project_root)?;
+        let lock = render_lockfile(&snapshot, &Vec::<ResolvedDependency>::new(), PX_VERSION)?;
+        fs::write(project_root.join("px.lock"), lock)?;
+
+        let global = GlobalOptions::default();
+        let ctx = CommandContext::new(&global, Arc::new(SystemEffects::new()))?;
+        refresh_project_site(&snapshot, &ctx)?;
+
+        let state = load_project_state(ctx.fs(), project_root)?;
+        let env = state.current_env.expect("env stored");
+        let site_packages = PathBuf::from(&env.site_packages);
+        let env_root = env
+            .env_path
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(|| env_root_from_site_packages(&site_packages))
+            .unwrap_or_else(|| site_packages.clone());
+        let env_python = PathBuf::from(&env.python.path);
+        let envs = project_site_env(&ctx, &snapshot, &env_root, &env_python)?;
+        let script = "import importlib.metadata, pkg_resources, setuptools, pip; print(importlib.metadata.version('setuptools'))";
+        let output = ctx.python_runtime().run_command(
+            env_python
+                .to_str()
+                .ok_or_else(|| anyhow!("invalid python path"))?,
+            &["-c".to_string(), script.to_string()],
+            &envs,
+            project_root,
+        )?;
+        assert_eq!(
+            output.code, 0,
+            "setuptools import should succeed even when PX_NO_ENSUREPIP=1: {} {}",
+            output.stdout, output.stderr
+        );
+        assert_eq!(
+            output.stdout.trim(),
+            SETUPTOOLS_SEED_VERSION,
+            "expected seeded setuptools version"
+        );
+        validate_cas_environment(&env).expect("bootstrap should leave CAS site clean");
 
         for (key, value) in saved_env {
             match value {

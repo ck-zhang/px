@@ -617,7 +617,7 @@ fn commit_workspace_context(
             }),
         ));
     }
-    let workspace_config = px_domain::workspace::workspace_config_from_doc(
+    let mut workspace_config = px_domain::workspace::workspace_config_from_doc(
         &workspace_root_at_ref,
         &manifest_path,
         &workspace_doc,
@@ -711,6 +711,12 @@ fn commit_workspace_context(
             snapshot,
         });
     }
+    if workspace_config.name.is_none() {
+        workspace_config.name = workspace_root
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(std::string::ToString::to_string);
+    }
     let member_snapshot = members
         .iter()
         .find(|member| member.root == member_root_at_ref)
@@ -749,6 +755,12 @@ fn commit_workspace_context(
     let workspace_name = workspace_config
         .name
         .clone()
+        .or_else(|| {
+            workspace_root
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(std::string::ToString::to_string)
+        })
         .or_else(|| {
             workspace_root_at_ref
                 .file_name()
@@ -864,9 +876,23 @@ fn commit_workspace_context(
         }
         push_unique(abs);
     }
-    for path in paths.allowed_paths {
-        push_unique(path);
+    for path in &paths.allowed_paths {
+        push_unique(path.clone());
     }
+    let pythonpath = env::join_paths(&combined)
+        .map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to assemble PYTHONPATH for git-ref execution",
+                json!({ "error": err.to_string() }),
+            )
+        })?
+        .into_string()
+        .map_err(|_| {
+            ExecutionOutcome::failure(
+                "failed to assemble PYTHONPATH for git-ref execution",
+                json!({ "error": "contains non-utf8 data" }),
+            )
+        })?;
     let runtime_path = cas_profile.runtime_path.display().to_string();
     let python = select_python_from_site(&paths.site_bin, &runtime_path, &runtime.version);
     let px_options = member_snapshot
@@ -889,7 +915,7 @@ fn commit_workspace_context(
             project_root: member_root_at_ref.clone(),
             project_name,
             python,
-            pythonpath: paths.pythonpath,
+            pythonpath,
             allowed_paths: combined,
             site_bin: paths.site_bin,
             pep582_bin: paths.pep582_bin,
@@ -1496,13 +1522,49 @@ fn run_python_command(
     envs: &[(String, String)],
     stream_runner: bool,
 ) -> Result<crate::RunOutput> {
+    let mut envs = envs.to_vec();
+    if let Some(merged) = merged_pythonpath(&envs) {
+        envs.retain(|(key, _)| key != "PYTHONPATH");
+        envs.push(("PYTHONPATH".into(), merged));
+    }
     if stream_runner {
         ctx.python_runtime()
-            .run_command_streaming(&py_ctx.python, args, envs, &py_ctx.project_root)
+            .run_command_streaming(&py_ctx.python, args, &envs, &py_ctx.project_root)
     } else {
         ctx.python_runtime()
-            .run_command(&py_ctx.python, args, envs, &py_ctx.project_root)
+            .run_command(&py_ctx.python, args, &envs, &py_ctx.project_root)
     }
+}
+
+fn merged_pythonpath(envs: &[(String, String)]) -> Option<String> {
+    use std::collections::HashSet;
+
+    let allowed = envs
+        .iter()
+        .find(|(key, _)| key == "PX_ALLOWED_PATHS")
+        .map(|(_, value)| value)?;
+
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push_unique = |path: std::path::PathBuf| {
+        if seen.insert(path.clone()) {
+            paths.push(path);
+        }
+    };
+
+    for entry in std::env::split_paths(allowed) {
+        push_unique(entry);
+    }
+
+    if let Some((_, pythonpath)) = envs.iter().find(|(key, _)| key == "PYTHONPATH") {
+        for entry in std::env::split_paths(pythonpath) {
+            push_unique(entry);
+        }
+    }
+
+    std::env::join_paths(paths)
+        .ok()
+        .and_then(|joined| joined.into_string().ok())
 }
 
 pub(crate) fn run_project_script(
@@ -2914,6 +2976,19 @@ oid sha256:deadbeef\nsize 4\n",
             "tests/runtests.py should be preferred over root runtests.py"
         );
         Ok(())
+    }
+
+    #[test]
+    fn merged_pythonpath_keeps_extra_entries() {
+        let envs = vec![
+            ("PX_ALLOWED_PATHS".into(), "/a:/b".into()),
+            ("PYTHONPATH".into(), "/extra:/b".into()),
+        ];
+        let merged = merged_pythonpath(&envs).expect("merged path");
+        let entries: Vec<_> = std::env::split_paths(&merged)
+            .map(|p| p.display().to_string())
+            .collect();
+        assert_eq!(entries, vec!["/a", "/b", "/extra"]);
     }
 
     fn git(cwd: &Path, args: &[&str]) -> Result<String> {
