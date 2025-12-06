@@ -1344,15 +1344,9 @@ mod tests {
         let shim = env_bin.join("python");
         let existing = "/tmp/custom";
         let runtime_site = runtime_root.join("lib/python3.11/site-packages");
-        let expected = format!(
-            "{existing}:{}:{}",
-            site.display(),
-            runtime_site.display()
-        );
+        let expected = format!("{existing}:{}:{}", site.display(), runtime_site.display());
 
-        let output = Command::new(&shim)
-            .env("PYTHONPATH", existing)
-            .output()?;
+        let output = Command::new(&shim).env("PYTHONPATH", existing).output()?;
         assert!(
             output.status.success(),
             "shim should run successfully: {:?}",

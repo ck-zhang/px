@@ -256,7 +256,10 @@ mod tests {
             .join("bin")
             .join("python3.12");
 
-        assert_eq!(runtime_source_for(&runtime_path.display().to_string()), RuntimeSource::PxManaged);
+        assert_eq!(
+            runtime_source_for(&runtime_path.display().to_string()),
+            RuntimeSource::PxManaged
+        );
     }
 
     #[test]
@@ -271,7 +274,10 @@ mod tests {
             .join("bin")
             .join("python3.11");
 
-        assert_eq!(runtime_source_for(&runtime_path.display().to_string()), RuntimeSource::PxManaged);
+        assert_eq!(
+            runtime_source_for(&runtime_path.display().to_string()),
+            RuntimeSource::PxManaged
+        );
     }
 
     #[test]
@@ -284,6 +290,9 @@ mod tests {
         let _guard_registry = EnvGuard::set("PX_RUNTIME_REGISTRY", &registry);
         let system_like = temp.path().join("usr").join("bin").join("python3");
 
-        assert_eq!(runtime_source_for(&system_like.display().to_string()), RuntimeSource::System);
+        assert_eq!(
+            runtime_source_for(&system_like.display().to_string()),
+            RuntimeSource::System
+        );
     }
 }
