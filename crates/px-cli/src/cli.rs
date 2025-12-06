@@ -82,20 +82,6 @@ pub struct PxCli {
     pub online: bool,
     #[arg(
         long,
-        help = "Skip the dependency resolver (use existing pins only; sets PX_RESOLVER=0)",
-        conflicts_with = "resolver",
-        global = true
-    )]
-    pub no_resolver: bool,
-    #[arg(
-        long,
-        help = "Force the dependency resolver even if PX_RESOLVER=0",
-        conflicts_with = "no_resolver",
-        global = true
-    )]
-    pub resolver: bool,
-    #[arg(
-        long,
         help = "Build from sdists even when wheels exist (sets PX_FORCE_SDIST=1)",
         conflicts_with = "prefer_wheels",
         global = true

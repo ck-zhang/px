@@ -65,37 +65,6 @@ fn resolver_pins_range_when_enabled() {
 }
 
 #[test]
-fn resolver_disabled_still_errors_for_ranges() {
-    if !require_online() {
-        return;
-    }
-
-    let temp = tempfile::tempdir().expect("tempdir");
-    let project = init_project(&temp, "resolver_disabled");
-    add_dependency(&project, "packaging>=24,<25");
-
-    let assert = cargo_bin_cmd!("px")
-        .current_dir(&project)
-        .env("PX_ONLINE", "1")
-        .env("PX_RESOLVER", "0")
-        .args(["sync"])
-        .assert()
-        .failure();
-    let output = assert.get_output();
-    let mut buffer = String::new();
-    if !output.stdout.is_empty() {
-        buffer.push_str(&String::from_utf8_lossy(&output.stdout));
-    }
-    if !output.stderr.is_empty() {
-        buffer.push_str(&String::from_utf8_lossy(&output.stderr));
-    }
-    assert!(
-        buffer.contains("requires `name==version`"),
-        "expected pinning error, got {buffer}"
-    );
-}
-
-#[test]
 fn resolver_handles_extras_and_markers() {
     if !require_online() {
         return;
@@ -180,39 +149,6 @@ fn resolver_pins_unversioned_spec() {
     assert!(
         pinned.starts_with("numpy=="),
         "expected numpy to be pinned, got {pinned}"
-    );
-}
-
-#[test]
-fn resolver_disabled_rejects_extras() {
-    if !require_online() {
-        return;
-    }
-
-    let temp = tempfile::tempdir().expect("tempdir");
-    let project = init_project(&temp, "resolver_disabled_extras");
-    let spec = r#"requests[socks]>=2.32 ; python_version >= "3.10""#;
-    add_dependency(&project, spec);
-
-    let assert = cargo_bin_cmd!("px")
-        .current_dir(&project)
-        .env("PX_ONLINE", "1")
-        .env("PX_RESOLVER", "0")
-        .args(["sync"])
-        .assert()
-        .failure();
-    let output = assert.get_output();
-    let mut buffer = String::new();
-    if !output.stdout.is_empty() {
-        buffer.push_str(&String::from_utf8_lossy(&output.stdout));
-    }
-    if !output.stderr.is_empty() {
-        buffer.push_str(&String::from_utf8_lossy(&output.stderr));
-    }
-    assert!(
-        buffer.contains("extras are not supported")
-            || buffer.contains("environment markers are not supported"),
-        "expected extras/marker error, got {buffer}"
     );
 }
 

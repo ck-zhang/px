@@ -407,7 +407,7 @@ pub(crate) fn install_snapshot(
             merge_requirements(&manifest_dependencies, &snapshot.group_dependencies);
         let marker_env = ctx.marker_environment()?;
         let mut resolved_override = None;
-        if override_pins.is_none() && ctx.config().resolver.enabled {
+        if override_pins.is_none() {
             let resolved = resolve_dependencies(ctx, &snapshot)?;
             if !resolved.specs.is_empty() && !inline {
                 manifest_dependencies = merge_resolved_dependencies(

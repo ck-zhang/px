@@ -11,7 +11,6 @@ Rule of thumb: user-facing behavior should be a CLI flag first; env vars stay as
 * `--no-color` – disable colored output.
 * `--config <path>` – explicit px config file.
 * `--offline` / `--online` – force network mode for this run (sets `PX_ONLINE`).
-* `--no-resolver` / `--resolver` – disable/enable dependency resolution (sets `PX_RESOLVER`).
 * `--force-sdist` / `--prefer-wheels` – pick sdists vs wheels when both exist (sets `PX_FORCE_SDIST`).
 
 ## Shared command flags to remember
@@ -46,7 +45,6 @@ Prefer the flags above for interactive use; env vars remain for CI/automation or
 ### Network, resolution, and downloads
 
 * `PX_ONLINE` – defaults to online; values `0/false/no/off/""` disable network access. Some operations (`px publish`, `px migrate --apply`) require `PX_ONLINE=1`.
-* `PX_RESOLVER` – set `0` to skip resolver-driven pin refresh; `1` (default) keeps resolving.
 * `PX_FORCE_SDIST=1` – prefer building from sdists even when wheels exist.
 * `PX_INDEX_URL` (or `PIP_INDEX_URL`/`PIP_EXTRA_INDEX_URL`) – override package index URLs used for resolution.
 * `PX_DOWNLOADS` – max concurrent artifact downloads (clamped 1–16; defaults to available CPUs).

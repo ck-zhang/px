@@ -86,10 +86,6 @@ impl Config {
                 },
             },
             resolver: ResolverConfig {
-                enabled: match snapshot.var("PX_RESOLVER") {
-                    Some(value) => value == "1",
-                    None => true,
-                },
                 force_sdist: snapshot.flag_is_enabled("PX_FORCE_SDIST"),
             },
             test: TestConfig {
@@ -140,7 +136,6 @@ pub struct NetworkConfig {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ResolverConfig {
-    pub enabled: bool,
     pub force_sdist: bool,
 }
 

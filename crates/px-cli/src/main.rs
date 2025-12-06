@@ -105,11 +105,6 @@ fn apply_env_overrides(cli: &PxCli) {
     } else if cli.online {
         env::set_var("PX_ONLINE", "1");
     }
-    if cli.no_resolver {
-        env::set_var("PX_RESOLVER", "0");
-    } else if cli.resolver {
-        env::set_var("PX_RESOLVER", "1");
-    }
     if cli.force_sdist {
         env::set_var("PX_FORCE_SDIST", "1");
     } else if cli.prefer_wheels {

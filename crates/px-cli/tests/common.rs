@@ -41,7 +41,6 @@ pub fn reset_test_store_env() {
         "PX_ENVS_PATH",
         "PX_TOOLS_DIR",
         "PX_ONLINE",
-        "PX_RESOLVER",
         "PX_FORCE_SDIST",
         "PX_RUNTIME_PYTHON",
         "PX_KEEP_PROXIES",

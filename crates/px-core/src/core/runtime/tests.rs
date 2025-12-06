@@ -24,7 +24,6 @@ use tempfile::tempdir;
 fn config_respects_env_flags() {
     let snapshot = EnvSnapshot::testing(&[
         ("PX_ONLINE", "1"),
-        ("PX_RESOLVER", "1"),
         ("PX_FORCE_SDIST", "1"),
         ("PX_TEST_FALLBACK_STD", "1"),
         ("PX_SKIP_TESTS", "1"),
@@ -32,7 +31,6 @@ fn config_respects_env_flags() {
     let effects = SystemEffects::new();
     let config = Config::from_snapshot(&snapshot, effects.cache()).expect("config");
     assert!(config.network.online);
-    assert!(config.resolver.enabled);
     assert!(config.resolver.force_sdist);
     assert!(config.test.fallback_builtin);
     assert_eq!(config.test.skip_tests_flag.as_deref(), Some("1"));
@@ -59,15 +57,10 @@ fn resolver_enabled_by_default() {
     let snapshot = EnvSnapshot::testing(&[]);
     let effects = SystemEffects::new();
     let config = Config::from_snapshot(&snapshot, effects.cache()).expect("config");
-    assert!(config.resolver.enabled);
-}
-
-#[test]
-fn resolver_can_be_disabled_via_env() {
-    let snapshot = EnvSnapshot::testing(&[("PX_RESOLVER", "0")]);
-    let effects = SystemEffects::new();
-    let config = Config::from_snapshot(&snapshot, effects.cache()).expect("config");
-    assert!(!config.resolver.enabled);
+    assert!(
+        !config.resolver.force_sdist,
+        "force_sdist should default to false"
+    );
 }
 
 #[test]
