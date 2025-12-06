@@ -4,7 +4,7 @@ use assert_cmd::cargo::cargo_bin_cmd;
 
 mod common;
 
-use common::{parse_json, prepare_fixture, require_online};
+use common::{parse_json, prepare_fixture, require_online, test_env_guard};
 
 fn find_python() -> Option<String> {
     let candidates = [
@@ -27,10 +27,10 @@ fn find_python() -> Option<String> {
 
 #[test]
 fn fmt_bypasses_project_lock_env_gating() {
+    let _guard = test_env_guard();
     if !require_online() {
         return;
     }
-    let _guard = common::test_env_guard();
     let (_tmp, project) = prepare_fixture("fmt-bypass");
     let cache = project.join(".px-cache");
     let store = cache.join("store");
@@ -79,6 +79,10 @@ fn fmt_bypasses_project_lock_env_gating() {
 
 #[test]
 fn frozen_test_refuses_autosync_for_missing_env() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_tmp, project) = prepare_fixture("frozen-missing-env");
     fs::remove_dir_all(project.join(".px")).ok();
     let Some(python) = find_python() else {
@@ -104,6 +108,10 @@ fn frozen_test_refuses_autosync_for_missing_env() {
 
 #[test]
 fn test_repairs_missing_env_in_dev_mode() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_tmp, project) = prepare_fixture("dev-missing-env");
     fs::remove_dir_all(project.join(".px")).ok();
     // Create a simple, guaranteed-core pytest to avoid environment-specific stdlib modules.
@@ -166,6 +174,7 @@ fn test_repairs_missing_env_in_dev_mode() {
 
 #[test]
 fn test_bootstraps_lock_before_running_tests() {
+    let _guard = test_env_guard();
     if !require_online() {
         return;
     }
@@ -204,6 +213,7 @@ fn test_bootstraps_lock_before_running_tests() {
 
 #[test]
 fn run_bootstraps_lock_before_execution() {
+    let _guard = test_env_guard();
     if !require_online() {
         return;
     }
@@ -241,6 +251,10 @@ fn run_bootstraps_lock_before_execution() {
 
 #[test]
 fn frozen_sync_reports_lock_drift() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_tmp, project) = prepare_fixture("drifted-lock");
     let lock_path = project.join("px.lock");
     let contents = fs::read_to_string(&lock_path).expect("read lock");

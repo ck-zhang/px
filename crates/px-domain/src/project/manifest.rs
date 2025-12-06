@@ -1632,7 +1632,7 @@ mypy = "^1.11.0"
 
     #[test]
     fn poetry_group_dependencies_resolve() -> Result<()> {
-        let mut doc: DocumentMut = r#"[project]
+        let doc: DocumentMut = r#"[project]
 name = "demo"
 version = "0.1.0"
 requires-python = ">=3.11"

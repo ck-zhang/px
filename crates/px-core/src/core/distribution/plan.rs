@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use serde_json::json;
 
-use crate::{relative_path_str, CommandContext, ExecutionOutcome, PythonContext};
+use crate::{relative_path_str, CommandContext, ExecutionOutcome, InstallUserError, PythonContext};
 
-use super::artifacts::{collect_artifact_summaries, ArtifactSummary, BuildTargets};
+use super::artifacts::{ArtifactSummary, BuildTargets};
+use super::uv::{discover_publish_artifacts, PublishArtifact};
 
 #[derive(Clone, Debug)]
 pub struct BuildRequest {
@@ -71,8 +72,17 @@ pub(crate) struct PublishPlan {
     pub(crate) registry: PublishRegistry,
     pub(crate) token_env: String,
     pub(crate) token: Option<String>,
-    pub(crate) artifacts: Vec<ArtifactSummary>,
+    pub(crate) artifacts: Vec<PublishArtifact>,
     pub(crate) dry_run: bool,
+}
+
+impl PublishPlan {
+    pub(crate) fn summaries(&self) -> Vec<ArtifactSummary> {
+        self.artifacts
+            .iter()
+            .map(|artifact| artifact.summary().clone())
+            .collect()
+    }
 }
 
 pub(crate) enum PublishPlanning {
@@ -92,7 +102,15 @@ pub(crate) fn plan_publish(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| ctx.config().publish.default_token_env.to_string());
     let dist_dir = py_ctx.project_root.join("dist");
-    let artifacts = collect_artifact_summaries(&dist_dir, None, py_ctx)?;
+    let artifacts = discover_publish_artifacts(&py_ctx.project_root, &dist_dir).map_err(|err| {
+        InstallUserError::new(
+            format!("px publish: {err}"),
+            json!({
+                "reason": "publish_artifacts",
+                "error": err.to_string(),
+            }),
+        )
+    })?;
     if artifacts.is_empty() {
         return Ok(PublishPlanning::Outcome(ExecutionOutcome::user_error(
             "px publish: no artifacts found (run `px build` first)",

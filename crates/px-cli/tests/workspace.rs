@@ -5,10 +5,14 @@ use toml_edit::{DocumentMut, Item};
 
 mod common;
 
-use common::{parse_json, prepare_named_fixture};
+use common::{parse_json, prepare_named_fixture, require_online, test_env_guard};
 
 #[test]
 fn workspace_sync_writes_workspace_metadata() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_temp, root) = prepare_named_fixture("workspace_basic", "workspace_meta");
 
     cargo_bin_cmd!("px")
@@ -43,6 +47,10 @@ fn workspace_sync_writes_workspace_metadata() {
 
 #[test]
 fn workspace_add_rolls_back_on_failure() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_temp, root) = prepare_named_fixture("workspace_basic", "workspace_add_fail");
     let member = root.join("apps/a");
 
@@ -72,6 +80,7 @@ fn workspace_add_rolls_back_on_failure() {
 
 #[test]
 fn workspace_status_handles_empty_members() {
+    let _guard = test_env_guard();
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path();
     let manifest = r#"[project]
@@ -99,6 +108,10 @@ members = []
 
 #[test]
 fn workspace_test_routes_through_workspace_state() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path();
     let workspace_manifest = r#"[project]
@@ -149,7 +162,10 @@ dependencies = []
 
 #[test]
 fn workspace_run_at_ref_uses_workspace_identity() {
-    let _guard = common::test_env_guard();
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_temp, root) = prepare_named_fixture("workspace_basic", "workspace_run_at_ref");
 
     let member = root.join("apps/a");

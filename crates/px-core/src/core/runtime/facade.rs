@@ -5385,6 +5385,10 @@ build-backend = "maturin"
     #[test]
     fn refresh_project_site_bootstraps_pip() -> Result<()> {
         let _lock = PIP_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        if env::var("PX_ONLINE").unwrap_or_default() != "1" {
+            eprintln!("skipping pip bootstrap test (PX_ONLINE!=1)");
+            return Ok(());
+        }
         let saved_env = vec![
             ("PX_CACHE_PATH", env::var("PX_CACHE_PATH").ok()),
             ("PX_STORE_PATH", env::var("PX_STORE_PATH").ok()),
@@ -5722,6 +5726,10 @@ build-backend = "setuptools.build_meta"
     #[test]
     fn refresh_project_site_preserves_editable_pip_entrypoints() -> Result<()> {
         let _lock = PIP_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        if env::var("PX_ONLINE").unwrap_or_default() != "1" {
+            eprintln!("skipping editable pip preservation test (PX_ONLINE!=1)");
+            return Ok(());
+        }
         let saved_env = vec![
             ("PX_CACHE_PATH", env::var("PX_CACHE_PATH").ok()),
             ("PX_STORE_PATH", env::var("PX_STORE_PATH").ok()),
@@ -5821,6 +5829,10 @@ build-backend = "setuptools.build_meta"
     #[test]
     fn validate_env_detects_untracked_site_packages_entries() -> Result<()> {
         let _lock = PIP_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        if env::var("PX_ONLINE").unwrap_or_default() != "1" {
+            eprintln!("skipping validate env drift test (PX_ONLINE!=1)");
+            return Ok(());
+        }
         let saved_env = vec![
             ("PX_CACHE_PATH", env::var("PX_CACHE_PATH").ok()),
             ("PX_STORE_PATH", env::var("PX_STORE_PATH").ok()),

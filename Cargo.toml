@@ -44,8 +44,10 @@ petgraph = "0.8.3"
 uv-cache = { version = "=0.0.1" }
 uv-client = { version = "=0.0.1" }
 uv-configuration = { version = "=0.0.1" }
+uv-auth = { version = "=0.0.1" }
 uv-dispatch = { version = "=0.0.1" }
 uv-distribution = { version = "=0.0.1" }
+uv-distribution-filename = { version = "=0.0.1" }
 uv-distribution-types = { version = "=0.0.1" }
 uv-install-wheel = { version = "=0.0.1", default-features = false }
 uv-pep440 = { version = "=0.0.1" }
@@ -54,6 +56,8 @@ uv-platform-tags = { version = "=0.0.1" }
 uv-preview = { version = "=0.0.1" }
 uv-pypi-types = { version = "=0.0.1" }
 uv-python = { version = "=0.0.1" }
+uv-publish = { version = "=0.0.1" }
+uv-redacted = { version = "=0.0.1" }
 uv-resolver = { version = "=0.0.1" }
 uv-types = { version = "=0.0.1" }
 uv-workspace = { version = "=0.0.1" }
@@ -101,6 +105,7 @@ uv-pep508 = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
 uv-platform = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
 uv-platform-tags = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
 uv-preview = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
+uv-publish = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
 uv-pypi-types = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
 uv-python = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }
 uv-redacted = { git = "https://github.com/astral-sh/uv.git", tag = "0.9.11" }

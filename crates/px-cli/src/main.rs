@@ -21,7 +21,7 @@ use output::{emit_output, OutputOptions, StatusRenderOptions};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
-    CompleteEnv::with_factory(|| PxCli::command())
+    CompleteEnv::with_factory(PxCli::command)
         .bin("px")
         .complete();
 

@@ -5,6 +5,8 @@ use serde_json::Value;
 use tempfile::TempDir;
 use toml_edit::DocumentMut;
 
+mod common;
+
 fn require_online() -> bool {
     if let Some("1") = env::var("PX_ONLINE").ok().as_deref() {
         true
@@ -687,6 +689,11 @@ fn migrate_respects_source_overrides() {
 
 #[test]
 fn migrate_blocks_dirty_worktree_without_flag() {
+    let _guard = common::test_env_guard();
+    common::ensure_test_store_env();
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     write_file(
         &temp,

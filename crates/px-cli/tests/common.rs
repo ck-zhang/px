@@ -57,7 +57,9 @@ pub fn reset_test_store_env() {
 }
 
 pub fn test_env_guard() -> std::sync::MutexGuard<'static, ()> {
-    serial_lock().lock().unwrap()
+    serial_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
 }
 
 pub fn ensure_test_store_env() {

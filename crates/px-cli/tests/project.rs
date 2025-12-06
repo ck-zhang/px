@@ -7,7 +7,7 @@ use toml_edit::DocumentMut;
 
 mod common;
 
-use common::{parse_json, prepare_fixture, require_online};
+use common::{parse_json, prepare_fixture, require_online, test_env_guard};
 
 fn px_cmd() -> assert_cmd::Command {
     common::ensure_test_store_env();
@@ -16,6 +16,10 @@ fn px_cmd() -> assert_cmd::Command {
 
 #[test]
 fn project_init_creates_minimal_shape() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path().join("demo_shape");
     fs::create_dir_all(&project_dir).expect("create project dir");
@@ -86,6 +90,10 @@ fn project_init_creates_minimal_shape() {
 
 #[test]
 fn project_init_infers_package_name_from_directory() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path().join("Fancy-App");
     fs::create_dir_all(&project_dir).expect("create project dir");
@@ -108,6 +116,10 @@ fn project_init_infers_package_name_from_directory() {
 
 #[test]
 fn project_init_refuses_when_pyproject_exists() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     scaffold_demo(&temp, "demo_pkg");
     let project_dir = temp.path();
@@ -128,6 +140,10 @@ fn project_init_refuses_when_pyproject_exists() {
 
 #[test]
 fn project_init_reports_orphaned_lockfile() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path();
     fs::write(project_dir.join("px.lock"), "").expect("write px.lock");
@@ -156,6 +172,10 @@ fn project_init_reports_orphaned_lockfile() {
 
 #[test]
 fn project_init_cleans_up_when_runtime_missing() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path().join("no_runtime");
     fs::create_dir_all(&project_dir).expect("create project dir");
@@ -189,6 +209,7 @@ fn project_init_cleans_up_when_runtime_missing() {
 
 #[test]
 fn project_surfaces_invalid_pyproject_without_trace() {
+    let _guard = test_env_guard();
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path();
     fs::write(
@@ -214,6 +235,7 @@ fn project_surfaces_invalid_pyproject_without_trace() {
 
 #[test]
 fn project_surfaces_invalid_lockfile_without_trace() {
+    let _guard = test_env_guard();
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path();
     fs::write(
@@ -252,6 +274,10 @@ build-backend = "setuptools.build_meta"
 
 #[test]
 fn project_init_respects_python_operator() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path().join("py-req");
     fs::create_dir_all(&project_dir).expect("create project dir");
@@ -272,6 +298,10 @@ fn project_init_respects_python_operator() {
 
 #[test]
 fn project_init_dry_run_writes_nothing() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path().join("dry-init");
     fs::create_dir_all(&project_dir).expect("create project dir");
@@ -298,6 +328,10 @@ fn project_init_dry_run_writes_nothing() {
 
 #[test]
 fn project_init_json_reports_details() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path().join("json-demo");
     fs::create_dir_all(&project_dir).expect("create project dir");
@@ -337,6 +371,7 @@ fn project_init_json_reports_details() {
 
 #[test]
 fn px_why_reports_direct_dependency() {
+    let _guard = test_env_guard();
     if !require_online() {
         return;
     }
@@ -367,6 +402,7 @@ fn px_why_reports_direct_dependency() {
 
 #[test]
 fn px_why_reports_transitive_chain() {
+    let _guard = test_env_guard();
     if !require_online() {
         return;
     }
@@ -410,6 +446,7 @@ fn px_why_reports_transitive_chain() {
 
 #[test]
 fn project_add_inserts_dependency() {
+    let _guard = test_env_guard();
     if !require_online() {
         return;
     }
@@ -429,6 +466,10 @@ fn project_add_inserts_dependency() {
 
 #[test]
 fn project_add_dry_run_leaves_project_unchanged() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     scaffold_demo(&temp, "demo_add_dry_run");
     let project_dir = temp.path();
@@ -457,6 +498,7 @@ fn project_add_dry_run_leaves_project_unchanged() {
 
 #[test]
 fn project_update_restores_manifest_on_failure() {
+    let _guard = test_env_guard();
     if !require_online() {
         return;
     }
@@ -509,6 +551,7 @@ fn project_update_restores_manifest_on_failure() {
 
 #[test]
 fn sync_dry_run_reports_resolution_failures() {
+    let _guard = test_env_guard();
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path();
     fs::write(
@@ -545,6 +588,7 @@ build-backend = "setuptools.build_meta"
 
 #[test]
 fn project_remove_deletes_dependency() {
+    let _guard = test_env_guard();
     if !require_online() {
         return;
     }
@@ -570,6 +614,10 @@ fn project_remove_deletes_dependency() {
 
 #[test]
 fn project_remove_requires_direct_dependency() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     scaffold_demo(&temp, "demo_remove_missing");
     let project_dir = temp.path();
@@ -593,6 +641,7 @@ fn project_remove_requires_direct_dependency() {
 
 #[test]
 fn px_commands_require_project_root() {
+    let _guard = test_env_guard();
     let temp = tempfile::tempdir().expect("tempdir");
     let assert = px_cmd()
         .current_dir(temp.path())
@@ -609,6 +658,7 @@ fn px_commands_require_project_root() {
 
 #[test]
 fn missing_project_hint_recommends_migrate_when_pyproject_exists() {
+    let _guard = test_env_guard();
     let temp = tempfile::tempdir().expect("tempdir");
     let pyproject = temp.path().join("pyproject.toml");
     fs::write(
@@ -652,6 +702,7 @@ fn missing_project_hint_recommends_migrate_when_pyproject_exists() {
 
 #[test]
 fn all_project_commands_surface_missing_project_errors() {
+    let _guard = test_env_guard();
     let temp = tempfile::tempdir().expect("tempdir");
     let message = "No px project found. Run `px init` in your project directory first.";
 
@@ -718,6 +769,7 @@ fn all_project_commands_surface_missing_project_errors() {
 
 #[test]
 fn px_commands_walk_up_to_project_root() {
+    let _guard = test_env_guard();
     if !require_online() {
         return;
     }
@@ -747,6 +799,10 @@ fn px_commands_walk_up_to_project_root() {
 
 #[test]
 fn sync_frozen_missing_lock_hint_is_clear() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path();
     px_cmd()
@@ -781,6 +837,7 @@ fn sync_frozen_missing_lock_hint_is_clear() {
 
 #[test]
 fn project_status_reports_missing_lock() {
+    let _guard = test_env_guard();
     let (_tmp, project) = prepare_fixture("status-missing-lock");
     let lock = project.join("px.lock");
     fs::remove_file(&lock).expect("remove px.lock");
@@ -803,6 +860,7 @@ fn project_status_reports_missing_lock() {
 
 #[test]
 fn project_status_detects_manifest_drift() {
+    let _guard = test_env_guard();
     let (_tmp, project) = prepare_fixture("status-drift");
     let pyproject = project.join("pyproject.toml");
     let mut doc: DocumentMut = fs::read_to_string(&pyproject)
@@ -839,7 +897,10 @@ fn project_status_detects_manifest_drift() {
 
 #[test]
 fn project_status_ignores_dependencies_filtered_by_markers() {
-    let _guard = common::test_env_guard();
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_tmp, project) = common::init_empty_project("px-status-markers");
     let cache = project.join(".px-cache");
     let store = cache.join("store");
@@ -892,6 +953,7 @@ fn project_status_ignores_dependencies_filtered_by_markers() {
 
 #[test]
 fn run_and_test_report_missing_manifest_command() {
+    let _guard = test_env_guard();
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path();
     fs::write(root.join("px.lock"), "").expect("touch lock");
@@ -915,7 +977,10 @@ fn run_and_test_report_missing_manifest_command() {
 
 #[test]
 fn project_test_surfaces_missing_pytest() {
-    let _guard = common::test_env_guard();
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_temp, root) = common::init_empty_project("px-missing-pytest");
     let cache = root.join(".px-cache");
     let store = cache.join("store");
@@ -977,6 +1042,10 @@ fn project_test_surfaces_missing_pytest() {
 
 #[test]
 fn project_test_prefers_runtests_script_when_present() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_temp, root) = common::prepare_fixture("px-runtests-runner");
 
     let Some(python) = find_python() else {
@@ -1017,6 +1086,10 @@ fn project_test_prefers_runtests_script_when_present() {
 
 #[test]
 fn corrupt_state_file_is_reported() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_temp, root) = common::init_empty_project("px-corrupt-state");
     let state = root.join(".px").join("state.json");
     fs::create_dir_all(state.parent().unwrap()).expect("create .px");

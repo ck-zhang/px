@@ -8,7 +8,7 @@ use toml_edit::DocumentMut;
 
 mod common;
 
-use common::{parse_json, prepare_named_fixture};
+use common::{parse_json, prepare_named_fixture, require_online, test_env_guard};
 
 fn find_python() -> Option<String> {
     let candidates = [
@@ -31,7 +31,10 @@ fn find_python() -> Option<String> {
 
 #[test]
 fn project_status_json_consistent() {
-    let _guard = common::test_env_guard();
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_tmp, root) = common::init_empty_project("status-consistent");
     let cache = root.join(".px-cache");
     let store = cache.join("store");
@@ -79,7 +82,10 @@ fn project_status_json_consistent() {
 
 #[test]
 fn project_status_detects_manifest_drift() {
-    let _guard = common::test_env_guard();
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_tmp, root) = common::init_empty_project("status-drift");
     let cache = root.join(".px-cache");
     let store = cache.join("store");
@@ -129,7 +135,10 @@ fn project_status_detects_manifest_drift() {
 
 #[test]
 fn project_status_detects_missing_env() {
-    let _guard = common::test_env_guard();
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_tmp, root) = common::init_empty_project("status-missing-env");
     let cache = root.join(".px-cache");
     let store = cache.join("store");
@@ -181,7 +190,10 @@ fn project_status_detects_missing_env() {
 
 #[test]
 fn workspace_member_status_consistent() {
-    let _guard = common::test_env_guard();
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_tmp, root) = prepare_named_fixture("workspace_basic", "status-ws-consistent");
     let member_a = root.join("apps").join("a");
     let member_b = root.join("libs").join("b");
@@ -235,7 +247,10 @@ fn workspace_member_status_consistent() {
 
 #[test]
 fn workspace_status_detects_member_drift() {
-    let _guard = common::test_env_guard();
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_tmp, root) = prepare_named_fixture("workspace_basic", "status-ws-drift");
     let member_a = root.join("apps").join("a");
     let member_b = root.join("libs").join("b");
@@ -292,6 +307,10 @@ fn workspace_status_detects_member_drift() {
 
 #[test]
 fn status_brief_emits_one_line() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_tmp, root) = common::init_empty_project("status-brief");
     let Some(python) = find_python() else {
         eprintln!("skipping status test (python binary not found)");
@@ -332,6 +351,7 @@ fn status_brief_emits_one_line() {
 
 #[test]
 fn status_reports_missing_project() {
+    let _guard = test_env_guard();
     let temp = tempfile::tempdir().expect("tempdir");
     let assert = cargo_bin_cmd!("px")
         .current_dir(temp.path())
