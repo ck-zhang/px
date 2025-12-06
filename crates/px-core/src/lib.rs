@@ -68,7 +68,8 @@ pub use crate::core::workspace::{
 pub(crate) use crate::core::runtime::PX_VERSION;
 pub use crate::core::runtime::{
     format_status_message, is_missing_project_error, manifest_error_outcome,
-    missing_project_outcome, to_json_response,
+    missing_project_outcome, run_target_completions, to_json_response, RunTargetCompletions,
+    RunTargetKind, RunTargetSuggestion,
 };
 
 pub const MISSING_PROJECT_MESSAGE: &str = crate::core::runtime::MISSING_PROJECT_MESSAGE;

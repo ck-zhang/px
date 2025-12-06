@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
 use clap::{value_parser, ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap_complete::engine::ArgValueCompleter;
 use serde::{Deserialize, Serialize};
+
+use crate::completion::run_target_completer;
 
 pub const PX_HELP_TEMPLATE: &str =
     "{before-help}\nUsage:\n    {usage}\n\nGlobal options:\n{options}\n";
@@ -31,6 +34,7 @@ pub const PX_BEFORE_HELP: &str = concat!(
 
 #[derive(Parser, Debug)]
 #[command(
+    name = "px",
     author,
     version,
     propagate_version = false,
@@ -345,7 +349,7 @@ pub struct SyncArgs {
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
-    #[arg(long)]
+    #[arg(long, add = ArgValueCompleter::new(run_target_completer))]
     pub target: Option<String>,
     #[arg(long, help = "Force interactive stdio (inherit stdin/stdout/stderr)")]
     pub interactive: bool,
@@ -368,12 +372,19 @@ pub struct RunArgs {
     pub at: Option<String>,
     #[arg(
         value_name = "TARGET",
+        allow_hyphen_values = true,
+        add = ArgValueCompleter::new(run_target_completer),
+        help = "Target to run"
+    )]
+    pub target_value: Option<String>,
+    #[arg(
+        value_name = "ARG",
         trailing_var_arg = true,
         allow_hyphen_values = true,
         num_args = 0..,
-        help = "Target to run followed by any arguments to pass through"
+        help = "Arguments forwarded to the target"
     )]
-    pub target_args: Vec<String>,
+    pub args: Vec<String>,
 }
 
 #[derive(Args, Debug)]

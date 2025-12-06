@@ -337,11 +337,21 @@ fn python_use_request_from_args(args: &PythonUseArgs) -> px_core::PythonUseReque
 
 fn normalize_run_invocation(args: &RunArgs) -> (Option<String>, Vec<String>) {
     if args.target.is_some() {
-        return (None, args.target_args.clone());
+        let mut forwarded = Vec::new();
+        if let Some(positional) = &args.target_value {
+            forwarded.push(positional.clone());
+        }
+        forwarded.extend(args.args.clone());
+        return (None, forwarded);
     }
-    match args.target_args.split_first() {
-        Some((first, _rest)) if first.starts_with('-') => (None, args.target_args.clone()),
-        Some((first, rest)) => (Some(first.clone()), rest.to_vec()),
-        None => (None, Vec::new()),
+    match args.target_value.as_ref() {
+        Some(first) if first.starts_with('-') => {
+            let mut forwarded = Vec::with_capacity(args.args.len() + 1);
+            forwarded.push(first.clone());
+            forwarded.extend(args.args.clone());
+            (None, forwarded)
+        }
+        Some(first) => (Some(first.clone()), args.args.clone()),
+        None => (None, args.args.clone()),
     }
 }

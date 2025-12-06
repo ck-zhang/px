@@ -2,11 +2,13 @@
 
 use std::{env, path::PathBuf, sync::Arc};
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::CompleteEnv;
 use color_eyre::{eyre::eyre, Result};
 use px_core::{CommandContext, GlobalOptions, SystemEffects};
 
 mod cli;
+mod completion;
 mod dispatch;
 mod output;
 mod style;
@@ -19,6 +21,9 @@ use output::{emit_output, OutputOptions, StatusRenderOptions};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
+    CompleteEnv::with_factory(|| PxCli::command())
+        .bin("px")
+        .complete();
 
     if cfg!(windows) {
         eprintln!("px currently supports Linux and macOS only; Windows is not supported yet. Please use WSL or a Unix host.");
