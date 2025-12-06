@@ -858,7 +858,13 @@ pub(crate) fn write_python_shim(
             pythonpath.push_str(&runtime_site.display().to_string());
         }
     }
-    script.push_str(&format!("export PYTHONPATH=\"{pythonpath}\"\n"));
+    script.push_str("if [ -n \"$PYTHONPATH\" ]; then\n");
+    script.push_str(&format!(
+        "  export PYTHONPATH=\"$PYTHONPATH{path_sep}{pythonpath}\"\n"
+    ));
+    script.push_str("else\n");
+    script.push_str(&format!("  export PYTHONPATH=\"{pythonpath}\"\n"));
+    script.push_str("fi\n");
     script.push_str(&format!("export PX_PYTHON=\"{}\"\n", runtime.display()));
     script.push_str("export PYTHONUNBUFFERED=1\n");
     script.push_str("export PYTHONDONTWRITEBYTECODE=1\n");
@@ -1311,6 +1317,49 @@ mod tests {
             stdout, "from_profile",
             "profile env vars should override parent values"
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn python_shim_preserves_existing_pythonpath() -> Result<()> {
+        let temp = tempdir()?;
+        let runtime_root = temp.path().join("runtime");
+        let bin_dir = runtime_root.join("bin");
+        fs::create_dir_all(&bin_dir)?;
+        let runtime = bin_dir.join("python");
+        fs::write(
+            &runtime,
+            "#!/usr/bin/env bash\nprintf \"%s\" \"$PYTHONPATH\"\n",
+        )?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755))?;
+
+        let env_root = temp.path().join("env");
+        let env_bin = env_root.join("bin");
+        let site = env_root.join("lib/python3.11/site-packages");
+        fs::create_dir_all(&site)?;
+
+        write_python_shim(&env_bin, &runtime, &site, &BTreeMap::new())?;
+        let shim = env_bin.join("python");
+        let existing = "/tmp/custom";
+        let runtime_site = runtime_root.join("lib/python3.11/site-packages");
+        let expected = format!(
+            "{existing}:{}:{}",
+            site.display(),
+            runtime_site.display()
+        );
+
+        let output = Command::new(&shim)
+            .env("PYTHONPATH", existing)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "shim should run successfully: {:?}",
+            output
+        );
+        let value = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(value, expected);
         Ok(())
     }
 

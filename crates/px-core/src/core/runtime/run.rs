@@ -1619,7 +1619,7 @@ fn run_executable(
     let uses_px_python = program_matches_python(program, py_ctx);
     let needs_stdin = uses_px_python && extra_args.first().map(|arg| arg == "-").unwrap_or(false);
     if !uses_px_python {
-        envs.retain(|(key, _)| key != "PX_PYTHON" && key != "PX_ALLOWED_PATHS");
+        envs.retain(|(key, _)| key != "PX_PYTHON");
     }
     let runtime = core_ctx.python_runtime();
     let interactive = interactive || needs_stdin;

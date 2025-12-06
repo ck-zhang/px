@@ -85,6 +85,54 @@ fn run_treats_flags_after_target_as_script_args() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn run_console_script_keeps_project_on_sys_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = common::test_env_guard();
+    let (_tmp, project) = prepare_fixture("run-console-script");
+    let Some(python) = find_python() else {
+        eprintln!("skipping console script test (python binary not found)");
+        return;
+    };
+
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .arg("sync")
+        .assert()
+        .success();
+
+    let env_bin = project.join(".px").join("envs").join("current").join("bin");
+    let shim = env_bin.join("python");
+    let script = env_bin.join("sample-greet");
+    fs::write(
+        &script,
+        format!(
+            "#!{}\nimport sample_px_app.cli as cli\nprint(cli.greet('Console'))\n",
+            shim.display()
+        ),
+    )
+    .expect("write console script");
+    let mut perms = fs::metadata(&script).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod script");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["run", "sample-greet"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("Hello, Console!"),
+        "console script should see project module on sys.path: {stdout:?}"
+    );
+}
+
 #[test]
 fn run_defaults_to_first_project_script() {
     let _guard = common::test_env_guard();
