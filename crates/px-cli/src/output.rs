@@ -864,6 +864,7 @@ fn error_code(info: CommandInfo) -> &'static str {
         CommandGroup::Why => diag_commands::WHY,
         CommandGroup::Tool => diag_commands::TOOL,
         CommandGroup::Python => diag_commands::PYTHON,
+        CommandGroup::Completions => diag_commands::GENERIC,
     }
 }
 

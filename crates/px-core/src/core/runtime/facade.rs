@@ -278,6 +278,7 @@ pub enum CommandGroup {
     Why,
     Tool,
     Python,
+    Completions,
 }
 
 impl fmt::Display for CommandGroup {
@@ -298,6 +299,7 @@ impl fmt::Display for CommandGroup {
             CommandGroup::Why => "why",
             CommandGroup::Tool => "tool",
             CommandGroup::Python => "python",
+            CommandGroup::Completions => "completions",
         };
         f.write_str(name)
     }

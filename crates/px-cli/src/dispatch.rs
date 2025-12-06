@@ -9,9 +9,9 @@ use px_core::{
 };
 
 use crate::{
-    BuildArgs, BuildFormat, CommandGroupCli, FmtArgs, InitArgs, MigrateArgs, PublishArgs, RunArgs,
-    SyncArgs, TestArgs, ToolCommand, ToolInstallArgs, ToolRemoveArgs, ToolRunArgs, ToolUpgradeArgs,
-    WhyArgs,
+    BuildArgs, BuildFormat, CommandGroupCli, CompletionShell, CompletionsArgs, FmtArgs, InitArgs,
+    MigrateArgs, PublishArgs, RunArgs, SyncArgs, TestArgs, ToolCommand, ToolInstallArgs,
+    ToolRemoveArgs, ToolRunArgs, ToolUpgradeArgs, WhyArgs,
 };
 use crate::{PythonCommand, PythonInstallArgs, PythonUseArgs};
 
@@ -139,6 +139,10 @@ pub fn dispatch_command(
                 core_call(info, px_core::python_use(ctx, &request))
             }
         },
+        CommandGroupCli::Completions(args) => {
+            let info = CommandInfo::new(CommandGroup::Completions, "completions");
+            Ok((info, completions_outcome(args)))
+        }
     }
 }
 
@@ -209,6 +213,25 @@ fn project_init_request_from_args(args: &InitArgs) -> ProjectInitRequest {
         dry_run: args.common.dry_run,
         force: args.common.force,
     }
+}
+
+fn completions_outcome(args: &CompletionsArgs) -> px_core::ExecutionOutcome {
+    let snippet = match args.shell {
+        CompletionShell::Bash => "source <(COMPLETE=bash px)".to_string(),
+        CompletionShell::Zsh => "source <(COMPLETE=zsh px)".to_string(),
+        CompletionShell::Fish => "source (COMPLETE=fish px | psub)".to_string(),
+        CompletionShell::Powershell => {
+            "$env:COMPLETE='powershell'; px | Out-String | Invoke-Expression; Remove-Item Env:\\COMPLETE".to_string()
+        }
+    };
+    px_core::ExecutionOutcome::success(
+        snippet.clone(),
+        serde_json::json!({
+            "passthrough": true,
+            "snippet": snippet,
+            "shell": format!("{:?}", args.shell).to_lowercase(),
+        }),
+    )
 }
 
 fn fmt_request_from_args(args: &FmtArgs) -> FmtRequest {

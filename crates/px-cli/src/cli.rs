@@ -30,6 +30,7 @@ pub const PX_BEFORE_HELP: &str = concat!(
     "\x1b[1;36mAdvanced\x1b[0m\n",
     "  tool             Install and run px-managed global tools.\n",
     "  python           Manage px Python runtimes (list/install/use/info).\n",
+    "  completions      Print shell completion snippet (optional, one-time setup).\n",
 );
 
 #[derive(Parser, Debug)]
@@ -184,6 +185,11 @@ pub enum CommandGroupCli {
         subcommand
     )]
     Python(PythonCommand),
+    #[command(
+        about = "Print shell completion setup snippet for px",
+        override_usage = "px completions <bash|zsh|fish|powershell>"
+    )]
+    Completions(CompletionsArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -212,6 +218,20 @@ pub struct PythonInstallArgs {
 pub struct PythonUseArgs {
     #[arg(value_name = "VERSION", help = "Python version channel (e.g. 3.11)")]
     pub version: String,
+}
+
+#[derive(Clone, Copy, ValueEnum, Debug)]
+pub enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+    Powershell,
+}
+
+#[derive(Args, Debug)]
+pub struct CompletionsArgs {
+    #[arg(value_enum)]
+    pub shell: CompletionShell,
 }
 
 #[derive(Subcommand, Debug)]
