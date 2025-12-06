@@ -2905,6 +2905,7 @@ mod tests {
     use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::io::Read;
+    use std::ops::Deref;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
     #[cfg(unix)]
@@ -2916,13 +2917,43 @@ mod tests {
 
     static CURRENT_DIR_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-    fn new_store() -> Result<(tempfile::TempDir, ContentAddressableStore)> {
+    struct EnvStoreTemp {
+        inner: tempfile::TempDir,
+        prev_envs: Option<String>,
+    }
+
+    impl Deref for EnvStoreTemp {
+        type Target = tempfile::TempDir;
+
+        fn deref(&self) -> &Self::Target {
+            &self.inner
+        }
+    }
+
+    impl Drop for EnvStoreTemp {
+        fn drop(&mut self) {
+            if let Some(prev) = &self.prev_envs {
+                std::env::set_var("PX_ENVS_PATH", prev);
+            } else {
+                std::env::remove_var("PX_ENVS_PATH");
+            }
+        }
+    }
+
+    fn new_store() -> Result<(EnvStoreTemp, ContentAddressableStore)> {
         let temp = tempdir()?;
         let root = temp.path().join("store");
         let envs_root = temp.path().join("envs");
+        let prev_envs = std::env::var("PX_ENVS_PATH").ok();
         std::env::set_var("PX_ENVS_PATH", &envs_root);
         let store = ContentAddressableStore::new(Some(root))?;
-        Ok((temp, store))
+        Ok((
+            EnvStoreTemp {
+                inner: temp,
+                prev_envs,
+            },
+            store,
+        ))
     }
 
     #[cfg(unix)]

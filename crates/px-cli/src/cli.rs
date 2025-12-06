@@ -22,7 +22,7 @@ pub const PX_BEFORE_HELP: &str = concat!(
     "  why              Explain why a dependency is present.\n",
     "  fmt              Run formatters/linters/cleanup tools inside the px environment.\n",
     "  build            Produce sdists/wheels from the px-managed environment.\n",
-    "  publish          Upload previously built artifacts (dry-run by default).\n",
+    "  publish          Upload previously built artifacts (dry-run by default; use --upload to push).\n",
     "  migrate          Create px metadata for an existing project.\n\n",
     "\x1b[1;36mAdvanced\x1b[0m\n",
     "  tool             Install and run px-managed global tools.\n",
@@ -490,8 +490,18 @@ pub enum BuildFormat {
 
 #[derive(Args, Debug)]
 pub struct PublishArgs {
-    #[command(flatten)]
-    pub common: CommonFlags,
+    #[arg(
+        long,
+        help = "Preview publish actions without uploading (default)",
+        default_value_t = true
+    )]
+    pub dry_run: bool,
+    #[arg(
+        long,
+        help = "Upload artifacts to the registry instead of performing a dry-run",
+        conflicts_with = "dry_run"
+    )]
+    pub upload: bool,
     #[arg(long)]
     pub registry: Option<String>,
     #[arg(long = "token-env")]

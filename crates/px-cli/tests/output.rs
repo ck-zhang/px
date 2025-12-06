@@ -69,15 +69,7 @@ fn publish_dry_run_reports_registry_and_artifacts() {
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
-        .args([
-            "--json",
-            "publish",
-            "--dry-run",
-            "--registry",
-            "testpypi",
-            "--token-env",
-            "PX_FAKE_TOKEN",
-        ])
+        .args(["--json", "publish", "--registry", "testpypi"])
         .assert()
         .success();
 
@@ -95,7 +87,29 @@ fn publish_dry_run_reports_registry_and_artifacts() {
 }
 
 #[test]
-fn publish_requires_token_when_online() {
+fn publish_default_dry_run_does_not_require_token() {
+    let _guard = common::test_env_guard();
+    let (_tmp, project) = init_empty_project("output-publish-default-dry-run");
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["build"])
+        .assert()
+        .success();
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_ONLINE", "1")
+        .args(["--json", "publish"])
+        .assert()
+        .success();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["details"]["dry_run"], Value::Bool(true));
+}
+
+#[test]
+fn publish_requires_token_when_uploading_online() {
     let _guard = common::test_env_guard();
     let (_tmp, project) = init_empty_project("output-publish-token");
     cargo_bin_cmd!("px")
@@ -107,7 +121,7 @@ fn publish_requires_token_when_online() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_ONLINE", "1")
-        .args(["--json", "publish"])
+        .args(["--json", "publish", "--upload"])
         .assert()
         .failure();
 
@@ -186,8 +200,9 @@ fn publish_requires_online_flag_when_artifacts_exist() {
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
+        .env("PX_ONLINE", "0")
         .env("PX_PUBLISH_TOKEN", "dummy-token")
-        .args(["--json", "publish"])
+        .args(["--json", "publish", "--upload"])
         .assert()
         .failure();
 
@@ -219,7 +234,7 @@ fn publish_rejects_empty_token_value() {
         .current_dir(&project)
         .env("PX_ONLINE", "1")
         .env("PX_PUBLISH_TOKEN", "")
-        .args(["--json", "publish"])
+        .args(["--json", "publish", "--upload"])
         .assert()
         .failure();
 

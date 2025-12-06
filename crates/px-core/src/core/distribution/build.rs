@@ -16,7 +16,8 @@ use walkdir::WalkDir;
 use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 
 use crate::{
-    project_table, python_context, relative_path_str, CommandContext, ExecutionOutcome,
+    is_missing_project_error, manifest_snapshot, missing_project_outcome, project_table,
+    python_context, relative_path_str, CommandContext, ExecutionOutcome, ManifestSnapshot,
     PythonContext,
 };
 
@@ -61,13 +62,18 @@ pub fn build_project(ctx: &CommandContext, request: &BuildRequest) -> Result<Exe
 }
 
 fn build_project_outcome(ctx: &CommandContext, request: &BuildRequest) -> Result<ExecutionOutcome> {
-    let py_ctx = match python_context(ctx) {
-        Ok(py) => py,
-        Err(outcome) => return Ok(outcome),
-    };
-    let plan = plan_build(&py_ctx, request);
-
     if request.dry_run {
+        let snapshot = match manifest_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                if is_missing_project_error(&err) {
+                    return Ok(missing_project_outcome());
+                }
+                return Err(err);
+            }
+        };
+        let py_ctx = dry_run_context(&snapshot);
+        let plan = plan_build(&py_ctx, request);
         let artifacts = collect_artifact_summaries(&plan.out_dir, None, &py_ctx)?;
         let details = json!({
             "artifacts": artifacts,
@@ -82,6 +88,12 @@ fn build_project_outcome(ctx: &CommandContext, request: &BuildRequest) -> Result
         );
         return Ok(ExecutionOutcome::success(message, details));
     }
+
+    let py_ctx = match python_context(ctx) {
+        Ok(py) => py,
+        Err(outcome) => return Ok(outcome),
+    };
+    let plan = plan_build(&py_ctx, request);
 
     ctx.fs()
         .create_dir_all(&plan.out_dir)
@@ -124,6 +136,19 @@ fn build_project_outcome(ctx: &CommandContext, request: &BuildRequest) -> Result
         "skip_tests": ctx.config().test.skip_tests_flag.clone(),
     });
     Ok(ExecutionOutcome::success(message, details))
+}
+
+fn dry_run_context(snapshot: &ManifestSnapshot) -> PythonContext {
+    PythonContext {
+        project_root: snapshot.root.clone(),
+        project_name: snapshot.name.clone(),
+        python: String::new(),
+        pythonpath: String::new(),
+        allowed_paths: vec![snapshot.root.clone()],
+        site_bin: None,
+        pep582_bin: Vec::new(),
+        px_options: snapshot.px_options.clone(),
+    }
 }
 
 fn build_with_uv(

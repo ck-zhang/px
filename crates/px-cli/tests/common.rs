@@ -30,8 +30,30 @@ fn serial_lock() -> &'static Mutex<()> {
 
 pub fn reset_test_store_env() {
     let _guard = env_lock().lock().unwrap();
-    // Keep the shared cache stable across concurrent tests to avoid flipping
-    // PX_* environment variables mid-execution.
+    TEST_CACHE.with(|cell| {
+        if let Some(dir) = cell.borrow_mut().take() {
+            let _ = dir.close();
+        }
+    });
+    for key in [
+        "PX_CACHE_PATH",
+        "PX_STORE_PATH",
+        "PX_ENVS_PATH",
+        "PX_TOOLS_DIR",
+        "PX_ONLINE",
+        "PX_RESOLVER",
+        "PX_FORCE_SDIST",
+        "PX_RUNTIME_PYTHON",
+        "PX_KEEP_PROXIES",
+        "PX_INDEX_URL",
+        "PIP_INDEX_URL",
+        "PIP_EXTRA_INDEX_URL",
+        "PX_RUNTIME_HOST_ONLY",
+        "PX_NO_ENSUREPIP",
+        "PX_DEBUG_PIP",
+    ] {
+        env::remove_var(key);
+    }
 }
 
 pub fn test_env_guard() -> std::sync::MutexGuard<'static, ()> {

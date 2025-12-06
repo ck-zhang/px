@@ -123,7 +123,12 @@ pub(crate) fn run_inline_script(
             .map_err(|err| map_install_error(err, "failed to prepare inline script environment"))?;
     }
 
-    let (py_ctx, report) = inline_python_context(ctx, &snapshot, EnvGuard::Strict, &script)?;
+    let guard = if strict {
+        EnvGuard::Strict
+    } else {
+        EnvGuard::AutoSync
+    };
+    let (py_ctx, report) = inline_python_context(ctx, &snapshot, guard, &script)?;
     if sync_report.is_none() {
         sync_report = report;
     }

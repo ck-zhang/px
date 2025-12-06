@@ -300,7 +300,7 @@ fn publish_request_from_args(args: &PublishArgs) -> PublishRequest {
     PublishRequest {
         registry: args.registry.clone(),
         token_env: args.token_env.clone(),
-        dry_run: args.common.dry_run,
+        dry_run: if args.upload { false } else { args.dry_run },
     }
 }
 
