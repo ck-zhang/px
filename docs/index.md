@@ -23,6 +23,7 @@ Platform support: px targets Linux and macOS today; Windows is not supported yet
 ## Design
 
 * [Determinism and CI](./design/determinism-and-ci.md)
+* [Sandbox](./design/sandbox.md)
 * [Non-goals](./design/non-goals.md)
 
 ## Legacy

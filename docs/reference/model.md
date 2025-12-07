@@ -35,6 +35,7 @@ px may create/modify only:
   * `pyproject.toml`
 
     * px edits only `[project]` (PEP 621) and `[tool.px]` sections.
+    * Sandbox config lives under `[tool.px.sandbox]` (project or workspace root) and is read-only from px’s perspective beyond normal manifest writes.
 
   * `dist/` – build artifacts (sdist, wheels).
 
@@ -54,6 +55,11 @@ px may create/modify only:
   * Workspace env metadata under `.px/` at the workspace root (WE). Physical layout is an implementation detail, but workspace envs are distinguishable from per-project envs and are always tied to `px.workspace.lock` and a runtime.
 
 px must not create other top-level files or directories.
+
+**Sandbox artifacts (derived)**
+
+* px may materialize sandbox bases/images under a global sandbox store (e.g., `~/.px/sandbox/`) when `--sandbox` or `px pack image` is used.
+* Sandbox artifacts are derived from env profiles plus `[tool.px.sandbox]`; they never add files to project/workspace roots.
 
 ## Shape after key commands
 
@@ -118,6 +124,12 @@ Both lockfiles are machine-generated only; direct edits are unsupported.
 * Tied to `px.workspace.lock` hash, runtime, and platform.
 * Contains exactly the packages described by WL.
 * Member projects run against WE; per-project envs are ignored in that context.
+
+**Sandbox layer**
+
+* Optional containerized layer on top of a project/workspace env: base OS + resolved capabilities + env profile → sandbox image.
+* Configured via `[tool.px.sandbox]` (base, capabilities, inference rules).
+* Used by `px run --sandbox`, `px test --sandbox`, and `px pack image`; sandbox images are immutable, cacheable, and do not mutate manifests, locks, or envs.
 
 ## Self-consistency
 

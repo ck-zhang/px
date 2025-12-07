@@ -137,6 +137,7 @@ Treat commands as transitions between canonical states. When a command fails, it
 * **Frozen/CI allowed start**: only `Consistent`.
 * **Behavior (dev)**: if `NeedsEnv`, rebuild env from existing lock (no re-resolution); run target via env.
 * **Behavior (frozen/CI)**: fail if not `Consistent`; never repairs envs.
+* **Sandbox flag**: `--sandbox` follows the same start-state rules; it may build/reuse a sandbox image derived from the env profile + `[tool.px.sandbox]` but never writes M/L/E.
 * **End**: manifests and locks unchanged; env may be rehydrated → `Consistent` or unchanged.
 
 #### `px fmt`
@@ -144,6 +145,12 @@ Treat commands as transitions between canonical states. When a command fails, it
 * **Start**: any with `manifest_exists == true`.
 * **Behavior**: operates only on code and tool envs; never touches manifest, lock, or project env in dev or CI.
 * **End**: project state unchanged.
+
+#### `px pack image`
+
+* **Start**: `Consistent` (fails fast from other states with a hint to run `px sync`).
+* **Behavior**: computes sandbox definition from env profile + `[tool.px.sandbox]`; reuses or builds sandbox image/OCI output; never re-resolves deps or mutates M/L/E.
+* **End**: project state unchanged (`Consistent`).
 
 #### `px status`
 
@@ -184,6 +191,7 @@ Legend: M = manifest (`pyproject.toml`), L = lock (`px.lock`), E = env (project 
 | `px run`    | C, NE                      | C                                    | No        | No        | Dev: NE→C; C→C      | C or unchanged                  | In dev, may repair E; in CI, never repairs E.             |
 | `px test`   | C, NE                      | C                                    | No        | No        | Dev: NE→C; C→C      | C or unchanged                  | Same rules as `px run`.                                   |
 | `px fmt`    | Any with `manifest_exists` | Any with `manifest_exists`           | No        | No        | No                  | Unchanged                       | Operates only on code and tool envs; never touches M/L/E. |
+| `px pack image` | C                      | C                                    | No        | No        | No                  | C                               | Builds/reuses sandbox image/OCI output; requires clean env. |
 | `px status` | Any                        | Any                                  | No        | No        | No                  | Unchanged                       | Purely introspective.                                     |
 | `px why`    | Any with `manifest_exists` | Any with `manifest_exists`           | No        | No        | No                  | Unchanged                       | Purely introspective.                                     |
 
@@ -300,11 +308,18 @@ Existing verbs operate over WM/WL/WE when routed via a workspace:
 
   * Dev allowed start: `WConsistent`, `WNeedsEnv`; may repair WE (no re-resolution).
   * Frozen/CI allowed start: only `WConsistent`; never repairs WE.
+  * `--sandbox` follows the same gating and builds/reuses the sandbox image from the workspace env + `[tool.px.sandbox]`; WM/WL/WE are not written.
 
 * **`px status`**
 
   * At workspace root: report workspace state and list members plus whether their manifests were included in `wmfingerprint`.
   * In a member: report workspace state plus whether that project’s manifest is included.
+
+* **`px pack image` (workspace root or member)**
+
+  * Requires `WConsistent`; fails otherwise with a hint to `px sync`.
+  * Builds/reuses sandbox image using workspace env profile and `[tool.px.sandbox]`.
+  * WM/WL/WE remain unchanged.
 
 ### Projects as workspace members
 

@@ -37,6 +37,7 @@ For a quick inventory of CLI flags and environment toggles, see [Env Vars and Fl
 
 * `px build`    – Build sdists/wheels into `dist/`.
 * `px publish`  – Upload artifacts from `dist/` to a registry.
+* `px pack image` – Build a sandbox-backed OCI image from the current env profile and `[tool.px.sandbox]`.
 * `px migrate`  – Plan migration of a legacy project into px.
 * `px migrate --apply` – Apply that migration.
 
@@ -120,6 +121,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 
 * **Behavior (dev)**: if env missing/stale, rebuild from `px.lock` (no resolution) before running.
 * **Behavior (CI/`--frozen`)**: fail if lock drifted or env stale; never repairs.
+* **Sandbox mode (`--sandbox`)**: runs the target inside a sandbox image derived from `[tool.px.sandbox]` + the resolved env profile. Same state requirements as unsandboxed `px run` (dev may rebuild env; frozen requires `Consistent`). px may build/reuse the sandbox image but never mutates manifest/lock/env; working tree is mounted into the container for execution.
 * **Commit-scoped**: `px run --at <git-ref>` uses the `pyproject.toml` + lock from that ref (project or workspace) without checking it out; locks are treated as frozen (fail if missing/drifted), and envs are reused/materialized in the global cache without touching the working tree.
 * **Env prep**: PATH is rebuilt with the px env’s `site/bin` first (px materializes console/gui scripts there from wheels); exports `PYAPP_COMMAND_NAME` when `[tool.px].manage-command` is set; runs a lightweight import check for `[tool.px].plugin-imports` and sets `PX_PLUGIN_PREFLIGHT` to `1`/`0`; clears proxy env vars.
 * **Pip semantics**: px envs are immutable CAS materializations; mutating pip commands (`pip install`, `python -m pip uninstall`, etc.) are blocked with a PX error. px seeds pip + setuptools into the project site so legacy `setup.py`/`pkg_resources` flows keep working without declaring them explicitly. Read-only pip invocations (`pip list/show/help/--version`) run normally.
@@ -131,6 +133,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 ### `px test`
 
 * Same consistency semantics as `px run`. Prefers project-provided runners like `tests/runtests.py` (or `runtests.py`) and otherwise runs `pytest` inside the project env.
+* Supports `--sandbox` with the same sandbox definition/resolution rules as `px run`.
 * `--at <git-ref>` mirrors `px run --at …`, using the manifest + lock at that ref with frozen semantics (no re-resolution; fail if lock is missing or drifted).
 * Output style (default): px streams the runner stdout/stderr live and renders a compact report:
 
@@ -180,6 +183,13 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 * **Missing tools**: fail with a clear message and a suggestion like `px tool install ruff`.
 * **Postconditions**: project manifest/lock/env unchanged; tool envs may be created/updated.
 
+### `px pack image`
+
+* **Intent**: freeze the current env profile plus `[tool.px.sandbox]` into a deterministic sandbox image for deploys/CI parity.
+* **Preconditions**: project/workspace manifest present and env clean; fails if env is missing or stale (suggests `px sync`).
+* **Behavior**: resolves sandbox base/capabilities → `sbx_id`; reuses or builds the sandbox image; supports `--tag`, `--out <path>` (OCI tar/dir), and `--push` to a registry. Uses the existing env contents; never re-resolves or mutates manifests/locks/envs.
+* **Postconditions**: project/workspace state unchanged; sandbox image cached/addressable by `sbx_id`.
+
 ### `px status`
 
 * **Intent**: read-only snapshot of manifest/lock/env alignment plus runtime identity.
@@ -198,5 +208,6 @@ When a workspace root is detected above CWD and CWD is inside a member project, 
 * `px add/remove` (from a member) – modify member manifest, re-resolve workspace graph → update `px.workspace.lock`, rebuild workspace env. Per-project `px.lock` is not updated in this mode.
 * `px sync` (member or workspace root) – if workspace lock missing or drifted: resolve union graph and write `px.workspace.lock`; ensure workspace env matches it; never touch per-project locks for members.
 * `px update` (member or workspace root) – update workspace lock within constraints and rebuild workspace env.
-* `px run` / `px test` (member) – in dev may rebuild workspace env from lock; in CI requires workspace `Consistent`; always use workspace env.
+* `px run` / `px test` (member) – in dev may rebuild workspace env from lock; in CI requires workspace `Consistent`; always use workspace env. `--sandbox` uses that workspace env to build/reuse the sandbox image; no workspace artifacts are written.
+* `px pack image` (workspace root or member) – requires workspace `Consistent`; builds/reuses sandbox image from workspace env + `[tool.px.sandbox]`; no workspace writes.
 * `px status` – at workspace root: report workspace state plus member manifest health; in a member: report workspace state and whether that member manifest is included; under the workspace root but outside members: emit a note about the non-member path.

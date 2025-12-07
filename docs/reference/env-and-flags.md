@@ -25,12 +25,13 @@ Rule of thumb: user-facing behavior should be a CLI flag first; env vars stay as
 * `px init` – `--package NAME`, `--py VERSION`, `--dry-run`, `--force`.
 * `px add/remove/update` – `--dry-run`.
 * `px sync` – `--dry-run`, `--frozen`.
-* `px run` – `--target NAME`, `--interactive`, `--non-interactive`, `--frozen`, `--` forwards args.
-* `px test` – `--frozen`, `--` forwards pytest args.
+* `px run` – `--target NAME`, `--interactive`, `--non-interactive`, `--sandbox`, `--frozen`, `--` forwards args.
+* `px test` – `--sandbox`, `--frozen`, `--` forwards pytest args.
 * `px fmt` – `--frozen`, `--json` (fmt-only), `--` forwards tool args.
 * `px status` – `--brief`.
 * `px build` – format selector `sdist|wheel|both` (positional), `--out DIR`, `--dry-run`.
 * `px publish` – `--registry NAME`, `--token-env VAR` (defaults to `PX_PUBLISH_TOKEN`), `--dry-run` (default), `--upload` (uploads require `PX_ONLINE=1`).
+* `px pack image` – `--tag NAME`, `--out PATH`, `--push`.
 * `px migrate` – `--python VERSION`, `--apply/--write`, `--yes`, `--no-input`, `--source PATH`, `--dev-source PATH`, `--allow-dirty`, `--lock-only`, `--no-autopin`.
 * `px why` – `--issue ID` (mutually exclusive with package arg).
 * `px tool install` – `--python VERSION`, `--module MODULE`.
