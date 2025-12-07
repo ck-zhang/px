@@ -1908,6 +1908,7 @@ fn load_editable_project_metadata(
         .map(std::string::ToString::to_string)
         .or_else(|| infer_version_from_version_file(&root, &doc, fs_ops))
         .or_else(|| infer_version_from_versioneer(&root, &normalized_name, fs_ops))
+        .or_else(|| infer_version_from_hatch_vcs(&root, &doc))
         .or_else(|| infer_version_from_sources(&root, &normalized_name, fs_ops))
         .unwrap_or_else(|| "0.0.0+unknown".to_string());
     let requires_python = project
@@ -2045,6 +2046,24 @@ print(json.dumps({{"version": version}}))
         .and_then(Value::as_str)
         .map(std::string::ToString::to_string)
         .filter(|value| !value.is_empty())
+}
+
+fn infer_version_from_hatch_vcs(manifest_root: &Path, doc: &DocumentMut) -> Option<String> {
+    if !uses_hatch_vcs(doc) {
+        return None;
+    }
+    let describe = hatch_git_describe_command(doc);
+    let simplify = hatch_prefers_simplified_semver(doc);
+    let drop_local = hatch_drops_local_version(doc);
+    derive_vcs_version(
+        manifest_root,
+        &VersionDeriveOptions {
+            git_describe_command: describe.as_deref(),
+            simplified_semver: simplify,
+            drop_local,
+        },
+    )
+    .ok()
 }
 
 fn infer_version_from_sources(
@@ -3453,6 +3472,16 @@ pub(crate) fn ensure_version_file(manifest_path: &Path) -> Result<()> {
     ensure_inline_version_module(&manifest_dir, &doc)?;
 
     Ok(())
+}
+
+fn uses_hatch_vcs(doc: &toml_edit::DocumentMut) -> bool {
+    doc.get("tool")
+        .and_then(|tool| tool.get("hatch"))
+        .and_then(|hatch| hatch.get("version"))
+        .and_then(|version| version.get("source"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.eq_ignore_ascii_case("vcs"))
+        .unwrap_or(false)
 }
 
 fn hatch_version_file(doc: &toml_edit::DocumentMut) -> Option<PathBuf> {
@@ -6549,6 +6578,74 @@ build-backend = "hatchling.build"
         assert!(
             contents.contains("demo.run"),
             "entrypoint should import target module"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn editable_stub_derives_hatch_vcs_version_without_version_file() -> Result<()> {
+        if Command::new("git").arg("--version").status().is_err() {
+            return Ok(());
+        }
+        let temp = tempdir()?;
+        let project_root = temp.path();
+        let pyproject = project_root.join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            r#"[project]
+name = "demo"
+dynamic = ["version"]
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+[tool.hatch.version.raw-options]
+local_scheme = "no-local-version"
+"#,
+        )?;
+        let pkg_dir = project_root.join("src/demo");
+        fs::create_dir_all(&pkg_dir)?;
+        fs::write(pkg_dir.join("__init__.py"), "")?;
+
+        let git_status = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(project_root)
+            .status()?;
+        if !git_status.success() {
+            return Ok(());
+        }
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(project_root)
+            .status()?;
+        Command::new("git")
+            .args([
+                "-c",
+                "user.name=px",
+                "-c",
+                "user.email=px@example.com",
+                "commit",
+                "-m",
+                "init",
+            ])
+            .current_dir(project_root)
+            .status()?;
+
+        let snapshot = ProjectSnapshot::read_from(project_root)?;
+        let site_dir = project_root.join(".px").join("env").join("site");
+        let effects = SystemEffects::new();
+        effects.fs().create_dir_all(&site_dir)?;
+        write_project_metadata_stub(&snapshot, &site_dir, effects.fs())?;
+
+        let metadata = fs::read_to_string(site_dir.join("demo-0.0.0.dist-info").join("METADATA"))?;
+        assert!(
+            metadata.contains("Version: 0.0.0"),
+            "hatch-vcs projects without version-file should derive a numeric version"
         );
         Ok(())
     }

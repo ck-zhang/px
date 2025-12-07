@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
     env, fs,
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -568,7 +569,8 @@ fn materialize_profile_env(
                 if entry.file_type()?.is_file() {
                     let src = entry.path();
                     let dest = bin_dir.join(entry.file_name());
-                    link_bin_entry(&src, &dest)?;
+                    let env_python = env_root.join("bin").join("python");
+                    link_bin_entry(&src, &dest, Some(&env_python))?;
                 }
             }
         }
@@ -652,7 +654,14 @@ fn materialize_profile_env(
     Ok(env_root)
 }
 
-fn link_bin_entry(src: &Path, dest: &Path) -> Result<()> {
+fn link_bin_entry(src: &Path, dest: &Path, env_python: Option<&Path>) -> Result<()> {
+    if let Some(python) = env_python {
+        if should_rewrite_python_entrypoint(src)? {
+            rewrite_python_entrypoint(src, dest, python)?;
+            return Ok(());
+        }
+    }
+
     if dest.exists() {
         let _ = fs::remove_file(dest);
     }
@@ -1052,6 +1061,35 @@ fn set_exec_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn should_rewrite_python_entrypoint(path: &Path) -> Result<bool> {
+    let mut file = fs::File::open(path)?;
+    let mut buf = [0u8; 256];
+    let read = file.read(&mut buf)?;
+    let prefix = std::str::from_utf8(&buf[..read]).unwrap_or_default();
+    let Some(first_line) = prefix.lines().next() else {
+        return Ok(false);
+    };
+    if !first_line.starts_with("#!") {
+        return Ok(false);
+    }
+    Ok(first_line.to_ascii_lowercase().contains("python"))
+}
+
+fn rewrite_python_entrypoint(src: &Path, dest: &Path, python: &Path) -> Result<()> {
+    if dest.exists() {
+        let _ = fs::remove_file(dest);
+    }
+    let contents = fs::read_to_string(src)?;
+    let mut parts = contents.splitn(2, '\n');
+    let _ = parts.next();
+    let rest = parts.next().unwrap_or("");
+    let mut rewritten = format!("#!{}\n", python.display());
+    rewritten.push_str(rest);
+    fs::write(dest, rewritten.as_bytes())?;
+    set_exec_permissions(dest)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1272,6 +1310,129 @@ mod tests {
                 fs::metadata(&env_bin)?.len(),
                 fs::metadata(&store_bin)?.len(),
                 "bin entry should point to CAS materialization"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn python_bin_entries_are_rewritten_to_env_python() -> Result<()> {
+        let store = global_store();
+        let temp = tempdir()?;
+
+        // Minimal runtime executable.
+        let runtime_root = temp.path().join("runtime");
+        let runtime_bin = runtime_root.join("bin");
+        fs::create_dir_all(&runtime_bin)?;
+        let runtime_exe = runtime_bin.join("python");
+        fs::write(&runtime_exe, b"#!/bin/false")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&runtime_exe, fs::Permissions::from_mode(0o755))?;
+        }
+
+        // CAS pkg-build with a python shebang.
+        let pkg_root = temp.path().join("pkg");
+        let pkg_bin = pkg_root.join("bin");
+        let pkg_site = pkg_root.join("site-packages");
+        fs::create_dir_all(&pkg_bin)?;
+        fs::create_dir_all(&pkg_site)?;
+        let script = pkg_bin.join("demo");
+        fs::write(&script, b"#!/usr/bin/env python3\nprint('hi from demo')\n")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
+        }
+
+        let pkg_archive = archive_dir_canonical(&pkg_root)?;
+        let pkg_obj = store.store(&ObjectPayload::PkgBuild {
+            header: PkgBuildHeader {
+                source_oid: "src".into(),
+                runtime_abi: "abi".into(),
+                build_options_hash: "opts".into(),
+            },
+            archive: Cow::Owned(pkg_archive),
+        })?;
+
+        let runtime_header = RuntimeHeader {
+            version: "3.11.0".to_string(),
+            abi: "cp311".to_string(),
+            platform: "linux".to_string(),
+            build_config_hash: "abc".to_string(),
+            exe_path: "bin/python".to_string(),
+        };
+        let runtime_obj = store.store(&ObjectPayload::Runtime {
+            header: runtime_header.clone(),
+            archive: Cow::Owned(archive_dir_canonical(&runtime_root)?),
+        })?;
+
+        let profile_header = ProfileHeader {
+            runtime_oid: runtime_obj.oid.clone(),
+            packages: vec![ProfilePackage {
+                name: "demo".to_string(),
+                version: "1.0.0".to_string(),
+                pkg_build_oid: pkg_obj.oid.clone(),
+            }],
+            sys_path_order: Vec::new(),
+            env_vars: BTreeMap::new(),
+        };
+        let profile_obj = store.store(&ObjectPayload::Profile {
+            header: profile_header.clone(),
+        })?;
+
+        let snapshot = ManifestSnapshot {
+            root: temp.path().to_path_buf(),
+            manifest_path: temp.path().join("pyproject.toml"),
+            lock_path: temp.path().join("px.lock"),
+            name: "demo".to_string(),
+            python_requirement: ">=3.11".to_string(),
+            dependencies: Vec::new(),
+            dependency_groups: Vec::new(),
+            declared_dependency_groups: Vec::new(),
+            dependency_group_source: DependencyGroupSource::None,
+            group_dependencies: Vec::new(),
+            requirements: Vec::new(),
+            python_override: None,
+            px_options: PxOptions::default(),
+            manifest_fingerprint: "fp".to_string(),
+        };
+
+        let env_root = materialize_profile_env(
+            &snapshot,
+            &RuntimeMetadata {
+                path: runtime_exe.display().to_string(),
+                version: "3.11.0".to_string(),
+                platform: "linux".to_string(),
+            },
+            &profile_header,
+            &profile_obj.oid,
+            &runtime_exe,
+        )?;
+
+        let env_script = env_root.join("bin").join("demo");
+        let contents = fs::read_to_string(&env_script)?;
+        let expected_shebang = format!("#!{}\n", env_root.join("bin").join("python").display());
+        assert!(
+            contents.starts_with(&expected_shebang),
+            "shebang should point at env python"
+        );
+        assert!(
+            contents.contains("hi from demo"),
+            "script body should be preserved"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert!(
+                !fs::symlink_metadata(&env_script)?.file_type().is_symlink(),
+                "python bin shims should be copied, not linked"
+            );
+            let mode = fs::metadata(&env_script)?.mode();
+            assert!(
+                mode & 0o111 != 0,
+                "rewritten script should remain executable"
             );
         }
         Ok(())
