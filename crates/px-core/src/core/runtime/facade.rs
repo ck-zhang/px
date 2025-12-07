@@ -397,6 +397,8 @@ pub(crate) fn install_snapshot(
         if let Some(parent) = snapshot.lock_path.parent() {
             fs::create_dir_all(parent)?;
         }
+        let has_foreign_lock =
+            snapshot.root.join("uv.lock").exists() || snapshot.root.join("poetry.lock").exists();
         let mut manifest_updated = false;
         let mut manifest_dependencies = if let Some(override_data) = override_pins {
             override_data.dependencies.clone()
@@ -409,7 +411,7 @@ pub(crate) fn install_snapshot(
         let mut resolved_override = None;
         if override_pins.is_none() {
             let resolved = resolve_dependencies(ctx, &snapshot)?;
-            if !resolved.specs.is_empty() && !inline {
+            if !resolved.specs.is_empty() && !inline && !has_foreign_lock {
                 manifest_dependencies = merge_resolved_dependencies(
                     &manifest_dependencies,
                     &resolved.specs,

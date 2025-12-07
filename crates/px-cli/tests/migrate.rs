@@ -272,6 +272,56 @@ requests = []
 }
 
 #[test]
+fn migrate_respects_uv_lock_without_pinning_manifest() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(
+        &temp,
+        "pyproject.toml",
+        r#"[project]
+name = "uv-lock-demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["click>=8.1"]
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#,
+    );
+    write_file(
+        &temp,
+        "uv.lock",
+        r#"version = 1
+requires-python = ">=3.11"
+
+[[package]]
+name = "click"
+version = "8.1.7"
+source = { registry = "https://pypi.org/simple" }
+"#,
+    );
+
+    px_command(&temp)
+        .args(["migrate", "--apply", "--allow-dirty"])
+        .assert()
+        .success();
+
+    let pyproject = fs::read_to_string(temp.path().join("pyproject.toml")).expect("pyproject");
+    assert!(
+        pyproject.contains("click>=8.1"),
+        "uv.lock migration should not pin manifest dependencies"
+    );
+    let lock_contents = fs::read_to_string(temp.path().join("px.lock")).expect("px.lock");
+    assert!(
+        lock_contents.contains("click==8.1.7"),
+        "px.lock should reuse versions from uv.lock"
+    );
+}
+
+#[test]
 fn migrate_errors_without_project_files() {
     let temp = tempfile::tempdir().expect("tempdir");
     cargo_bin_cmd!("px")

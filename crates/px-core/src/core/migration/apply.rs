@@ -3,7 +3,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use anyhow::{Context, Result};
@@ -171,6 +171,8 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     };
 
     let lock_only = request.lock_behavior.is_lock_only();
+    let project_lock_only =
+        lock_only || root.join("uv.lock").exists() || root.join("poetry.lock").exists();
 
     if lock_only && !pyproject_exists {
         return Ok(ExecutionOutcome::user_error(
@@ -429,7 +431,8 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     let mut backups = BackupManager::new(&root);
     let mut created_files: Vec<PathBuf> = Vec::new();
     let mut pyproject_modified = false;
-    let mut pyproject_plan = prepare_pyproject_plan(&root, &pyproject_path, lock_only, &packages)?;
+    let mut pyproject_plan =
+        prepare_pyproject_plan(&root, &pyproject_path, project_lock_only, &packages)?;
     if let Some(python) = &python_override_value {
         pyproject_plan.contents = Some(apply_python_override(&pyproject_plan, python)?.to_string());
     }
@@ -460,10 +463,14 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     let mut install_override: Option<InstallOverride> = None;
     let mut autopin_changed_pyproject = false;
     let mut autopin_hint = None;
-    let poetry_pins = poetry_lock_versions(&root)?.map(Arc::new);
     let marker_env = Arc::new(ctx.marker_environment()?);
-    let reused_from_poetry = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let skipped_poetry = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let poetry_pins = poetry_lock_versions(&root)?.map(Arc::new);
+    let uv_pins = uv_lock_versions(&root, &marker_env)?.map(Arc::new);
+    let reused_from_poetry = Arc::new(Mutex::new(Vec::new()));
+    let skipped_poetry = Arc::new(Mutex::new(Vec::new()));
+    let reused_from_uv = Arc::new(Mutex::new(Vec::new()));
+    let skipped_uv = Arc::new(Mutex::new(Vec::new()));
+    let autopin_lock_only = project_lock_only || uv_pins.is_some() || poetry_pins.is_some();
 
     if pyproject_path.exists() {
         let autopin_snapshot = px_domain::ProjectSnapshot::read_from(&root)?;
@@ -471,28 +478,36 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         let autopin_state = match plan_autopin(
             &autopin_snapshot,
             &pyproject_path,
-            lock_only,
+            autopin_lock_only,
             no_autopin,
             &{
+                let uv_lookup = uv_pins.clone();
                 let lock_lookup = poetry_pins.clone();
                 let marker_env = marker_env.clone();
                 let reused_from_poetry = reused_from_poetry.clone();
                 let skipped_poetry = skipped_poetry.clone();
+                let reused_from_uv = reused_from_uv.clone();
+                let skipped_uv = skipped_uv.clone();
                 move |snap: &ManifestSnapshot, specs: &[String]| -> Result<Vec<PinSpec>> {
                     let mut pins = Vec::new();
                     let mut needs_resolution = false;
-                    if let Some(locked) = lock_lookup.as_ref() {
-                        for spec in specs {
-                            match pin_from_poetry_lock(spec, locked, marker_env.as_ref()) {
-                                PoetryPinChoice::Reuse { pin, source } => {
-                                    if let Ok(mut reused) = reused_from_poetry.lock() {
+                    for spec in specs {
+                        let mut pinned = None;
+                        if let Some(locked) = uv_lookup.as_ref() {
+                            match pin_from_locked_versions(
+                                spec,
+                                locked,
+                                marker_env.as_ref(),
+                                "uv.lock",
+                            ) {
+                                LockPinChoice::Reuse { pin, source } => {
+                                    if let Ok(mut reused) = reused_from_uv.lock() {
                                         reused.push(source);
                                     }
-                                    pins.push(pin);
+                                    pinned = Some(pin);
                                 }
-                                PoetryPinChoice::Skip(reason) => {
-                                    needs_resolution = true;
-                                    if let Ok(mut skipped) = skipped_poetry.lock() {
+                                LockPinChoice::Skip(reason) => {
+                                    if let Ok(mut skipped) = skipped_uv.lock() {
                                         skipped.push(json!({
                                             "spec": spec,
                                             "reason": reason,
@@ -501,8 +516,35 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
                                 }
                             }
                         }
-                    } else {
-                        needs_resolution = true;
+                        if pinned.is_none() {
+                            if let Some(locked) = lock_lookup.as_ref() {
+                                match pin_from_locked_versions(
+                                    spec,
+                                    locked,
+                                    marker_env.as_ref(),
+                                    "poetry.lock",
+                                ) {
+                                    LockPinChoice::Reuse { pin, source } => {
+                                        if let Ok(mut reused) = reused_from_poetry.lock() {
+                                            reused.push(source);
+                                        }
+                                        pinned = Some(pin);
+                                    }
+                                    LockPinChoice::Skip(reason) => {
+                                        if let Ok(mut skipped) = skipped_poetry.lock() {
+                                            skipped.push(json!({
+                                                "spec": spec,
+                                                "reason": reason,
+                                            }));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        match pinned {
+                            Some(pin) => pins.push(pin),
+                            None => needs_resolution = true,
+                        }
                     }
                     if !needs_resolution {
                         return Ok(pins);
@@ -591,9 +633,18 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
                 .collect(),
         );
     }
+    let reused_uv_refs = reused_from_uv.lock().unwrap();
+    if !reused_uv_refs.is_empty() {
+        details["autopin_uv_lock_used"] =
+            Value::Array(reused_uv_refs.iter().cloned().map(Value::String).collect());
+    }
     let skipped_poetry_refs = skipped_poetry.lock().unwrap();
     if !skipped_poetry_refs.is_empty() {
         details["autopin_poetry_lock_skipped"] = Value::Array(skipped_poetry_refs.clone());
+    }
+    let skipped_uv_refs = skipped_uv.lock().unwrap();
+    if !skipped_uv_refs.is_empty() {
+        details["autopin_uv_lock_skipped"] = Value::Array(skipped_uv_refs.clone());
     }
 
     let snapshot = match manifest_snapshot_at(&root) {
@@ -786,6 +837,73 @@ fn rollback_failed_migration(backups: &BackupManager, created_files: &[PathBuf])
     Ok(())
 }
 
+fn marker_expression_matches(marker_env: &MarkerEnvironment, expression: &str) -> bool {
+    let requirement = format!("__px_marker_only__; {}", expression.trim());
+    PepRequirement::from_str(&requirement)
+        .map(|req| req.evaluate_markers(marker_env, &[]))
+        .unwrap_or(false)
+}
+
+fn uv_lock_versions(
+    root: &Path,
+    marker_env: &MarkerEnvironment,
+) -> Result<Option<HashMap<String, String>>> {
+    let path = root.join("uv.lock");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read uv.lock at {}", path.display()))?;
+    let doc: DocumentMut = contents
+        .parse()
+        .with_context(|| format!("failed to parse uv.lock at {}", path.display()))?;
+    let Some(packages) = doc.get("package").and_then(Item::as_array_of_tables) else {
+        return Ok(None);
+    };
+    let mut versions: HashMap<String, (String, usize)> = HashMap::new();
+    for package in packages.iter() {
+        let Some(name) = package.get("name").and_then(Item::as_str) else {
+            continue;
+        };
+        let Some(version) = package.get("version").and_then(Item::as_str) else {
+            continue;
+        };
+        let resolution_markers = package
+            .get("resolution-markers")
+            .and_then(Item::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|value| value.as_str().map(std::string::ToString::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !resolution_markers.is_empty()
+            && !resolution_markers
+                .iter()
+                .any(|expr| marker_expression_matches(marker_env, expr))
+        {
+            continue;
+        }
+        let normalized = normalize_dist_name(name);
+        let specificity = resolution_markers.len();
+        match versions.get(&normalized) {
+            Some((_, existing_specificity)) if *existing_specificity >= specificity => {}
+            _ => {
+                versions.insert(normalized, (version.to_string(), specificity));
+            }
+        }
+    }
+    if versions.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        versions
+            .into_iter()
+            .map(|(name, (version, _))| (name, version))
+            .collect(),
+    ))
+}
+
 fn poetry_lock_versions(root: &Path) -> Result<Option<HashMap<String, String>>> {
     let path = root.join("poetry.lock");
     if !path.exists() {
@@ -824,27 +942,28 @@ fn merge_pin_sets(existing: &mut Vec<PinSpec>, extra: Vec<PinSpec>) {
     }
 }
 
-enum PoetryPinChoice {
+enum LockPinChoice {
     Reuse { pin: PinSpec, source: String },
     Skip(String),
 }
 
-fn pin_from_poetry_lock(
+fn pin_from_locked_versions(
     spec: &str,
     versions: &HashMap<String, String>,
     marker_env: &MarkerEnvironment,
-) -> PoetryPinChoice {
+    source_label: &str,
+) -> LockPinChoice {
     let requirement = match PepRequirement::from_str(spec.trim()) {
         Ok(req) => req,
-        Err(err) => return PoetryPinChoice::Skip(err.to_string()),
+        Err(err) => return LockPinChoice::Skip(err.to_string()),
     };
     if !requirement.evaluate_markers(marker_env, &[]) {
-        return PoetryPinChoice::Skip("markers_do_not_apply".to_string());
+        return LockPinChoice::Skip("markers_do_not_apply".to_string());
     }
     let name = requirement.name.to_string();
     let normalized = normalize_dist_name(&name);
     let Some(version) = versions.get(&normalized) else {
-        return PoetryPinChoice::Skip("not_in_poetry_lock".to_string());
+        return LockPinChoice::Skip(format!("not_in_{source_label}"));
     };
 
     // Ensure the locked version satisfies the current specifiers.
@@ -863,8 +982,8 @@ fn pin_from_poetry_lock(
         None => false,
     };
     if !satisfies {
-        return PoetryPinChoice::Skip(format!(
-            "poetry.lock has {version} which does not satisfy current spec"
+        return LockPinChoice::Skip(format!(
+            "{source_label} has {version} which does not satisfy current spec"
         ));
     }
 
@@ -877,8 +996,8 @@ fn pin_from_poetry_lock(
     );
     let marker = requirement.marker.as_ref().map(ToString::to_string);
     let specifier = format_specifier(&normalized, &extras, version, marker.as_deref());
-    let source_normalized = normalized.clone();
-    PoetryPinChoice::Reuse {
+    let normalized_label = normalized.clone();
+    LockPinChoice::Reuse {
         pin: PinSpec {
             name,
             specifier,
@@ -889,6 +1008,6 @@ fn pin_from_poetry_lock(
             direct: true,
             requires: Vec::new(),
         },
-        source: format!("{source_normalized}=={version} (poetry.lock)"),
+        source: format!("{normalized_label}=={version} ({source_label})"),
     }
 }

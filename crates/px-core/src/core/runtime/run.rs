@@ -1816,13 +1816,7 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
         Err(outcome) => return Ok(outcome),
     } {
         let workdir = invocation_workdir(&ws_ctx.py_ctx.project_root);
-        return run_tests_for_context(
-            ctx,
-            &ws_ctx.py_ctx,
-            request,
-            ws_ctx.sync_report,
-            &workdir,
-        );
+        return run_tests_for_context(ctx, &ws_ctx.py_ctx, request, ws_ctx.sync_report, &workdir);
     }
 
     let snapshot = match manifest_snapshot() {
@@ -1889,17 +1883,15 @@ fn run_tests_for_context(
 
     let mut outcome = match select_test_runner(ctx, py_ctx) {
         TestRunner::Builtin => run_builtin_tests(ctx, py_ctx, envs, stream_runner, workdir)?,
-        TestRunner::Script(script) => {
-            run_script_runner(
-                ctx,
-                py_ctx,
-                envs,
-                &script,
-                &request.args,
-                stream_runner,
-                workdir,
-            )?
-        }
+        TestRunner::Script(script) => run_script_runner(
+            ctx,
+            py_ctx,
+            envs,
+            &script,
+            &request.args,
+            stream_runner,
+            workdir,
+        )?,
         TestRunner::Pytest => {
             envs.push(("PX_TEST_RUNNER".into(), "pytest".into()));
             run_pytest_runner(
@@ -2877,15 +2869,7 @@ oid sha256:deadbeef\nsize 4\n",
             px_options: PxOptions::default(),
         };
 
-        let outcome = run_executable(
-            &ctx,
-            &py_ctx,
-            "pwd",
-            &[],
-            &json!({}),
-            &workdir,
-            false,
-        )?;
+        let outcome = run_executable(&ctx, &py_ctx, "pwd", &[], &json!({}), &workdir, false)?;
 
         let stdout = outcome
             .details
