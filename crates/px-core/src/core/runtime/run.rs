@@ -48,6 +48,24 @@ pub struct RunRequest {
 
 type EnvPairs = Vec<(String, String)>;
 
+fn invocation_workdir(project_root: &Path) -> PathBuf {
+    map_workdir(Some(project_root), project_root)
+}
+
+fn map_workdir(invocation_root: Option<&Path>, context_root: &Path) -> PathBuf {
+    let cwd = env::current_dir().unwrap_or_else(|_| context_root.to_path_buf());
+    if let Some(root) = invocation_root {
+        if let Ok(rel) = cwd.strip_prefix(root) {
+            return context_root.join(rel);
+        }
+    }
+    if cwd.starts_with(context_root) {
+        cwd
+    } else {
+        context_root.to_path_buf()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TestReporter {
     Px,
@@ -184,13 +202,14 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         if target.trim().is_empty() {
             return Ok(run_target_required_outcome());
         }
+        let workdir = invocation_workdir(&ws_ctx.py_ctx.project_root);
         let deps = DependencyContext::from_sources(&ws_ctx.workspace_deps, Some(&ws_ctx.lock_path));
         let mut command_args = json!({
             "target": &target,
             "args": &request.args,
         });
         deps.inject(&mut command_args);
-        let plan = plan_run_target(&ws_ctx.py_ctx, &ws_ctx.manifest_path, &target)?;
+        let plan = plan_run_target(&ws_ctx.py_ctx, &ws_ctx.manifest_path, &target, &workdir)?;
         let mut outcome = match plan {
             RunTargetPlan::Script(path) => run_project_script(
                 ctx,
@@ -198,6 +217,7 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
                 &path,
                 &request.args,
                 &command_args,
+                &workdir,
                 interactive,
             )?,
             RunTargetPlan::Executable(program) => run_executable(
@@ -206,6 +226,7 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
                 &program,
                 &request.args,
                 &command_args,
+                &workdir,
                 interactive,
             )?,
         };
@@ -249,11 +270,12 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         "args": &request.args,
     });
     deps.inject(&mut command_args);
+    let workdir = invocation_workdir(&py_ctx.project_root);
 
     if target.trim().is_empty() {
         return Ok(run_target_required_outcome());
     }
-    let plan = plan_run_target(&py_ctx, &manifest, &target)?;
+    let plan = plan_run_target(&py_ctx, &manifest, &target, &workdir)?;
     let mut outcome = match plan {
         RunTargetPlan::Script(path) => run_project_script(
             ctx,
@@ -261,6 +283,7 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             &path,
             &request.args,
             &command_args,
+            &workdir,
             interactive,
         )?,
         RunTargetPlan::Executable(program) => run_executable(
@@ -269,6 +292,7 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             &program,
             &request.args,
             &command_args,
+            &workdir,
             interactive,
         )?,
     };
@@ -326,13 +350,20 @@ fn run_project_at_ref(
         Ok(value) => value,
         Err(outcome) => return Ok(outcome),
     };
+    let invocation_root = ctx.project_root().ok();
+    let workdir = map_workdir(invocation_root.as_deref(), &commit_ctx.py_ctx.project_root);
     let mut command_args = command_args;
     commit_ctx.deps.inject(&mut command_args);
 
     if target.trim().is_empty() {
         return Ok(run_target_required_outcome());
     }
-    let plan = plan_run_target(&commit_ctx.py_ctx, &commit_ctx.manifest_path, &target)?;
+    let plan = plan_run_target(
+        &commit_ctx.py_ctx,
+        &commit_ctx.manifest_path,
+        &target,
+        &workdir,
+    )?;
     let outcome = match plan {
         RunTargetPlan::Script(path) => run_project_script(
             ctx,
@@ -340,6 +371,7 @@ fn run_project_at_ref(
             &path,
             &request.args,
             &command_args,
+            &workdir,
             interactive,
         )?,
         RunTargetPlan::Executable(program) => run_executable(
@@ -348,6 +380,7 @@ fn run_project_at_ref(
             &program,
             &request.args,
             &command_args,
+            &workdir,
             interactive,
         )?,
     };
@@ -364,7 +397,9 @@ fn run_tests_at_ref(
         Err(outcome) => return Ok(outcome),
     };
     let _stdlib_guard = commit_stdlib_guard(ctx, git_ref);
-    run_tests_for_context(ctx, &commit_ctx.py_ctx, request, None)
+    let invocation_root = ctx.project_root().ok();
+    let workdir = map_workdir(invocation_root.as_deref(), &commit_ctx.py_ctx.project_root);
+    run_tests_for_context(ctx, &commit_ctx.py_ctx, request, None, &workdir)
 }
 
 fn prepare_commit_python_context(
@@ -1387,10 +1422,11 @@ fn run_pytest_runner(
     test_args: &[String],
     stream_runner: bool,
     allow_builtin_fallback: bool,
+    workdir: &Path,
 ) -> Result<ExecutionOutcome> {
     let reporter = test_reporter_from_env();
     let (envs, pytest_cmd) = build_pytest_invocation(ctx, py_ctx, envs, test_args, reporter)?;
-    let output = run_python_command(ctx, py_ctx, &pytest_cmd, &envs, stream_runner)?;
+    let output = run_python_command(ctx, py_ctx, &pytest_cmd, &envs, stream_runner, workdir)?;
     if output.code == 0 {
         let mut outcome = test_success("pytest", output, stream_runner, test_args);
         if let TestReporter::Px = reporter {
@@ -1400,7 +1436,7 @@ fn run_pytest_runner(
     }
     if missing_pytest(&output.stderr) {
         if ctx.config().test.fallback_builtin || allow_builtin_fallback {
-            return run_builtin_tests(ctx, py_ctx, envs, stream_runner);
+            return run_builtin_tests(ctx, py_ctx, envs, stream_runner, workdir);
         }
         return Ok(missing_pytest_outcome(output, test_args));
     }
@@ -1521,6 +1557,7 @@ fn run_python_command(
     args: &[String],
     envs: &[(String, String)],
     stream_runner: bool,
+    cwd: &Path,
 ) -> Result<crate::RunOutput> {
     let mut envs = envs.to_vec();
     if let Some(merged) = merged_pythonpath(&envs) {
@@ -1528,15 +1565,11 @@ fn run_python_command(
         envs.push(("PYTHONPATH".into(), merged));
     }
     if stream_runner {
-        ctx.python_runtime().run_command_streaming(
-            &py_ctx.python,
-            args,
-            &envs,
-            &py_ctx.project_root,
-        )
+        ctx.python_runtime()
+            .run_command_streaming(&py_ctx.python, args, &envs, cwd)
     } else {
         ctx.python_runtime()
-            .run_command(&py_ctx.python, args, &envs, &py_ctx.project_root)
+            .run_command(&py_ctx.python, args, &envs, cwd)
     }
 }
 
@@ -1577,6 +1610,7 @@ pub(crate) fn run_project_script(
     script: &Path,
     extra_args: &[String],
     command_args: &Value,
+    workdir: &Path,
     interactive: bool,
 ) -> Result<ExecutionOutcome> {
     let (envs, _) = build_env_with_preflight(core_ctx, py_ctx, command_args)?;
@@ -1585,9 +1619,9 @@ pub(crate) fn run_project_script(
     args.extend(extra_args.iter().cloned());
     let runtime = core_ctx.python_runtime();
     let output = if interactive {
-        runtime.run_command_passthrough(&py_ctx.python, &args, &envs, &py_ctx.project_root)?
+        runtime.run_command_passthrough(&py_ctx.python, &args, &envs, workdir)?
     } else {
-        runtime.run_command(&py_ctx.python, &args, &envs, &py_ctx.project_root)?
+        runtime.run_command(&py_ctx.python, &args, &envs, workdir)?
     };
     let details = json!({
         "mode": "script",
@@ -1610,6 +1644,7 @@ fn run_executable(
     program: &str,
     extra_args: &[String],
     command_args: &Value,
+    workdir: &Path,
     interactive: bool,
 ) -> Result<ExecutionOutcome> {
     if let Some(subcommand) = mutating_pip_invocation(program, extra_args, py_ctx) {
@@ -1624,11 +1659,11 @@ fn run_executable(
     let runtime = core_ctx.python_runtime();
     let interactive = interactive || needs_stdin;
     let output = if needs_stdin {
-        runtime.run_command_with_stdin(program, extra_args, &envs, &py_ctx.project_root, true)?
+        runtime.run_command_with_stdin(program, extra_args, &envs, workdir, true)?
     } else if interactive {
-        runtime.run_command_passthrough(program, extra_args, &envs, &py_ctx.project_root)?
+        runtime.run_command_passthrough(program, extra_args, &envs, workdir)?
     } else {
-        runtime.run_command(program, extra_args, &envs, &py_ctx.project_root)?
+        runtime.run_command(program, extra_args, &envs, workdir)?
     };
     let mut details = json!({
         "mode": if uses_px_python { "passthrough" } else { "executable" },
@@ -1780,7 +1815,14 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
     } {
-        return run_tests_for_context(ctx, &ws_ctx.py_ctx, request, ws_ctx.sync_report);
+        let workdir = invocation_workdir(&ws_ctx.py_ctx.project_root);
+        return run_tests_for_context(
+            ctx,
+            &ws_ctx.py_ctx,
+            request,
+            ws_ctx.sync_report,
+            &workdir,
+        );
     }
 
     let snapshot = match manifest_snapshot() {
@@ -1809,7 +1851,8 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
     };
-    run_tests_for_context(ctx, &py_ctx, request, sync_report)
+    let workdir = invocation_workdir(&py_ctx.project_root);
+    run_tests_for_context(ctx, &py_ctx, request, sync_report, &workdir)
 }
 
 fn select_test_runner(ctx: &CommandContext, py_ctx: &PythonContext) -> TestRunner {
@@ -1834,6 +1877,7 @@ fn run_tests_for_context(
     py_ctx: &PythonContext,
     request: &TestRequest,
     sync_report: Option<crate::EnvironmentSyncReport>,
+    workdir: &Path,
 ) -> Result<ExecutionOutcome> {
     let command_args = json!({ "test_args": request.args });
     let (mut envs, _preflight) = build_env_with_preflight(ctx, py_ctx, &command_args)?;
@@ -1844,9 +1888,17 @@ fn run_tests_for_context(
         .unwrap_or(false);
 
     let mut outcome = match select_test_runner(ctx, py_ctx) {
-        TestRunner::Builtin => run_builtin_tests(ctx, py_ctx, envs, stream_runner)?,
+        TestRunner::Builtin => run_builtin_tests(ctx, py_ctx, envs, stream_runner, workdir)?,
         TestRunner::Script(script) => {
-            run_script_runner(ctx, py_ctx, envs, &script, &request.args, stream_runner)?
+            run_script_runner(
+                ctx,
+                py_ctx,
+                envs,
+                &script,
+                &request.args,
+                stream_runner,
+                workdir,
+            )?
         }
         TestRunner::Pytest => {
             envs.push(("PX_TEST_RUNNER".into(), "pytest".into()));
@@ -1857,6 +1909,7 @@ fn run_tests_for_context(
                 &request.args,
                 stream_runner,
                 allow_missing_pytest_fallback,
+                workdir,
             )?
         }
     };
@@ -1871,6 +1924,7 @@ fn run_script_runner(
     script: &Path,
     args: &[String],
     stream_runner: bool,
+    workdir: &Path,
 ) -> Result<ExecutionOutcome> {
     let runner_label = script
         .strip_prefix(&py_ctx.project_root)
@@ -1880,7 +1934,7 @@ fn run_script_runner(
     envs.push(("PX_TEST_RUNNER".into(), runner_label.clone()));
     let mut cmd_args = vec![script.display().to_string()];
     cmd_args.extend_from_slice(args);
-    let output = run_python_command(ctx, py_ctx, &cmd_args, &envs, stream_runner)?;
+    let output = run_python_command(ctx, py_ctx, &cmd_args, &envs, stream_runner, workdir)?;
     if output.code == 0 {
         Ok(test_success(&runner_label, output, stream_runner, args))
     } else {
@@ -1893,6 +1947,7 @@ fn run_builtin_tests(
     ctx: &PythonContext,
     mut envs: Vec<(String, String)>,
     stream_runner: bool,
+    workdir: &Path,
 ) -> Result<ExecutionOutcome> {
     if let Some(path) = ensure_stdlib_tests_available(ctx)? {
         append_pythonpath(&mut envs, &path);
@@ -1900,7 +1955,7 @@ fn run_builtin_tests(
     envs.push(("PX_TEST_RUNNER".into(), "builtin".into()));
     let script = "from sample_px_app import cli\nassert cli.greet() == 'Hello, World!'\nprint('px fallback test passed')";
     let args = vec!["-c".to_string(), script.to_string()];
-    let output = run_python_command(core_ctx, ctx, &args, &envs, stream_runner)?;
+    let output = run_python_command(core_ctx, ctx, &args, &envs, stream_runner, workdir)?;
     let runner_args: Vec<String> = Vec::new();
     Ok(test_success("builtin", output, stream_runner, &runner_args))
 }
@@ -2568,6 +2623,7 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -2769,7 +2825,15 @@ oid sha256:deadbeef\nsize 4\n",
         };
 
         let args = vec!["install".to_string(), "demo".to_string()];
-        let outcome = run_executable(&ctx, &py_ctx, "pip", &args, &json!({}), false)?;
+        let outcome = run_executable(
+            &ctx,
+            &py_ctx,
+            "pip",
+            &args,
+            &json!({}),
+            &py_ctx.project_root,
+            false,
+        )?;
 
         assert_eq!(outcome.status, CommandStatus::UserError);
         assert_eq!(
@@ -2793,6 +2857,43 @@ oid sha256:deadbeef\nsize 4\n",
                 .and_then(|value| value.as_str()),
             Some("pip")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn run_executable_uses_workdir() -> Result<()> {
+        let ctx = ctx_with_defaults();
+        let temp = tempdir()?;
+        let workdir = temp.path().join("nested");
+        fs::create_dir_all(&workdir)?;
+        let py_ctx = PythonContext {
+            project_root: temp.path().to_path_buf(),
+            project_name: "demo".into(),
+            python: "/usr/bin/python".into(),
+            pythonpath: String::new(),
+            allowed_paths: vec![temp.path().to_path_buf()],
+            site_bin: None,
+            pep582_bin: Vec::new(),
+            px_options: PxOptions::default(),
+        };
+
+        let outcome = run_executable(
+            &ctx,
+            &py_ctx,
+            "pwd",
+            &[],
+            &json!({}),
+            &workdir,
+            false,
+        )?;
+
+        let stdout = outcome
+            .details
+            .get("stdout")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .trim();
+        assert_eq!(PathBuf::from(stdout), workdir);
         Ok(())
     }
 

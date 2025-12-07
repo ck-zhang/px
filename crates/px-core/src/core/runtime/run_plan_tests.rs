@@ -27,7 +27,12 @@ fn prefers_console_script_from_site_bin() -> anyhow::Result<()> {
         px_options: PxOptions::default(),
     };
 
-    let plan = plan_run_target(&ctx, &temp.path().join("pyproject.toml"), "demo")?;
+    let plan = plan_run_target(
+        &ctx,
+        &temp.path().join("pyproject.toml"),
+        "demo",
+        temp.path(),
+    )?;
     let resolved = match plan {
         RunTargetPlan::Executable(path) => path,
         other => panic!("expected executable plan, got {other:?}"),
@@ -61,7 +66,7 @@ demo = "demo.cli:main"
         px_options: PxOptions::default(),
     };
 
-    let plan = plan_run_target(&ctx, &pyproject, "demo")?;
+    let plan = plan_run_target(&ctx, &pyproject, "demo", temp.path())?;
     match plan {
         RunTargetPlan::Executable(target) => assert_eq!(target, "demo"),
         other => panic!("expected passthrough executable, got {other:?}"),
@@ -94,7 +99,7 @@ scripts = { demo = "demo.cli:main" }
         px_options: PxOptions::default(),
     };
 
-    let plan = plan_run_target(&ctx, &pyproject, "demo")?;
+    let plan = plan_run_target(&ctx, &pyproject, "demo", temp.path())?;
     match plan {
         RunTargetPlan::Executable(target) => assert_eq!(target, "demo"),
         other => panic!("expected passthrough executable, got {other:?}"),
@@ -121,7 +126,12 @@ fn resolves_existing_project_script_under_root() -> anyhow::Result<()> {
         px_options: PxOptions::default(),
     };
 
-    let plan = plan_run_target(&ctx, &temp.path().join("pyproject.toml"), "scripts/app.py")?;
+    let plan = plan_run_target(
+        &ctx,
+        &temp.path().join("pyproject.toml"),
+        "scripts/app.py",
+        temp.path(),
+    )?;
     match plan {
         RunTargetPlan::Script(path) => {
             assert_eq!(
@@ -149,7 +159,12 @@ fn does_not_guess_missing_python_script_targets() -> anyhow::Result<()> {
         px_options: PxOptions::default(),
     };
 
-    let plan = plan_run_target(&ctx, &temp.path().join("pyproject.toml"), "missing.py")?;
+    let plan = plan_run_target(
+        &ctx,
+        &temp.path().join("pyproject.toml"),
+        "missing.py",
+        temp.path(),
+    )?;
     match plan {
         RunTargetPlan::Executable(target) => {
             assert_eq!(
@@ -176,10 +191,49 @@ fn python_alias_runs_as_plain_executable() -> anyhow::Result<()> {
         px_options: PxOptions::default(),
     };
 
-    let plan = plan_run_target(&ctx, &temp.path().join("pyproject.toml"), "python")?;
+    let plan = plan_run_target(
+        &ctx,
+        &temp.path().join("pyproject.toml"),
+        "python",
+        temp.path(),
+    )?;
     match plan {
         RunTargetPlan::Executable(target) => assert_eq!(target, "python"),
         other => panic!("expected executable passthrough, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn resolves_script_relative_to_working_dir_within_project() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let cwd = temp.path().join("tests");
+    fs::create_dir_all(&cwd)?;
+    let script = cwd.join("runtests.py");
+    fs::write(&script, b"print('hi')")?;
+
+    let ctx = PythonContext {
+        project_root: temp.path().to_path_buf(),
+        project_name: "demo".into(),
+        python: "/usr/bin/python".into(),
+        pythonpath: String::new(),
+        allowed_paths: vec![],
+        site_bin: None,
+        pep582_bin: Vec::new(),
+        px_options: PxOptions::default(),
+    };
+
+    let plan = plan_run_target(
+        &ctx,
+        &temp.path().join("pyproject.toml"),
+        "runtests.py",
+        &cwd,
+    )?;
+    match plan {
+        RunTargetPlan::Script(path) => {
+            assert_eq!(path, script.canonicalize()?);
+        }
+        other => panic!("expected script plan, got {other:?}"),
     }
     Ok(())
 }

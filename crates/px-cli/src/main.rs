@@ -1,6 +1,6 @@
 #![deny(clippy::all, warnings)]
 
-use std::{env, path::PathBuf, sync::Arc};
+use std::{env, ffi::OsString, path::PathBuf, sync::Arc};
 
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
@@ -30,7 +30,8 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let cli = PxCli::parse();
+    let raw_args: Vec<_> = env::args_os().collect();
+    let cli = PxCli::parse_from(normalize_run_args(raw_args));
     let trace = cli.trace || cli.debug;
     init_tracing(trace, cli.verbose);
     if cli.debug {
@@ -78,6 +79,65 @@ fn main() -> Result<()> {
     }
 }
 
+fn normalize_run_args(args: Vec<OsString>) -> Vec<OsString> {
+    let mut top_level = None;
+    for (idx, arg) in args.iter().enumerate().skip(1) {
+        let text = arg.to_string_lossy();
+        if text.starts_with('-') {
+            continue;
+        }
+        top_level = Some(idx);
+        break;
+    }
+    let Some(run_pos) = top_level.filter(|idx| {
+        args.get(*idx)
+            .map(|arg| arg.to_string_lossy() == "run")
+            .unwrap_or(false)
+    }) else {
+        return args;
+    };
+    if args.iter().skip(run_pos + 1).any(|arg| arg == "--") {
+        return args;
+    }
+
+    let mut insert_pos = None;
+    let mut idx = run_pos + 1;
+    while idx < args.len() {
+        let arg = &args[idx];
+        if arg == "--" {
+            return args;
+        }
+        if arg == "--target" {
+            let value_idx = idx + 1;
+            if value_idx < args.len() {
+                insert_pos = Some(value_idx + 1);
+            }
+            break;
+        }
+        if arg == "--at" {
+            idx += 2;
+            continue;
+        }
+        let is_positional = {
+            let text = arg.to_string_lossy();
+            text == "-" || !text.starts_with('-')
+        };
+        if is_positional {
+            insert_pos = Some(idx + 1);
+            break;
+        }
+        idx += 1;
+    }
+
+    if let Some(pos) = insert_pos.filter(|pos| *pos < args.len()) {
+        let mut normalized = args;
+        normalized.insert(pos, OsString::from("--"));
+        normalized
+    } else {
+        args
+    }
+}
+
 fn init_tracing(trace: bool, verbose: u8) {
     let level = if trace {
         "trace"
@@ -118,6 +178,74 @@ fn apply_env_overrides(cli: &PxCli) {
         if let Some(cache) = env::var_os("PX_CACHE_PATH") {
             let store = PathBuf::from(cache).join("store");
             env::set_var("PX_STORE_PATH", store);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_forwards_flags_after_target() {
+        let cli = PxCli::try_parse_from(normalize_run_args(vec![
+            OsString::from("px"),
+            OsString::from("run"),
+            OsString::from("tests/runtests.py"),
+            OsString::from("--help"),
+        ]))
+        .expect("parse run args");
+
+        match cli.command {
+            CommandGroupCli::Run(run) => {
+                assert_eq!(run.target_value.as_deref(), Some("tests/runtests.py"));
+                assert_eq!(run.args, vec!["--help".to_string()]);
+            }
+            other => panic!("expected run command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_does_not_add_delimiter_without_trailing_args() {
+        let cli = PxCli::try_parse_from(normalize_run_args(vec![
+            OsString::from("px"),
+            OsString::from("run"),
+            OsString::from("script.py"),
+        ]))
+        .expect("parse run args");
+
+        match cli.command {
+            CommandGroupCli::Run(run) => {
+                assert_eq!(run.target_value.as_deref(), Some("script.py"));
+                assert!(run.args.is_empty());
+            }
+            other => panic!("expected run command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_handles_explicit_target_flag() {
+        let cli = PxCli::try_parse_from(normalize_run_args(vec![
+            OsString::from("px"),
+            OsString::from("run"),
+            OsString::from("--target"),
+            OsString::from("./runtests.py"),
+            OsString::from("--verbosity"),
+            OsString::from("2"),
+        ]))
+        .expect("parse run args");
+
+        match cli.command {
+            CommandGroupCli::Run(run) => {
+                assert_eq!(run.target.as_deref(), Some("./runtests.py"));
+                let mut forwarded = Vec::new();
+                if let Some(positional) = &run.target_value {
+                    forwarded.push(positional.clone());
+                }
+                forwarded.extend(run.args.clone());
+                assert_eq!(forwarded, vec!["--verbosity".to_string(), "2".to_string()]);
+            }
+            other => panic!("expected run command, got {other:?}"),
         }
     }
 }

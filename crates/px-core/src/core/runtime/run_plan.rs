@@ -14,8 +14,9 @@ pub(crate) fn plan_run_target(
     py_ctx: &PythonContext,
     _manifest: &Path,
     target: &str,
+    cwd: &Path,
 ) -> Result<RunTargetPlan> {
-    if let Some(script_path) = script_under_project_root(&py_ctx.project_root, target) {
+    if let Some(script_path) = script_under_project_root(&py_ctx.project_root, cwd, target) {
         return Ok(RunTargetPlan::Script(script_path));
     }
 
@@ -26,14 +27,20 @@ pub(crate) fn plan_run_target(
     Ok(RunTargetPlan::Executable(target.to_string()))
 }
 
-fn script_under_project_root(root: &Path, target: &str) -> Option<PathBuf> {
+fn script_under_project_root(root: &Path, cwd: &Path, target: &str) -> Option<PathBuf> {
+    resolve_script_path(root, root, target)
+        .or_else(|| resolve_script_path(cwd, root, target))
+        .filter(|path| path.starts_with(root))
+}
+
+fn resolve_script_path(base: &Path, project_root: &Path, target: &str) -> Option<PathBuf> {
     let candidate = if Path::new(target).is_absolute() {
         PathBuf::from(target)
     } else {
-        root.join(target)
+        base.join(target)
     };
     let canonical = candidate.canonicalize().ok()?;
-    if canonical.starts_with(root) && canonical.is_file() {
+    if canonical.starts_with(project_root) && canonical.is_file() {
         Some(canonical)
     } else {
         None

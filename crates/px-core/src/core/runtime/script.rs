@@ -139,6 +139,7 @@ pub(crate) fn run_inline_script(
         &script.path,
         extra_args,
         command_args,
+        &script.working_dir,
         interactive,
     ) {
         Ok(result) => result,
