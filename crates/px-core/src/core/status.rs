@@ -158,6 +158,7 @@ pub struct StatusPayload {
     pub lock: Option<LockStatus>,
     pub env: Option<EnvStatus>,
     pub next_action: NextAction,
+    pub warnings: Vec<String>,
 }
 
 impl StatusPayload {

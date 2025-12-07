@@ -16,23 +16,31 @@ use super::cas_env::{ensure_profile_env, project_env_owner_id, workspace_env_own
 use super::script::{detect_inline_script, run_inline_script};
 use crate::core::runtime::artifacts::dependency_name;
 use crate::core::runtime::facade::{
-    build_pythonpath, compute_lock_hash_bytes, detect_runtime_metadata, marker_env_for_snapshot,
-    select_python_from_site,
+    build_pythonpath, compute_lock_hash_bytes, detect_runtime_metadata, load_project_state,
+    marker_env_for_snapshot, select_python_from_site, ManifestSnapshot,
 };
+use crate::core::sandbox::{
+    default_store_root, detect_container_backend, discover_site_packages, ensure_image_layout,
+    ensure_sandbox_image, env_root_from_site_packages, run_container, sandbox_image_tag,
+    ContainerBackend, ContainerRunArgs, Mount, RunMode, SandboxArtifacts, SandboxImageLayout,
+    SandboxStore,
+};
+use crate::project::evaluate_project_state;
 use crate::run_plan::{plan_run_target, RunTargetPlan};
 use crate::tooling::{missing_pyproject_outcome, run_target_required_outcome};
-use crate::workspace::prepare_workspace_run_context;
+use crate::workspace::{prepare_workspace_run_context, WorkspaceStateKind, WorkspaceStateReport};
 use crate::{
     attach_autosync_details, is_missing_project_error, manifest_snapshot, missing_project_outcome,
     outcome_from_output, python_context_with_mode, state_guard::guard_for_execution,
     CommandContext, ExecutionOutcome, OwnerId, OwnerType, PythonContext,
 };
-use px_domain::{detect_lock_drift, load_lockfile_optional};
+use px_domain::{detect_lock_drift, load_lockfile_optional, sandbox_config_from_manifest};
 
 #[derive(Clone, Debug)]
 pub struct TestRequest {
     pub args: Vec<String>,
     pub frozen: bool,
+    pub sandbox: bool,
     pub at: Option<String>,
 }
 
@@ -43,10 +51,77 @@ pub struct RunRequest {
     pub args: Vec<String>,
     pub frozen: bool,
     pub interactive: Option<bool>,
+    pub sandbox: bool,
     pub at: Option<String>,
 }
 
 type EnvPairs = Vec<(String, String)>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct SandboxRunContext {
+    store: SandboxStore,
+    artifacts: SandboxArtifacts,
+}
+
+pub(crate) trait CommandRunner {
+    fn run_command(
+        &self,
+        program: &str,
+        args: &[String],
+        envs: &[(String, String)],
+        cwd: &Path,
+    ) -> Result<crate::RunOutput>;
+
+    fn run_command_streaming(
+        &self,
+        program: &str,
+        args: &[String],
+        envs: &[(String, String)],
+        cwd: &Path,
+    ) -> Result<crate::RunOutput>;
+
+    fn run_command_with_stdin(
+        &self,
+        program: &str,
+        args: &[String],
+        envs: &[(String, String)],
+        cwd: &Path,
+        inherit_stdin: bool,
+    ) -> Result<crate::RunOutput>;
+
+    fn run_command_passthrough(
+        &self,
+        program: &str,
+        args: &[String],
+        envs: &[(String, String)],
+        cwd: &Path,
+    ) -> Result<crate::RunOutput>;
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct HostCommandRunner<'a> {
+    ctx: &'a CommandContext<'a>,
+}
+
+impl<'a> HostCommandRunner<'a> {
+    pub(crate) fn new(ctx: &'a CommandContext<'a>) -> Self {
+        Self { ctx }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SandboxCommandRunner {
+    backend: ContainerBackend,
+    layout: SandboxImageLayout,
+    sbx_id: String,
+    mounts: Vec<Mount>,
+    host_project_root: PathBuf,
+    host_env_root: PathBuf,
+    container_project_root: PathBuf,
+    container_env_root: PathBuf,
+    pythonpath: String,
+    allowed_paths_env: String,
+}
 
 fn invocation_workdir(project_root: &Path) -> PathBuf {
     map_workdir(Some(project_root), project_root)
@@ -64,6 +139,395 @@ fn map_workdir(invocation_root: Option<&Path>, context_root: &Path) -> PathBuf {
     } else {
         context_root.to_path_buf()
     }
+}
+
+impl CommandRunner for HostCommandRunner<'_> {
+    fn run_command(
+        &self,
+        program: &str,
+        args: &[String],
+        envs: &[(String, String)],
+        cwd: &Path,
+    ) -> Result<crate::RunOutput> {
+        self.ctx
+            .python_runtime()
+            .run_command(program, args, envs, cwd)
+    }
+
+    fn run_command_streaming(
+        &self,
+        program: &str,
+        args: &[String],
+        envs: &[(String, String)],
+        cwd: &Path,
+    ) -> Result<crate::RunOutput> {
+        self.ctx
+            .python_runtime()
+            .run_command_streaming(program, args, envs, cwd)
+    }
+
+    fn run_command_with_stdin(
+        &self,
+        program: &str,
+        args: &[String],
+        envs: &[(String, String)],
+        cwd: &Path,
+        inherit_stdin: bool,
+    ) -> Result<crate::RunOutput> {
+        self.ctx
+            .python_runtime()
+            .run_command_with_stdin(program, args, envs, cwd, inherit_stdin)
+    }
+
+    fn run_command_passthrough(
+        &self,
+        program: &str,
+        args: &[String],
+        envs: &[(String, String)],
+        cwd: &Path,
+    ) -> Result<crate::RunOutput> {
+        self.ctx
+            .python_runtime()
+            .run_command_passthrough(program, args, envs, cwd)
+    }
+}
+
+impl SandboxCommandRunner {
+    fn run_in_container(
+        &self,
+        program: &str,
+        args: &[String],
+        envs: &[(String, String)],
+        cwd: &Path,
+        mode: RunMode,
+        inherit_stdin: bool,
+    ) -> Result<crate::RunOutput> {
+        let mut env = Vec::new();
+        let mut base_path: Option<String> = None;
+        for (key, value) in envs {
+            match key.as_str() {
+                "PX_ALLOWED_PATHS" | "PYTHONPATH" | "PX_PROJECT_ROOT" | "PX_PYTHON"
+                | "VIRTUAL_ENV" | "PYTHONHOME" => continue,
+                "PATH" => {
+                    base_path = Some(value.clone());
+                }
+                _ => {
+                    env.push((
+                        key.clone(),
+                        rewrite_env_value(
+                            value,
+                            &self.host_project_root,
+                            &self.container_project_root,
+                            &self.host_env_root,
+                            &self.container_env_root,
+                        ),
+                    ));
+                }
+            }
+        }
+        env.push(("PX_ALLOWED_PATHS".into(), self.allowed_paths_env.clone()));
+        env.push(("PYTHONPATH".into(), self.pythonpath.clone()));
+        env.push((
+            "PX_PROJECT_ROOT".into(),
+            self.container_project_root.display().to_string(),
+        ));
+        let container_python = self.container_env_root.join("bin").join("python");
+        env.push((
+            "PX_PYTHON".into(),
+            container_python.display().to_string(),
+        ));
+        env.push((
+            "VIRTUAL_ENV".into(),
+            self.container_env_root.display().to_string(),
+        ));
+        env.push((
+            "PYTHONHOME".into(),
+            self.container_env_root.display().to_string(),
+        ));
+        let default_path =
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/bin".to_string();
+        let base_path = base_path.unwrap_or(default_path);
+        env.push((
+            "PATH".into(),
+            format!(
+                "{}/bin:{base_path}",
+                self.container_env_root.display()
+            ),
+        ));
+        env.push(("PX_SANDBOX".into(), "1".into()));
+        env.push(("PX_SANDBOX_ID".into(), self.sbx_id.clone()));
+        let workdir = map_workdir_container(
+            cwd,
+            &self.host_project_root,
+            &self.container_project_root,
+            &self.host_env_root,
+            &self.container_env_root,
+        );
+        let opts = ContainerRunArgs {
+            env,
+            mounts: self.mounts.clone(),
+            workdir,
+            program: program.to_string(),
+            args: args.to_vec(),
+        };
+        let mode = match mode {
+            RunMode::WithStdin(_) => RunMode::WithStdin(inherit_stdin),
+            other => other,
+        };
+        run_container(&self.backend, &self.layout, &opts, mode).map_err(anyhow::Error::new)
+    }
+}
+
+impl CommandRunner for SandboxCommandRunner {
+    fn run_command(
+        &self,
+        program: &str,
+        args: &[String],
+        envs: &[(String, String)],
+        cwd: &Path,
+    ) -> Result<crate::RunOutput> {
+        self.run_in_container(program, args, envs, cwd, RunMode::Capture, false)
+    }
+
+    fn run_command_streaming(
+        &self,
+        program: &str,
+        args: &[String],
+        envs: &[(String, String)],
+        cwd: &Path,
+    ) -> Result<crate::RunOutput> {
+        self.run_in_container(program, args, envs, cwd, RunMode::Streaming, false)
+    }
+
+    fn run_command_with_stdin(
+        &self,
+        program: &str,
+        args: &[String],
+        envs: &[(String, String)],
+        cwd: &Path,
+        inherit_stdin: bool,
+    ) -> Result<crate::RunOutput> {
+        self.run_in_container(
+            program,
+            args,
+            envs,
+            cwd,
+            RunMode::WithStdin(inherit_stdin),
+            inherit_stdin,
+        )
+    }
+
+    fn run_command_passthrough(
+        &self,
+        program: &str,
+        args: &[String],
+        envs: &[(String, String)],
+        cwd: &Path,
+    ) -> Result<crate::RunOutput> {
+        self.run_in_container(program, args, envs, cwd, RunMode::Passthrough, true)
+    }
+}
+
+fn canonical_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn map_allowed_paths_for_container(
+    allowed_paths: &[PathBuf],
+    project_root: &Path,
+    env_root: &Path,
+    container_project: &Path,
+    container_env: &Path,
+) -> Vec<PathBuf> {
+    let mut mapped = Vec::new();
+    for path in allowed_paths {
+        let mapped_path = if path.starts_with(project_root) {
+            container_project.join(
+                path.strip_prefix(project_root)
+                    .unwrap_or_else(|_| Path::new("")),
+            )
+        } else if path.starts_with(env_root) {
+            container_env
+                .join(path.strip_prefix(env_root).unwrap_or_else(|_| Path::new("")))
+        } else {
+            path.clone()
+        };
+        if !mapped.iter().any(|p| p == &mapped_path) {
+            mapped.push(mapped_path);
+        }
+    }
+    if !mapped.iter().any(|p| p == container_project) {
+        mapped.insert(0, container_project.to_path_buf());
+    }
+    mapped
+}
+
+fn map_workdir_container(
+    cwd: &Path,
+    host_project_root: &Path,
+    container_project_root: &Path,
+    host_env_root: &Path,
+    container_env_root: &Path,
+) -> PathBuf {
+    if cwd.starts_with(host_project_root) {
+        return container_project_root
+            .join(cwd.strip_prefix(host_project_root).unwrap_or_else(|_| Path::new("")));
+    }
+    if cwd.starts_with(host_env_root) {
+        return container_env_root
+            .join(cwd.strip_prefix(host_env_root).unwrap_or_else(|_| Path::new("")));
+    }
+    canonical_path(cwd)
+}
+
+fn rewrite_env_value(
+    value: &str,
+    host_project_root: &Path,
+    container_project_root: &Path,
+    host_env_root: &Path,
+    container_env_root: &Path,
+) -> String {
+    let mut rewritten = value.to_string();
+    if let (Some(host), Some(container)) = (
+        host_project_root.to_str(),
+        container_project_root.to_str(),
+    ) {
+        rewritten = rewritten.replace(host, container);
+    }
+    if let (Some(host), Some(container)) = (host_env_root.to_str(), container_env_root.to_str()) {
+        rewritten = rewritten.replace(host, container);
+    }
+    rewritten
+}
+
+pub(crate) fn sandbox_runner_for_context(
+    py_ctx: &PythonContext,
+    sandbox: &mut SandboxRunContext,
+    workdir: &Path,
+) -> Result<SandboxCommandRunner, ExecutionOutcome> {
+    let backend = detect_container_backend().map_err(|err| {
+        ExecutionOutcome::user_error(err.message().to_string(), err.details().clone())
+    })?;
+    let tag = sandbox_image_tag(&sandbox.artifacts.definition.sbx_id());
+    let layout = ensure_image_layout(
+        &mut sandbox.artifacts,
+        &sandbox.store,
+        &py_ctx.project_root,
+        &py_ctx.allowed_paths,
+        &tag,
+    )
+    .map_err(|err| ExecutionOutcome::user_error(err.message, err.details))?;
+    let container_project = PathBuf::from("/app");
+    let container_env = PathBuf::from("/px/env");
+    let mapped_allowed = map_allowed_paths_for_container(
+        &py_ctx.allowed_paths,
+        &py_ctx.project_root,
+        &sandbox.artifacts.env_root,
+        &container_project,
+        &container_env,
+    );
+    let allowed_env = env::join_paths(&mapped_allowed)
+        .map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to assemble sandbox allowed paths",
+                json!({ "error": err.to_string() }),
+            )
+        })?
+        .into_string()
+        .map_err(|_| {
+            ExecutionOutcome::failure(
+                "failed to assemble sandbox allowed paths",
+                json!({ "error": "non-utf8 path entry" }),
+            )
+        })?;
+    let pythonpath = env::join_paths(&mapped_allowed)
+        .map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to assemble sandbox python path",
+                json!({ "error": err.to_string() }),
+            )
+        })?
+        .into_string()
+        .map_err(|_| {
+            ExecutionOutcome::failure(
+                "failed to assemble sandbox python path",
+                json!({ "error": "non-utf8 path entry" }),
+            )
+        })?;
+    Ok(SandboxCommandRunner {
+        backend,
+        layout,
+        sbx_id: sandbox.artifacts.definition.sbx_id(),
+        mounts: sandbox_mounts(py_ctx, workdir, &sandbox.artifacts.env_root),
+        host_project_root: py_ctx.project_root.clone(),
+        host_env_root: sandbox.artifacts.env_root.clone(),
+        container_project_root: container_project,
+        container_env_root: container_env,
+        pythonpath,
+        allowed_paths_env: allowed_env,
+    })
+}
+
+fn sandbox_mounts(py_ctx: &PythonContext, workdir: &Path, env_root: &Path) -> Vec<Mount> {
+    let container_project = PathBuf::from("/app");
+    let mut mounts = vec![Mount {
+        host: canonical_path(&py_ctx.project_root),
+        guest: container_project,
+        read_only: false,
+    }];
+    let workdir = canonical_path(workdir);
+    if !workdir.starts_with(&py_ctx.project_root) {
+        mounts.push(Mount {
+            host: workdir.clone(),
+            guest: workdir.clone(),
+            read_only: false,
+        });
+    }
+    for path in &py_ctx.allowed_paths {
+        if path.starts_with(&py_ctx.project_root) || path.starts_with(env_root) {
+            continue;
+        }
+        let host = if path.is_file() {
+            path.parent()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| path.clone())
+        } else {
+            path.clone()
+        };
+        let host = canonical_path(&host);
+        let guest = host.clone();
+        mounts.push(Mount {
+            host,
+            guest,
+            read_only: false,
+        });
+    }
+    let mut seen = HashSet::new();
+    mounts
+        .into_iter()
+        .filter(|m| seen.insert((m.host.clone(), m.guest.clone())))
+        .collect()
+}
+
+fn sandbox_workspace_env_inconsistent(
+    root: &Path,
+    state: &WorkspaceStateReport,
+) -> ExecutionOutcome {
+    let reason = state
+        .env_issue
+        .as_ref()
+        .and_then(|issue| issue.get("reason").and_then(serde_json::Value::as_str))
+        .unwrap_or("env_outdated");
+    ExecutionOutcome::user_error(
+        "sandbox requires a consistent workspace environment",
+        json!({
+            "code": "PX902",
+            "reason": reason,
+            "hint": "run `px sync` at the workspace root before using --sandbox",
+            "state": state.canonical.as_str(),
+            "workspace_root": root.display().to_string(),
+        }),
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -171,6 +635,7 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
     let interactive = request.interactive.unwrap_or_else(|| {
         !strict && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
     });
+    let mut sandbox: Option<SandboxRunContext> = None;
 
     if !target.trim().is_empty() {
         if let Some(inline) = match detect_inline_script(&target) {
@@ -181,26 +646,87 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
                 "target": &target,
                 "args": &request.args,
             });
-            return match run_inline_script(
+            if request.sandbox {
+                let snapshot = match manifest_snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(err) => {
+                        if is_missing_project_error(&err) {
+                            return Ok(missing_project_outcome());
+                        }
+                        let msg = err.to_string();
+                        if msg.contains("pyproject.toml not found") {
+                            let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                            return Ok(missing_pyproject_outcome("run", &root));
+                        }
+                        return Err(err);
+                    }
+                };
+                let state_report = match evaluate_project_state(ctx, &snapshot) {
+                    Ok(report) => report,
+                    Err(err) => {
+                        return Ok(ExecutionOutcome::failure(
+                            "failed to evaluate project state",
+                            json!({ "error": err.to_string() }),
+                        ))
+                    }
+                };
+                let guard = match guard_for_execution(strict, &snapshot, &state_report, "run") {
+                    Ok(guard) => guard,
+                    Err(outcome) => return Ok(outcome),
+                };
+                if matches!(guard, crate::EnvGuard::AutoSync) {
+                    if let Err(outcome) = python_context_with_mode(ctx, guard) {
+                        return Ok(outcome);
+                    }
+                }
+                match prepare_project_sandbox(ctx, &snapshot) {
+                    Ok(sbx) => sandbox = Some(sbx),
+                    Err(outcome) => return Ok(outcome),
+                }
+            }
+            let mut outcome = match run_inline_script(
                 ctx,
+                sandbox.as_mut(),
                 inline,
                 &request.args,
                 &command_args,
                 interactive,
                 strict,
             ) {
-                Ok(outcome) => Ok(outcome),
-                Err(outcome) => Ok(outcome),
+                Ok(outcome) => outcome,
+                Err(outcome) => outcome,
             };
+            if let Some(ref sbx) = sandbox {
+                attach_sandbox_details(&mut outcome, sbx);
+            }
+            return Ok(outcome);
         }
     }
 
-    if let Some(ws_ctx) = match prepare_workspace_run_context(ctx, strict, "run") {
+    if let Some(ws_ctx) = match prepare_workspace_run_context(ctx, strict, "run", request.sandbox) {
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
     } {
         if target.trim().is_empty() {
             return Ok(run_target_required_outcome());
+        }
+        if request.sandbox
+            && strict
+            && !matches!(
+                ws_ctx.state.canonical,
+                WorkspaceStateKind::Consistent | WorkspaceStateKind::InitializedEmpty
+            )
+        {
+            return Ok(sandbox_workspace_env_inconsistent(
+                &ws_ctx.workspace_root,
+                &ws_ctx.state,
+            ));
+        }
+        if request.sandbox {
+            match prepare_workspace_sandbox(ctx, &ws_ctx) {
+                Ok(sbx) => sandbox = Some(sbx),
+                Err(outcome) => return Ok(outcome),
+            }
         }
         let workdir = invocation_workdir(&ws_ctx.py_ctx.project_root);
         let deps = DependencyContext::from_sources(&ws_ctx.workspace_deps, Some(&ws_ctx.lock_path));
@@ -209,10 +735,26 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             "args": &request.args,
         });
         deps.inject(&mut command_args);
+        let host_runner = HostCommandRunner::new(ctx);
+        let sandbox_runner = match sandbox {
+            Some(ref mut sbx) => {
+                let runner = match sandbox_runner_for_context(&ws_ctx.py_ctx, sbx, &workdir) {
+                    Ok(runner) => runner,
+                    Err(outcome) => return Ok(outcome),
+                };
+                Some(runner)
+            }
+            None => None,
+        };
+        let runner: &dyn CommandRunner = match sandbox_runner.as_ref() {
+            Some(runner) => runner,
+            None => &host_runner,
+        };
         let plan = plan_run_target(&ws_ctx.py_ctx, &ws_ctx.manifest_path, &target, &workdir)?;
         let mut outcome = match plan {
             RunTargetPlan::Script(path) => run_project_script(
                 ctx,
+                runner,
                 &ws_ctx.py_ctx,
                 &path,
                 &request.args,
@@ -222,6 +764,7 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             )?,
             RunTargetPlan::Executable(program) => run_executable(
                 ctx,
+                runner,
                 &ws_ctx.py_ctx,
                 &program,
                 &request.args,
@@ -231,6 +774,9 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             )?,
         };
         attach_autosync_details(&mut outcome, ws_ctx.sync_report);
+        if let Some(ref sbx) = sandbox {
+            attach_sandbox_details(&mut outcome, sbx);
+        }
         return Ok(outcome);
     }
 
@@ -263,6 +809,12 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
     };
+    if request.sandbox {
+        match prepare_project_sandbox(ctx, &snapshot) {
+            Ok(sbx) => sandbox = Some(sbx),
+            Err(outcome) => return Ok(outcome),
+        }
+    }
     let manifest = py_ctx.project_root.join("pyproject.toml");
     let deps = DependencyContext::from_sources(&snapshot.requirements, Some(&snapshot.lock_path));
     let mut command_args = json!({
@@ -271,6 +823,21 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
     });
     deps.inject(&mut command_args);
     let workdir = invocation_workdir(&py_ctx.project_root);
+    let host_runner = HostCommandRunner::new(ctx);
+    let sandbox_runner = match sandbox {
+        Some(ref mut sbx) => {
+            let runner = match sandbox_runner_for_context(&py_ctx, sbx, &workdir) {
+                Ok(runner) => runner,
+                Err(outcome) => return Ok(outcome),
+            };
+            Some(runner)
+        }
+        None => None,
+    };
+    let runner: &dyn CommandRunner = match sandbox_runner.as_ref() {
+        Some(runner) => runner,
+        None => &host_runner,
+    };
 
     if target.trim().is_empty() {
         return Ok(run_target_required_outcome());
@@ -279,6 +846,7 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
     let mut outcome = match plan {
         RunTargetPlan::Script(path) => run_project_script(
             ctx,
+            runner,
             &py_ctx,
             &path,
             &request.args,
@@ -288,6 +856,7 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         )?,
         RunTargetPlan::Executable(program) => run_executable(
             ctx,
+            runner,
             &py_ctx,
             &program,
             &request.args,
@@ -297,6 +866,9 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         )?,
     };
     attach_autosync_details(&mut outcome, sync_report);
+    if let Some(ref sbx) = sandbox {
+        attach_sandbox_details(&mut outcome, sbx);
+    }
     Ok(outcome)
 }
 
@@ -304,6 +876,10 @@ struct CommitRunContext {
     py_ctx: PythonContext,
     manifest_path: PathBuf,
     deps: DependencyContext,
+    lock: px_domain::LockSnapshot,
+    profile_oid: String,
+    env_root: PathBuf,
+    site_packages: Option<PathBuf>,
     _temp_guard: Option<TempDir>,
 }
 
@@ -327,36 +903,51 @@ fn run_project_at_ref(
         "git_ref": git_ref,
     });
 
-    if !target.trim().is_empty() {
-        if let Some(inline) = match detect_inline_script(&target) {
-            Ok(result) => result,
-            Err(outcome) => return Ok(outcome),
-        } {
-            return match run_inline_script(
-                ctx,
-                inline,
-                &request.args,
-                &command_args,
-                interactive,
-                strict,
-            ) {
-                Ok(outcome) => Ok(outcome),
-                Err(outcome) => Ok(outcome),
-            };
-        }
-    }
-
     let commit_ctx = match prepare_commit_python_context(ctx, git_ref) {
         Ok(value) => value,
         Err(outcome) => return Ok(outcome),
     };
+    let mut sandbox: Option<SandboxRunContext> = None;
     let invocation_root = ctx.project_root().ok();
     let workdir = map_workdir(invocation_root.as_deref(), &commit_ctx.py_ctx.project_root);
     let mut command_args = command_args;
     commit_ctx.deps.inject(&mut command_args);
 
+    if request.sandbox {
+        match prepare_commit_sandbox(
+            &commit_ctx.manifest_path,
+            &commit_ctx.lock,
+            &commit_ctx.profile_oid,
+            &commit_ctx.env_root,
+            commit_ctx.site_packages.as_deref(),
+        ) {
+            Ok(sbx) => sandbox = Some(sbx),
+            Err(outcome) => return Ok(outcome),
+        }
+    }
     if target.trim().is_empty() {
         return Ok(run_target_required_outcome());
+    }
+    if let Some(inline) = match detect_inline_script(&target) {
+        Ok(result) => result,
+        Err(outcome) => return Ok(outcome),
+    } {
+        let mut outcome = match run_inline_script(
+            ctx,
+            sandbox.as_mut(),
+            inline,
+            &request.args,
+            &command_args,
+            interactive,
+            strict,
+        ) {
+            Ok(outcome) => outcome,
+            Err(outcome) => outcome,
+        };
+        if let Some(ref sbx) = sandbox {
+            attach_sandbox_details(&mut outcome, sbx);
+        }
+        return Ok(outcome);
     }
     let plan = plan_run_target(
         &commit_ctx.py_ctx,
@@ -364,9 +955,25 @@ fn run_project_at_ref(
         &target,
         &workdir,
     )?;
+    let host_runner = HostCommandRunner::new(ctx);
+    let sandbox_runner = match sandbox {
+        Some(ref mut sbx) => {
+            let runner = match sandbox_runner_for_context(&commit_ctx.py_ctx, sbx, &workdir) {
+                Ok(runner) => runner,
+                Err(outcome) => return Ok(outcome),
+            };
+            Some(runner)
+        }
+        None => None,
+    };
+    let runner: &dyn CommandRunner = match sandbox_runner.as_ref() {
+        Some(runner) => runner,
+        None => &host_runner,
+    };
     let outcome = match plan {
         RunTargetPlan::Script(path) => run_project_script(
             ctx,
+            runner,
             &commit_ctx.py_ctx,
             &path,
             &request.args,
@@ -376,6 +983,7 @@ fn run_project_at_ref(
         )?,
         RunTargetPlan::Executable(program) => run_executable(
             ctx,
+            runner,
             &commit_ctx.py_ctx,
             &program,
             &request.args,
@@ -384,6 +992,10 @@ fn run_project_at_ref(
             interactive,
         )?,
     };
+    let mut outcome = outcome;
+    if let Some(ref sbx) = sandbox {
+        attach_sandbox_details(&mut outcome, sbx);
+    }
     Ok(outcome)
 }
 
@@ -399,7 +1011,40 @@ fn run_tests_at_ref(
     let _stdlib_guard = commit_stdlib_guard(ctx, git_ref);
     let invocation_root = ctx.project_root().ok();
     let workdir = map_workdir(invocation_root.as_deref(), &commit_ctx.py_ctx.project_root);
-    run_tests_for_context(ctx, &commit_ctx.py_ctx, request, None, &workdir)
+    let mut sandbox: Option<SandboxRunContext> = None;
+    if request.sandbox {
+        match prepare_commit_sandbox(
+            &commit_ctx.manifest_path,
+            &commit_ctx.lock,
+            &commit_ctx.profile_oid,
+            &commit_ctx.env_root,
+            commit_ctx.site_packages.as_deref(),
+        ) {
+            Ok(sbx) => sandbox = Some(sbx),
+            Err(outcome) => return Ok(outcome),
+        }
+    }
+    let host_runner = HostCommandRunner::new(ctx);
+    let sandbox_runner = match sandbox {
+        Some(ref mut sbx) => {
+            let runner = match sandbox_runner_for_context(&commit_ctx.py_ctx, sbx, &workdir) {
+                Ok(runner) => runner,
+                Err(outcome) => return Ok(outcome),
+            };
+            Some(runner)
+        }
+        None => None,
+    };
+    let runner: &dyn CommandRunner = match sandbox_runner.as_ref() {
+        Some(runner) => runner,
+        None => &host_runner,
+    };
+    let mut outcome =
+        run_tests_for_context(ctx, runner, &commit_ctx.py_ctx, request, None, &workdir)?;
+    if let Some(ref sbx) = sandbox {
+        attach_sandbox_details(&mut outcome, sbx);
+    }
+    Ok(outcome)
 }
 
 fn prepare_commit_python_context(
@@ -562,11 +1207,9 @@ fn commit_project_context(
         ensure_profile_env(ctx, &snapshot, &lock, &runtime, &env_owner).map_err(|err| {
             install_error_outcome(err, "failed to prepare environment for git-ref execution")
         })?;
-    let paths = build_pythonpath(
-        ctx.fs(),
-        &project_root_at_ref,
-        Some(cas_profile.env_path.clone()),
-    )
+    let env_root = cas_profile.env_path.clone();
+    let site_packages = discover_site_packages(&env_root);
+    let paths = build_pythonpath(ctx.fs(), &project_root_at_ref, Some(env_root.clone()))
     .map_err(|err| {
         ExecutionOutcome::failure(
             "failed to assemble PYTHONPATH for git-ref execution",
@@ -589,6 +1232,10 @@ fn commit_project_context(
         },
         manifest_path,
         deps,
+        lock: lock.clone(),
+        profile_oid: cas_profile.profile_oid.clone(),
+        env_root,
+        site_packages,
         _temp_guard: Some(archive),
     })
 }
@@ -880,11 +1527,9 @@ fn commit_workspace_context(
             "failed to prepare workspace environment for git-ref execution",
         )
     })?;
-    let paths = build_pythonpath(
-        ctx.fs(),
-        &member_root_at_ref,
-        Some(cas_profile.env_path.clone()),
-    )
+    let env_root = cas_profile.env_path.clone();
+    let site_packages = discover_site_packages(&env_root);
+    let paths = build_pythonpath(ctx.fs(), &member_root_at_ref, Some(env_root.clone()))
     .map_err(|err| {
         ExecutionOutcome::failure(
             "failed to assemble PYTHONPATH for git-ref execution",
@@ -958,6 +1603,10 @@ fn commit_workspace_context(
         },
         manifest_path: member_root_at_ref.join("pyproject.toml"),
         deps,
+        lock: lock.clone(),
+        profile_oid: cas_profile.profile_oid.clone(),
+        env_root,
+        site_packages,
         _temp_guard: Some(archive),
     })
 }
@@ -1415,8 +2064,10 @@ fn install_error_outcome(err: anyhow::Error, context: &str) -> ExecutionOutcome 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_pytest_runner(
     ctx: &CommandContext,
+    runner: &dyn CommandRunner,
     py_ctx: &PythonContext,
     envs: EnvPairs,
     test_args: &[String],
@@ -1426,7 +2077,7 @@ fn run_pytest_runner(
 ) -> Result<ExecutionOutcome> {
     let reporter = test_reporter_from_env();
     let (envs, pytest_cmd) = build_pytest_invocation(ctx, py_ctx, envs, test_args, reporter)?;
-    let output = run_python_command(ctx, py_ctx, &pytest_cmd, &envs, stream_runner, workdir)?;
+    let output = run_python_command(runner, py_ctx, &pytest_cmd, &envs, stream_runner, workdir)?;
     if output.code == 0 {
         let mut outcome = test_success("pytest", output, stream_runner, test_args);
         if let TestReporter::Px = reporter {
@@ -1436,7 +2087,7 @@ fn run_pytest_runner(
     }
     if missing_pytest(&output.stderr) {
         if ctx.config().test.fallback_builtin || allow_builtin_fallback {
-            return run_builtin_tests(ctx, py_ctx, envs, stream_runner, workdir);
+            return run_builtin_tests(ctx, runner, py_ctx, envs, stream_runner, workdir);
         }
         return Ok(missing_pytest_outcome(output, test_args));
     }
@@ -1552,7 +2203,7 @@ fn ensure_px_pytest_plugin(ctx: &CommandContext, py_ctx: &PythonContext) -> Resu
 }
 
 fn run_python_command(
-    ctx: &CommandContext,
+    runner: &dyn CommandRunner,
     py_ctx: &PythonContext,
     args: &[String],
     envs: &[(String, String)],
@@ -1565,11 +2216,9 @@ fn run_python_command(
         envs.push(("PYTHONPATH".into(), merged));
     }
     if stream_runner {
-        ctx.python_runtime()
-            .run_command_streaming(&py_ctx.python, args, &envs, cwd)
+        runner.run_command_streaming(&py_ctx.python, args, &envs, cwd)
     } else {
-        ctx.python_runtime()
-            .run_command(&py_ctx.python, args, &envs, cwd)
+        runner.run_command(&py_ctx.python, args, &envs, cwd)
     }
 }
 
@@ -1604,8 +2253,10 @@ fn merged_pythonpath(envs: &[(String, String)]) -> Option<String> {
         .and_then(|joined| joined.into_string().ok())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_project_script(
     core_ctx: &CommandContext,
+    runner: &dyn CommandRunner,
     py_ctx: &PythonContext,
     script: &Path,
     extra_args: &[String],
@@ -1617,11 +2268,10 @@ pub(crate) fn run_project_script(
     let mut args = Vec::with_capacity(extra_args.len() + 1);
     args.push(script.display().to_string());
     args.extend(extra_args.iter().cloned());
-    let runtime = core_ctx.python_runtime();
     let output = if interactive {
-        runtime.run_command_passthrough(&py_ctx.python, &args, &envs, workdir)?
+        runner.run_command_passthrough(&py_ctx.python, &args, &envs, workdir)?
     } else {
-        runtime.run_command(&py_ctx.python, &args, &envs, workdir)?
+        runner.run_command(&py_ctx.python, &args, &envs, workdir)?
     };
     let details = json!({
         "mode": "script",
@@ -1638,8 +2288,10 @@ pub(crate) fn run_project_script(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_executable(
     core_ctx: &CommandContext,
+    runner: &dyn CommandRunner,
     py_ctx: &PythonContext,
     program: &str,
     extra_args: &[String],
@@ -1656,14 +2308,13 @@ fn run_executable(
     if !uses_px_python {
         envs.retain(|(key, _)| key != "PX_PYTHON");
     }
-    let runtime = core_ctx.python_runtime();
     let interactive = interactive || needs_stdin;
     let output = if needs_stdin {
-        runtime.run_command_with_stdin(program, extra_args, &envs, workdir, true)?
+        runner.run_command_with_stdin(program, extra_args, &envs, workdir, true)?
     } else if interactive {
-        runtime.run_command_passthrough(program, extra_args, &envs, workdir)?
+        runner.run_command_passthrough(program, extra_args, &envs, workdir)?
     } else {
-        runtime.run_command(program, extra_args, &envs, workdir)?
+        runner.run_command(program, extra_args, &envs, workdir)?
     };
     let mut details = json!({
         "mode": if uses_px_python { "passthrough" } else { "executable" },
@@ -1810,13 +2461,59 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
         return run_tests_at_ref(ctx, request, at_ref);
     }
     let strict = request.frozen || ctx.env_flag_enabled("CI");
+    let mut sandbox: Option<SandboxRunContext> = None;
 
-    if let Some(ws_ctx) = match prepare_workspace_run_context(ctx, strict, "test") {
+    if let Some(ws_ctx) = match prepare_workspace_run_context(ctx, strict, "test", request.sandbox)
+    {
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
     } {
+        if request.sandbox
+            && strict
+            && !matches!(
+                ws_ctx.state.canonical,
+                WorkspaceStateKind::Consistent | WorkspaceStateKind::InitializedEmpty
+            )
+        {
+            return Ok(sandbox_workspace_env_inconsistent(
+                &ws_ctx.workspace_root,
+                &ws_ctx.state,
+            ));
+        }
+        if request.sandbox {
+            match prepare_workspace_sandbox(ctx, &ws_ctx) {
+                Ok(sbx) => sandbox = Some(sbx),
+                Err(outcome) => return Ok(outcome),
+            }
+        }
         let workdir = invocation_workdir(&ws_ctx.py_ctx.project_root);
-        return run_tests_for_context(ctx, &ws_ctx.py_ctx, request, ws_ctx.sync_report, &workdir);
+        let host_runner = HostCommandRunner::new(ctx);
+        let sandbox_runner = match sandbox {
+            Some(ref mut sbx) => {
+                let runner = match sandbox_runner_for_context(&ws_ctx.py_ctx, sbx, &workdir) {
+                    Ok(runner) => runner,
+                    Err(outcome) => return Ok(outcome),
+                };
+                Some(runner)
+            }
+            None => None,
+        };
+        let runner: &dyn CommandRunner = match sandbox_runner.as_ref() {
+            Some(runner) => runner,
+            None => &host_runner,
+        };
+        let mut outcome = run_tests_for_context(
+            ctx,
+            runner,
+            &ws_ctx.py_ctx,
+            request,
+            ws_ctx.sync_report,
+            &workdir,
+        )?;
+        if let Some(ref sbx) = sandbox {
+            attach_sandbox_details(&mut outcome, sbx);
+        }
+        return Ok(outcome);
     }
 
     let snapshot = match manifest_snapshot() {
@@ -1845,8 +2542,33 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
     };
+    if request.sandbox {
+        match prepare_project_sandbox(ctx, &snapshot) {
+            Ok(sbx) => sandbox = Some(sbx),
+            Err(outcome) => return Ok(outcome),
+        }
+    }
     let workdir = invocation_workdir(&py_ctx.project_root);
-    run_tests_for_context(ctx, &py_ctx, request, sync_report, &workdir)
+    let host_runner = HostCommandRunner::new(ctx);
+    let sandbox_runner = match sandbox {
+        Some(ref mut sbx) => {
+            let runner = match sandbox_runner_for_context(&py_ctx, sbx, &workdir) {
+                Ok(runner) => runner,
+                Err(outcome) => return Ok(outcome),
+            };
+            Some(runner)
+        }
+        None => None,
+    };
+    let runner: &dyn CommandRunner = match sandbox_runner.as_ref() {
+        Some(runner) => runner,
+        None => &host_runner,
+    };
+    let mut outcome = run_tests_for_context(ctx, runner, &py_ctx, request, sync_report, &workdir)?;
+    if let Some(ref sbx) = sandbox {
+        attach_sandbox_details(&mut outcome, sbx);
+    }
+    Ok(outcome)
 }
 
 fn select_test_runner(ctx: &CommandContext, py_ctx: &PythonContext) -> TestRunner {
@@ -1868,6 +2590,7 @@ fn find_runtests_script(project_root: &Path) -> Option<PathBuf> {
 
 fn run_tests_for_context(
     ctx: &CommandContext,
+    runner: &dyn CommandRunner,
     py_ctx: &PythonContext,
     request: &TestRequest,
     sync_report: Option<crate::EnvironmentSyncReport>,
@@ -1882,9 +2605,12 @@ fn run_tests_for_context(
         .unwrap_or(false);
 
     let mut outcome = match select_test_runner(ctx, py_ctx) {
-        TestRunner::Builtin => run_builtin_tests(ctx, py_ctx, envs, stream_runner, workdir)?,
+        TestRunner::Builtin => {
+            run_builtin_tests(ctx, runner, py_ctx, envs, stream_runner, workdir)?
+        }
         TestRunner::Script(script) => run_script_runner(
             ctx,
+            runner,
             py_ctx,
             envs,
             &script,
@@ -1896,6 +2622,7 @@ fn run_tests_for_context(
             envs.push(("PX_TEST_RUNNER".into(), "pytest".into()));
             run_pytest_runner(
                 ctx,
+                runner,
                 py_ctx,
                 envs,
                 &request.args,
@@ -1909,8 +2636,10 @@ fn run_tests_for_context(
     Ok(outcome)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_script_runner(
-    ctx: &CommandContext,
+    _ctx: &CommandContext,
+    runner: &dyn CommandRunner,
     py_ctx: &PythonContext,
     mut envs: EnvPairs,
     script: &Path,
@@ -1926,7 +2655,7 @@ fn run_script_runner(
     envs.push(("PX_TEST_RUNNER".into(), runner_label.clone()));
     let mut cmd_args = vec![script.display().to_string()];
     cmd_args.extend_from_slice(args);
-    let output = run_python_command(ctx, py_ctx, &cmd_args, &envs, stream_runner, workdir)?;
+    let output = run_python_command(runner, py_ctx, &cmd_args, &envs, stream_runner, workdir)?;
     if output.code == 0 {
         Ok(test_success(&runner_label, output, stream_runner, args))
     } else {
@@ -1935,7 +2664,8 @@ fn run_script_runner(
 }
 
 fn run_builtin_tests(
-    core_ctx: &CommandContext,
+    _core_ctx: &CommandContext,
+    runner: &dyn CommandRunner,
     ctx: &PythonContext,
     mut envs: Vec<(String, String)>,
     stream_runner: bool,
@@ -1947,7 +2677,7 @@ fn run_builtin_tests(
     envs.push(("PX_TEST_RUNNER".into(), "builtin".into()));
     let script = "from sample_px_app import cli\nassert cli.greet() == 'Hello, World!'\nprint('px fallback test passed')";
     let args = vec!["-c".to_string(), script.to_string()];
-    let output = run_python_command(core_ctx, ctx, &args, &envs, stream_runner, workdir)?;
+    let output = run_python_command(runner, ctx, &args, &envs, stream_runner, workdir)?;
     let runner_args: Vec<String> = Vec::new();
     Ok(test_success("builtin", output, stream_runner, &runner_args))
 }
@@ -2604,8 +3334,239 @@ def pytest_sessionstart(session):
             pm.unregister(default)
         pm.register(reporter, "terminalreporter")
         config._px_reporter_registered = True
-    reporter.pytest_sessionstart(session)
+reporter.pytest_sessionstart(session)
 "#;
+
+fn prepare_project_sandbox(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+) -> Result<SandboxRunContext, ExecutionOutcome> {
+    let store = sandbox_store()?;
+    let state = load_project_state(ctx.fs(), &snapshot.root).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to read project state for sandbox",
+            json!({ "error": err.to_string(), "code": "PX903" }),
+        )
+    })?;
+    let env = state.current_env.ok_or_else(|| {
+        ExecutionOutcome::user_error(
+            "project environment missing for sandbox execution",
+            json!({
+                "code": "PX902",
+                "reason": "missing_env",
+                "hint": "run `px sync` before using --sandbox",
+            }),
+        )
+    })?;
+    let profile_oid = env
+        .profile_oid
+        .as_deref()
+        .unwrap_or(&env.id)
+        .trim()
+        .to_string();
+    if profile_oid.is_empty() {
+        return Err(ExecutionOutcome::user_error(
+            "sandbox requires an environment profile",
+            json!({
+                "code": "PX904",
+                "reason": "missing_profile_oid",
+            }),
+        ));
+    }
+    let site_packages = if env.site_packages.trim().is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(&env.site_packages))
+    };
+    let env_root = env
+        .env_path
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| {
+            site_packages
+                .as_ref()
+                .and_then(|site| env_root_from_site_packages(site))
+        });
+    let env_root = match env_root {
+        Some(root) => root,
+        None => {
+            return Err(ExecutionOutcome::user_error(
+                "project environment missing for sandbox execution",
+                json!({
+                    "code": "PX902",
+                    "reason": "missing_env",
+                    "hint": "run `px sync` before using --sandbox",
+                }),
+            ))
+        }
+    };
+    let lock = match load_lockfile_optional(&snapshot.lock_path) {
+        Ok(lock) => lock,
+        Err(err) => {
+            return Err(ExecutionOutcome::failure(
+                "failed to read px.lock",
+                json!({ "error": err.to_string(), "code": "PX900" }),
+            ))
+        }
+    };
+    let Some(lock) = lock.as_ref() else {
+        return Err(ExecutionOutcome::user_error(
+            "px.lock not found for sandbox execution",
+            json!({ "code": "PX900", "reason": "missing_lock" }),
+        ));
+    };
+    let config = sandbox_config_from_manifest(&snapshot.manifest_path).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to read sandbox configuration",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    let artifacts = ensure_sandbox_image(
+        &store,
+        &config,
+        Some(lock),
+        None,
+        &profile_oid,
+        &env_root,
+        site_packages.as_deref(),
+    )
+    .map_err(|err| ExecutionOutcome::user_error(err.message, err.details))?;
+    Ok(SandboxRunContext {
+        store,
+        artifacts,
+    })
+}
+
+fn prepare_workspace_sandbox(
+    _ctx: &CommandContext,
+    ws_ctx: &crate::workspace::WorkspaceRunContext,
+) -> Result<SandboxRunContext, ExecutionOutcome> {
+    let store = sandbox_store()?;
+    let profile_oid = ws_ctx
+        .profile_oid
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if profile_oid.is_empty() {
+        return Err(ExecutionOutcome::user_error(
+            "workspace environment missing for sandbox execution",
+            json!({
+                "code": "PX902",
+                "reason": "missing_env",
+                "hint": "run `px sync` at the workspace root before using --sandbox",
+            }),
+        ));
+    }
+    let lock = match load_lockfile_optional(&ws_ctx.lock_path) {
+        Ok(lock) => lock,
+        Err(err) => {
+            return Err(ExecutionOutcome::failure(
+                "failed to read workspace lockfile",
+                json!({ "error": err.to_string(), "code": "PX900" }),
+            ))
+        }
+    };
+    let Some(lock) = lock.as_ref() else {
+        return Err(ExecutionOutcome::user_error(
+            "workspace lockfile missing for sandbox execution",
+            json!({ "code": "PX900", "reason": "missing_lock" }),
+        ));
+    };
+    let env_root = env_root_from_site_packages(&ws_ctx.site_packages).ok_or_else(|| {
+        ExecutionOutcome::user_error(
+            "workspace environment missing for sandbox execution",
+            json!({
+                "code": "PX902",
+                "reason": "missing_env",
+                "hint": "run `px sync` at the workspace root before using --sandbox",
+            }),
+        )
+    })?;
+    let workspace_lock = lock.workspace.as_ref();
+    let config = sandbox_config_from_manifest(&ws_ctx.workspace_manifest).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to read workspace sandbox configuration",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    let artifacts = ensure_sandbox_image(
+        &store,
+        &config,
+        Some(lock),
+        workspace_lock,
+        &profile_oid,
+        &env_root,
+        Some(ws_ctx.site_packages.as_path()),
+    )
+    .map_err(|err| ExecutionOutcome::user_error(err.message, err.details))?;
+    Ok(SandboxRunContext {
+        store,
+        artifacts,
+    })
+}
+
+fn prepare_commit_sandbox(
+    manifest_path: &Path,
+    lock: &px_domain::LockSnapshot,
+    profile_oid: &str,
+    env_root: &Path,
+    site_packages: Option<&Path>,
+) -> Result<SandboxRunContext, ExecutionOutcome> {
+    let store = sandbox_store()?;
+    let config = sandbox_config_from_manifest(manifest_path).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to read sandbox configuration at git ref",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    let artifacts = ensure_sandbox_image(
+        &store,
+        &config,
+        Some(lock),
+        lock.workspace.as_ref(),
+        profile_oid,
+        env_root,
+        site_packages,
+    )
+    .map_err(|err| ExecutionOutcome::user_error(err.message, err.details))?;
+    Ok(SandboxRunContext { store, artifacts })
+}
+
+fn sandbox_store() -> Result<SandboxStore, ExecutionOutcome> {
+    default_store_root().map(SandboxStore::new).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to resolve sandbox store",
+            json!({ "error": err.to_string(), "code": "PX903" }),
+        )
+    })
+}
+
+fn attach_sandbox_details(outcome: &mut ExecutionOutcome, sandbox: &SandboxRunContext) {
+    let details = json!({
+        "sbx_id": sandbox.artifacts.definition.sbx_id(),
+        "base": sandbox.artifacts.base.name,
+        "base_os_oid": sandbox.artifacts.base.base_os_oid,
+        "capabilities": sandbox.artifacts.definition.capabilities,
+        "profile_oid": sandbox.artifacts.definition.profile_oid,
+        "image_digest": sandbox.artifacts.manifest.image_digest,
+    });
+    match outcome.details {
+        Value::Object(ref mut map) => {
+            map.insert("sandbox".to_string(), details);
+        }
+        Value::Null => {
+            outcome.details = json!({ "sandbox": details });
+        }
+        ref mut other => {
+            let prev = other.take();
+            outcome.details = json!({
+                "value": prev,
+                "sandbox": details,
+            });
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2817,8 +3778,10 @@ oid sha256:deadbeef\nsize 4\n",
         };
 
         let args = vec!["install".to_string(), "demo".to_string()];
+        let runner = HostCommandRunner::new(&ctx);
         let outcome = run_executable(
             &ctx,
+            &runner,
             &py_ctx,
             "pip",
             &args,
@@ -2869,7 +3832,17 @@ oid sha256:deadbeef\nsize 4\n",
             px_options: PxOptions::default(),
         };
 
-        let outcome = run_executable(&ctx, &py_ctx, "pwd", &[], &json!({}), &workdir, false)?;
+        let runner = HostCommandRunner::new(&ctx);
+        let outcome = run_executable(
+            &ctx,
+            &runner,
+            &py_ctx,
+            "pwd",
+            &[],
+            &json!({}),
+            &workdir,
+            false,
+        )?;
 
         let stdout = outcome
             .details

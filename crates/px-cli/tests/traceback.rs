@@ -91,14 +91,20 @@ fn run_traceback_is_not_duplicated_in_cli_output() {
         .assert()
         .failure();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout");
-    if stdout.contains("Environment missing") {
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("stderr");
+    let text = if stdout.trim().is_empty() {
+        &stderr
+    } else {
+        &stdout
+    };
+    if text.contains("Environment missing") {
         return;
     }
     let header = "Traceback (most recent call last):";
-    let count = stdout.matches(header).count();
+    let count = text.matches(header).count();
     assert!(
         count == 1,
-        "traceback header should appear once in CLI output: {stdout:?}"
+        "traceback header should appear once in CLI output: {text:?}"
     );
 }
 

@@ -5,7 +5,7 @@ use toml_edit::{DocumentMut, Item};
 
 mod common;
 
-use common::{parse_json, prepare_named_fixture, require_online, test_env_guard};
+use common::{find_python, parse_json, prepare_named_fixture, require_online, test_env_guard};
 
 #[test]
 fn workspace_sync_writes_workspace_metadata() {
@@ -227,5 +227,68 @@ fn workspace_run_at_ref_uses_workspace_identity() {
     assert!(
         stdout.contains("A sees ok"),
         "px run --at should use workspace lock/env without drift: {stdout}"
+    );
+}
+
+#[test]
+fn sandbox_workspace_requires_consistent_env() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let Some(python) = find_python() else {
+        eprintln!("skipping workspace sandbox env repair test (python not found)");
+        return;
+    };
+    let (_temp, root) = prepare_named_fixture("workspace_basic", "workspace_sandbox_env");
+    let member = root.join("apps").join("a");
+    fs::create_dir_all(&member).expect("create member root");
+    fs::write(
+        member.join("pyproject.toml"),
+        r#"[project]
+name = "member"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.px]
+"#,
+    )
+    .expect("write member manifest");
+    let lib_root = root.join("libs").join("b");
+    fs::create_dir_all(lib_root.join("src").join("b")).expect("create lib package");
+    fs::write(
+        lib_root.join("pyproject.toml"),
+        r#"[project]
+name = "lib-b"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.px]
+"#,
+    )
+    .expect("write lib manifest");
+
+    cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    fs::remove_dir_all(root.join(".px")).ok();
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&member)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["--json", "test", "--sandbox"])
+        .assert()
+        .success();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    assert!(
+        root.join(".px").exists(),
+        "sandbox workspace run should recreate workspace environment"
     );
 }

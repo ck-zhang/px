@@ -14,7 +14,10 @@ use crate::core::runtime::facade::{
     select_python_from_site, EnvironmentIssue, EnvironmentSyncReport, ManifestSnapshot,
     PythonContext,
 };
-use crate::core::runtime::run::run_project_script;
+use crate::core::runtime::run::{
+    run_project_script, sandbox_runner_for_context, CommandRunner, HostCommandRunner,
+    SandboxRunContext,
+};
 use crate::core::runtime::EnvGuard;
 use crate::{CommandContext, ExecutionOutcome, InstallUserError};
 use px_domain::project::manifest::manifest_fingerprint;
@@ -103,6 +106,7 @@ pub(crate) fn detect_inline_script(target: &str) -> Result<Option<InlineScript>,
 /// Resolve, lock, and run an inline script using the metadata in its px block.
 pub(crate) fn run_inline_script(
     ctx: &CommandContext,
+    sandbox: Option<&mut SandboxRunContext>,
     script: InlineScript,
     extra_args: &[String],
     command_args: &serde_json::Value,
@@ -133,8 +137,22 @@ pub(crate) fn run_inline_script(
         sync_report = report;
     }
 
+    let host_runner = HostCommandRunner::new(ctx);
+    let sandbox_runner = match sandbox {
+        Some(sbx) => match sandbox_runner_for_context(&py_ctx, sbx, &script.working_dir) {
+            Ok(runner) => Some(runner),
+            Err(outcome) => return Err(outcome),
+        },
+        None => None,
+    };
+    let runner: &dyn CommandRunner = match sandbox_runner.as_ref() {
+        Some(runner) => runner,
+        None => &host_runner,
+    };
+
     let mut outcome = match run_project_script(
         ctx,
+        runner,
         &py_ctx,
         &script.path,
         extra_args,

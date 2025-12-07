@@ -173,6 +173,7 @@ fn project_status_payload(ctx: &CommandContext, root: &Path) -> Result<StatusPay
         lock: Some(lock_status),
         env: Some(env_status),
         next_action,
+        warnings: Vec::new(),
     })
 }
 

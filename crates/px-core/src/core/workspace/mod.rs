@@ -28,8 +28,8 @@ use crate::{
 use px_domain::project::manifest::px_options_from_doc;
 use px_domain::{
     detect_lock_drift, discover_workspace_root, load_lockfile_optional, read_workspace_config,
-    workspace_manifest_fingerprint, workspace_member_for_path, ManifestEditor, ProjectSnapshot,
-    PxOptions, ResolvedDependency, WorkspaceConfig, WorkspaceLock,
+    sandbox_config_from_manifest, workspace_manifest_fingerprint, workspace_member_for_path,
+    ManifestEditor, ProjectSnapshot, PxOptions, ResolvedDependency, WorkspaceConfig, WorkspaceLock,
     WorkspaceMember as WorkspaceLockMember, WorkspaceOwner,
 };
 
@@ -1023,6 +1023,7 @@ fn workspace_payload_from_snapshot(
 
     let (project_name, project_root, member_path, kind) =
         workspace_context(&snapshot.config, cwd, &snapshot.members);
+    let warnings = collect_sandbox_warnings(&snapshot);
 
     Ok(StatusPayload {
         context: StatusContext {
@@ -1039,6 +1040,7 @@ fn workspace_payload_from_snapshot(
         lock: Some(lock_status),
         env: Some(env_status),
         next_action,
+        warnings,
     })
 }
 
@@ -1052,6 +1054,7 @@ fn workspace_payload_tolerant(
     let mut member_statuses = Vec::new();
     let mut member_snapshots = Vec::new();
     let mut member_issues = Vec::new();
+    let mut warnings = Vec::new();
 
     for rel in &config.members {
         let abs = config.root.join(rel);
@@ -1129,6 +1132,17 @@ fn workspace_payload_tolerant(
         false,
     );
     let runtime_status = workspace_runtime_status(ctx, None, env_state.runtime.clone());
+    for rel in &config.members {
+        let manifest = config.root.join(rel).join("pyproject.toml");
+        if let Ok(cfg) = sandbox_config_from_manifest(&manifest) {
+            if cfg.defined {
+                warnings.push(format!(
+                    "workspace sandbox config is authoritative; member {} defines [tool.px.sandbox] which is ignored",
+                    rel.display()
+                ));
+            }
+        }
+    }
     let workspace_payload = WorkspaceStatusPayload {
         manifest_exists,
         lock_exists: lock.is_some(),
@@ -1182,6 +1196,7 @@ fn workspace_payload_tolerant(
         lock: Some(lock_status),
         env: Some(env_status),
         next_action,
+        warnings,
     })
 }
 
@@ -1211,6 +1226,21 @@ fn workspace_context(
         StatusContextKind::Workspace
     };
     (project_name, member_root, member_path, kind)
+}
+
+fn collect_sandbox_warnings(workspace: &WorkspaceSnapshot) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for member in &workspace.members {
+        if let Ok(config) = sandbox_config_from_manifest(&member.snapshot.manifest_path) {
+            if config.defined {
+                warnings.push(format!(
+                    "workspace sandbox config is authoritative; member {} defines [tool.px.sandbox] which is ignored",
+                    member.rel_path
+                ));
+            }
+        }
+    }
+    warnings
 }
 
 fn workspace_display_name(config: &WorkspaceConfig) -> String {
@@ -1537,12 +1567,18 @@ pub struct WorkspaceRunContext {
     pub(crate) sync_report: Option<crate::EnvironmentSyncReport>,
     pub(crate) workspace_deps: Vec<String>,
     pub(crate) lock_path: PathBuf,
+    pub(crate) profile_oid: Option<String>,
+    pub(crate) workspace_root: PathBuf,
+    pub(crate) workspace_manifest: PathBuf,
+    pub(crate) site_packages: PathBuf,
+    pub(crate) state: WorkspaceStateReport,
 }
 
 pub fn prepare_workspace_run_context(
     ctx: &CommandContext,
     strict: bool,
     command: &str,
+    sandbox: bool,
 ) -> Result<Option<WorkspaceRunContext>, ExecutionOutcome> {
     let scope = discover_workspace_scope().map_err(|err| {
         ExecutionOutcome::failure(
@@ -1550,12 +1586,19 @@ pub fn prepare_workspace_run_context(
             json!({ "error": err.to_string() }),
         )
     })?;
-    let Some(WorkspaceScope::Member {
-        workspace,
-        member_root,
-    }) = scope
-    else {
+    let Some(scope) = scope else {
         return Ok(None);
+    };
+    let (workspace, member_root) = match scope {
+        WorkspaceScope::Member {
+            workspace,
+            member_root,
+        } => (workspace, member_root),
+        WorkspaceScope::Root(workspace) if command == "pack" => {
+            let root = workspace.config.root.clone();
+            (workspace, root)
+        }
+        _ => return Ok(None),
     };
     let state = evaluate_workspace_state(ctx, &workspace).map_err(|err| {
         ExecutionOutcome::failure(
@@ -1591,6 +1634,14 @@ pub fn prepare_workspace_run_context(
 
     let mut sync_report = None;
     if !strict && !state.env_clean {
+        if sandbox {
+            return Err(workspace_violation(
+                command,
+                &workspace,
+                &state,
+                StateViolation::EnvDrift,
+            ));
+        }
         eprintln!("px ▸ Syncing workspace environment…");
         refresh_workspace_site(ctx, &workspace).map_err(|err| {
             ExecutionOutcome::failure(
@@ -1714,6 +1765,11 @@ pub fn prepare_workspace_run_context(
         sync_report,
         workspace_deps: workspace.dependencies.clone(),
         lock_path: workspace.lock_path.clone(),
+        profile_oid: env.profile_oid.clone(),
+        workspace_root: workspace.config.root.clone(),
+        workspace_manifest: workspace.config.manifest_path.clone(),
+        site_packages: site_dir,
+        state,
     }))
 }
 
@@ -1722,9 +1778,11 @@ mod tests {
     use super::*;
     use crate::{CommandStatus, GlobalOptions, StatusPayload, SystemEffects};
     use px_domain::lockfile::load_lockfile;
+    use px_domain::PxOptions;
     use serde_json;
     use serde_json::Value;
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -1987,5 +2045,61 @@ dependencies = []
                 .map(str::to_string)
         });
         assert_eq!(reason.as_deref(), Some("runtime_mismatch"));
+    }
+
+    #[test]
+    fn workspace_warns_on_member_sandbox_config() -> Result<()> {
+        let tmp = tempdir()?;
+        let root = tmp.path();
+        fs::create_dir_all(root.join("apps/a"))?;
+        fs::write(
+            root.join("pyproject.toml"),
+            r#"[project]
+name = "ws"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[tool.px.workspace]
+members = ["apps/a"]
+"#,
+        )?;
+        fs::write(
+            root.join("apps/a").join("pyproject.toml"),
+            r#"[project]
+name = "member-a"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.px.sandbox]
+base = "alpine-3.20"
+"#,
+        )?;
+        let member_snapshot = ProjectSnapshot::read_from(root.join("apps/a"))?;
+        let workspace = WorkspaceSnapshot {
+            config: WorkspaceConfig {
+                root: root.to_path_buf(),
+                manifest_path: root.join("pyproject.toml"),
+                members: vec![PathBuf::from("apps/a")],
+                python: None,
+                name: Some("ws".into()),
+            },
+            members: vec![WorkspaceMember {
+                rel_path: "apps/a".into(),
+                root: member_snapshot.root.clone(),
+                snapshot: member_snapshot,
+            }],
+            manifest_fingerprint: "fp".into(),
+            lock_path: root.join("px.workspace.lock"),
+            python_requirement: ">=3.11".into(),
+            python_override: None,
+            dependencies: Vec::new(),
+            name: "ws".into(),
+            px_options: PxOptions::default(),
+        };
+        let warnings = collect_sandbox_warnings(&workspace);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("apps/a"));
+        Ok(())
     }
 }

@@ -26,6 +26,7 @@ pub const PX_BEFORE_HELP: &str = concat!(
     "  fmt              Run formatters/linters/cleanup tools inside the px environment.\n",
     "  build            Produce sdists/wheels from the px-managed environment.\n",
     "  publish          Upload previously built artifacts (dry-run by default; use --upload to push).\n",
+    "  pack image       Freeze the current env + sandbox config into an OCI image.\n",
     "  migrate          Create px metadata for an existing project.\n\n",
     "\x1b[1;36mAdvanced\x1b[0m\n",
     "  tool             Install and run px-managed global tools.\n",
@@ -152,6 +153,11 @@ pub enum CommandGroupCli {
         override_usage = "px publish [--dry-run] [--registry NAME] [--token-env VAR]"
     )]
     Publish(PublishArgs),
+    #[command(
+        about = "Build a sandbox-backed OCI image from the current env profile.",
+        override_usage = "px pack image [--tag NAME] [--out PATH] [--push] [--allow-dirty]"
+    )]
+    Pack(PackArgs),
     #[command(about = "Create px metadata for an existing project.")]
     Migrate(MigrateArgs),
     #[command(
@@ -372,6 +378,11 @@ pub struct RunArgs {
     pub frozen: bool,
     #[arg(
         long,
+        help = "Execute inside the sandbox derived from [tool.px.sandbox]"
+    )]
+    pub sandbox: bool,
+    #[arg(
+        long,
         value_name = "GIT_REF",
         help = "Run using the manifest and lock at a past git ref without checking it out"
     )]
@@ -400,6 +411,11 @@ pub struct TestArgs {
         help = "Fail if px.lock is missing or the environment is out of sync"
     )]
     pub frozen: bool,
+    #[arg(
+        long,
+        help = "Execute tests inside the sandbox derived from [tool.px.sandbox]"
+    )]
+    pub sandbox: bool,
     #[arg(
         long,
         value_name = "GIT_REF",
@@ -496,6 +512,26 @@ pub struct BuildArgs {
     pub format: BuildFormat,
     #[arg(long)]
     pub out: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct PackArgs {
+    #[arg(
+        value_name = "TARGET",
+        default_value = "image",
+        value_parser = ["image"],
+        hide_default_value = true,
+        help = "Artifact kind (only 'image' is supported)"
+    )]
+    pub target: String,
+    #[arg(long, value_name = "TAG", help = "Explicit image tag to apply")]
+    pub tag: Option<String>,
+    #[arg(long, value_parser = value_parser!(PathBuf), value_name = "PATH", help = "Write OCI output to this directory or tarball")]
+    pub out: Option<PathBuf>,
+    #[arg(long, help = "Push the built image to a registry")]
+    pub push: bool,
+    #[arg(long, help = "Allow packing with a dirty working tree")]
+    pub allow_dirty: bool,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, Serialize, Deserialize)]

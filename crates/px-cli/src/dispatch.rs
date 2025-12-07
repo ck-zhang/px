@@ -10,7 +10,7 @@ use px_core::{
 
 use crate::{
     BuildArgs, BuildFormat, CommandGroupCli, CompletionShell, CompletionsArgs, FmtArgs, InitArgs,
-    MigrateArgs, PublishArgs, RunArgs, SyncArgs, TestArgs, ToolCommand, ToolInstallArgs,
+    MigrateArgs, PackArgs, PublishArgs, RunArgs, SyncArgs, TestArgs, ToolCommand, ToolInstallArgs,
     ToolRemoveArgs, ToolRunArgs, ToolUpgradeArgs, WhyArgs,
 };
 use crate::{PythonCommand, PythonInstallArgs, PythonUseArgs};
@@ -82,6 +82,11 @@ pub fn dispatch_command(
             let info = CommandInfo::new(CommandGroup::Publish, "publish");
             let request = publish_request_from_args(args);
             core_call(info, px_core::publish_project(ctx, &request))
+        }
+        CommandGroupCli::Pack(args) => {
+            let info = CommandInfo::new(CommandGroup::Pack, "pack image");
+            let request = pack_request_from_args(args);
+            core_call(info, px_core::pack_image(ctx, &request))
         }
         CommandGroupCli::Migrate(args) => {
             let info = CommandInfo::new(CommandGroup::Migrate, "migrate");
@@ -184,6 +189,7 @@ fn test_request_from_args(args: &TestArgs) -> TestRequest {
     TestRequest {
         args: args.args.clone(),
         frozen: args.frozen,
+        sandbox: args.sandbox,
         at: args.at.clone(),
     }
 }
@@ -202,6 +208,7 @@ fn run_request_from_args(args: &RunArgs) -> RunRequest {
         } else {
             None
         },
+        sandbox: args.sandbox,
         at: args.at.clone(),
     }
 }
@@ -324,6 +331,15 @@ fn publish_request_from_args(args: &PublishArgs) -> PublishRequest {
         registry: args.registry.clone(),
         token_env: args.token_env.clone(),
         dry_run: if args.upload { false } else { args.dry_run },
+    }
+}
+
+fn pack_request_from_args(args: &PackArgs) -> px_core::PackRequest {
+    px_core::PackRequest {
+        tag: args.tag.clone(),
+        out: args.out.clone(),
+        push: args.push,
+        allow_dirty: args.allow_dirty,
     }
 }
 

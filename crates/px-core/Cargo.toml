@@ -24,11 +24,13 @@ flate2 = "=1.1.5"
 tar = "0.4"
 zip.workspace = true
 time.workspace = true
+oci-distribution = "0.10"
 which = "6"
 tempfile.workspace = true
 base64 = "0.22"
 uv-build-backend.workspace = true
 walkdir = "2"
+ignore = "0.4"
 url.workspace = true
 fs4 = "0.6"
 rusqlite = { version = "0.31", features = ["bundled"] }

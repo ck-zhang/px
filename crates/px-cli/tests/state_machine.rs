@@ -4,26 +4,10 @@ use assert_cmd::cargo::cargo_bin_cmd;
 
 mod common;
 
-use common::{parse_json, prepare_fixture, require_online, test_env_guard};
-
-fn find_python() -> Option<String> {
-    let candidates = [
-        std::env::var("PYTHON").ok(),
-        Some("python3".to_string()),
-        Some("python".to_string()),
-    ];
-    for candidate in candidates.into_iter().flatten() {
-        let status = std::process::Command::new(&candidate)
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        if matches!(status, Ok(code) if code.success()) {
-            return Some(candidate);
-        }
-    }
-    None
-}
+use common::{
+    fake_sandbox_backend, find_python, parse_json, prepare_fixture, prepare_traceback_fixture,
+    require_online, test_env_guard,
+};
 
 #[test]
 fn fmt_bypasses_project_lock_env_gating() {
@@ -169,6 +153,37 @@ fn test_repairs_missing_env_in_dev_mode() {
         String::from_utf8_lossy(&output.stdout).trim(),
         "123",
         "env python should execute core import correctly"
+    );
+}
+
+#[test]
+fn sandbox_run_requires_consistent_env() {
+    let _guard = test_env_guard();
+    let Some(python) = find_python() else {
+        eprintln!("skipping sandbox env repair test (python not found)");
+        return;
+    };
+    let (tmp, project) = prepare_traceback_fixture("sandbox-run-env");
+    let store = tmp.path().join("sandbox-store");
+    let (backend, log) = fake_sandbox_backend(tmp.path()).expect("sandbox backend");
+    fs::remove_dir_all(project.join(".px")).ok();
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_SANDBOX_BACKEND", &backend)
+        .env("PX_SANDBOX_STORE", &store)
+        .env("PX_FAKE_SANDBOX_LOG", &log)
+        .env("PX_FAKE_SANDBOX_INSPECT_EXIT", "1")
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["--json", "run", "--sandbox", "python", "-c", "print('hi')"])
+        .assert()
+        .success();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    assert!(
+        project.join(".px").exists(),
+        "sandbox should have bootstrapped environment"
     );
 }
 

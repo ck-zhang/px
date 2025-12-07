@@ -1,8 +1,11 @@
 #![allow(dead_code)]
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::Mutex,
 };
 
@@ -160,6 +163,97 @@ pub fn prepare_traceback_fixture(prefix: &str) -> (TempDir, PathBuf) {
     let dst = temp.path().join("traceback_lab");
     copy_dir_all(&traceback_fixture_source(), &dst).expect("copy traceback fixture");
     (temp, dst)
+}
+
+#[must_use]
+pub fn find_python() -> Option<String> {
+    let candidates = [
+        std::env::var("PYTHON").ok(),
+        Some("python3".to_string()),
+        Some("python".to_string()),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        let status = Command::new(&candidate)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if matches!(status, Ok(code) if code.success()) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+pub fn fake_sandbox_backend(dir: &Path) -> io::Result<(PathBuf, PathBuf)> {
+    let script = dir.join("fake-sandbox-backend.sh");
+    let log = dir.join("sandbox.log");
+    let contents = r#"#!/bin/sh
+log="${PX_FAKE_SANDBOX_LOG:-}"
+cmd="$1"
+shift
+case "$cmd" in
+    image)
+        if [ "$1" = "inspect" ]; then
+            exit ${PX_FAKE_SANDBOX_INSPECT_EXIT:-1}
+        fi
+        ;;
+    load)
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = "--input" ] && [ -n "$log" ]; then
+                shift
+                echo "load:$1" >> "$log"
+            fi
+            shift
+        done
+        echo "loaded"
+        exit 0
+        ;;
+    run)
+        workdir=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --workdir|-w)
+                    shift
+                    workdir="$1"
+                    shift
+                    continue
+                    ;;
+                --volume|-v|--env|-e)
+                    shift
+                    shift
+                    continue
+                    ;;
+                -i|--rm)
+                    shift
+                    continue
+                    ;;
+                *)
+                    tag="$1"
+                    shift
+                    break
+                    ;;
+            esac
+        done
+        if [ -n "$log" ]; then
+            echo "run:${tag}:$*" >> "$log"
+        fi
+        if [ -n "$workdir" ]; then
+            cd "$workdir" 2>/dev/null || true
+        fi
+        exec "$@"
+        ;;
+esac
+exit 0
+"#;
+    fs::write(&script, contents)?;
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(&script)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms)?;
+    }
+    Ok((script, log))
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {

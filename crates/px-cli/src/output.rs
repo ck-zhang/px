@@ -469,6 +469,13 @@ fn format_status_default(style: &Style, payload: &StatusPayload) -> Vec<String> 
         }
     }
 
+    if !payload.warnings.is_empty() {
+        lines.push(String::new());
+        for warning in &payload.warnings {
+            lines.push(kv("warning:", warning, pad));
+        }
+    }
+
     if payload.next_action.kind != px_core::NextActionKind::None {
         lines.push(String::new());
         lines.push(kv("next:", &next_line(payload), pad));
@@ -478,7 +485,7 @@ fn format_status_default(style: &Style, payload: &StatusPayload) -> Vec<String> 
 }
 
 fn label_width(payload: &StatusPayload) -> usize {
-    let mut labels = vec!["runtime:", "env:", "lock:", "next:"];
+    let mut labels = vec!["runtime:", "env:", "lock:", "next:", "warning:"];
     match payload.context.kind {
         px_core::StatusContextKind::Project => {
             labels.extend(["project:", "state:"]);
@@ -860,6 +867,7 @@ fn error_code(info: CommandInfo) -> &'static str {
         CommandGroup::Fmt => diag_commands::FMT,
         CommandGroup::Build => diag_commands::BUILD,
         CommandGroup::Publish => diag_commands::PUBLISH,
+        CommandGroup::Pack => diag_commands::PACK,
         CommandGroup::Migrate => diag_commands::MIGRATE,
         CommandGroup::Why => diag_commands::WHY,
         CommandGroup::Tool => diag_commands::TOOL,

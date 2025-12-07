@@ -10,6 +10,7 @@ pub mod commands {
     pub const FMT: &str = "PX301";
     pub const BUILD: &str = "PX401";
     pub const PUBLISH: &str = "PX402";
+    pub const PACK: &str = "PX901";
     pub const MIGRATE: &str = "PX501";
     pub const WHY: &str = "PX702";
     pub const TOOL: &str = "PX640";
