@@ -149,7 +149,7 @@ Treat commands as transitions between canonical states. When a command fails, it
 #### `px pack image`
 
 * **Start**: `Consistent` (fails fast from other states with a hint to run `px sync`).
-* **Behavior**: computes sandbox definition from env profile + `[tool.px.sandbox]`; reuses or builds sandbox image/OCI output; never re-resolves deps or mutates M/L/E.
+* **Behavior**: computes sandbox definition from env profile + `[tool.px.sandbox]`; copies the working tree (clean by default unless `--allow-dirty`) into the image; reuses or builds sandbox image/OCI output; never re-resolves deps or mutates M/L/E.
 * **End**: project state unchanged (`Consistent`).
 
 #### `px status`

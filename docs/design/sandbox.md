@@ -156,6 +156,10 @@ px ships a curated set of **sandbox bases**:
   * Logical name in config: `debian-12`, `alpine-3.20`, etc.
   * Resolved `base_os_oid` at runtime by px.
 
+* Default base:
+
+  * If `base` is not set, px uses `debian-12` everywhere (including macOS hosts). Other bases (e.g. `alpine-3.20`) are opt-in.
+
 **Non‑goal:** supporting arbitrary user‑constructed bases in v1.
 
 * Advanced configs may allow overriding the base with a custom image reference, but this is an escape‑hatch, not the primary flow.
@@ -222,6 +226,12 @@ Rules:
   * When `true`, px may infer capabilities from lock/ CAS / errors.
   * When `false`, px uses only explicitly declared capabilities.
 
+* Workspace precedence:
+
+  * Standalone project (no workspace): use `[tool.px.sandbox]` in that project’s `pyproject.toml`.
+  * Workspace-governed project: only the workspace root `[tool.px.sandbox]` is read; member-level `[tool.px.sandbox]` is ignored.
+  * `px status` should warn when a member defines `[tool.px.sandbox]` but a workspace root exists: workspace sandbox config is authoritative.
+
 * Explicit `capabilities`:
 
   * `name = true` → capability is enabled regardless of inference.
@@ -240,6 +250,8 @@ capabilities_effective :=
 ### 14.7 Capability inference
 
 Inference is best‑effort and may be disabled (`auto = false`). It must be deterministic for a given px version, base, and profile.
+
+Inference is **pure**: it affects only the sandbox build; px never writes inferred capabilities back to `pyproject.toml` or other project/workspace artifacts.
 
 Inference has three layers, applied in order:
 
@@ -303,6 +315,11 @@ px maps these patterns to capabilities and may:
 * Optionally (controlled by a flag) auto‑add the capability when `auto = true`.
 
 Inference is **advisory**; explicit config always wins.
+
+Frozen/CI (`--frozen` / `CI=1`) behavior:
+
+* Sandbox commands may still build/reuse images from a clean lock/env and inferred capabilities.
+* If a required capability is missing, commands fail with an explicit suggestion; px never edits manifests or auto-adds capabilities in frozen/CI.
 
 ---
 
@@ -382,7 +399,8 @@ Sandbox execution wraps the existing env execution model.
 
          * Copy or mount the px runtime tree.
          * Copy or mount env site‑packages and scripts.
-         * Copy minimal project app code (or bind‑mount at runtime; implementation detail).
+         * **Run/test:** bind‑mount the working tree into the container (e.g. at `/app`) for a tight dev loop; no image rebuild needed for code edits.
+         * **Pack:** copy the working tree into the image (see 14.10).
        * Install OS packages for `capabilities_effective` into the base via an internal mechanism (not exposed to users).
        * Write `manifest.json`.
      * Optionally push to/from a registry (implementation detail of `px pack image`).
@@ -395,6 +413,7 @@ Sandbox execution wraps the existing env execution model.
      * `PWD` is the project root inside container.
      * Env vars are set from profile/env manifest plus minimal host passthrough (HOME, TERM, etc.).
    * Use same target resolution as `px run` inside the container (scripts, `python`, files).
+   * Frozen/CI: if a required capability is missing, fail with a suggestion; no auto-add or manifest edits.
 
 5. **Exit semantics**:
 
@@ -426,19 +445,25 @@ Sandbox execution wraps the existing env execution model.
 
 2. Ensure SI exists for `sbx_id` (as in 14.9’s “Ensure SI”).
 
-3. **Naming:**
+3. **App code:**
+
+   * Copy the working tree into the image (respecting `.gitignore` / standard Python packaging ignores).
+   * Default: require a clean working tree; fail with a clear message if dirty.
+   * Allow an explicit escape hatch (`--allow-dirty`) to pack with uncommitted changes.
+
+4. **Naming:**
 
    * Derive a default image name if none provided (e.g. `px.local/<project_name>:<version-or-git-sha>`).
    * Allow explicit `--tag` to override.
 
-4. **Encoding:**
+5. **Encoding:**
 
    * Produce a valid OCI image:
 
      * `config` and `manifest` referencing the layers derived from SB and env profile.
      * Layers are content‑addressed and deduplicated where possible.
 
-5. **Output modes:**
+6. **Output modes:**
 
    * `--out <path>` – write an OCI tarball or directory layout.
    * `--push` – push to a container registry (implementation detail); failures here are reported as pack errors.

@@ -60,6 +60,7 @@ px must not create other top-level files or directories.
 
 * px may materialize sandbox bases/images under a global sandbox store (e.g., `~/.px/sandbox/`) when `--sandbox` or `px pack image` is used.
 * Sandbox artifacts are derived from env profiles plus `[tool.px.sandbox]`; they never add files to project/workspace roots.
+* Workspace governs sandbox config when present: workspace root `[tool.px.sandbox]` is authoritative; member-level `[tool.px.sandbox]` is ignored (expect a warning from `px status`).
 
 ## Shape after key commands
 

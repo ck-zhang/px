@@ -31,7 +31,7 @@ Rule of thumb: user-facing behavior should be a CLI flag first; env vars stay as
 * `px status` – `--brief`.
 * `px build` – format selector `sdist|wheel|both` (positional), `--out DIR`, `--dry-run`.
 * `px publish` – `--registry NAME`, `--token-env VAR` (defaults to `PX_PUBLISH_TOKEN`), `--dry-run` (default), `--upload` (uploads require `PX_ONLINE=1`).
-* `px pack image` – `--tag NAME`, `--out PATH`, `--push`.
+* `px pack image` – `--tag NAME`, `--out PATH`, `--push`, `--allow-dirty`.
 * `px migrate` – `--python VERSION`, `--apply/--write`, `--yes`, `--no-input`, `--source PATH`, `--dev-source PATH`, `--allow-dirty`, `--lock-only`, `--no-autopin`.
 * `px why` – `--issue ID` (mutually exclusive with package arg).
 * `px tool install` – `--python VERSION`, `--module MODULE`.
