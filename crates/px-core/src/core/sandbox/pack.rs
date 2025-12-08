@@ -987,7 +987,9 @@ pub(crate) fn write_env_layer_tar(
         .and_then(|p| p.to_str())
         .map(|s| s.to_string());
     let mut external_paths = Vec::new();
-    let env_root_canon = env_root.canonicalize().unwrap_or_else(|_| env_root.to_path_buf());
+    let env_root_canon = env_root
+        .canonicalize()
+        .unwrap_or_else(|_| env_root.to_path_buf());
     for entry in WalkDir::new(env_root)
         .max_depth(4)
         .into_iter()
@@ -1135,11 +1137,7 @@ pub(crate) fn write_env_layer_tar(
                 Ok(rel) => rel,
                 Err(_) => continue,
             };
-            let archive_path = Path::new("").join(
-                ext.strip_prefix("/")
-                    .unwrap_or(&ext)
-                    .join(rel),
-            );
+            let archive_path = Path::new("").join(ext.strip_prefix("/").unwrap_or(&ext).join(rel));
             if seen.insert(archive_path.clone()) {
                 append_path(&mut builder, &archive_path, path)?;
             }

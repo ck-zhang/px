@@ -310,7 +310,7 @@ fn build_run_args(opts: &ContainerRunArgs, tag: &str, interactive: bool) -> Vec<
         let host = canonical_or(&mount.host);
         let guest = mount.guest.clone();
         args.push("--volume".to_string());
-        let mode = if mount.read_only { "ro" } else { "rw" };
+        let mode = if mount.read_only { "ro,Z" } else { "rw,Z" };
         args.push(format!("{}:{}:{mode}", host.display(), guest.display()));
     }
 

@@ -256,12 +256,57 @@ impl SandboxCommandRunner {
             &self.host_env_root,
             &self.container_env_root,
         );
+        let original_program = program.to_string();
+        let mut program = map_program_for_container(
+            program,
+            &self.host_project_root,
+            &self.container_project_root,
+            &self.host_env_root,
+            &self.container_env_root,
+        );
+        let mut args: Vec<String> = args.to_vec();
+        let host_program = PathBuf::from(original_program);
+        if host_program.is_absolute() {
+            let program_canon = host_program
+                .canonicalize()
+                .unwrap_or_else(|_| host_program.clone());
+            let is_python_binary = program_canon
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|name| {
+                    let lower = name.to_ascii_lowercase();
+                    lower == "python"
+                        || lower.starts_with("python3")
+                        || lower.starts_with("python2")
+                })
+                .unwrap_or(false);
+            if !is_python_binary {
+                if let Some(env_root) = program_canon
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.canonicalize().ok())
+                    .filter(|root| root.join("pyvenv.cfg").exists())
+                {
+                    if let Ok(rel) = program_canon.strip_prefix(&env_root) {
+                        let script = self.container_env_root.join(rel).display().to_string();
+                        let mut rewritten = vec![script];
+                        rewritten.extend(args);
+                        args = rewritten;
+                        program = self
+                            .container_env_root
+                            .join("bin/python")
+                            .display()
+                            .to_string();
+                    }
+                }
+            }
+        }
         let opts = ContainerRunArgs {
             env,
             mounts: self.mounts.clone(),
             workdir,
-            program: program.to_string(),
-            args: args.to_vec(),
+            program,
+            args,
         };
         let mode = match mode {
             RunMode::WithStdin(_) => RunMode::WithStdin(inherit_stdin),
@@ -377,6 +422,37 @@ fn map_workdir_container(
         );
     }
     canonical_path(cwd)
+}
+
+fn map_program_for_container(
+    program: &str,
+    host_project_root: &Path,
+    container_project_root: &Path,
+    host_env_root: &Path,
+    container_env_root: &Path,
+) -> String {
+    let path = Path::new(program);
+    if !path.is_absolute() {
+        return program.to_string();
+    }
+
+    let program_canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let host_project_canon = host_project_root
+        .canonicalize()
+        .unwrap_or_else(|_| host_project_root.to_path_buf());
+    let host_env_canon = host_env_root
+        .canonicalize()
+        .unwrap_or_else(|_| host_env_root.to_path_buf());
+
+    if let Ok(rel) = program_canon.strip_prefix(&host_project_canon) {
+        return container_project_root.join(rel).display().to_string();
+    }
+    if let Ok(rel) = program_canon.strip_prefix(&host_env_canon) {
+        return container_env_root.join(rel).display().to_string();
+    }
+
+    // Fall back to the original path when no mapping applies.
+    program.to_string()
 }
 
 fn rewrite_env_value(
@@ -3596,7 +3672,7 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -3609,6 +3685,36 @@ mod tests {
             json: false,
         };
         CommandContext::new(&GLOBAL, Arc::new(SystemEffects::new())).expect("ctx")
+    }
+
+    #[test]
+    fn maps_program_path_into_container_roots() {
+        let mapped_env = map_program_for_container(
+            "/home/user/.px/envs/demo/bin/pythonproject",
+            Path::new("/home/user/project"),
+            Path::new("/app"),
+            Path::new("/home/user/.px/envs/demo"),
+            Path::new("/px/env"),
+        );
+        assert_eq!(mapped_env, "/px/env/bin/pythonproject");
+
+        let mapped_project = map_program_for_container(
+            "/home/user/project/scripts/run.py",
+            Path::new("/home/user/project"),
+            Path::new("/app"),
+            Path::new("/home/user/.px/envs/demo"),
+            Path::new("/px/env"),
+        );
+        assert_eq!(mapped_project, "/app/scripts/run.py");
+
+        let passthrough = map_program_for_container(
+            "pythonproject",
+            Path::new("/home/user/project"),
+            Path::new("/app"),
+            Path::new("/home/user/.px/envs/demo"),
+            Path::new("/px/env"),
+        );
+        assert_eq!(passthrough, "pythonproject");
     }
 
     #[test]

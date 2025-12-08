@@ -241,6 +241,27 @@ case "$cmd" in
         if [ -n "$workdir" ]; then
             cd "$workdir" 2>/dev/null || true
         fi
+        if [ "$#" -gt 0 ]; then
+            if [ -n "$PX_FAKE_SANDBOX_ENV_ROOT" ]; then
+                case "$1" in
+                    /px/env/*)
+                        candidate="$PX_FAKE_SANDBOX_ENV_ROOT/${1#/px/env/}"
+                        if [ -x "$candidate" ]; then
+                            shift
+                            set -- "$candidate" "$@"
+                        fi
+                        ;;
+                esac
+            fi
+            case "$1" in
+                /px/env/bin/python|/px/env/bin/python3|/px/env/bin/python3.*)
+                    if [ -n "$PX_RUNTIME_PYTHON" ]; then
+                        shift
+                        set -- "$PX_RUNTIME_PYTHON" "$@"
+                    fi
+                    ;;
+            esac
+        fi
         exec "$@"
         ;;
 esac
