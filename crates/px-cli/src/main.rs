@@ -100,30 +100,52 @@ fn normalize_run_args(args: Vec<OsString>) -> Vec<OsString> {
         return args;
     }
 
+    enum PendingValue {
+        Target,
+        Other,
+    }
     let mut insert_pos = None;
+    let mut expect_value_for: Option<PendingValue> = None;
+    let mut saw_target = false;
     let mut idx = run_pos + 1;
     while idx < args.len() {
         let arg = &args[idx];
         if arg == "--" {
             return args;
         }
-        if arg == "--target" {
-            let value_idx = idx + 1;
-            if value_idx < args.len() {
-                insert_pos = Some(value_idx + 1);
+        if let Some(flag) = expect_value_for.take() {
+            if matches!(flag, PendingValue::Target) {
+                saw_target = true;
             }
-            break;
-        }
-        if arg == "--at" {
-            idx += 2;
+            idx += 1;
             continue;
         }
-        let is_positional = {
-            let text = arg.to_string_lossy();
-            text == "-" || !text.starts_with('-')
-        };
-        if is_positional {
-            insert_pos = Some(idx + 1);
+        let text = arg.to_string_lossy();
+        match text.as_ref() {
+            "--target" => {
+                expect_value_for = Some(PendingValue::Target);
+                idx += 1;
+                continue;
+            }
+            "--at" => {
+                expect_value_for = Some(PendingValue::Other);
+                idx += 1;
+                continue;
+            }
+            "--interactive" | "--non-interactive" | "--frozen" | "--sandbox" => {
+                idx += 1;
+                continue;
+            }
+            _ => {}
+        }
+        let is_positional = text == "-" || !text.starts_with('-');
+        if is_positional && !saw_target {
+            saw_target = true;
+            idx += 1;
+            continue;
+        }
+        if saw_target {
+            insert_pos = Some(idx);
             break;
         }
         idx += 1;
@@ -244,6 +266,28 @@ mod tests {
                 }
                 forwarded.extend(run.args.clone());
                 assert_eq!(forwarded, vec!["--verbosity".to_string(), "2".to_string()]);
+            }
+            other => panic!("expected run command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_preserves_at_after_positional_target() {
+        let cli = PxCli::try_parse_from(normalize_run_args(vec![
+            OsString::from("px"),
+            OsString::from("run"),
+            OsString::from("script.py"),
+            OsString::from("--at"),
+            OsString::from("HEAD"),
+            OsString::from("--flag"),
+        ]))
+        .expect("parse run args");
+
+        match cli.command {
+            CommandGroupCli::Run(run) => {
+                assert_eq!(run.target_value.as_deref(), Some("script.py"));
+                assert_eq!(run.at.as_deref(), Some("HEAD"));
+                assert_eq!(run.args, vec!["--flag".to_string()]);
             }
             other => panic!("expected run command, got {other:?}"),
         }

@@ -30,7 +30,7 @@ use crate::{
     is_missing_project_error, manifest_snapshot, missing_project_outcome, CommandContext,
     ExecutionOutcome, InstallUserError, PX_VERSION,
 };
-use px_domain::{load_lockfile_optional, sandbox_config_from_manifest, ProjectStateKind};
+use px_domain::{load_lockfile_optional, sandbox_config_from_manifest};
 
 #[derive(Clone, Debug)]
 pub struct PackRequest {
@@ -79,7 +79,7 @@ fn pack_project(
             ))
         }
     };
-    if state_report.canonical != ProjectStateKind::Consistent {
+    if !state_report.is_consistent() {
         return Ok(ExecutionOutcome::user_error(
             "px pack image requires a clean environment",
             json!({
