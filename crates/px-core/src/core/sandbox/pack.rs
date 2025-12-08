@@ -10,20 +10,22 @@ use oci_distribution::client::{Client, ClientConfig, Config as OciConfig, ImageL
 use oci_distribution::manifest::OciImageManifest;
 use oci_distribution::secrets::RegistryAuth;
 use oci_distribution::Reference;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tar::Builder;
-use time::OffsetDateTime;
+use tar::{Archive, Builder, Header};
 use tokio::runtime::Runtime;
 use toml_edit::DocumentMut;
 use walkdir::WalkDir;
 
+use super::app_bundle::{write_pxapp_bundle, PxAppMetadata};
 use super::{
     default_store_root, discover_site_packages, ensure_sandbox_image, env_root_from_site_packages,
-    sandbox_error, sandbox_image_tag, SandboxArtifacts, SandboxImageManifest, SandboxStore,
+    sandbox_error, sandbox_image_tag, sandbox_timestamp_string, SandboxArtifacts,
+    SandboxImageManifest, SandboxStore,
 };
-use crate::core::runtime::{load_project_state, ManifestSnapshot};
 use crate::core::runtime::build_pythonpath;
+use crate::core::runtime::{load_project_state, ManifestSnapshot};
 use crate::project::evaluate_project_state;
 use crate::workspace::prepare_workspace_run_context;
 use crate::{
@@ -32,15 +34,45 @@ use crate::{
 };
 use px_domain::{load_lockfile_optional, sandbox_config_from_manifest};
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum PackTarget {
+    Image,
+    App,
+}
+
 #[derive(Clone, Debug)]
 pub struct PackRequest {
+    pub target: PackTarget,
     pub tag: Option<String>,
     pub out: Option<PathBuf>,
     pub push: bool,
     pub allow_dirty: bool,
+    pub entrypoint: Option<Vec<String>>,
+    pub workdir: Option<PathBuf>,
 }
 
 pub fn pack_image(ctx: &CommandContext, request: &PackRequest) -> Result<ExecutionOutcome> {
+    let mut request = request.clone();
+    request.target = PackTarget::Image;
+    pack(ctx, &request)
+}
+
+pub fn pack_app(ctx: &CommandContext, request: &PackRequest) -> Result<ExecutionOutcome> {
+    let mut request = request.clone();
+    request.target = PackTarget::App;
+    pack(ctx, &request)
+}
+
+fn pack(ctx: &CommandContext, request: &PackRequest) -> Result<ExecutionOutcome> {
+    if matches!(request.target, PackTarget::App) && request.push {
+        return Ok(ExecutionOutcome::user_error(
+            "px pack app does not support --push",
+            json!({
+                "code": "PX903",
+                "reason": "push_not_supported",
+            }),
+        ));
+    }
     if let Some(ws_ctx) = match prepare_workspace_run_context(ctx, true, "pack", false) {
         Ok(value) => value,
         Err(outcome) => return Ok(outcome),
@@ -70,6 +102,10 @@ fn pack_project(
     request: &PackRequest,
     snapshot: &ManifestSnapshot,
 ) -> Result<ExecutionOutcome> {
+    let pack_label = match request.target {
+        PackTarget::Image => "px pack image",
+        PackTarget::App => "px pack app",
+    };
     let state_report = match evaluate_project_state(ctx, snapshot) {
         Ok(report) => report,
         Err(err) => {
@@ -81,7 +117,7 @@ fn pack_project(
     };
     if !state_report.is_consistent() {
         return Ok(ExecutionOutcome::user_error(
-            "px pack image requires a clean environment",
+            format!("{pack_label} requires a clean environment"),
             json!({
                 "code": "PX201",
                 "reason": "env_outdated",
@@ -144,15 +180,11 @@ fn pack_project(
     } else {
         Some(PathBuf::from(&env.site_packages))
     };
-    let env_root = env
-        .env_path
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| {
-            site_packages
-                .as_ref()
-                .and_then(|site| env_root_from_site_packages(site))
-        });
+    let env_root = env.env_path.as_ref().map(PathBuf::from).or_else(|| {
+        site_packages
+            .as_ref()
+            .and_then(|site| env_root_from_site_packages(site))
+    });
     let env_root = match env_root {
         Some(path) => path,
         None => {
@@ -231,13 +263,17 @@ fn pack_project(
     ) {
         return Ok(ExecutionOutcome::user_error(err.message, err.details));
     }
-    let tag = request.tag.clone().or_else(|| {
-        Some(default_tag(
-            &snapshot.name,
-            &snapshot.manifest_path,
-            &profile_oid,
-        ))
-    });
+    let tag = if matches!(request.target, PackTarget::Image) {
+        request.tag.clone().or_else(|| {
+            Some(default_tag(
+                &snapshot.name,
+                &snapshot.manifest_path,
+                &profile_oid,
+            ))
+        })
+    } else {
+        None
+    };
     let pack_root = store.pack_dir(&artifacts.definition.sbx_id());
     let pack_blobs = pack_root.join("blobs").join("sha256");
     let base_blobs = store
@@ -266,62 +302,117 @@ fn pack_project(
         Path::new("/app"),
         Some(&pythonpath),
     )?;
-    if let Some(out) = &request.out {
-        export_output(&pack_root, out, &snapshot.root)?;
-    }
-    let mut details = json!({
-        "sbx_id": artifacts.definition.sbx_id(),
-        "base": artifacts.base.name,
-        "capabilities": artifacts.definition.capabilities,
-        "profile_oid": artifacts.definition.profile_oid,
-        "image_digest": format!("sha256:{}", built.manifest_digest),
-        "store": pack_root.display().to_string(),
-        "allow_dirty": request.allow_dirty,
-        "pushed": false,
-    });
-    if let Some(tag) = &tag {
-        details["tag"] = json!(tag);
-    }
-    if let Some(out) = &request.out {
-        details["out"] = json!(out.display().to_string());
-    }
-    if request.push {
-        if let Some(tag_ref) = tag.as_deref() {
-            match push_oci_image(tag_ref, &built) {
-                Ok(_) => {
-                    details["pushed"] = json!(true);
-                }
-                Err(err) => {
-                    return Ok(ExecutionOutcome::failure(
-                        "failed to push sandbox image",
-                        err.details,
-                    ))
+    match request.target {
+        PackTarget::Image => {
+            if let Some(out) = &request.out {
+                export_output(&pack_root, out, &snapshot.root)?;
+            }
+            let mut details = json!({
+                "sbx_id": artifacts.definition.sbx_id(),
+                "base": artifacts.base.name,
+                "capabilities": artifacts.definition.capabilities,
+                "profile_oid": artifacts.definition.profile_oid,
+                "image_digest": format!("sha256:{}", built.manifest_digest),
+                "store": pack_root.display().to_string(),
+                "allow_dirty": request.allow_dirty,
+                "pushed": false,
+            });
+            if let Some(tag) = &tag {
+                details["tag"] = json!(tag);
+            }
+            if let Some(out) = &request.out {
+                details["out"] = json!(out.display().to_string());
+            }
+            if request.push {
+                if let Some(tag_ref) = tag.as_deref() {
+                    match push_oci_image(tag_ref, &built) {
+                        Ok(_) => {
+                            details["pushed"] = json!(true);
+                        }
+                        Err(err) => {
+                            return Ok(ExecutionOutcome::failure(
+                                "failed to push sandbox image",
+                                err.details,
+                            ))
+                        }
+                    }
+                } else {
+                    return Ok(ExecutionOutcome::user_error(
+                        "image tag is required to push",
+                        json!({ "code": "PX903", "reason": "missing_tag" }),
+                    ));
                 }
             }
-        } else {
-            return Ok(ExecutionOutcome::user_error(
-                "image tag is required to push",
-                json!({ "code": "PX903", "reason": "missing_tag" }),
-            ));
+            let message = format!(
+                "px pack image: sbx_id={} (base={}, capabilities={})",
+                artifacts.definition.sbx_id(),
+                artifacts.base.name,
+                format_capabilities(&artifacts),
+            );
+            Ok(ExecutionOutcome::success(message, details))
+        }
+        PackTarget::App => {
+            let entrypoint = match resolve_entrypoint(request, &snapshot.root, &snapshot.name) {
+                Ok(ep) => ep,
+                Err(err) => return Ok(ExecutionOutcome::user_error(err.message, err.details)),
+            };
+            let workdir = request
+                .workdir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("/app"));
+            let out_path = request.out.clone().unwrap_or_else(|| {
+                default_pxapp_path(
+                    &snapshot.root,
+                    &snapshot.name,
+                    &snapshot.manifest_path,
+                    &profile_oid,
+                )
+            });
+            let metadata = PxAppMetadata {
+                format_version: super::PXAPP_VERSION,
+                sbx_version: artifacts.definition.sbx_version,
+                sbx_id: artifacts.definition.sbx_id(),
+                base_os_oid: artifacts.base.base_os_oid.clone(),
+                profile_oid: artifacts.definition.profile_oid.clone(),
+                capabilities: artifacts.definition.capabilities.clone(),
+                entrypoint: entrypoint.clone(),
+                workdir: workdir.display().to_string(),
+                manifest_digest: String::new(),
+                config_digest: String::new(),
+                layer_digests: vec![],
+                created_at: sandbox_timestamp_string(),
+                px_version: PX_VERSION.to_string(),
+            };
+            write_pxapp_bundle(
+                &out_path,
+                metadata,
+                &built.manifest_bytes,
+                &built.config_bytes,
+                &built.layers,
+            )?;
+            let mut details = json!({
+                "sbx_id": artifacts.definition.sbx_id(),
+                "base": artifacts.base.name,
+                "capabilities": artifacts.definition.capabilities,
+                "profile_oid": artifacts.definition.profile_oid,
+                "bundle": out_path.display().to_string(),
+                "allow_dirty": request.allow_dirty,
+                "entrypoint": entrypoint,
+                "workdir": workdir.display().to_string(),
+                "store": pack_root.display().to_string(),
+            });
+            if let Some(tag) = &tag {
+                details["tag"] = json!(tag);
+            }
+            let message = format!(
+                "px pack app: sbx_id={} (base={}, capabilities={})",
+                artifacts.definition.sbx_id(),
+                artifacts.base.name,
+                format_capabilities(&artifacts),
+            );
+            Ok(ExecutionOutcome::success(message, details))
         }
     }
-    let message = format!(
-        "px pack image: sbx_id={} (base={}, capabilities={})",
-        artifacts.definition.sbx_id(),
-        artifacts.base.name,
-        if artifacts.definition.capabilities.is_empty() {
-            "none".into()
-        } else {
-            artifacts
-                .definition
-                .capabilities
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(",")
-        }
-    );
-    Ok(ExecutionOutcome::success(message, details))
 }
 
 fn pack_workspace_member(
@@ -419,13 +510,17 @@ fn pack_workspace_member(
     ) {
         return Ok(ExecutionOutcome::user_error(err.message, err.details));
     }
-    let tag = request.tag.clone().or_else(|| {
-        Some(default_tag(
-            &ws_ctx.py_ctx.project_name,
-            &ws_ctx.manifest_path,
-            &profile_oid,
-        ))
-    });
+    let tag = if matches!(request.target, PackTarget::Image) {
+        request.tag.clone().or_else(|| {
+            Some(default_tag(
+                &ws_ctx.py_ctx.project_name,
+                &ws_ctx.manifest_path,
+                &profile_oid,
+            ))
+        })
+    } else {
+        None
+    };
     let pack_root = store.pack_dir(&artifacts.definition.sbx_id());
     let pack_blobs = pack_root.join("blobs").join("sha256");
     let base_blobs = store
@@ -457,63 +552,123 @@ fn pack_workspace_member(
         Path::new("/app"),
         Some(&pythonpath),
     )?;
-    if let Some(out) = &request.out {
-        export_output(&pack_root, out, &ws_ctx.py_ctx.project_root)?;
-    }
-    let mut details = json!({
-        "sbx_id": artifacts.definition.sbx_id(),
-        "base": artifacts.base.name,
-        "capabilities": artifacts.definition.capabilities,
-        "profile_oid": artifacts.definition.profile_oid,
-        "image_digest": format!("sha256:{}", built.manifest_digest),
-        "store": pack_root.display().to_string(),
-        "allow_dirty": request.allow_dirty,
-        "pushed": false,
-        "workspace_root": ws_ctx.workspace_root.display().to_string(),
-    });
-    if let Some(tag) = &tag {
-        details["tag"] = json!(tag);
-    }
-    if let Some(out) = &request.out {
-        details["out"] = json!(out.display().to_string());
-    }
-    if request.push {
-        if let Some(tag_ref) = tag.as_deref() {
-            match push_oci_image(tag_ref, &built) {
-                Ok(_) => {
-                    details["pushed"] = json!(true);
-                }
-                Err(err) => {
-                    return Ok(ExecutionOutcome::failure(
-                        "failed to push sandbox image",
-                        err.details,
-                    ))
+    match request.target {
+        PackTarget::Image => {
+            if let Some(out) = &request.out {
+                export_output(&pack_root, out, &ws_ctx.py_ctx.project_root)?;
+            }
+            let mut details = json!({
+                "sbx_id": artifacts.definition.sbx_id(),
+                "base": artifacts.base.name,
+                "capabilities": artifacts.definition.capabilities,
+                "profile_oid": artifacts.definition.profile_oid,
+                "image_digest": format!("sha256:{}", built.manifest_digest),
+                "store": pack_root.display().to_string(),
+                "allow_dirty": request.allow_dirty,
+                "pushed": false,
+                "workspace_root": ws_ctx.workspace_root.display().to_string(),
+            });
+            if let Some(tag) = &tag {
+                details["tag"] = json!(tag);
+            }
+            if let Some(out) = &request.out {
+                details["out"] = json!(out.display().to_string());
+            }
+            if request.push {
+                if let Some(tag_ref) = tag.as_deref() {
+                    match push_oci_image(tag_ref, &built) {
+                        Ok(_) => {
+                            details["pushed"] = json!(true);
+                        }
+                        Err(err) => {
+                            return Ok(ExecutionOutcome::failure(
+                                "failed to push sandbox image",
+                                err.details,
+                            ))
+                        }
+                    }
+                } else {
+                    return Ok(ExecutionOutcome::user_error(
+                        "image tag is required to push",
+                        json!({ "code": "PX903", "reason": "missing_tag" }),
+                    ));
                 }
             }
-        } else {
-            return Ok(ExecutionOutcome::user_error(
-                "image tag is required to push",
-                json!({ "code": "PX903", "reason": "missing_tag" }),
-            ));
+            let message = format!(
+                "px pack image: sbx_id={} (base={}, capabilities={})",
+                artifacts.definition.sbx_id(),
+                artifacts.base.name,
+                format_capabilities(&artifacts),
+            );
+            Ok(ExecutionOutcome::success(message, details))
+        }
+        PackTarget::App => {
+            let entrypoint = match resolve_entrypoint(
+                request,
+                &ws_ctx.py_ctx.project_root,
+                &ws_ctx.py_ctx.project_name,
+            ) {
+                Ok(ep) => ep,
+                Err(err) => return Ok(ExecutionOutcome::user_error(err.message, err.details)),
+            };
+            let workdir = request
+                .workdir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("/app"));
+            let out_path = request.out.clone().unwrap_or_else(|| {
+                default_pxapp_path(
+                    &ws_ctx.py_ctx.project_root,
+                    &ws_ctx.py_ctx.project_name,
+                    &ws_ctx.manifest_path,
+                    &profile_oid,
+                )
+            });
+            let metadata = PxAppMetadata {
+                format_version: super::PXAPP_VERSION,
+                sbx_version: artifacts.definition.sbx_version,
+                sbx_id: artifacts.definition.sbx_id(),
+                base_os_oid: artifacts.base.base_os_oid.clone(),
+                profile_oid: artifacts.definition.profile_oid.clone(),
+                capabilities: artifacts.definition.capabilities.clone(),
+                entrypoint: entrypoint.clone(),
+                workdir: workdir.display().to_string(),
+                manifest_digest: String::new(),
+                config_digest: String::new(),
+                layer_digests: vec![],
+                created_at: sandbox_timestamp_string(),
+                px_version: PX_VERSION.to_string(),
+            };
+            write_pxapp_bundle(
+                &out_path,
+                metadata,
+                &built.manifest_bytes,
+                &built.config_bytes,
+                &built.layers,
+            )?;
+            let mut details = json!({
+                "sbx_id": artifacts.definition.sbx_id(),
+                "base": artifacts.base.name,
+                "capabilities": artifacts.definition.capabilities,
+                "profile_oid": artifacts.definition.profile_oid,
+                "bundle": out_path.display().to_string(),
+                "allow_dirty": request.allow_dirty,
+                "entrypoint": entrypoint,
+                "workdir": workdir.display().to_string(),
+                "store": pack_root.display().to_string(),
+                "workspace_root": ws_ctx.workspace_root.display().to_string(),
+            });
+            if let Some(tag) = &tag {
+                details["tag"] = json!(tag);
+            }
+            let message = format!(
+                "px pack app: sbx_id={} (base={}, capabilities={})",
+                artifacts.definition.sbx_id(),
+                artifacts.base.name,
+                format_capabilities(&artifacts),
+            );
+            Ok(ExecutionOutcome::success(message, details))
         }
     }
-    let message = format!(
-        "px pack image: sbx_id={} (base={}, capabilities={})",
-        artifacts.definition.sbx_id(),
-        artifacts.base.name,
-        if artifacts.definition.capabilities.is_empty() {
-            "none".into()
-        } else {
-            artifacts
-                .definition
-                .capabilities
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(",")
-        }
-    );
-    Ok(ExecutionOutcome::success(message, details))
 }
 
 fn default_tag(project_name: &str, manifest_path: &Path, profile_oid: &str) -> String {
@@ -560,7 +715,85 @@ fn profile_fallback(profile_oid: &str) -> String {
     cleaned.chars().take(32).collect()
 }
 
-#[derive(Clone)]
+fn default_pxapp_path(
+    project_root: &Path,
+    project_name: &str,
+    manifest_path: &Path,
+    profile_oid: &str,
+) -> PathBuf {
+    let name = sanitize_component(project_name);
+    let version = project_version(manifest_path).unwrap_or_else(|| profile_fallback(profile_oid));
+    project_root
+        .join("dist")
+        .join(format!("{name}-{version}.pxapp"))
+}
+
+fn default_entrypoint(project_root: &Path, project_name: &str) -> Vec<String> {
+    let module = sanitize_component(project_name).replace('-', "_");
+    let mut entry = Vec::new();
+    entry.push("python".to_string());
+    if !module.is_empty() {
+        let candidates = [
+            project_root.join(&module),
+            project_root.join("src").join(&module),
+        ];
+        for package_dir in candidates {
+            if package_dir.join("__main__.py").exists() {
+                entry.push("-m".to_string());
+                entry.push(module.clone());
+                return entry;
+            }
+            if package_dir.join("cli.py").exists() {
+                entry.push("-m".to_string());
+                entry.push(format!("{module}.cli"));
+                return entry;
+            }
+        }
+        entry.push("-m".to_string());
+        entry.push(module);
+        return entry;
+    }
+    entry
+}
+
+fn resolve_entrypoint(
+    request: &PackRequest,
+    project_root: &Path,
+    project_name: &str,
+) -> Result<Vec<String>, InstallUserError> {
+    let raw = match &request.entrypoint {
+        Some(custom) => custom.clone(),
+        None => default_entrypoint(project_root, project_name),
+    };
+    let entry: Vec<String> = raw
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .collect();
+    if entry.is_empty() {
+        return Err(sandbox_error(
+            "PX903",
+            "px pack app requires an entrypoint command",
+            json!({ "reason": "missing_entrypoint" }),
+        ));
+    }
+    Ok(entry)
+}
+
+fn format_capabilities(artifacts: &SandboxArtifacts) -> String {
+    if artifacts.definition.capabilities.is_empty() {
+        "none".into()
+    } else {
+        artifacts
+            .definition
+            .capabilities
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct LayerTar {
     pub(crate) digest: String,
     pub(crate) size: u64,
@@ -618,13 +851,16 @@ pub(crate) fn build_oci_image(
         .map(|layer| format!("sha256:{}", layer.digest))
         .collect();
     let mut env_vars = Vec::new();
-    env_vars.push("PATH=/px/env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/bin".into());
+    env_vars.push(
+        "PATH=/px/env/bin:/px/runtime/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/bin"
+            .into(),
+    );
     if let Some(py_path) = pythonpath {
         env_vars.push(format!("PYTHONPATH={py_path}"));
     }
     env_vars.push(format!("PX_SANDBOX_ID={}", artifacts.definition.sbx_id()));
     let config = json!({
-        "created": OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+        "created": sandbox_timestamp_string(),
         "architecture": "amd64",
         "os": "linux",
         "rootfs": {
@@ -741,9 +977,57 @@ pub(crate) fn build_oci_image(
 
 pub(crate) fn write_env_layer_tar(
     env_root: &Path,
+    runtime_root: Option<&Path>,
     blobs: &Path,
 ) -> Result<LayerTar, InstallUserError> {
     let mut builder = Builder::new(Vec::new());
+    let runtime_root = runtime_root.and_then(|path| path.canonicalize().ok());
+    let runtime_root_str = runtime_root
+        .as_ref()
+        .and_then(|p| p.to_str())
+        .map(|s| s.to_string());
+    let mut external_paths = Vec::new();
+    let env_root_canon = env_root.canonicalize().unwrap_or_else(|_| env_root.to_path_buf());
+    for entry in WalkDir::new(env_root)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("pth") {
+            continue;
+        }
+        let Ok(contents) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || !trimmed.starts_with('/') {
+                continue;
+            }
+            let path = PathBuf::from(trimmed);
+            if path.starts_with(&env_root_canon) || !path.exists() {
+                continue;
+            }
+            external_paths.push(path);
+        }
+    }
+    external_paths.sort();
+    external_paths.dedup();
+    let mut extra_paths = Vec::new();
+    if let Some(runtime_root) = runtime_root.as_ref() {
+        extra_paths.extend(shared_libs(&runtime_root.join("bin").join("python")));
+        extra_paths.extend(shared_libs(Path::new("/bin/bash")));
+        extra_paths.extend(shared_libs(Path::new("/usr/bin/env")));
+        extra_paths.extend(shared_libs(Path::new("/usr/bin/coreutils")));
+        extra_paths.push(PathBuf::from("/usr/bin/env"));
+        extra_paths.push(PathBuf::from("/bin/bash"));
+        extra_paths.push(PathBuf::from("/usr/bin/coreutils"));
+        extra_paths.sort();
+        extra_paths.dedup();
+    }
     let mut seen = HashSet::new();
     let walker = WalkDir::new(env_root).sort_by(|a, b| a.path().cmp(b.path()));
     for entry in walker {
@@ -764,28 +1048,129 @@ pub(crate) fn write_env_layer_tar(
         };
         let archive_path = Path::new("px").join("env").join(rel);
         if seen.insert(archive_path.clone()) {
-            append_path(&mut builder, &archive_path, path)?;
+            let is_python_shim = runtime_root.is_some()
+                && (entry.file_type().is_file() || entry.file_type().is_symlink())
+                && archive_path.starts_with(Path::new("px").join("env").join("bin"))
+                && path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|name| name.starts_with("python"))
+                    .unwrap_or(false);
+            if is_python_shim {
+                append_rewritten_python(
+                    &mut builder,
+                    &archive_path,
+                    path,
+                    env_root,
+                    runtime_root_str.as_deref(),
+                )?;
+            } else if entry.file_type().is_file()
+                && path.file_name().and_then(|n| n.to_str()) == Some("pyvenv.cfg")
+            {
+                append_rewritten_pyvenv(&mut builder, &archive_path, path)?;
+            } else {
+                append_path(&mut builder, &archive_path, path)?;
+            }
         }
     }
-    for lib in python_shared_libs(env_root) {
-        let archive_path = lib
-            .strip_prefix(Path::new("/"))
-            .unwrap_or(&lib)
+    if let Some(runtime_root) = runtime_root {
+        let walker = WalkDir::new(&runtime_root)
+            .sort_by(|a, b| a.path().cmp(b.path()))
+            .into_iter()
+            .filter_map(Result::ok);
+        for entry in walker {
+            let path = entry.path();
+            if path == runtime_root {
+                continue;
+            }
+            let rel = match path.strip_prefix(&runtime_root) {
+                Ok(rel) => rel,
+                Err(_) => continue,
+            };
+            let is_python_related = rel.components().any(|comp| {
+                comp.as_os_str()
+                    .to_str()
+                    .map(|name| name.starts_with("python") || name.starts_with("libpython"))
+                    .unwrap_or(false)
+            });
+            if !is_python_related {
+                continue;
+            }
+            let archive_path = Path::new("px").join("runtime").join(rel);
+            if seen.insert(archive_path.clone()) {
+                append_path(&mut builder, &archive_path, path)?;
+            }
+        }
+    }
+    for host_path in extra_paths {
+        if !host_path.exists() {
+            continue;
+        }
+        let rel = host_path
+            .strip_prefix("/")
+            .unwrap_or(&host_path)
             .to_path_buf();
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        if rel.components().count() == 0 {
+            continue;
+        }
+        let archive_path = Path::new("").join(rel);
         if seen.insert(archive_path.clone()) {
-            append_path(&mut builder, &archive_path, &lib)?;
+            append_path(&mut builder, &archive_path, &host_path)?;
+        }
+    }
+    for ext in external_paths {
+        let walker = WalkDir::new(&ext)
+            .sort_by(|a, b| a.path().cmp(b.path()))
+            .into_iter()
+            .filter_map(Result::ok);
+        for entry in walker {
+            let path = entry.path();
+            if path == ext {
+                continue;
+            }
+            let rel = match path.strip_prefix(&ext) {
+                Ok(rel) => rel,
+                Err(_) => continue,
+            };
+            let archive_path = Path::new("").join(
+                ext.strip_prefix("/")
+                    .unwrap_or(&ext)
+                    .join(rel),
+            );
+            if seen.insert(archive_path.clone()) {
+                append_path(&mut builder, &archive_path, path)?;
+            }
         }
     }
     finalize_layer(builder, blobs)
 }
 
-fn python_shared_libs(env_root: &Path) -> Vec<PathBuf> {
+pub(crate) fn runtime_home_from_env(env_root: &Path) -> Option<PathBuf> {
+    let cfg = env_root.join("pyvenv.cfg");
+    let contents = fs::read_to_string(&cfg).ok()?;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("home") {
+            if let Some((_, value)) = rest.split_once('=') {
+                let path = value.trim();
+                if !path.is_empty() {
+                    return Some(PathBuf::from(path));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn shared_libs(binary: &Path) -> Vec<PathBuf> {
     let mut libs = Vec::new();
-    let python = env_root.join("bin").join("python");
-    if !python.exists() {
+    if !binary.exists() {
         return libs;
     }
-    let Ok(output) = Command::new("ldd").arg(&python).output() else {
+    let Ok(output) = Command::new("ldd").arg(binary).output() else {
         return libs;
     };
     if !output.status.success() {
@@ -808,6 +1193,44 @@ fn python_shared_libs(env_root: &Path) -> Vec<PathBuf> {
         }
     }
     libs
+}
+
+fn layer_contains_runtime(blobs: &Path, digest: &str) -> Result<bool, InstallUserError> {
+    let path = blobs.join(digest);
+    let file = File::open(&path).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to read sandbox layer",
+            json!({ "path": path.display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    let mut archive = Archive::new(file);
+    for entry in archive.entries().map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to inspect sandbox layer",
+            json!({ "path": path.display().to_string(), "error": err.to_string() }),
+        )
+    })? {
+        let entry = entry.map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to read sandbox layer entry",
+                json!({ "path": path.display().to_string(), "error": err.to_string() }),
+            )
+        })?;
+        let entry_path = entry.path().map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to resolve sandbox layer entry path",
+                json!({ "path": path.display().to_string(), "error": err.to_string() }),
+            )
+        })?;
+        if entry_path.starts_with("px/runtime/") || entry_path == Path::new("px/runtime") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn write_app_layer_tar(source_root: &Path, blobs: &Path) -> Result<LayerTar, InstallUserError> {
@@ -842,7 +1265,11 @@ fn write_app_layer_tar(source_root: &Path, blobs: &Path) -> Result<LayerTar, Ins
     finalize_layer(builder, blobs)
 }
 
-fn append_path(builder: &mut Builder<Vec<u8>>, archive_path: &Path, path: &Path) -> Result<(), InstallUserError> {
+fn append_path(
+    builder: &mut Builder<Vec<u8>>,
+    archive_path: &Path,
+    path: &Path,
+) -> Result<(), InstallUserError> {
     let metadata = fs::symlink_metadata(path).map_err(|err| {
         sandbox_error(
             "PX903",
@@ -876,21 +1303,121 @@ fn append_path(builder: &mut Builder<Vec<u8>>, archive_path: &Path, path: &Path)
                 json!({ "path": path.display().to_string(), "error": err.to_string() }),
             )
         })?;
-        builder.append_file(archive_path, &mut file).map_err(|err| {
-            sandbox_error(
-                "PX903",
-                "failed to add file to sandbox layer",
-                json!({ "path": path.display().to_string(), "error": err.to_string() }),
-            )
-        })?;
+        builder
+            .append_file(archive_path, &mut file)
+            .map_err(|err| {
+                sandbox_error(
+                    "PX903",
+                    "failed to add file to sandbox layer",
+                    json!({ "path": path.display().to_string(), "error": err.to_string() }),
+                )
+            })?;
     }
     Ok(())
 }
 
-fn finalize_layer(
-    builder: Builder<Vec<u8>>,
-    blobs: &Path,
-) -> Result<LayerTar, InstallUserError> {
+fn append_rewritten_python(
+    builder: &mut Builder<Vec<u8>>,
+    archive_path: &Path,
+    path: &Path,
+    env_root: &Path,
+    runtime_root: Option<&str>,
+) -> Result<(), InstallUserError> {
+    let runtime_root = runtime_root.unwrap_or("/px/runtime");
+    let env_root = env_root
+        .canonicalize()
+        .unwrap_or_else(|_| env_root.to_path_buf());
+    let env_root_str = env_root.to_string_lossy().to_string();
+    let target_name = archive_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("python");
+    let target = format!("/px/runtime/bin/{target_name}");
+    if path.is_symlink() {
+        let shim = "#!/bin/bash\nexec \"/px/env/bin/python\" \"$@\"\n";
+        return append_bytes_deterministic(builder, archive_path, shim.as_bytes(), Some(0o755));
+    }
+    let contents = fs::read_to_string(path).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to read python shim for sandbox layer",
+            json!({ "path": path.display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    let mut rewritten_lines = Vec::new();
+    rewritten_lines.push("#!/bin/bash".to_string());
+    for line in contents.lines() {
+        if line.trim_start().starts_with("#!") {
+            continue;
+        }
+        let mut line = line.replace(&env_root_str, "/px/env");
+        line = line.replace(runtime_root, "/px/runtime");
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("export PX_PYTHON") {
+            line = format!(r#"export PX_PYTHON="{target}""#);
+        } else if trimmed.starts_with("exec ") {
+            line = format!(r#"exec "{target}" "$@""#);
+        }
+        rewritten_lines.push(line);
+    }
+    let rewritten = rewritten_lines.join("\n") + "\n";
+    append_bytes_deterministic(builder, archive_path, rewritten.as_bytes(), Some(0o755))
+}
+
+fn append_rewritten_pyvenv(
+    builder: &mut Builder<Vec<u8>>,
+    archive_path: &Path,
+    path: &Path,
+) -> Result<(), InstallUserError> {
+    let contents = fs::read_to_string(path).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to read pyvenv.cfg for sandbox layer",
+            json!({ "path": path.display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    let mut lines = Vec::new();
+    for line in contents.lines() {
+        if line.trim_start().starts_with("home") {
+            lines.push("home = /px/runtime".to_string());
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    let rewritten = lines.join("\n") + "\n";
+    append_bytes_deterministic(builder, archive_path, rewritten.as_bytes(), Some(0o644))
+}
+
+fn append_bytes_deterministic(
+    builder: &mut Builder<Vec<u8>>,
+    archive_path: &Path,
+    data: &[u8],
+    mode: Option<u32>,
+) -> Result<(), InstallUserError> {
+    let mut header = Header::new_gnu();
+    header.set_path(archive_path).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to stage sandbox entry",
+            json!({ "path": archive_path.display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    header.set_size(data.len() as u64);
+    header.set_mode(mode.unwrap_or(0o644));
+    header.set_mtime(0);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_cksum();
+    builder.append(&header, data).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to write sandbox entry",
+            json!({ "path": archive_path.display().to_string(), "error": err.to_string() }),
+        )
+    })
+}
+
+fn finalize_layer(builder: Builder<Vec<u8>>, blobs: &Path) -> Result<LayerTar, InstallUserError> {
     let data = builder.into_inner().map_err(|err| {
         sandbox_error(
             "PX903",
@@ -1000,18 +1527,26 @@ fn map_allowed_paths_for_image(
     let mut mapped = Vec::new();
     for path in allowed_paths {
         let mapped_path = if path.starts_with(project_root) {
-            container_project.join(
-                path.strip_prefix(project_root)
-                    .unwrap_or_else(|_| Path::new("")),
+            Some(
+                container_project.join(
+                    path.strip_prefix(project_root)
+                        .unwrap_or_else(|_| Path::new("")),
+                ),
             )
         } else if path.starts_with(env_root) {
-            container_env
-                .join(path.strip_prefix(env_root).unwrap_or_else(|_| Path::new("")))
+            Some(
+                container_env.join(
+                    path.strip_prefix(env_root)
+                        .unwrap_or_else(|_| Path::new("")),
+                ),
+            )
         } else {
-            path.clone()
+            None
         };
-        if !mapped.iter().any(|p| p == &mapped_path) {
-            mapped.push(mapped_path);
+        if let Some(mapped_path) = mapped_path {
+            if !mapped.iter().any(|p| p == &mapped_path) {
+                mapped.push(mapped_path);
+            }
         }
     }
     if !mapped.iter().any(|p| p == container_project) {
@@ -1046,6 +1581,8 @@ fn ensure_base_image(
 ) -> Result<(), InstallUserError> {
     let oci_dir = store.oci_dir(&artifacts.definition.sbx_id());
     let blobs = oci_dir.join("blobs").join("sha256");
+    let runtime_root = runtime_home_from_env(&artifacts.env_root);
+    let runtime_required = runtime_root.is_some();
     let mut rebuild = !oci_dir.join("index.json").exists();
     if !rebuild {
         let digest = artifacts
@@ -1061,6 +1598,17 @@ fn ensure_base_image(
             .map(|d| blobs.join(d).exists())
             .unwrap_or(false);
         rebuild = !manifest_path.exists() || !env_ok;
+    }
+    if !rebuild && runtime_required {
+        if let Some(env_digest) = artifacts.manifest.env_layer_digest.as_ref() {
+            match layer_contains_runtime(&blobs, env_digest) {
+                Ok(true) => {}
+                Ok(false) => rebuild = true,
+                Err(_) => rebuild = true,
+            }
+        } else {
+            rebuild = true;
+        }
     }
     if rebuild {
         if let Some(parent) = oci_dir.parent() {
@@ -1079,9 +1627,8 @@ fn ensure_base_image(
                 json!({ "path": blobs.display().to_string(), "error": err.to_string() }),
             )
         })?;
-        let env_layer = write_env_layer_tar(&artifacts.env_root, &blobs)?;
-        let mapped =
-            map_allowed_paths_for_image(allowed_paths, project_root, &artifacts.env_root);
+        let env_layer = write_env_layer_tar(&artifacts.env_root, runtime_root.as_deref(), &blobs)?;
+        let mapped = map_allowed_paths_for_image(allowed_paths, project_root, &artifacts.env_root);
         let pythonpath = join_paths_env(&mapped)?;
         let built = build_oci_image(
             artifacts,
@@ -1093,9 +1640,7 @@ fn ensure_base_image(
         )?;
         artifacts.manifest.image_digest = format!("sha256:{}", built.manifest_digest);
         artifacts.manifest.env_layer_digest = Some(env_layer.digest);
-        artifacts.manifest.created_at = OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap_or_default();
+        artifacts.manifest.created_at = sandbox_timestamp_string();
         artifacts.manifest.px_version = PX_VERSION.to_string();
         persist_manifest(store, &artifacts.manifest)?;
     }
@@ -1175,7 +1720,9 @@ fn push_oci_image(tag: &str, built: &BuiltImage) -> Result<(), InstallUserError>
         )
     })?;
     rt.block_on(async {
-        client.push(&reference, &layers, config, &auth, Some(manifest)).await
+        client
+            .push(&reference, &layers, config, &auth, Some(manifest))
+            .await
     })
     .map_err(|err| {
         let message = err.to_string();
@@ -1283,7 +1830,7 @@ fn should_skip(path: &Path, root: &Path) -> bool {
     ) || name.ends_with(".pyc")
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
@@ -1308,7 +1855,10 @@ mod tests {
         fs::write(source.join("app.py"), b"print('hi')\n")?;
         let env_root = temp.path().join("env");
         fs::create_dir_all(env_root.join("bin"))?;
-        fs::write(env_root.join("bin").join("python"), b"#!/usr/bin/env python\n")?;
+        fs::write(
+            env_root.join("bin").join("python"),
+            b"#!/usr/bin/env python\n",
+        )?;
         let oci_root = temp.path().join("oci");
 
         let mut caps = BTreeSet::new();
@@ -1341,7 +1891,7 @@ mod tests {
         };
 
         let blobs = oci_root.join("blobs").join("sha256");
-        let env_layer = write_env_layer_tar(&env_root, &blobs)?;
+        let env_layer = write_env_layer_tar(&env_root, None, &blobs)?;
         let app_layer = write_app_layer_tar(&source, &blobs)?;
         build_oci_image(
             &artifacts,

@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_json::json;
-use time::OffsetDateTime;
 
-use super::{sandbox_error, SandboxArtifacts, SandboxImageManifest, SandboxStore};
+use super::{
+    sandbox_error, sandbox_timestamp_string, SandboxArtifacts, SandboxImageManifest, SandboxStore,
+};
 use crate::core::runtime::process::{
     run_command, run_command_passthrough, run_command_streaming, run_command_with_stdin, RunOutput,
 };
@@ -103,7 +104,8 @@ pub(crate) fn ensure_image_layout(
                 json!({ "path": blobs.display().to_string(), "error": err.to_string() }),
             )
         })?;
-        let env_layer = write_env_layer_tar(&artifacts.env_root, &blobs)?;
+        let runtime_root = crate::core::sandbox::pack::runtime_home_from_env(&artifacts.env_root);
+        let env_layer = write_env_layer_tar(&artifacts.env_root, runtime_root.as_deref(), &blobs)?;
         let mapped = map_allowed_paths(allowed_paths, source_root, &artifacts.env_root);
         let pythonpath = join_paths(&mapped)?;
         let built = build_oci_image(
@@ -116,29 +118,23 @@ pub(crate) fn ensure_image_layout(
         )?;
         artifacts.manifest.image_digest = format!("sha256:{}", built.manifest_digest);
         artifacts.manifest.env_layer_digest = Some(env_layer.digest);
-        artifacts.manifest.created_at = OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap_or_default();
+        artifacts.manifest.created_at = sandbox_timestamp_string();
         artifacts.manifest.px_version = PX_VERSION.to_string();
         write_manifest(store, &artifacts.manifest)?;
     }
     let tag = match discover_tag(&oci_dir)? {
         Some(tag) => tag,
         None => {
-            let digest = artifacts
-                .manifest
-                .env_layer_digest
-                .clone()
-                .ok_or_else(|| {
-                    sandbox_error(
-                        "PX903",
-                        "sandbox image metadata is incomplete",
-                        json!({
-                            "path": oci_dir.display().to_string(),
-                            "reason": "missing_env_layer",
-                        }),
-                    )
-                })?;
+            let digest = artifacts.manifest.env_layer_digest.clone().ok_or_else(|| {
+                sandbox_error(
+                    "PX903",
+                    "sandbox image metadata is incomplete",
+                    json!({
+                        "path": oci_dir.display().to_string(),
+                        "reason": "missing_env_layer",
+                    }),
+                )
+            })?;
             let env_layer = load_layer_from_blobs(&blobs, &digest)?;
             let mapped = map_allowed_paths(allowed_paths, source_root, &artifacts.env_root);
             let pythonpath = join_paths(&mapped)?;
@@ -315,11 +311,7 @@ fn build_run_args(opts: &ContainerRunArgs, tag: &str, interactive: bool) -> Vec<
         let guest = mount.guest.clone();
         args.push("--volume".to_string());
         let mode = if mount.read_only { "ro" } else { "rw" };
-        args.push(format!(
-            "{}:{}:{mode}",
-            host.display(),
-            guest.display()
-        ));
+        args.push(format!("{}:{}:{mode}", host.display(), guest.display()));
     }
 
     for (key, value) in &opts.env {
@@ -389,18 +381,26 @@ fn map_allowed_paths(
     let mut mapped = Vec::new();
     for path in allowed_paths {
         let mapped_path = if path.starts_with(project_root) {
-            container_project.join(
-                path.strip_prefix(project_root)
-                    .unwrap_or_else(|_| Path::new("")),
+            Some(
+                container_project.join(
+                    path.strip_prefix(project_root)
+                        .unwrap_or_else(|_| Path::new("")),
+                ),
             )
         } else if path.starts_with(env_root) {
-            container_env
-                .join(path.strip_prefix(env_root).unwrap_or_else(|_| Path::new("")))
+            Some(
+                container_env.join(
+                    path.strip_prefix(env_root)
+                        .unwrap_or_else(|_| Path::new("")),
+                ),
+            )
         } else {
-            path.clone()
+            None
         };
-        if !mapped.iter().any(|p| p == &mapped_path) {
-            mapped.push(mapped_path);
+        if let Some(mapped_path) = mapped_path {
+            if !mapped.iter().any(|p| p == &mapped_path) {
+                mapped.push(mapped_path);
+            }
         }
     }
     if !mapped.iter().any(|p| p == container_project) {

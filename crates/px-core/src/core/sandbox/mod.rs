@@ -1,7 +1,10 @@
+mod app_bundle;
 mod pack;
+mod pxapp;
 mod runner;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +20,7 @@ use px_domain::{LockSnapshot, SandboxConfig, WorkspaceLock};
 
 const DEFAULT_BASE: &str = "debian-12";
 pub(crate) const SBX_VERSION: u32 = 1;
+pub(crate) const PXAPP_VERSION: u32 = 1;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SandboxBase {
@@ -117,6 +121,13 @@ impl SandboxStore {
         self.images_dir().join(sbx_id).join("pack")
     }
 
+    pub(crate) fn bundle_dir(&self, sbx_id: &str, bundle_id: &str) -> PathBuf {
+        self.images_dir()
+            .join(sbx_id)
+            .join("bundles")
+            .join(bundle_id)
+    }
+
     pub(crate) fn ensure_base_manifest(&self, base: &SandboxBase) -> Result<()> {
         let manifest_path = self.base_manifest_path(base);
         if manifest_path.exists() {
@@ -215,9 +226,7 @@ impl SandboxStore {
                 )
             })?;
         }
-        let created_at = OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap_or_default();
+        let created_at = sandbox_timestamp_string();
         let manifest = SandboxImageManifest {
             sbx_id: definition.sbx_id(),
             base_os_oid: definition.base_os_oid.clone(),
@@ -598,6 +607,23 @@ fn validate_capabilities(
     Ok(())
 }
 
+pub(crate) fn sandbox_timestamp() -> OffsetDateTime {
+    if let Ok(raw) = env::var("SOURCE_DATE_EPOCH") {
+        if let Ok(epoch) = raw.trim().parse::<i64>() {
+            if let Ok(ts) = OffsetDateTime::from_unix_timestamp(epoch) {
+                return ts;
+            }
+        }
+    }
+    OffsetDateTime::UNIX_EPOCH
+}
+
+pub(crate) fn sandbox_timestamp_string() -> String {
+    sandbox_timestamp()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+}
+
 pub(crate) fn default_store_root() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("PX_SANDBOX_STORE") {
         return Ok(PathBuf::from(path));
@@ -627,10 +653,11 @@ pub(crate) fn sandbox_error(code: &str, message: &str, details: Value) -> Instal
     InstallUserError::new(message, merged)
 }
 
-pub use pack::{pack_image, PackRequest};
+pub use pack::{pack_app, pack_image, PackRequest, PackTarget};
+pub(crate) use pxapp::run_pxapp_bundle;
 pub(crate) use runner::{
-    detect_container_backend, ensure_image_layout, run_container, ContainerBackend, ContainerRunArgs,
-    Mount, RunMode, SandboxImageLayout,
+    detect_container_backend, ensure_image_layout, run_container, ContainerBackend,
+    ContainerRunArgs, Mount, RunMode, SandboxImageLayout,
 };
 
 #[cfg(test)]
@@ -682,8 +709,10 @@ mod tests {
     #[test]
     fn ensure_image_writes_manifest_and_reuses_store() {
         let temp = tempdir().expect("tempdir");
-        let mut config = SandboxConfig::default();
-        config.auto = false;
+        let mut config = SandboxConfig {
+            auto: false,
+            ..Default::default()
+        };
         config.capabilities.insert("postgres".to_string(), true);
         let lock = lock_with_deps(vec![]);
         let store = SandboxStore::new(temp.path().to_path_buf());

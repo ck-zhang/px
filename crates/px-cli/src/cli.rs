@@ -27,6 +27,7 @@ pub const PX_BEFORE_HELP: &str = concat!(
     "  build            Produce sdists/wheels from the px-managed environment.\n",
     "  publish          Upload previously built artifacts (dry-run by default; use --upload to push).\n",
     "  pack image       Freeze the current env + sandbox config into an OCI image.\n",
+    "  pack app         Build a portable .pxapp bundle runnable via `px run <file>.pxapp`.\n",
     "  migrate          Create px metadata for an existing project.\n\n",
     "\x1b[1;36mAdvanced\x1b[0m\n",
     "  tool             Install and run px-managed global tools.\n",
@@ -154,10 +155,10 @@ pub enum CommandGroupCli {
     )]
     Publish(PublishArgs),
     #[command(
-        about = "Build a sandbox-backed OCI image from the current env profile.",
-        override_usage = "px pack image [--tag NAME] [--out PATH] [--push] [--allow-dirty]"
+        about = "Package sandboxed apps as OCI images or portable bundles.",
+        subcommand
     )]
-    Pack(PackArgs),
+    Pack(PackCommand),
     #[command(about = "Create px metadata for an existing project.")]
     Migrate(MigrateArgs),
     #[command(
@@ -514,24 +515,61 @@ pub struct BuildArgs {
     pub out: Option<PathBuf>,
 }
 
-#[derive(Args, Debug)]
-pub struct PackArgs {
-    #[arg(
-        value_name = "TARGET",
-        default_value = "image",
-        value_parser = ["image"],
-        hide_default_value = true,
-        help = "Artifact kind (only 'image' is supported)"
+#[derive(Subcommand, Debug)]
+pub enum PackCommand {
+    #[command(
+        about = "Build a sandbox-backed OCI image from the current env profile.",
+        override_usage = "px pack image [--tag NAME] [--out PATH] [--push] [--allow-dirty]"
     )]
-    pub target: String,
+    Image(PackImageArgs),
+    #[command(
+        about = "Build a portable .pxapp bundle runnable via `px run <bundle>`.",
+        override_usage = "px pack app [--out PATH] [--allow-dirty] [--entrypoint CMD] [--workdir DIR]"
+    )]
+    App(PackAppArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct PackImageArgs {
     #[arg(long, value_name = "TAG", help = "Explicit image tag to apply")]
     pub tag: Option<String>,
-    #[arg(long, value_parser = value_parser!(PathBuf), value_name = "PATH", help = "Write OCI output to this directory or tarball")]
+    #[arg(
+        long,
+        value_parser = value_parser!(PathBuf),
+        value_name = "PATH",
+        help = "Write OCI output to this directory or tarball"
+    )]
     pub out: Option<PathBuf>,
     #[arg(long, help = "Push the built image to a registry")]
     pub push: bool,
     #[arg(long, help = "Allow packing with a dirty working tree")]
     pub allow_dirty: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct PackAppArgs {
+    #[arg(
+        long,
+        value_parser = value_parser!(PathBuf),
+        value_name = "PATH",
+        help = "Write the .pxapp bundle to this path (default: dist/<name>-<version>.pxapp)"
+    )]
+    pub out: Option<PathBuf>,
+    #[arg(long, help = "Allow packing with a dirty working tree")]
+    pub allow_dirty: bool,
+    #[arg(
+        long,
+        value_name = "CMD",
+        help = "Override the bundle entrypoint (quote to include spaces, e.g. \"python -m app\")"
+    )]
+    pub entrypoint: Option<String>,
+    #[arg(
+        long,
+        value_parser = value_parser!(PathBuf),
+        value_name = "DIR",
+        help = "Override the bundle working directory (default: /app)"
+    )]
+    pub workdir: Option<PathBuf>,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, Serialize, Deserialize)]

@@ -3060,6 +3060,7 @@ dependencies = [
  "px-core",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
  "toml_edit 0.22.27",
  "tracing",

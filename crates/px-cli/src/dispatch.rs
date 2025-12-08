@@ -10,8 +10,8 @@ use px_core::{
 
 use crate::{
     BuildArgs, BuildFormat, CommandGroupCli, CompletionShell, CompletionsArgs, FmtArgs, InitArgs,
-    MigrateArgs, PackArgs, PublishArgs, RunArgs, SyncArgs, TestArgs, ToolCommand, ToolInstallArgs,
-    ToolRemoveArgs, ToolRunArgs, ToolUpgradeArgs, WhyArgs,
+    MigrateArgs, PackAppArgs, PackCommand, PackImageArgs, PublishArgs, RunArgs, SyncArgs, TestArgs,
+    ToolCommand, ToolInstallArgs, ToolRemoveArgs, ToolRunArgs, ToolUpgradeArgs, WhyArgs,
 };
 use crate::{PythonCommand, PythonInstallArgs, PythonUseArgs};
 
@@ -83,11 +83,18 @@ pub fn dispatch_command(
             let request = publish_request_from_args(args);
             core_call(info, px_core::publish_project(ctx, &request))
         }
-        CommandGroupCli::Pack(args) => {
-            let info = CommandInfo::new(CommandGroup::Pack, "pack image");
-            let request = pack_request_from_args(args);
-            core_call(info, px_core::pack_image(ctx, &request))
-        }
+        CommandGroupCli::Pack(cmd) => match cmd {
+            PackCommand::Image(args) => {
+                let info = CommandInfo::new(CommandGroup::Pack, "pack image");
+                let request = pack_image_request_from_args(args);
+                core_call(info, px_core::pack_image(ctx, &request))
+            }
+            PackCommand::App(args) => {
+                let info = CommandInfo::new(CommandGroup::Pack, "pack app");
+                let request = pack_app_request_from_args(args);
+                core_call(info, px_core::pack_app(ctx, &request))
+            }
+        },
         CommandGroupCli::Migrate(args) => {
             let info = CommandInfo::new(CommandGroup::Migrate, "migrate");
             let request = migrate_request_from_args(args);
@@ -334,12 +341,31 @@ fn publish_request_from_args(args: &PublishArgs) -> PublishRequest {
     }
 }
 
-fn pack_request_from_args(args: &PackArgs) -> px_core::PackRequest {
+fn pack_image_request_from_args(args: &PackImageArgs) -> px_core::PackRequest {
     px_core::PackRequest {
+        target: px_core::PackTarget::Image,
         tag: args.tag.clone(),
         out: args.out.clone(),
         push: args.push,
         allow_dirty: args.allow_dirty,
+        entrypoint: None,
+        workdir: None,
+    }
+}
+
+fn pack_app_request_from_args(args: &PackAppArgs) -> px_core::PackRequest {
+    let entrypoint = args
+        .entrypoint
+        .as_ref()
+        .map(|raw| raw.split_whitespace().map(|s| s.to_string()).collect());
+    px_core::PackRequest {
+        target: px_core::PackTarget::App,
+        tag: None,
+        out: args.out.clone(),
+        push: false,
+        allow_dirty: args.allow_dirty,
+        entrypoint,
+        workdir: args.workdir.clone(),
     }
 }
 

@@ -21,9 +21,9 @@ use crate::core::runtime::facade::{
 };
 use crate::core::sandbox::{
     default_store_root, detect_container_backend, discover_site_packages, ensure_image_layout,
-    ensure_sandbox_image, env_root_from_site_packages, run_container, sandbox_image_tag,
-    ContainerBackend, ContainerRunArgs, Mount, RunMode, SandboxArtifacts, SandboxImageLayout,
-    SandboxStore,
+    ensure_sandbox_image, env_root_from_site_packages, run_container, run_pxapp_bundle,
+    sandbox_image_tag, ContainerBackend, ContainerRunArgs, Mount, RunMode, SandboxArtifacts,
+    SandboxImageLayout, SandboxStore,
 };
 use crate::project::evaluate_project_state;
 use crate::run_plan::{plan_run_target, RunTargetPlan};
@@ -232,10 +232,7 @@ impl SandboxCommandRunner {
             self.container_project_root.display().to_string(),
         ));
         let container_python = self.container_env_root.join("bin").join("python");
-        env.push((
-            "PX_PYTHON".into(),
-            container_python.display().to_string(),
-        ));
+        env.push(("PX_PYTHON".into(), container_python.display().to_string()));
         env.push((
             "VIRTUAL_ENV".into(),
             self.container_env_root.display().to_string(),
@@ -244,15 +241,11 @@ impl SandboxCommandRunner {
             "PYTHONHOME".into(),
             self.container_env_root.display().to_string(),
         ));
-        let default_path =
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/bin".to_string();
+        let default_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/bin".to_string();
         let base_path = base_path.unwrap_or(default_path);
         env.push((
             "PATH".into(),
-            format!(
-                "{}/bin:{base_path}",
-                self.container_env_root.display()
-            ),
+            format!("{}/bin:{base_path}", self.container_env_root.display()),
         ));
         env.push(("PX_SANDBOX".into(), "1".into()));
         env.push(("PX_SANDBOX_ID".into(), self.sbx_id.clone()));
@@ -347,8 +340,10 @@ fn map_allowed_paths_for_container(
                     .unwrap_or_else(|_| Path::new("")),
             )
         } else if path.starts_with(env_root) {
-            container_env
-                .join(path.strip_prefix(env_root).unwrap_or_else(|_| Path::new("")))
+            container_env.join(
+                path.strip_prefix(env_root)
+                    .unwrap_or_else(|_| Path::new("")),
+            )
         } else {
             path.clone()
         };
@@ -370,12 +365,16 @@ fn map_workdir_container(
     container_env_root: &Path,
 ) -> PathBuf {
     if cwd.starts_with(host_project_root) {
-        return container_project_root
-            .join(cwd.strip_prefix(host_project_root).unwrap_or_else(|_| Path::new("")));
+        return container_project_root.join(
+            cwd.strip_prefix(host_project_root)
+                .unwrap_or_else(|_| Path::new("")),
+        );
     }
     if cwd.starts_with(host_env_root) {
-        return container_env_root
-            .join(cwd.strip_prefix(host_env_root).unwrap_or_else(|_| Path::new("")));
+        return container_env_root.join(
+            cwd.strip_prefix(host_env_root)
+                .unwrap_or_else(|_| Path::new("")),
+        );
     }
     canonical_path(cwd)
 }
@@ -388,10 +387,9 @@ fn rewrite_env_value(
     container_env_root: &Path,
 ) -> String {
     let mut rewritten = value.to_string();
-    if let (Some(host), Some(container)) = (
-        host_project_root.to_str(),
-        container_project_root.to_str(),
-    ) {
+    if let (Some(host), Some(container)) =
+        (host_project_root.to_str(), container_project_root.to_str())
+    {
         rewritten = rewritten.replace(host, container);
     }
     if let (Some(host), Some(container)) = (host_env_root.to_str(), container_env_root.to_str()) {
@@ -604,6 +602,24 @@ fn sorted_list(values: &HashSet<String>) -> Vec<String> {
     items
 }
 
+fn pxapp_path_from_request(request: &RunRequest) -> Option<PathBuf> {
+    let entry = request.entry.as_ref()?;
+    let path = PathBuf::from(entry);
+    if !path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("pxapp"))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 /// Runs the project's tests using a project-provided runner or pytest, with an
 /// optional px fallback runner.
 ///
@@ -622,19 +638,32 @@ pub fn run_project(ctx: &CommandContext, request: &RunRequest) -> Result<Executi
 }
 
 fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<ExecutionOutcome> {
+    let strict = request.frozen || ctx.env_flag_enabled("CI");
+    let interactive = request.interactive.unwrap_or_else(|| {
+        !strict && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+    });
+    if let Some(bundle) = pxapp_path_from_request(request) {
+        if request.at.is_some() {
+            return Ok(ExecutionOutcome::user_error(
+                "px run <bundle.pxapp> does not support --at",
+                json!({
+                    "code": "PX903",
+                    "reason": "pxapp_at_ref_unsupported",
+                    "path": bundle.display().to_string(),
+                }),
+            ));
+        }
+        return run_pxapp_bundle(ctx, &bundle, &request.args, interactive);
+    }
     if let Some(at_ref) = &request.at {
         return run_project_at_ref(ctx, request, at_ref);
     }
-    let strict = request.frozen || ctx.env_flag_enabled("CI");
     let target = request
         .entry
         .clone()
         .or_else(|| request.target.clone())
         .unwrap_or_default();
 
-    let interactive = request.interactive.unwrap_or_else(|| {
-        !strict && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
-    });
     let mut sandbox: Option<SandboxRunContext> = None;
 
     if !target.trim().is_empty() {
@@ -1209,13 +1238,14 @@ fn commit_project_context(
         })?;
     let env_root = cas_profile.env_path.clone();
     let site_packages = discover_site_packages(&env_root);
-    let paths = build_pythonpath(ctx.fs(), &project_root_at_ref, Some(env_root.clone()))
-    .map_err(|err| {
-        ExecutionOutcome::failure(
-            "failed to assemble PYTHONPATH for git-ref execution",
-            json!({ "error": err.to_string() }),
-        )
-    })?;
+    let paths = build_pythonpath(ctx.fs(), &project_root_at_ref, Some(env_root.clone())).map_err(
+        |err| {
+            ExecutionOutcome::failure(
+                "failed to assemble PYTHONPATH for git-ref execution",
+                json!({ "error": err.to_string() }),
+            )
+        },
+    )?;
     let runtime_path = cas_profile.runtime_path.display().to_string();
     let python = select_python_from_site(&paths.site_bin, &runtime_path, &runtime.version);
     let deps = DependencyContext::from_sources(&snapshot.requirements, Some(&lock_path));
@@ -1529,13 +1559,13 @@ fn commit_workspace_context(
     })?;
     let env_root = cas_profile.env_path.clone();
     let site_packages = discover_site_packages(&env_root);
-    let paths = build_pythonpath(ctx.fs(), &member_root_at_ref, Some(env_root.clone()))
-    .map_err(|err| {
-        ExecutionOutcome::failure(
-            "failed to assemble PYTHONPATH for git-ref execution",
-            json!({ "error": err.to_string() }),
-        )
-    })?;
+    let paths =
+        build_pythonpath(ctx.fs(), &member_root_at_ref, Some(env_root.clone())).map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to assemble PYTHONPATH for git-ref execution",
+                json!({ "error": err.to_string() }),
+            )
+        })?;
     let mut combined = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut push_unique = |path: PathBuf| {
@@ -3378,15 +3408,11 @@ fn prepare_project_sandbox(
     } else {
         Some(PathBuf::from(&env.site_packages))
     };
-    let env_root = env
-        .env_path
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| {
-            site_packages
-                .as_ref()
-                .and_then(|site| env_root_from_site_packages(site))
-        });
+    let env_root = env.env_path.as_ref().map(PathBuf::from).or_else(|| {
+        site_packages
+            .as_ref()
+            .and_then(|site| env_root_from_site_packages(site))
+    });
     let env_root = match env_root {
         Some(root) => root,
         None => {
@@ -3431,10 +3457,7 @@ fn prepare_project_sandbox(
         site_packages.as_deref(),
     )
     .map_err(|err| ExecutionOutcome::user_error(err.message, err.details))?;
-    Ok(SandboxRunContext {
-        store,
-        artifacts,
-    })
+    Ok(SandboxRunContext { store, artifacts })
 }
 
 fn prepare_workspace_sandbox(
@@ -3500,10 +3523,7 @@ fn prepare_workspace_sandbox(
         Some(ws_ctx.site_packages.as_path()),
     )
     .map_err(|err| ExecutionOutcome::user_error(err.message, err.details))?;
-    Ok(SandboxRunContext {
-        store,
-        artifacts,
-    })
+    Ok(SandboxRunContext { store, artifacts })
 }
 
 fn prepare_commit_sandbox(
