@@ -4299,6 +4299,15 @@ struct EnvManifest {
 fn expected_pxpth_entries(manifest: &EnvManifest, store_root: &Path) -> Vec<PathBuf> {
     let mut expected = Vec::new();
     let mut seen = HashSet::new();
+    let pkg_path = |oid: &str| {
+        let base = store_root.join(MATERIALIZED_PKG_BUILDS_DIR).join(oid);
+        let site = base.join("site-packages");
+        if site.exists() {
+            site
+        } else {
+            base
+        }
+    };
     let ordered: Vec<String> = if manifest.sys_path_order.is_empty() {
         manifest
             .packages
@@ -4310,24 +4319,12 @@ fn expected_pxpth_entries(manifest: &EnvManifest, store_root: &Path) -> Vec<Path
     };
     for oid in ordered {
         if seen.insert(oid.clone()) {
-            let path = store_root
-                .join(MATERIALIZED_PKG_BUILDS_DIR)
-                .join(&oid)
-                .join("site-packages");
-            if path.exists() {
-                expected.push(path);
-            }
+            expected.push(pkg_path(&oid));
         }
     }
     for pkg in &manifest.packages {
         if seen.insert(pkg.pkg_build_oid.clone()) {
-            let path = store_root
-                .join(MATERIALIZED_PKG_BUILDS_DIR)
-                .join(&pkg.pkg_build_oid)
-                .join("site-packages");
-            if path.exists() {
-                expected.push(path);
-            }
+            expected.push(pkg_path(&pkg.pkg_build_oid));
         }
     }
     expected
