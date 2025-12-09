@@ -405,6 +405,9 @@ fn cache_hit_matches(request: &SdistRequest<'_>, built: &BuiltWheel) -> Result<b
     if !built.builder_id.is_empty() && built.builder_id != request.builder_id {
         return Ok(false);
     }
+    if built.build_method == BuildMethod::BuilderWheel {
+        return Ok(true);
+    }
     if built.build_options_hash.is_empty() {
         return Ok(false);
     }
@@ -465,16 +468,16 @@ fi
 mkdir -p "$MAMBA_PKGS_DIRS" "$DIST_DIR" "$PIP_CACHE_DIR"
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
+FRESH=0
 if [ ! -x "$PY_BIN" ]; then
   micromamba create -y -p "$ENV_ROOT" --override-channels -c conda-forge \
     python=={py_version} pip wheel setuptools pkg-config c-compiler cxx-compiler fortran-compiler \
     gdal proj geos
-else
-  micromamba install -y -p "$ENV_ROOT" --override-channels -c conda-forge \
-    python=={py_version} pip wheel setuptools pkg-config c-compiler cxx-compiler fortran-compiler \
-    gdal proj geos
+  FRESH=1
 fi
-micromamba run -p "$ENV_ROOT" python -m pip install --upgrade pip build wheel
+if [ "$FRESH" -eq 1 ]; then
+  micromamba run -p "$ENV_ROOT" python -m pip install --upgrade pip build wheel
+fi
 micromamba run -p "$ENV_ROOT" python -m pip wheel --no-deps --wheel-dir "$DIST_DIR" "$SDIST"
 "#,
         dist_dir_container = dist_dir_container,
