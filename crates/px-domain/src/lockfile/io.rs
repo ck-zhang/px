@@ -159,6 +159,7 @@ fn hash_artifact(hasher: &mut Sha256, artifact: &LockedArtifact) {
     hasher.update(artifact.python_tag.as_bytes());
     hasher.update(artifact.abi_tag.as_bytes());
     hasher.update(artifact.platform_tag.as_bytes());
+    hasher.update(artifact.build_options_hash.as_bytes());
 }
 
 pub fn render_lockfile_v2(
@@ -381,6 +382,12 @@ fn render_artifact(artifact: &LockedArtifact) -> Table {
         table.insert(
             "is_direct_url",
             Item::Value(TomlValue::from(artifact.is_direct_url)),
+        );
+    }
+    if !artifact.build_options_hash.is_empty() {
+        table.insert(
+            "build_options_hash",
+            Item::Value(TomlValue::from(artifact.build_options_hash.clone())),
         );
     }
     table

@@ -12,6 +12,7 @@ use std::{
 
 use crate::context::{CommandContext, CommandInfo};
 use crate::core::runtime::artifacts::select_wheel;
+use crate::core::runtime::builder::{builder_identity_for_python, builder_identity_for_runtime};
 use crate::core::tooling::diagnostics;
 use crate::diagnostics::commands as diag_commands;
 use crate::effects;
@@ -32,11 +33,11 @@ use pep508_rs::MarkerEnvironment;
 #[cfg(test)]
 use px_domain::LockSnapshot;
 use px_domain::{
-    analyze_lock_diff, autopin_pin_key, autopin_spec_key, detect_lock_drift, format_specifier,
-    load_lockfile_optional, marker_applies, merge_resolved_dependencies, missing_project_guidance,
-    render_lockfile, resolve, spec_requires_pin, verify_locked_artifacts, AutopinEntry,
-    InstallOverride, MissingProjectGuidance, PinSpec, ProjectSnapshot, PxOptions, ResolverRequest,
-    ResolverTags,
+    analyze_lock_diff, autopin_pin_key, autopin_spec_key, canonicalize_spec, detect_lock_drift,
+    format_specifier, load_lockfile_optional, marker_applies, merge_resolved_dependencies,
+    missing_project_guidance, render_lockfile, resolve, spec_requires_pin, verify_locked_artifacts,
+    AutopinEntry, InstallOverride, MissingProjectGuidance, PinSpec, ProjectSnapshot, PxOptions,
+    ResolverRequest, ResolverTags,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1492,7 +1493,14 @@ fn ensure_project_wheel_scripts(
     let keep_proxies = env::var("PX_KEEP_PROXIES")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let build_hash = project_build_hash(runtime, snapshot, &python_path, keep_proxies)?;
+    let builder = builder_identity_for_runtime(runtime)?;
+    let build_hash = project_build_hash(
+        runtime,
+        snapshot,
+        &python_path,
+        keep_proxies,
+        &builder.builder_id,
+    )?;
     let cache_dir = project_wheel_cache_dir(
         cache_root,
         snapshot,
@@ -1743,31 +1751,12 @@ fn persist_wheel_metadata(
     Ok(())
 }
 
-fn runtime_abi_tag(python: &str) -> Result<String> {
-    let tags = crate::python_sys::detect_interpreter_tags(python)?;
-    let py = tags
-        .python
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "py3".to_string());
-    let abi = tags
-        .abi
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "abi3".to_string());
-    let platform = tags
-        .platform
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "any".to_string());
-    Ok(format!("{py}-{abi}-{platform}"))
-}
-
 fn project_build_hash(
     runtime: &RuntimeMetadata,
     snapshot: &ManifestSnapshot,
     python: &Path,
     keep_proxies: bool,
+    builder_id: &str,
 ) -> Result<String> {
     let build_env_hash = wheel_build_options_hash(&python.display().to_string())?;
     let payload = json!({
@@ -1776,6 +1765,7 @@ fn project_build_hash(
         "manifest": snapshot.manifest_fingerprint,
         "python": python.display().to_string(),
         "keep_proxies": keep_proxies,
+        "builder_id": builder_id,
         "build_env": build_env_hash,
     });
     Ok(hex::encode(Sha256::digest(
@@ -1817,10 +1807,11 @@ fn store_project_wheel_in_cas(
         }
     };
 
-    let runtime_abi = runtime_abi_tag(&python.display().to_string())?;
+    let builder = builder_identity_for_python(&python.display().to_string())?;
     let pkg_header = PkgBuildHeader {
         source_oid,
-        runtime_abi,
+        runtime_abi: builder.runtime_abi,
+        builder_id: builder.builder_id,
         build_options_hash: build_options_hash.to_string(),
     };
     let pkg_key = pkg_build_lookup_key(&pkg_header);
@@ -2473,11 +2464,23 @@ pub(crate) fn write_python_environment_markers(
         .canonicalize(runtime_path)
         .unwrap_or_else(|_| runtime_path.to_path_buf());
     let site_packages = site_packages_dir(site_dir, &runtime.version);
+    let manifest_env_vars = {
+        let mut env_vars = BTreeMap::new();
+        let manifest_path = site_dir.join("manifest.json");
+        if let Ok(contents) = fs.read_to_string(&manifest_path) {
+            if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&contents) {
+                if let Some(vars) = manifest.get("env_vars").and_then(|v| v.as_object()) {
+                    env_vars = vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                }
+            }
+        }
+        env_vars
+    };
     write_python_shim(
         &bin_dir,
         &canonical_runtime,
         &site_packages,
-        &BTreeMap::new(),
+        &manifest_env_vars,
     )?;
 
     let home = canonical_runtime
@@ -2898,7 +2901,8 @@ pub(crate) fn resolve_dependencies_with_effects(
         .requirements
         .iter()
         .filter(|spec| marker_applies(spec, &marker_env))
-        .cloned()
+        .map(|spec| canonicalize_spec(spec))
+        .filter(|spec| !spec.is_empty())
         .collect();
     tracing::debug!(?requirements, "resolver_requirements");
     let request = ResolverRequest {
@@ -5122,13 +5126,24 @@ build-backend = "maturin"
             version: "3.12.0".into(),
             platform: "test-platform".into(),
         };
+        let builder = builder_identity_for_runtime(&runtime)?;
         let cache_root = temp.path().join("cache");
 
-        let first_hash =
-            project_build_hash(&runtime, &snapshot, Path::new("/usr/bin/python"), false)?;
+        let first_hash = project_build_hash(
+            &runtime,
+            &snapshot,
+            Path::new("/usr/bin/python"),
+            false,
+            &builder.builder_id,
+        )?;
         env::set_var(key, "value-b");
-        let second_hash =
-            project_build_hash(&runtime, &snapshot, Path::new("/usr/bin/python"), false)?;
+        let second_hash = project_build_hash(
+            &runtime,
+            &snapshot,
+            Path::new("/usr/bin/python"),
+            false,
+            &builder.builder_id,
+        )?;
         match original {
             Some(value) => env::set_var(key, value),
             None => env::remove_var(key),
@@ -5192,7 +5207,14 @@ build-backend = "maturin"
             version: "3.12.0".into(),
             platform: "test-platform".into(),
         };
-        let build_hash = project_build_hash(&runtime, &snapshot, Path::new(&python), false)?;
+        let builder = builder_identity_for_runtime(&runtime)?;
+        let build_hash = project_build_hash(
+            &runtime,
+            &snapshot,
+            Path::new(&python),
+            false,
+            &builder.builder_id,
+        )?;
         let cache_root = temp.path().join("cache");
         let cache_dir = project_wheel_cache_dir(
             &cache_root,
@@ -5276,8 +5298,14 @@ build-backend = "maturin"
             version: "3.12.0".into(),
             platform: "test-platform".into(),
         };
-        let build_hash =
-            project_build_hash(&runtime, &snapshot, Path::new("/usr/bin/python"), false)?;
+        let builder = builder_identity_for_runtime(&runtime)?;
+        let build_hash = project_build_hash(
+            &runtime,
+            &snapshot,
+            Path::new("/usr/bin/python"),
+            false,
+            &builder.builder_id,
+        )?;
         let cache_root = temp.path().join("cache");
         let wheel_dir = project_wheel_cache_dir(
             &cache_root,
@@ -5351,8 +5379,15 @@ build-backend = "maturin"
             version: "3.12.0".into(),
             platform: "test-platform".into(),
         };
+        let builder = builder_identity_for_runtime(&runtime)?;
         let cache_root = temp.path().join("cache");
-        let first_hash = project_build_hash(&runtime, &snapshot, Path::new(&runtime.path), false)?;
+        let first_hash = project_build_hash(
+            &runtime,
+            &snapshot,
+            Path::new(&runtime.path),
+            false,
+            &builder.builder_id,
+        )?;
         let first_dir = project_wheel_cache_dir(
             &cache_root,
             &snapshot,
@@ -5375,7 +5410,13 @@ build-backend = "maturin"
         persist_wheel_metadata(&first_dir, &wheel_path, &sha256, "maturin-change", "0.1.0")?;
 
         env::set_var("RUSTFLAGS", "second-hash");
-        let second_hash = project_build_hash(&runtime, &snapshot, Path::new(&runtime.path), false)?;
+        let second_hash = project_build_hash(
+            &runtime,
+            &snapshot,
+            Path::new(&runtime.path),
+            false,
+            &builder.builder_id,
+        )?;
         assert_ne!(
             first_hash, second_hash,
             "build hash should vary with build env"

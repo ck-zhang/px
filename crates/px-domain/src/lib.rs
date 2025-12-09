@@ -17,10 +17,11 @@ pub use lockfile::{
     ResolvedDependency, WorkspaceLock, WorkspaceMember, WorkspaceOwner,
 };
 pub use project::{
-    collect_pyproject_packages, collect_requirement_packages, collect_setup_cfg_packages,
-    current_project_root, discover_project_root, ensure_pyproject_exists, infer_package_name,
-    missing_project_guidance, prepare_pyproject_plan, project_name_from_pyproject,
-    read_requirements_file, read_setup_cfg_requires, resolve_onboard_path, sandbox_config_from_doc,
+    canonicalize_package_name, canonicalize_spec, collect_pyproject_packages,
+    collect_requirement_packages, collect_setup_cfg_packages, current_project_root,
+    discover_project_root, ensure_pyproject_exists, infer_package_name, missing_project_guidance,
+    prepare_pyproject_plan, project_name_from_pyproject, read_requirements_file,
+    read_setup_cfg_requires, resolve_onboard_path, sandbox_config_from_doc,
     sandbox_config_from_manifest, sanitize_package_candidate, BackupManager, BackupSummary,
     DependencyGroupSource, ManifestAddReport, ManifestEditor, ManifestRemoveReport,
     MissingProjectGuidance, OnboardPackagePlan, ProjectInitializer, ProjectSnapshot,

@@ -8,13 +8,14 @@ use anyhow::{anyhow, Context, Result};
 use pep440_rs::{Operator, VersionSpecifiers};
 use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement, VersionOrUrl};
 use px_domain::{
-    canonical_extras, format_specifier, marker_applies, normalize_dist_name, LockedArtifact,
-    PinSpec, ResolvedDependency,
+    canonical_extras, canonicalize_package_name, format_specifier, marker_applies,
+    normalize_dist_name, LockedArtifact, PinSpec, ResolvedDependency,
 };
 use reqwest::{blocking::Client, StatusCode};
 use serde_json::json;
 
 use crate::context::CommandContext;
+use crate::core::runtime::builder::builder_identity_from_tags;
 use crate::effects;
 use crate::progress::{download_concurrency, ProgressReporter};
 use crate::pypi::{PypiFile, PypiReleaseResponse};
@@ -106,6 +107,7 @@ fn download_artifact(
     force_sdist: bool,
 ) -> Result<ResolvedDependency> {
     let release = pypi.fetch_release(&pin.normalized, &pin.version, &pin.specifier)?;
+    let builder = builder_identity_from_tags(tags);
     let default_build_hash = wheel_build_options_hash(python)?;
     let artifact = if force_sdist {
         build_wheel_via_sdist(
@@ -115,6 +117,8 @@ fn download_artifact(
             &pin,
             python,
             &default_build_hash,
+            &builder.builder_id,
+            &cache.path,
         )?
     } else {
         match select_wheel(&release.urls, tags, &pin.specifier) {
@@ -147,6 +151,8 @@ fn download_artifact(
                 &pin,
                 python,
                 &default_build_hash,
+                &builder.builder_id,
+                &cache.path,
             )?,
         }
     };
@@ -170,6 +176,8 @@ fn build_wheel_via_sdist(
     pin: &PinSpec,
     python: &str,
     default_build_hash: &str,
+    builder_id: &str,
+    builder_root: &Path,
 ) -> Result<LockedArtifact> {
     let sdist = select_sdist(&release.urls, &pin.specifier)?;
     let built = cache_store.ensure_sdist_build(
@@ -181,6 +189,8 @@ fn build_wheel_via_sdist(
             url: &sdist.url,
             sha256: Some(&sdist.digests.sha256),
             python_path: python,
+            builder_id,
+            builder_root: Some(builder_root.to_path_buf()),
         },
     )?;
     let build_options_hash = if built.build_options_hash.is_empty() {
@@ -622,7 +632,7 @@ pub(crate) fn dependency_name(spec: &str) -> String {
     }
     let head = &trimmed[..end];
     let base = head.split('[').next().unwrap_or(head);
-    base.to_lowercase()
+    canonicalize_package_name(base)
 }
 
 pub(crate) fn strip_wrapping_quotes(input: &str) -> &str {

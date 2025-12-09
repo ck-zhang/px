@@ -1,14 +1,19 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
+use bzip2::read::BzDecoder;
 use hex;
-use serde::Serialize;
+use reqwest;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tar::Archive;
 use tempfile::NamedTempFile;
+use tracing::debug;
+use walkdir::WalkDir;
 
 use super::{
     apply_python_env,
@@ -22,11 +27,173 @@ use super::{
 };
 use std::borrow::Cow;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum BuildMethod {
     PipWheel,
     PythonBuild,
+    BuilderWheel,
+}
+
+fn copy_native_libs(env_root: &Path, dist_path: &Path) -> Result<()> {
+    let mut env_lib_index: HashMap<String, PathBuf> = HashMap::new();
+    for dir in ["lib", "lib64"] {
+        let lib_root = env_root.join(dir);
+        if !lib_root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(&lib_root) {
+            let entry = entry?;
+            if entry.file_type().is_file() && is_shared_lib(entry.path()) {
+                if let Some(name) = entry
+                    .path()
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+                {
+                    env_lib_index
+                        .entry(name)
+                        .or_insert(entry.path().to_path_buf());
+                }
+            }
+        }
+    }
+    debug!(
+        env_root = %env_root.display(),
+        lib_count = env_lib_index.len(),
+        "collecting native libs from builder environment"
+    );
+
+    let mut queue = VecDeque::new();
+    for entry in WalkDir::new(dist_path) {
+        let entry = entry?;
+        if entry.file_type().is_file() && is_shared_lib(entry.path()) {
+            queue.push_back(entry.path().to_path_buf());
+        }
+    }
+    debug!(
+        dist = %dist_path.display(),
+        seeds = queue.len(),
+        "scanning built wheel for native dependencies"
+    );
+
+    let mut seen = HashSet::new();
+    let mut deps_to_copy: HashSet<PathBuf> = HashSet::new();
+
+    while let Some(target) = queue.pop_front() {
+        if !seen.insert(target.clone()) {
+            continue;
+        }
+        let deps = ldd_dependencies(&target, env_root)?;
+        for dep in deps {
+            let resolved = if dep.starts_with(env_root) {
+                Some(dep)
+            } else {
+                dep.file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| env_lib_index.get(name).cloned())
+            };
+            let Some(dep_path) = resolved else {
+                continue;
+            };
+            if deps_to_copy.insert(dep_path.clone()) {
+                queue.push_back(dep_path);
+            }
+        }
+    }
+
+    debug!(
+        deps = deps_to_copy.len(),
+        "copying resolved native libraries into wheel dist"
+    );
+    for dep in deps_to_copy {
+        let rel = dep.strip_prefix(env_root).unwrap_or(dep.as_path());
+        let dest = dist_path.join(rel);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&dep, &dest).with_context(|| {
+            format!(
+                "failed to copy native lib {} to {}",
+                dep.display(),
+                dest.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn is_shared_lib(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.contains(".so") || lower.ends_with(".dylib") || lower.ends_with(".dll")
+        })
+        .unwrap_or(false)
+}
+
+fn ldd_dependencies(target: &Path, env_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut cmd = Command::new("ldd");
+    cmd.arg(target);
+    let mut search_paths = Vec::new();
+    for dir in ["lib", "lib64"] {
+        let candidate = env_root.join(dir);
+        if candidate.exists() {
+            search_paths.push(candidate);
+        }
+    }
+    if !search_paths.is_empty() {
+        let joined = search_paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(":");
+        cmd.env("LD_LIBRARY_PATH", joined);
+    }
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to run ldd on {}", target.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("ldd failed for {}: {stderr}", target.display());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut deps = Vec::new();
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut path_candidate: Option<PathBuf> = None;
+        if let Some((_, rest)) = trimmed.split_once("=>") {
+            let value = rest.trim();
+            if value.starts_with("not found") || value == "not found" {
+                continue;
+            }
+            let path_part = value.split_whitespace().next().unwrap_or("");
+            if path_part.is_empty() || path_part == "not" {
+                continue;
+            }
+            if path_part.starts_with('/') {
+                path_candidate = Some(PathBuf::from(path_part));
+            }
+        } else if let Some(first) = trimmed.split_whitespace().next() {
+            if first.starts_with('/') {
+                path_candidate = Some(PathBuf::from(first));
+            }
+        }
+        if let Some(path) = path_candidate {
+            deps.push(path);
+        }
+    }
+    Ok(deps)
+}
+
+impl Default for BuildMethod {
+    fn default() -> Self {
+        Self::PipWheel
+    }
 }
 
 /// Build or retrieve an sdist-derived wheel from the cache.
@@ -42,7 +209,7 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
     if let Some(id) = &precomputed_id {
         let meta_path = cache_root.join("sdist-build").join(id).join("meta.json");
         if let Some(built) = load_cached_build(&meta_path)? {
-            if built.cached_path.exists() {
+            if cache_hit_matches(request, &built)? && built.cached_path.exists() {
                 return Ok(built);
             }
         }
@@ -85,8 +252,11 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
     let meta_path = build_root.join("meta.json");
 
     if let Some(built) = load_cached_build(&meta_path)? {
-        if built.cached_path.exists() {
+        if cache_hit_matches(request, &built)? && built.cached_path.exists() {
             return Ok(built);
+        }
+        if built.builder_id != request.builder_id && build_root.exists() {
+            let _ = fs::remove_dir_all(&build_root);
         }
     }
 
@@ -109,7 +279,18 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
     extract_sdist(request.python_path, &sdist_path, &src_dir)?;
     let project_dir = discover_project_dir(&src_dir)?;
     ensure_build_bootstrap(request.python_path)?;
-    let build_method = run_python_build(request.python_path, &project_dir, &dist_dir)?;
+
+    let (build_method, build_python_path, builder_env_root) =
+        if needs_builder(request.normalized_name) {
+            let (method, py, root) = build_with_micromamba(request, &project_dir, &dist_dir)?;
+            (method, py, Some(root))
+        } else {
+            (
+                run_python_build(request.python_path, &project_dir, &dist_dir)?,
+                PathBuf::from(request.python_path),
+                None,
+            )
+        };
 
     let built_wheel_path = find_wheel(&dist_dir)?;
     let filename = built_wheel_path
@@ -134,12 +315,22 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
     let sha256 = compute_sha256(&dest)?;
     let size = fs::metadata(&dest)?.len();
     let dist_path = ensure_wheel_dist(&dest, &sha256)?;
+    if let Some(env_root) = &builder_env_root {
+        copy_native_libs(env_root, &dist_path)?;
+    }
     let runtime_abi = format!("{python_tag}-{abi_tag}-{platform_tag}");
-    let build_options_hash = compute_build_options_hash(request.python_path, build_method)?;
+    let mut build_options_hash = compute_build_options_hash(
+        build_python_path.to_str().unwrap_or(request.python_path),
+        build_method,
+    )?;
+    if builder_env_root.is_some() {
+        build_options_hash = format!("{build_options_hash}-native-libs");
+    }
     let archive = super::cas::archive_dir_canonical(&dist_path)?;
     let pkg_header = PkgBuildHeader {
         source_oid,
         runtime_abi,
+        builder_id: request.builder_id.to_string(),
         build_options_hash: build_options_hash.clone(),
     };
     let pkg_key = pkg_build_lookup_key(&pkg_header);
@@ -161,6 +352,8 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
         abi_tag,
         platform_tag,
         build_options_hash,
+        build_method,
+        builder_id: request.builder_id.to_string(),
     };
     persist_metadata(&meta_path, &built)?;
 
@@ -172,11 +365,44 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
 
 fn build_identifier(request: &SdistRequest<'_>, sha256: &str) -> String {
     let short_len = sha256.len().min(16);
+    let builder = sanitize_builder_id(request.builder_id);
     format!(
-        "{}-{}-{}",
+        "{}-{}-{}-{}",
         request.normalized_name,
         request.version,
-        &sha256[..short_len]
+        &sha256[..short_len],
+        builder
+    )
+}
+
+fn sanitize_builder_id(builder_id: &str) -> String {
+    builder_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn cache_hit_matches(request: &SdistRequest<'_>, built: &BuiltWheel) -> Result<bool> {
+    if !built.builder_id.is_empty() && built.builder_id != request.builder_id {
+        return Ok(false);
+    }
+    if built.build_options_hash.is_empty() {
+        return Ok(false);
+    }
+    let expected = compute_build_options_hash(request.python_path, built.build_method)?;
+    Ok(built.build_options_hash == expected)
+}
+
+fn needs_builder(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "gdal" | "osgeo" | "rasterio" | "fiona" | "pyproj" | "shapely"
     )
 }
 
@@ -316,6 +542,169 @@ fn pip_wheel_fallback(python: &str, project_dir: &Path, out_dir: &Path) -> Resul
     }
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     bail!("{stderr}");
+}
+
+fn build_with_micromamba(
+    request: &SdistRequest<'_>,
+    project_dir: &Path,
+    out_dir: &Path,
+) -> Result<(BuildMethod, PathBuf, PathBuf)> {
+    let builder_root = request
+        .builder_root
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir());
+    fs::create_dir_all(&builder_root)?;
+    let micromamba = ensure_micromamba(&builder_root)?;
+    let py_version = python_version(request.python_path)?;
+    let env_root = builder_root
+        .join("envs")
+        .join(sanitize_builder_id(request.builder_id))
+        .join(format!("py{py_version}"));
+    let conda_meta = env_root.join("conda-meta");
+    let env_python = env_root.join("bin").join("python");
+    let needs_create = !conda_meta.exists() || !env_python.exists();
+    if env_root.exists() && needs_create {
+        debug!(
+            env_root = %env_root.display(),
+            "builder env path exists but is incomplete; recreating"
+        );
+        let _ = fs::remove_dir_all(&env_root);
+    }
+    debug!(
+        env_root = %env_root.display(),
+        builder_id = request.builder_id,
+        py_version,
+        "provisioning micromamba builder environment",
+    );
+    if needs_create {
+        let create_out = Command::new(&micromamba)
+            .arg("create")
+            .arg("-y")
+            .arg("-p")
+            .arg(&env_root)
+            .arg(format!("python=={py_version}"))
+            .arg("gdal")
+            .arg("proj")
+            .arg("geos")
+            .arg("pysocks")
+            .output()
+            .context("failed to spawn micromamba to provision builder env")?;
+        if !create_out.status.success() {
+            let stderr = String::from_utf8_lossy(&create_out.stderr);
+            bail!("failed to provision builder environment with micromamba: {stderr}");
+        }
+    }
+    let builder_python = env_root.join("bin").join("python");
+    if !builder_python.exists() {
+        bail!(
+            "builder environment missing python at {}",
+            builder_python.display()
+        );
+    }
+    let mut cmd = Command::new(&builder_python);
+    cmd.arg("-m")
+        .arg("pip")
+        .arg("wheel")
+        .arg("--no-deps")
+        .arg("--wheel-dir")
+        .arg(out_dir)
+        .arg(project_dir);
+    cmd.env("GDAL_CONFIG", env_root.join("bin").join("gdal-config"));
+    cmd.env("PROJ_LIB", env_root.join("share").join("proj"));
+    cmd.env(
+        "PATH",
+        format!(
+            "{}/bin:{}",
+            env_root.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    for key in [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        cmd.env_remove(key);
+    }
+    cmd.current_dir(project_dir);
+    apply_python_env(&mut cmd);
+    let output = cmd.output().context("failed to run builder pip wheel")?;
+    if output.status.success() {
+        return Ok((BuildMethod::BuilderWheel, builder_python, env_root));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    bail!(
+        "builder pip wheel failed (code {}):\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        stdout,
+        stderr
+    );
+}
+
+fn ensure_micromamba(root: &Path) -> Result<PathBuf> {
+    let bin = root.join("micromamba");
+    if bin.exists() {
+        return Ok(bin);
+    }
+    let url = "https://micromamba.snakepit.net/api/micromamba/linux-64/latest";
+    let response = reqwest::blocking::get(url).context("failed to download micromamba")?;
+    let status = response.status();
+    let bytes = response
+        .error_for_status()
+        .map_err(|err| anyhow!("micromamba download failed: {err} (status {status})"))?
+        .bytes()
+        .context("failed to read micromamba download")?;
+    let mut decoder = BzDecoder::new(bytes.as_ref());
+    let mut extracted = Vec::new();
+    decoder
+        .read_to_end(&mut extracted)
+        .context("failed to decompress micromamba")?;
+    let mut archive = Archive::new(std::io::Cursor::new(extracted));
+    let mut extracted_bin = Vec::new();
+    for entry in archive
+        .entries()
+        .context("failed to read micromamba archive")?
+    {
+        let mut entry = entry.context("failed to read micromamba entry")?;
+        let path = entry
+            .path()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_owned()));
+        if let Some(name) = path {
+            if name == "micromamba" {
+                entry
+                    .read_to_end(&mut extracted_bin)
+                    .context("failed to extract micromamba binary")?;
+                break;
+            }
+        }
+    }
+    if extracted_bin.is_empty() {
+        bail!("micromamba archive did not contain binary");
+    }
+    fs::write(&bin, &extracted_bin).context("failed to write micromamba binary")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&bin, fs::Permissions::from_mode(0o755));
+    }
+    Ok(bin)
+}
+
+fn python_version(python: &str) -> Result<String> {
+    let output = Command::new(python)
+        .arg("-c")
+        .arg("import sys; print(f\"{sys.version_info[0]}.{sys.version_info[1]}\")")
+        .output()
+        .context("failed to query python version")?;
+    if !output.status.success() {
+        bail!("failed to query python version");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn ensure_build_bootstrap(python: &str) -> Result<()> {

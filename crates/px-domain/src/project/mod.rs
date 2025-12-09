@@ -6,10 +6,11 @@ pub mod state;
 
 pub use init::{infer_package_name, sanitize_package_candidate, ProjectInitializer};
 pub use manifest::{
-    collect_pyproject_packages, collect_requirement_packages, collect_setup_cfg_packages,
-    read_requirements_file, read_setup_cfg_requires, sandbox_config_from_doc,
-    sandbox_config_from_manifest, DependencyGroupSource, ManifestAddReport, ManifestEditor,
-    ManifestRemoveReport, OnboardPackagePlan, PxOptions, SandboxConfig,
+    canonicalize_package_name, canonicalize_spec, collect_pyproject_packages,
+    collect_requirement_packages, collect_setup_cfg_packages, read_requirements_file,
+    read_setup_cfg_requires, sandbox_config_from_doc, sandbox_config_from_manifest,
+    DependencyGroupSource, ManifestAddReport, ManifestEditor, ManifestRemoveReport,
+    OnboardPackagePlan, PxOptions, SandboxConfig,
 };
 pub use onboard::{
     prepare_pyproject_plan, resolve_onboard_path, BackupManager, BackupSummary, PyprojectPlan,

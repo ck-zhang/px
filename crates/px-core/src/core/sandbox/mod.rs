@@ -391,6 +391,7 @@ fn known_capabilities() -> BTreeSet<String> {
         "ldap",
         "ffi",
         "curl",
+        "gdal",
     ]
     .into_iter()
     .map(str::to_string)
@@ -415,6 +416,11 @@ fn capability_package_map() -> &'static [(&'static str, &'static [&'static str])
         ("pycparser", &["ffi"]),
         ("httpx", &["curl"]),
         ("requests", &["curl"]),
+        ("gdal", &["gdal"]),
+        ("rasterio", &["gdal"]),
+        ("fiona", &["gdal"]),
+        ("pyproj", &["gdal"]),
+        ("shapely", &["gdal"]),
     ]
 }
 
@@ -431,6 +437,9 @@ fn library_capability_map() -> &'static [(&'static str, &'static str)] {
         ("libffi", "ffi"),
         ("libcurl", "curl"),
         ("libssl", "curl"),
+        ("libgdal", "gdal"),
+        ("libproj", "gdal"),
+        ("libgeos", "gdal"),
     ]
 }
 
@@ -756,6 +765,35 @@ mod tests {
         assert!(
             resolved.definition.capabilities.contains("postgres"),
             "libpq should infer postgres capability"
+        );
+    }
+
+    #[test]
+    fn lock_inference_detects_gdal_stack() {
+        let config = SandboxConfig::default();
+        let lock = lock_with_deps(vec!["gdal==3.8.0".into()]);
+        let resolved = resolve_sandbox_definition(&config, Some(&lock), None, "profile", None)
+            .expect("resolution");
+        assert!(
+            resolved.definition.capabilities.contains("gdal"),
+            "gdal package should infer gdal capability"
+        );
+    }
+
+    #[test]
+    fn site_inference_detects_gdal_library() {
+        let temp = tempdir().expect("tempdir");
+        let site = temp.path().join("site");
+        fs::create_dir_all(&site).expect("create site dir");
+        fs::write(site.join("libgdal.so.34"), b"").expect("write sentinel");
+        let config = SandboxConfig::default();
+        let lock = lock_with_deps(vec![]);
+        let resolved =
+            resolve_sandbox_definition(&config, Some(&lock), None, "profile", Some(site.as_path()))
+                .expect("resolution");
+        assert!(
+            resolved.definition.capabilities.contains("gdal"),
+            "libgdal should infer gdal capability"
         );
     }
 

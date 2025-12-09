@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
 use tempfile::tempdir;
 
 #[test]
@@ -194,6 +195,49 @@ fn python_environment_markers_create_pyvenv_and_shims() -> Result<()> {
         env_python.starts_with(site_dir.join("bin")),
         "primary python should live under the site bin dir"
     );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn python_environment_markers_apply_manifest_env_vars() -> Result<()> {
+    let temp = tempdir()?;
+    let site_dir = temp.path().join("env").join("site");
+    fs::create_dir_all(site_dir.join("bin"))?;
+
+    let manifest = json!({
+        "profile_oid": "demo-profile",
+        "runtime_oid": "demo-runtime",
+        "packages": [],
+        "sys_path_order": [],
+        "env_vars": { "LD_LIBRARY_PATH": "/tmp/from_manifest" }
+    });
+    fs::write(
+        site_dir.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest)?,
+    )?;
+
+    let runtime_dir = temp.path().join("runtime").join("bin");
+    fs::create_dir_all(&runtime_dir)?;
+    let runtime_python = runtime_dir.join("python3.11");
+    fs::write(
+        &runtime_python,
+        "#!/usr/bin/env bash\nprintf \"%s\" \"$LD_LIBRARY_PATH\"\n",
+    )?;
+    fs::set_permissions(&runtime_python, fs::Permissions::from_mode(0o755))?;
+
+    let runtime = RuntimeMetadata {
+        path: runtime_python.display().to_string(),
+        version: "3.11.4".into(),
+        platform: "linux_x86_64".into(),
+    };
+    let effects = SystemEffects::new();
+    let env_python =
+        write_python_environment_markers(&site_dir, &runtime, &runtime_python, effects.fs())?;
+    let output = Command::new(&env_python).output()?;
+    assert!(output.status.success(), "shim should execute");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "/tmp/from_manifest");
     Ok(())
 }
 

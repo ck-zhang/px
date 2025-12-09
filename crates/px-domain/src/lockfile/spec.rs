@@ -3,6 +3,7 @@ use std::io::Read;
 use std::path::Path;
 use std::str::FromStr;
 
+use crate::project::manifest::canonicalize_package_name;
 use anyhow::Result;
 use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement};
 use sha2::{Digest, Sha256};
@@ -71,11 +72,8 @@ pub(crate) fn dependency_name(spec: &str) -> String {
         }
     }
     let head = &trimmed[..end];
-    head.split('[')
-        .next()
-        .unwrap_or(head)
-        .to_ascii_lowercase()
-        .replace(['_', '.'], "-")
+    let base = head.split('[').next().unwrap_or(head);
+    canonicalize_package_name(base)
 }
 
 pub(crate) fn strip_wrapping_quotes(input: &str) -> &str {

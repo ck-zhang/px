@@ -227,7 +227,13 @@ pub struct SourceHeader {
 pub struct PkgBuildHeader {
     pub source_oid: String,
     pub runtime_abi: String,
+    #[serde(default = "default_builder_id")]
+    pub builder_id: String,
     pub build_options_hash: String,
+}
+
+fn default_builder_id() -> String {
+    "legacy-builder-v0".to_string()
 }
 
 /// Canonical runtime metadata baked into the payload header.
@@ -2790,8 +2796,8 @@ pub fn source_lookup_key(header: &SourceHeader) -> String {
 #[must_use]
 pub fn pkg_build_lookup_key(header: &PkgBuildHeader) -> String {
     format!(
-        "{}|{}|{}",
-        header.source_oid, header.runtime_abi, header.build_options_hash
+        "{}|{}|{}|{}",
+        header.source_oid, header.runtime_abi, header.builder_id, header.build_options_hash
     )
 }
 
@@ -3653,6 +3659,7 @@ mod tests {
             header: PkgBuildHeader {
                 source_oid: "src".into(),
                 runtime_abi: "abi".into(),
+                builder_id: "builder".into(),
                 build_options_hash: "opts".into(),
             },
             archive: Cow::Owned(archive_a),
@@ -3661,6 +3668,7 @@ mod tests {
             header: PkgBuildHeader {
                 source_oid: "src".into(),
                 runtime_abi: "abi".into(),
+                builder_id: "builder".into(),
                 build_options_hash: "opts".into(),
             },
             archive: Cow::Owned(archive_b),

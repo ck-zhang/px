@@ -26,6 +26,7 @@ zip.workspace = true
 time.workspace = true
 oci-distribution = "0.10"
 which = "6"
+bzip2 = "0.4"
 tempfile.workspace = true
 base64 = "0.22"
 uv-build-backend.workspace = true

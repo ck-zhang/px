@@ -230,6 +230,15 @@ pub fn verify_locked_artifacts(lock: &LockSnapshot) -> Vec<String> {
         let Some(artifact) = &dep.artifact else {
             continue;
         };
+        if artifact
+            .build_options_hash
+            .to_ascii_lowercase()
+            .contains("native-libs")
+        {
+            // Native-builder artifacts are rebuilt on demand, so we don't treat
+            // cache drift as a hard failure during verification.
+            continue;
+        }
         if artifact.cached_path.is_empty() {
             issues.push(format!(
                 "dependency `{}` missing cached_path in lock",

@@ -80,11 +80,11 @@ impl ManifestEditor {
         let mut added = Vec::new();
         let mut updated = Vec::new();
         for spec in specs {
-            let spec = spec.trim();
+            let spec = canonicalize_spec(spec);
             if spec.is_empty() {
                 continue;
             }
-            match upsert_dependency(&mut deps, spec) {
+            match upsert_dependency(&mut deps, &spec) {
                 InsertOutcome::Added(name) => added.push(name),
                 InsertOutcome::Updated(name) => updated.push(name),
                 InsertOutcome::Unchanged => {}
@@ -521,6 +521,33 @@ pub(crate) fn sort_and_dedupe(specs: &mut Vec<String>) {
     specs.dedup();
 }
 
+pub fn canonicalize_spec(spec: &str) -> String {
+    let trimmed = strip_wrapping_quotes(spec.trim());
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let mut end = trimmed.len();
+    for (idx, ch) in trimmed.char_indices() {
+        if ch.is_ascii_whitespace() || matches!(ch, '<' | '>' | '=' | '!' | '~' | ';') {
+            end = idx;
+            break;
+        }
+    }
+    let head = &trimmed[..end];
+    let base = head.split('[').next().unwrap_or(head);
+    let suffix = &trimmed[base.len()..];
+    let canonical = canonicalize_package_name(base);
+    format!("{canonical}{suffix}")
+}
+
+pub fn canonicalize_package_name(name: &str) -> String {
+    let normalized = name.to_ascii_lowercase().replace(['_', '.'], "-");
+    match normalized.as_str() {
+        "osgeo" => "gdal".to_string(),
+        _ => normalized,
+    }
+}
+
 pub(crate) fn dependency_name(spec: &str) -> String {
     let trimmed = strip_wrapping_quotes(spec.trim());
     let mut end = trimmed.len();
@@ -531,11 +558,8 @@ pub(crate) fn dependency_name(spec: &str) -> String {
         }
     }
     let head = &trimmed[..end];
-    head.split('[')
-        .next()
-        .unwrap_or(head)
-        .to_ascii_lowercase()
-        .replace(['_', '.'], "-")
+    let base = head.split('[').next().unwrap_or(head);
+    canonicalize_package_name(base)
 }
 
 pub(crate) fn strip_wrapping_quotes(input: &str) -> &str {
@@ -1840,5 +1864,17 @@ allow-direct-references = true
         let changed = ensure_tooling_requirements(&mut doc);
         assert!(!changed, "no-op when tomli-w already present");
         Ok(())
+    }
+
+    #[test]
+    fn dependency_name_applies_aliases() {
+        assert_eq!(dependency_name("osgeo"), "gdal");
+        assert_eq!(dependency_name("OSGEO>=1.0"), "gdal");
+    }
+
+    #[test]
+    fn canonicalize_spec_rewrites_alias() {
+        assert_eq!(canonicalize_spec("osgeo>=1.0"), "gdal>=1.0");
+        assert_eq!(canonicalize_spec("gdal==3.12.0"), "gdal==3.12.0");
     }
 }

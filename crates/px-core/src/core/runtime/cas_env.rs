@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use tar::Archive;
 use tempfile::TempDir;
 
+use crate::core::runtime::builder::builder_identity_for_runtime;
 use crate::core::runtime::facade::{site_packages_dir, RuntimeMetadata, SITE_CUSTOMIZE};
 use crate::store::cas::{
     archive_dir_canonical, archive_selected, global_store, make_read_only_recursive,
@@ -24,7 +25,9 @@ use crate::store::cas::{
     OwnerType, PkgBuildHeader, ProfileHeader, ProfilePackage, RuntimeHeader, SourceHeader,
     MATERIALIZED_PKG_BUILDS_DIR, MATERIALIZED_RUNTIMES_DIR,
 };
-use crate::store::{cache_wheel, ensure_wheel_dist, wheel_path, ArtifactRequest};
+use crate::store::{
+    cache_wheel, ensure_sdist_build, ensure_wheel_dist, wheel_path, ArtifactRequest, SdistRequest,
+};
 use crate::{CommandContext, ManifestSnapshot};
 use tracing::debug;
 
@@ -116,9 +119,12 @@ pub(crate) fn ensure_profile_env(
     let _ = store.add_ref(&runtime_owner, &runtime_obj.oid);
 
     let lookup_versions = dependency_versions(lock)?;
-    let runtime_abi = runtime_abi(runtime)?;
+    let builder = builder_identity_for_runtime(runtime)?;
+    let runtime_abi = builder.runtime_abi.clone();
+    let builder_id = builder.builder_id.clone();
     let default_build_options_hash = default_build_options_hash(runtime);
-    let env_vars = profile_env_vars(snapshot)?;
+    let mut env_vars = profile_env_vars(snapshot)?;
+    let mut native_lib_paths = Vec::new();
 
     let mut packages = Vec::new();
     let mut sys_path_order = Vec::new();
@@ -131,19 +137,45 @@ pub(crate) fn ensure_profile_env(
             .get(&dep.name.to_ascii_lowercase())
             .cloned()
             .unwrap_or_else(|| inferred_version_from_filename(&artifact.filename));
-        let source_header = SourceHeader {
+        let mut source_header = SourceHeader {
             name: dep.name.clone(),
             version: version.clone(),
             filename: artifact.filename.clone(),
             index_url: artifact.url.clone(),
             sha256: artifact.sha256.clone(),
         };
-        let wheel_path =
-            if !artifact.cached_path.is_empty() && Path::new(&artifact.cached_path).exists() {
-                PathBuf::from(&artifact.cached_path)
-            } else {
-                ensure_cached_wheel(cache_root, &source_header, artifact)?
-            };
+        let builder_needed = artifact.build_options_hash.contains("native-libs");
+        let mut build_options_hash = if artifact.build_options_hash.is_empty() {
+            default_build_options_hash.clone()
+        } else {
+            artifact.build_options_hash.clone()
+        };
+        let mut builder_dist: Option<PathBuf> = None;
+        let wheel_path = if builder_needed {
+            let built = ensure_sdist_build(
+                cache_root,
+                &SdistRequest {
+                    normalized_name: &dep.name,
+                    version: &version,
+                    filename: &artifact.filename,
+                    url: &artifact.url,
+                    sha256: None,
+                    python_path: &runtime.path,
+                    builder_id: &builder_id,
+                    builder_root: Some(cache_root.to_path_buf()),
+                },
+            )?;
+            build_options_hash = built.build_options_hash.clone();
+            source_header.filename = built.filename.clone();
+            source_header.index_url = built.url.clone();
+            source_header.sha256 = built.sha256.clone();
+            builder_dist = Some(built.dist_path.clone());
+            built.cached_path
+        } else if !artifact.cached_path.is_empty() && Path::new(&artifact.cached_path).exists() {
+            PathBuf::from(&artifact.cached_path)
+        } else {
+            ensure_cached_wheel(cache_root, &source_header, artifact)?
+        };
         let source_key = source_lookup_key(&source_header);
         let source_oid = match store.lookup_key(ObjectKind::Source, &source_key)? {
             Some(oid) => oid,
@@ -158,22 +190,21 @@ pub(crate) fn ensure_profile_env(
                 stored.oid
             }
         };
-
-        let build_options_hash = if artifact.build_options_hash.is_empty() {
-            default_build_options_hash.clone()
-        } else {
-            artifact.build_options_hash.clone()
-        };
         let pkg_header = PkgBuildHeader {
             source_oid,
             runtime_abi: runtime_abi.clone(),
+            builder_id: builder_id.clone(),
             build_options_hash: build_options_hash.clone(),
         };
         let pkg_key = pkg_build_lookup_key(&pkg_header);
         let pkg_oid = match store.lookup_key(ObjectKind::PkgBuild, &pkg_key)? {
             Some(existing) => existing,
             None => {
-                let dist = ensure_wheel_dist(&wheel_path, &artifact.sha256)?;
+                let dist = if let Some(path) = builder_dist.take() {
+                    path
+                } else {
+                    ensure_wheel_dist(&wheel_path, &source_header.sha256)?
+                };
                 let (stage_guard, staging_root) = stage_pkg_build(&dist)?;
                 let archive = archive_dir_canonical(&staging_root)?;
                 drop(stage_guard);
@@ -186,6 +217,20 @@ pub(crate) fn ensure_profile_env(
                 stored.oid
             }
         };
+        for dir in [
+            "lib",
+            "lib64",
+            "site-packages",
+            "site-packages/lib",
+            "site-packages/lib64",
+        ] {
+            let path = store
+                .root()
+                .join(MATERIALIZED_PKG_BUILDS_DIR)
+                .join(&pkg_oid)
+                .join(dir);
+            native_lib_paths.push(path);
+        }
         let pkg = ProfilePackage {
             name: dep.name.clone(),
             version,
@@ -198,6 +243,23 @@ pub(crate) fn ensure_profile_env(
     }
 
     packages.sort_by(|a, b| a.name.cmp(&b.name));
+    if !native_lib_paths.is_empty() {
+        let mut entries = Vec::new();
+        if let Some(existing) = env_vars
+            .get("LD_LIBRARY_PATH")
+            .and_then(|v| v.as_str().map(str::to_string))
+        {
+            entries.push(existing);
+        }
+        native_lib_paths.sort();
+        native_lib_paths.dedup();
+        for path in native_lib_paths {
+            entries.push(path.display().to_string());
+        }
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        let joined = entries.join(&sep.to_string());
+        env_vars.insert("LD_LIBRARY_PATH".to_string(), Value::String(joined));
+    }
     let manifest = ProfileHeader {
         runtime_oid: runtime_obj.oid.clone(),
         packages,
@@ -339,26 +401,6 @@ fn runtime_config_hash(tags: &crate::python_sys::InterpreterTags) -> String {
     });
     let bytes = serde_json::to_vec(&payload).unwrap_or_default();
     hex::encode(Sha256::digest(bytes))
-}
-
-fn runtime_abi(runtime: &RuntimeMetadata) -> Result<String> {
-    let tags = crate::python_sys::detect_interpreter_tags(&runtime.path)?;
-    let py = tags
-        .python
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "py3".to_string());
-    let abi = tags
-        .abi
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "abi3".to_string());
-    let platform = tags
-        .platform
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "any".to_string());
-    Ok(format!("{py}-{abi}-{platform}"))
 }
 
 fn default_build_options_hash(runtime: &RuntimeMetadata) -> String {
@@ -1213,6 +1255,7 @@ mod tests {
             header: PkgBuildHeader {
                 source_oid: "src".into(),
                 runtime_abi: "abi".into(),
+                builder_id: "builder".into(),
                 build_options_hash: "opts".into(),
             },
             archive: Cow::Owned(pkg_archive),
@@ -1351,6 +1394,7 @@ mod tests {
             header: PkgBuildHeader {
                 source_oid: "src".into(),
                 runtime_abi: "abi".into(),
+                builder_id: "builder".into(),
                 build_options_hash: "opts".into(),
             },
             archive: Cow::Owned(pkg_archive),

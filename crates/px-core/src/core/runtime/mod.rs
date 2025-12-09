@@ -1,4 +1,5 @@
 pub(crate) mod artifacts;
+pub(crate) mod builder;
 pub(crate) mod cas_env;
 pub(crate) mod effects;
 pub(crate) mod fmt_plan;
