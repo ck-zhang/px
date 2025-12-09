@@ -137,10 +137,22 @@ pub(crate) fn ensure_profile_env(
             .get(&dep.name.to_ascii_lowercase())
             .cloned()
             .unwrap_or_else(|| inferred_version_from_filename(&artifact.filename));
+        let source_filename = if artifact.filename.ends_with(".whl")
+            && (artifact.url.ends_with(".tar.gz") || artifact.url.ends_with(".zip"))
+        {
+            artifact
+                .url
+                .rsplit('/')
+                .next()
+                .unwrap_or(&artifact.filename)
+                .to_string()
+        } else {
+            artifact.filename.clone()
+        };
         let mut source_header = SourceHeader {
             name: dep.name.clone(),
             version: version.clone(),
-            filename: artifact.filename.clone(),
+            filename: source_filename,
             index_url: artifact.url.clone(),
             sha256: artifact.sha256.clone(),
         };
@@ -152,23 +164,26 @@ pub(crate) fn ensure_profile_env(
         };
         let mut builder_dist: Option<PathBuf> = None;
         let wheel_path = if builder_needed {
+            let sha = if artifact.filename.ends_with(".whl") || source_header.sha256.is_empty() {
+                None
+            } else {
+                Some(source_header.sha256.as_str())
+            };
             let built = ensure_sdist_build(
                 cache_root,
                 &SdistRequest {
                     normalized_name: &dep.name,
                     version: &version,
-                    filename: &artifact.filename,
-                    url: &artifact.url,
-                    sha256: None,
+                    filename: &source_header.filename,
+                    url: &source_header.index_url,
+                    sha256: sha,
                     python_path: &runtime.path,
                     builder_id: &builder_id,
                     builder_root: Some(cache_root.to_path_buf()),
                 },
             )?;
             build_options_hash = built.build_options_hash.clone();
-            source_header.filename = built.filename.clone();
-            source_header.index_url = built.url.clone();
-            source_header.sha256 = built.sha256.clone();
+            source_header.sha256 = built.source_sha256.clone();
             builder_dist = Some(built.dist_path.clone());
             built.cached_path
         } else if !artifact.cached_path.is_empty() && Path::new(&artifact.cached_path).exists() {
@@ -223,6 +238,8 @@ pub(crate) fn ensure_profile_env(
             "site-packages",
             "site-packages/lib",
             "site-packages/lib64",
+            "site-packages/sys-libs",
+            "sys-libs",
         ] {
             let path = store
                 .root()
@@ -603,6 +620,8 @@ fn materialize_profile_env(
         let pkg_site = materialized.join("site-packages");
         if pkg_site.exists() {
             site_entries.insert(pkg.pkg_build_oid.clone(), pkg_site);
+        } else {
+            site_entries.insert(pkg.pkg_build_oid.clone(), materialized.clone());
         }
         let pkg_bin = materialized.join("bin");
         if pkg_bin.exists() {
@@ -924,13 +943,6 @@ pub(crate) fn write_python_shim(
         let rendered = env_var_value(value);
         script.push_str(&format!("export {key}={}\n", shell_escape(&rendered)));
     }
-    script.push_str("if [ -n \"$PX_LD_LIBRARY_PATH_EXTRA\" ]; then\n");
-    script.push_str("  if [ -n \"$LD_LIBRARY_PATH\" ]; then\n");
-    script.push_str("    export LD_LIBRARY_PATH=\"${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$PX_LD_LIBRARY_PATH_EXTRA\"\n");
-    script.push_str("  else\n");
-    script.push_str("    export LD_LIBRARY_PATH=\"$PX_LD_LIBRARY_PATH_EXTRA\"\n");
-    script.push_str("  fi\n");
-    script.push_str("fi\n");
     script.push_str(&format!("exec \"{}\" \"$@\"\n", runtime.display()));
     fs::write(&shim, script)?;
     #[cfg(unix)]

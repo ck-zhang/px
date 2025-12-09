@@ -5,18 +5,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
-use bzip2::read::BzDecoder;
 use hex;
-use reqwest;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tar::Archive;
 use tempfile::NamedTempFile;
 use tracing::debug;
 use walkdir::WalkDir;
 
+use crate::core::runtime::builder::BUILDER_VERSION;
+use crate::core::sandbox::detect_container_backend;
+
 use super::{
-    apply_python_env,
     cas::{
         global_store, pkg_build_lookup_key, source_lookup_key, ObjectKind, ObjectPayload,
         PkgBuildHeader, SourceHeader,
@@ -34,6 +33,9 @@ pub(crate) enum BuildMethod {
     PythonBuild,
     BuilderWheel,
 }
+
+const BUILDER_IMAGE: &str =
+    "docker.io/mambaorg/micromamba@sha256:008e06cd8432eb558faa4738a092f30b38dd8db3137a5dd3fca57374a790825b";
 
 fn copy_native_libs(env_root: &Path, dist_path: &Path) -> Result<()> {
     let mut env_lib_index: HashMap<String, PathBuf> = HashMap::new();
@@ -92,10 +94,14 @@ fn copy_native_libs(env_root: &Path, dist_path: &Path) -> Result<()> {
                 dep.file_name()
                     .and_then(|name| name.to_str())
                     .and_then(|name| env_lib_index.get(name).cloned())
+                    .or_else(|| Some(dep.clone()))
             };
             let Some(dep_path) = resolved else {
                 continue;
             };
+            if should_skip_native_dep(&dep_path) {
+                continue;
+            }
             if deps_to_copy.insert(dep_path.clone()) {
                 queue.push_back(dep_path);
             }
@@ -106,8 +112,21 @@ fn copy_native_libs(env_root: &Path, dist_path: &Path) -> Result<()> {
         deps = deps_to_copy.len(),
         "copying resolved native libraries into wheel dist"
     );
+    let sys_libs_root = dist_path.join("sys-libs");
     for dep in deps_to_copy {
-        let rel = dep.strip_prefix(env_root).unwrap_or(dep.as_path());
+        if should_skip_native_dep(&dep) {
+            continue;
+        }
+        let rel = if dep.starts_with(env_root) {
+            dep.strip_prefix(env_root)
+                .unwrap_or(dep.as_path())
+                .to_path_buf()
+        } else {
+            sys_libs_root.join(
+                dep.file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("unknown")),
+            )
+        };
         let dest = dist_path.join(rel);
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
@@ -129,6 +148,16 @@ fn is_shared_lib(path: &Path) -> bool {
         .map(|name| {
             let lower = name.to_ascii_lowercase();
             lower.contains(".so") || lower.ends_with(".dylib") || lower.ends_with(".dll")
+        })
+        .unwrap_or(false)
+}
+
+fn should_skip_native_dep(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.starts_with("ld-linux") || lower.starts_with("libc.")
         })
         .unwrap_or(false)
 }
@@ -265,32 +294,16 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
     persist_named_tempfile(temp_file, &sdist_path)
         .map_err(|err| anyhow!("unable to persist sdist download: {err}"))?;
 
-    let src_dir = build_root.join("src");
     let dist_dir = build_root.join("dist");
-    if src_dir.exists() {
-        fs::remove_dir_all(&src_dir)?;
-    }
     if dist_dir.exists() {
         fs::remove_dir_all(&dist_dir)?;
     }
-    fs::create_dir_all(&src_dir)?;
     fs::create_dir_all(&dist_dir)?;
 
-    extract_sdist(request.python_path, &sdist_path, &src_dir)?;
-    let project_dir = discover_project_dir(&src_dir)?;
-    ensure_build_bootstrap(request.python_path)?;
-
-    let (build_method, build_python_path, builder_env_root) =
-        if needs_builder(request.normalized_name) {
-            let (method, py, root) = build_with_micromamba(request, &project_dir, &dist_dir)?;
-            (method, py, Some(root))
-        } else {
-            (
-                run_python_build(request.python_path, &project_dir, &dist_dir)?,
-                PathBuf::from(request.python_path),
-                None,
-            )
-        };
+    let builder = build_with_container_builder(request, &sdist_path, &dist_dir, &build_root)?;
+    let build_method = BuildMethod::BuilderWheel;
+    let build_python_path = builder.python_path.clone();
+    let builder_env_root = Some(builder.env_root.clone());
 
     let built_wheel_path = find_wheel(&dist_dir)?;
     let filename = built_wheel_path
@@ -345,6 +358,7 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
         filename,
         url: request.url.to_string(),
         sha256,
+        source_sha256: download_sha,
         size,
         cached_path: dest.clone(),
         dist_path: dist_path.clone(),
@@ -357,7 +371,6 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
     };
     persist_metadata(&meta_path, &built)?;
 
-    let _ = fs::remove_dir_all(&src_dir);
     let _ = fs::remove_dir_all(&dist_dir);
 
     Ok(built)
@@ -399,11 +412,119 @@ fn cache_hit_matches(request: &SdistRequest<'_>, built: &BuiltWheel) -> Result<b
     Ok(built.build_options_hash == expected)
 }
 
-fn needs_builder(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "gdal" | "osgeo" | "rasterio" | "fiona" | "pyproj" | "shapely"
-    )
+#[derive(Debug, Clone)]
+struct BuilderArtifacts {
+    python_path: PathBuf,
+    env_root: PathBuf,
+}
+
+fn build_with_container_builder(
+    request: &SdistRequest<'_>,
+    sdist_path: &Path,
+    dist_dir: &Path,
+    build_root: &Path,
+) -> Result<BuilderArtifacts> {
+    let backend = detect_container_backend().map_err(|err| anyhow!(err.to_string()))?;
+    let builder_root = request
+        .builder_root
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir());
+    let py_version = python_version(request.python_path)?;
+    let builder_home = builder_root
+        .join("builders")
+        .join(sanitize_builder_id(request.builder_id))
+        .join(format!("py{py_version}"));
+    let env_root = builder_home.join("env");
+    let env_python = env_root.join("bin").join("python");
+    fs::create_dir_all(&builder_home)?;
+    fs::create_dir_all(dist_dir)?;
+
+    let builder_mount = fs::canonicalize(&builder_home).unwrap_or(builder_home.clone());
+    let build_mount = fs::canonicalize(build_root).unwrap_or_else(|_| build_root.to_path_buf());
+    let dist_dir_container = "/work/dist";
+    let env_root_container = "/builder/env";
+    let sdist_container = format!(
+        "/work/{}",
+        sdist_path.file_name().unwrap_or_default().to_string_lossy()
+    );
+    let script = format!(
+        r#"set -euo pipefail
+umask 022
+ENV_ROOT="{env_root_container}"
+DIST_DIR="{dist_dir_container}"
+SDIST="{sdist_container}"
+export MAMBA_PKGS_DIRS=/builder/pkgs
+export PIP_CACHE_DIR=/builder/pip-cache
+export PIP_NO_BUILD_ISOLATION=1
+export PROJ_LIB="$ENV_ROOT/share/proj"
+export GDAL_DATA="$ENV_ROOT/share/gdal"
+PY_BIN="$ENV_ROOT/bin/python"
+if [ ! -d "$ENV_ROOT/conda-meta" ]; then
+  rm -rf "$ENV_ROOT"
+fi
+mkdir -p "$MAMBA_PKGS_DIRS" "$DIST_DIR" "$PIP_CACHE_DIR"
+rm -rf "$DIST_DIR"
+mkdir -p "$DIST_DIR"
+if [ ! -x "$PY_BIN" ]; then
+  micromamba create -y -p "$ENV_ROOT" --override-channels -c conda-forge \
+    python=={py_version} pip wheel setuptools pkg-config c-compiler cxx-compiler fortran-compiler \
+    gdal proj geos
+else
+  micromamba install -y -p "$ENV_ROOT" --override-channels -c conda-forge \
+    python=={py_version} pip wheel setuptools pkg-config c-compiler cxx-compiler fortran-compiler \
+    gdal proj geos
+fi
+micromamba run -p "$ENV_ROOT" python -m pip install --upgrade pip build wheel
+micromamba run -p "$ENV_ROOT" python -m pip wheel --no-deps --wheel-dir "$DIST_DIR" "$SDIST"
+"#,
+        dist_dir_container = dist_dir_container,
+        sdist_container = sdist_container,
+        env_root_container = env_root_container,
+        py_version = py_version
+    );
+
+    let mut cmd = Command::new(&backend.program);
+    cmd.arg("run")
+        .arg("--rm")
+        .arg("--user")
+        .arg("0:0")
+        .arg("--workdir")
+        .arg("/work")
+        .arg("--volume")
+        .arg(format!("{}:/work:rw,Z", build_mount.display()))
+        .arg("--volume")
+        .arg(format!("{}:/builder:rw,Z", builder_mount.display()));
+    for key in [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        cmd.arg("--env").arg(format!("{key}="));
+    }
+    cmd.arg("--env").arg("MAMBA_PKGS_DIRS=/builder/pkgs");
+    cmd.arg("--env").arg("PIP_CACHE_DIR=/builder/pip-cache");
+    cmd.arg(BUILDER_IMAGE).arg("bash").arg("-c").arg(script);
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to run builder container {BUILDER_IMAGE}"))?;
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "builder container failed (code {}):\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            stdout,
+            stderr
+        );
+    }
+
+    Ok(BuilderArtifacts {
+        python_path: env_python,
+        env_root,
+    })
 }
 
 fn download_sdist(request: &SdistRequest<'_>) -> Result<(NamedTempFile, String)> {
@@ -480,221 +601,6 @@ fn is_cross_device(err: &io::Error) -> bool {
     matches!(err.raw_os_error(), Some(18))
 }
 
-fn extract_sdist(python: &str, sdist: &Path, dest: &Path) -> Result<()> {
-    let status = Command::new(python)
-        .arg("-m")
-        .arg("tarfile")
-        .arg("-e")
-        .arg(sdist)
-        .arg(dest)
-        .status()
-        .with_context(|| format!("failed to unpack {}", sdist.display()))?;
-    if !status.success() {
-        bail!("tarfile failed to unpack {}", sdist.display());
-    }
-    Ok(())
-}
-
-fn run_python_build(python: &str, project_dir: &Path, out_dir: &Path) -> Result<BuildMethod> {
-    match pip_wheel_fallback(python, project_dir, out_dir) {
-        Ok(method) => Ok(method),
-        Err(pip_err) => {
-            let mut cmd = Command::new(python);
-            cmd.arg("-m")
-                .arg("build")
-                .arg("--wheel")
-                .arg("--outdir")
-                .arg(out_dir)
-                .arg(project_dir);
-            apply_python_env(&mut cmd);
-            cmd.env("PX_BUILD_FROM_SDIST", "1");
-            let output = cmd.output().with_context(|| {
-                format!("failed to run python -m build in {}", project_dir.display())
-            })?;
-            if output.status.success() {
-                Ok(BuildMethod::PythonBuild)
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                bail!("python -m pip wheel failed: {pip_err}\npython -m build failed: {stderr}")
-            }
-        }
-    }
-}
-
-fn pip_wheel_fallback(python: &str, project_dir: &Path, out_dir: &Path) -> Result<BuildMethod> {
-    let mut cmd = Command::new(python);
-    cmd.arg("-m")
-        .arg("pip")
-        .arg("wheel")
-        .arg("--no-deps")
-        .arg("--wheel-dir")
-        .arg(out_dir)
-        .arg(project_dir);
-    apply_python_env(&mut cmd);
-    let output = cmd.output().with_context(|| {
-        format!(
-            "failed to run python -m pip wheel in {}",
-            project_dir.display()
-        )
-    })?;
-    if output.status.success() {
-        return Ok(BuildMethod::PipWheel);
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    bail!("{stderr}");
-}
-
-fn build_with_micromamba(
-    request: &SdistRequest<'_>,
-    project_dir: &Path,
-    out_dir: &Path,
-) -> Result<(BuildMethod, PathBuf, PathBuf)> {
-    let builder_root = request
-        .builder_root
-        .clone()
-        .unwrap_or_else(|| std::env::temp_dir());
-    fs::create_dir_all(&builder_root)?;
-    let micromamba = ensure_micromamba(&builder_root)?;
-    let py_version = python_version(request.python_path)?;
-    let env_root = builder_root
-        .join("envs")
-        .join(sanitize_builder_id(request.builder_id))
-        .join(format!("py{py_version}"));
-    let conda_meta = env_root.join("conda-meta");
-    let env_python = env_root.join("bin").join("python");
-    let needs_create = !conda_meta.exists() || !env_python.exists();
-    if env_root.exists() && needs_create {
-        debug!(
-            env_root = %env_root.display(),
-            "builder env path exists but is incomplete; recreating"
-        );
-        let _ = fs::remove_dir_all(&env_root);
-    }
-    debug!(
-        env_root = %env_root.display(),
-        builder_id = request.builder_id,
-        py_version,
-        "provisioning micromamba builder environment",
-    );
-    if needs_create {
-        let create_out = Command::new(&micromamba)
-            .arg("create")
-            .arg("-y")
-            .arg("-p")
-            .arg(&env_root)
-            .arg(format!("python=={py_version}"))
-            .arg("gdal")
-            .arg("proj")
-            .arg("geos")
-            .arg("pysocks")
-            .output()
-            .context("failed to spawn micromamba to provision builder env")?;
-        if !create_out.status.success() {
-            let stderr = String::from_utf8_lossy(&create_out.stderr);
-            bail!("failed to provision builder environment with micromamba: {stderr}");
-        }
-    }
-    let builder_python = env_root.join("bin").join("python");
-    if !builder_python.exists() {
-        bail!(
-            "builder environment missing python at {}",
-            builder_python.display()
-        );
-    }
-    let mut cmd = Command::new(&builder_python);
-    cmd.arg("-m")
-        .arg("pip")
-        .arg("wheel")
-        .arg("--no-deps")
-        .arg("--wheel-dir")
-        .arg(out_dir)
-        .arg(project_dir);
-    cmd.env("GDAL_CONFIG", env_root.join("bin").join("gdal-config"));
-    cmd.env("PROJ_LIB", env_root.join("share").join("proj"));
-    cmd.env(
-        "PATH",
-        format!(
-            "{}/bin:{}",
-            env_root.display(),
-            std::env::var("PATH").unwrap_or_default()
-        ),
-    );
-    for key in [
-        "HTTP_PROXY",
-        "http_proxy",
-        "HTTPS_PROXY",
-        "https_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-    ] {
-        cmd.env_remove(key);
-    }
-    cmd.current_dir(project_dir);
-    apply_python_env(&mut cmd);
-    let output = cmd.output().context("failed to run builder pip wheel")?;
-    if output.status.success() {
-        return Ok((BuildMethod::BuilderWheel, builder_python, env_root));
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    bail!(
-        "builder pip wheel failed (code {}):\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        stdout,
-        stderr
-    );
-}
-
-fn ensure_micromamba(root: &Path) -> Result<PathBuf> {
-    let bin = root.join("micromamba");
-    if bin.exists() {
-        return Ok(bin);
-    }
-    let url = "https://micromamba.snakepit.net/api/micromamba/linux-64/latest";
-    let response = reqwest::blocking::get(url).context("failed to download micromamba")?;
-    let status = response.status();
-    let bytes = response
-        .error_for_status()
-        .map_err(|err| anyhow!("micromamba download failed: {err} (status {status})"))?
-        .bytes()
-        .context("failed to read micromamba download")?;
-    let mut decoder = BzDecoder::new(bytes.as_ref());
-    let mut extracted = Vec::new();
-    decoder
-        .read_to_end(&mut extracted)
-        .context("failed to decompress micromamba")?;
-    let mut archive = Archive::new(std::io::Cursor::new(extracted));
-    let mut extracted_bin = Vec::new();
-    for entry in archive
-        .entries()
-        .context("failed to read micromamba archive")?
-    {
-        let mut entry = entry.context("failed to read micromamba entry")?;
-        let path = entry
-            .path()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_owned()));
-        if let Some(name) = path {
-            if name == "micromamba" {
-                entry
-                    .read_to_end(&mut extracted_bin)
-                    .context("failed to extract micromamba binary")?;
-                break;
-            }
-        }
-    }
-    if extracted_bin.is_empty() {
-        bail!("micromamba archive did not contain binary");
-    }
-    fs::write(&bin, &extracted_bin).context("failed to write micromamba binary")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&bin, fs::Permissions::from_mode(0o755));
-    }
-    Ok(bin)
-}
-
 fn python_version(python: &str) -> Result<String> {
     let output = Command::new(python)
         .arg("-c")
@@ -707,38 +613,7 @@ fn python_version(python: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn ensure_build_bootstrap(python: &str) -> Result<()> {
-    let mut cmd = Command::new(python);
-    cmd.arg("-m")
-        .arg("pip")
-        .arg("install")
-        .arg("--upgrade")
-        .arg("--quiet")
-        .arg("pip")
-        .arg("build")
-        .arg("wheel")
-        .arg("pysocks");
-    apply_python_env(&mut cmd);
-    for key in [
-        "HTTP_PROXY",
-        "http_proxy",
-        "HTTPS_PROXY",
-        "https_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-    ] {
-        cmd.env_remove(key);
-    }
-    let output = cmd
-        .output()
-        .context("failed to bootstrap build tools (pip/build/wheel/pysocks)")?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    bail!("failed to bootstrap build tools: {stderr}");
-}
-
+#[cfg(test)]
 fn discover_project_dir(root: &Path) -> Result<PathBuf> {
     if is_project_dir(root) {
         return Ok(root.to_path_buf());
@@ -755,6 +630,7 @@ fn discover_project_dir(root: &Path) -> Result<PathBuf> {
     Err(anyhow!("unable to find project dir in {}", root.display()))
 }
 
+#[cfg(test)]
 fn is_project_dir(path: &Path) -> bool {
     path.join("pyproject.toml").exists()
         || path.join("setup.py").exists()
@@ -786,10 +662,16 @@ pub(crate) fn compute_build_options_hash(python_path: &str, method: BuildMethod)
         env: BTreeMap<String, String>,
     }
 
-    let python = fs::canonicalize(python_path)
-        .unwrap_or_else(|_| PathBuf::from(python_path))
-        .display()
-        .to_string();
+    let python = match method {
+        BuildMethod::BuilderWheel => {
+            let version = python_version(python_path).unwrap_or_else(|_| "unknown".to_string());
+            format!("builder-v{BUILDER_VERSION}-py{version}")
+        }
+        _ => fs::canonicalize(python_path)
+            .unwrap_or_else(|_| PathBuf::from(python_path))
+            .display()
+            .to_string(),
+    };
     let fingerprint = BuildOptionsFingerprint {
         python,
         method,

@@ -110,6 +110,7 @@ pub struct BuiltWheel {
     pub filename: String,
     pub url: String,
     pub sha256: String,
+    pub source_sha256: String,
     pub size: u64,
     pub cached_path: PathBuf,
     pub dist_path: PathBuf,
@@ -126,6 +127,8 @@ struct BuiltWheelMetadata {
     filename: String,
     url: String,
     sha256: String,
+    #[serde(default)]
+    source_sha256: String,
     size: u64,
     cached_path: String,
     #[serde(default)]
@@ -158,6 +161,7 @@ fn load_cached_build(meta_path: &Path) -> Result<Option<BuiltWheel>> {
         filename: meta.filename,
         url: meta.url,
         sha256: meta.sha256,
+        source_sha256: meta.source_sha256,
         size: meta.size,
         cached_path: PathBuf::from(meta.cached_path),
         dist_path: dist_path.unwrap_or_default(),
@@ -175,6 +179,7 @@ fn persist_metadata(meta_path: &Path, built: &BuiltWheel) -> Result<()> {
         filename: built.filename.clone(),
         url: built.url.clone(),
         sha256: built.sha256.clone(),
+        source_sha256: built.source_sha256.clone(),
         size: built.size,
         cached_path: built.cached_path.display().to_string(),
         dist_path: Some(built.dist_path.display().to_string()),
@@ -192,6 +197,7 @@ fn persist_metadata(meta_path: &Path, built: &BuiltWheel) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn apply_python_env(cmd: &mut Command) {
     if let Ok(interpreter) = detect_interpreter() {
         cmd.env("PYTHON", interpreter);
