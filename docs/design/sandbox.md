@@ -23,6 +23,28 @@ Sandbox is **optional**:
 
 Sandbox is **derived** from the env profile and a small **sandbox manifest**; it does not mutate project/workspace state. `.pxapp` bundles are exports of this derived sandbox state plus an app code snapshot; they do not extend the state machine.
 
+### 14.1.1 Build vs runtime sandboxing
+
+Sandbox (SBX) is a **runtime** concept: it describes the OS + system libraries
+used when running code (`px run --sandbox`, `px test --sandbox`, `px pack image`,
+`px pack app`).
+
+Native builds are handled separately by **builder** environments (BD):
+
+* Builders are px-managed container images used only for creating `pkg-build`
+  CAS objects (see §13.6.2).
+* Builders may use an internal OS package provider (e.g. conda-forge) to install
+  system libraries and headers needed to compile Python packages.
+* Builders are not configurable by users and are not controlled by
+  `[tool.px.sandbox]`.
+
+Invariants:
+
+* `[tool.px.sandbox]` **never** affects CAS `pkg-build` contents or builder
+  selection; it only affects runtime sandbox images (SI) and portable bundles.
+* Changing sandbox base or capabilities changes `sbx_id` and sandbox images,
+  but does not invalidate or recompute `pkg-build` CAS objects.
+
 ---
 
 ### 14.2 Sandbox nouns
@@ -221,6 +243,13 @@ Capabilities are:
 * Extensible in future versions; capability → packages mapping is part of sandbox format.
 
 **Non‑goal:** arbitrary OS package management; px does not expose apt/dnf/apk directly.
+
+px does not expose OS package managers or conda environments directly. Users
+express system requirements only via capabilities; px translates those
+capabilities into concrete OS packages inside sandbox images and builder
+environments. The choice of package provider (apt/apk/dnf/conda-forge/...) is an
+implementation detail and may change between px versions without affecting the
+sandbox model.
 
 ---
 

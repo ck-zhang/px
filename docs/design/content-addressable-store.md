@@ -80,6 +80,20 @@ The CAS introduces a few new nouns:
 
   * `runtime`, `profile`, `project-env`, `workspace-env`, `tool-env`.
 
+* **Builder (BD)** – an internal, versioned description of the containerized build
+  environment used to create `pkg-build` objects for a given `(platform, runtime)`.
+
+  * Identified by a stable `builder_id` (e.g. `linux-x86_64-cp311-v1`).
+  * Encodes OS base, compiler/toolchain, and the OS package provider
+    (apt/apk/conda-forge, etc.).
+  * Not a CAS object and not a user-facing noun; px may change how builders are
+    provisioned as long as `builder_id` and build determinism guarantees are
+    preserved.
+  * Changing builder contents in a way that affects builds **must** bump
+    `builder_id`, so new builds use a new build key; existing `pkg-build`
+    objects remain immutable.
+  * Selected via `builder_for(runtime_abi, platform)` (see §13.6.2).
+
 The CAS is deliberately orthogonal to M/L/E and WM/WL/WE:
 
 * Lockfiles describe **what should exist**.
@@ -412,31 +426,50 @@ Input:
 
 Behavior:
 
-1. Compute **build key** (for diagnostics/logging, not as the oid itself):
+1. Select a **builder** for this runtime/platform:
+
+   * `builder_id := builder_for(runtime_abi, platform)`
+   * `builder_for` returns a px-managed, containerized build environment (BD)
+     with a pinned OS base, toolchain, and OS package provider (apt/apk/conda-forge/etc.).
+   * `builder_for` is deterministic for a fixed px version and `(runtime_abi, platform)`.
+   * Builders are internal; users cannot select or customize them directly.
+
+2. Compute **build key** (for diagnostics/logging, not as the oid itself):
 
    ```text
-   build_key := (source_oid, runtime_abi, build_options_hash)
+   build_key := (source_oid, runtime_abi, builder_id, build_options_hash)
    ```
 
-2. Materialize the build in an isolated temp dir (no writes to store or envs):
+where `build_options_hash` covers user-visible build toggles (env vars, flags,
+`--no-binary`, etc.). `builder_id` is always part of the key so changing the
+builder changes which `pkg-build` objects are reused.
 
-   * resolve `source_oid`,
-   * run build backend with the requested runtime/options,
-   * produce a filesystem tree.
+3. Materialize the build in an isolated temp dir **inside the builder environment**
+   (no writes to store or envs):
 
-3. Normalize the tree:
+   * Resolve `source_oid` into the builder.
+   * Run the build backend with the requested runtime/options.
+   * Let the builder use its pinned OS package provider (e.g. conda-forge) to
+     install any required system libraries or headers; this is implementation
+     detail and not exposed to users.
+   * Produce a filesystem tree for the built dist.
 
-   * strip timestamps and unstable paths/metadata,
-   * normalize separators, ensure relative paths,
-   * sort entries.
+4. Normalize the tree:
 
-4. Compute `pkg_build_oid` from the canonical payload that includes `build_key` and the normalized tree, e.g.:
+   * Strip timestamps and unstable paths/metadata.
+   * Normalize separators, ensure relative paths.
+   * Sort entries.
+
+5. Compute `pkg_build_oid` from the canonical payload that includes `build_key`
+   and the normalized tree, e.g.:
 
    ```text
-   pkg_build_oid := sha256( canonical_encode("pkg-build", (build_key, normalized_fs_tree)) )
+   pkg_build_oid := sha256(
+     canonical_encode("pkg-build", (build_key, normalized_fs_tree))
+   )
    ```
 
-5. Under lock for `pkg_build_oid`:
+6. Under lock for `pkg_build_oid`:
 
    * If object exists → reuse and discard the temp build.
    * Else:
@@ -447,9 +480,13 @@ Behavior:
      * store as `objects/<prefix>/<pkg_build_oid>` via atomic rename,
      * record metadata in `objects`.
 
-6. Return `pkg_build_oid`.
+7. Return `pkg_build_oid`.
 
-All per‑env site‑packages are built **once** per `(source, runtime, options)` at the CAS level. In races, multiple processes may build, but only one result wins; others observe the existing object and discard their temp builds.
+All per‑env site‑packages are built **once** per `(source_oid, runtime_abi, builder_id, build_options_hash)` at the CAS level. In races, multiple processes may build, but only one result wins; others observe the existing object and discard their temp builds.
+
+Builds never run directly on the host OS; they always run inside a px-managed
+builder environment. `[tool.px.sandbox]` does **not** affect which builder is
+chosen or how `pkg-build` objects are produced.
 
 #### 13.6.3 `cas.ensure_profile(L/WL, runtime)`
 

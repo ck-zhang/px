@@ -49,11 +49,18 @@ For a fixed px version, runtime set, platform, and index configuration, the foll
    * Given `px.workspace.lock` and runtime, the workspace environment must contain exactly the packages described by WL.
    * Rebuilding for the same WL must result in an equivalent environment (from px’s metadata point of view).
 
+9. **Native builds via builders**
+
+   * For a fixed px version, builder set (`builder_id`), runtime, platform, and index configuration, building from the same `source_oid` and build options must produce the same `pkg-build` CAS object.
+   * Builders are versioned; changing the underlying builder image (OS, toolchain, OS package provider) must bump `builder_id` so new builds use a new `build_key` while existing CAS objects remain valid.
+
 ## CI and frozen mode
 
 * Under `CI=1` or `--frozen`, px never re-resolves locks.
 * `px run` / `px test` / `px fmt` do not rebuild project/workspace envs; they check consistency and fail if broken (for run/test) or run tools in isolation (`fmt`).
 * No prompts or implicit mutations. Output must be non-interactive; follow the non-TTY rules above.
+
+Native builds in CI always run inside the same px-managed builders as on developer machines; px never uses ad-hoc host compilers or user-managed conda envs for producing `pkg-build` artifacts.
 
 These rules keep local development and CI reproducible and make state drift visible instead of silently patched.
 
