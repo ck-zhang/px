@@ -3362,9 +3362,16 @@ impl PythonContext {
     }
 
     pub(crate) fn base_env(&self, command_args: &Value) -> Result<Vec<(String, String)>> {
-        let allowed =
-            env::join_paths(&self.allowed_paths).context("allowed path contains invalid UTF-8")?;
-        let allowed = allowed
+        let mut allowed_paths = self.allowed_paths.clone();
+        if !self.pythonpath.is_empty() {
+            for entry in env::split_paths(&self.pythonpath) {
+                if !allowed_paths.contains(&entry) {
+                    allowed_paths.push(entry);
+                }
+            }
+        }
+        let allowed = env::join_paths(&allowed_paths)
+            .context("allowed path contains invalid UTF-8")?
             .into_string()
             .map_err(|_| anyhow!("allowed path contains non-utf8 data"))?;
         let mut python_paths: Vec<_> = env::split_paths(&allowed).collect();
@@ -4088,7 +4095,12 @@ pub(crate) fn build_pythonpath(
     site_paths.push(canonical.clone());
     if let Some(site_packages) = detect_local_site_packages(fs, &canonical) {
         site_packages_used = Some(site_packages.clone());
-        site_paths.push(site_packages);
+        site_paths.push(site_packages.clone());
+        if let Ok(canon) = fs.canonicalize(&site_packages) {
+            if canon != site_packages {
+                site_paths.push(canon);
+            }
+        }
     }
     let pth = canonical.join("px.pth");
     if pth.exists() {

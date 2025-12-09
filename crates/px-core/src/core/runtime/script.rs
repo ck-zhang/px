@@ -106,7 +106,7 @@ pub(crate) fn detect_inline_script(target: &str) -> Result<Option<InlineScript>,
 /// Resolve, lock, and run an inline script using the metadata in its px block.
 pub(crate) fn run_inline_script(
     ctx: &CommandContext,
-    sandbox: Option<&mut SandboxRunContext>,
+    mut sandbox: Option<&mut SandboxRunContext>,
     script: InlineScript,
     extra_args: &[String],
     command_args: &serde_json::Value,
@@ -139,7 +139,7 @@ pub(crate) fn run_inline_script(
 
     let host_runner = HostCommandRunner::new(ctx);
     let sandbox_runner = match sandbox {
-        Some(sbx) => match sandbox_runner_for_context(&py_ctx, sbx, &script.working_dir) {
+        Some(ref mut sbx) => match sandbox_runner_for_context(&py_ctx, sbx, &script.working_dir) {
             Ok(runner) => Some(runner),
             Err(outcome) => return Err(outcome),
         },
@@ -159,6 +159,11 @@ pub(crate) fn run_inline_script(
         command_args,
         &script.working_dir,
         interactive,
+        if sandbox.is_some() {
+            "python"
+        } else {
+            &py_ctx.python
+        },
     ) {
         Ok(result) => result,
         Err(err) => {

@@ -924,6 +924,13 @@ pub(crate) fn write_python_shim(
         let rendered = env_var_value(value);
         script.push_str(&format!("export {key}={}\n", shell_escape(&rendered)));
     }
+    script.push_str("if [ -n \"$PX_LD_LIBRARY_PATH_EXTRA\" ]; then\n");
+    script.push_str("  if [ -n \"$LD_LIBRARY_PATH\" ]; then\n");
+    script.push_str("    export LD_LIBRARY_PATH=\"${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$PX_LD_LIBRARY_PATH_EXTRA\"\n");
+    script.push_str("  else\n");
+    script.push_str("    export LD_LIBRARY_PATH=\"$PX_LD_LIBRARY_PATH_EXTRA\"\n");
+    script.push_str("  fi\n");
+    script.push_str("fi\n");
     script.push_str(&format!("exec \"{}\" \"$@\"\n", runtime.display()));
     fs::write(&shim, script)?;
     #[cfg(unix)]

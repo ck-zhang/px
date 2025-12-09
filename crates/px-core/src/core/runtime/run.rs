@@ -121,6 +121,7 @@ pub(crate) struct SandboxCommandRunner {
     container_env_root: PathBuf,
     pythonpath: String,
     allowed_paths_env: String,
+    container_system_libs: Option<PathBuf>,
 }
 
 fn invocation_workdir(project_root: &Path) -> PathBuf {
@@ -204,12 +205,39 @@ impl SandboxCommandRunner {
     ) -> Result<crate::RunOutput> {
         let mut env = Vec::new();
         let mut base_path: Option<String> = None;
+        let mut rewritten_pythonpath: Option<String> = None;
+        let mut allowed_entries: Vec<PathBuf> =
+            std::env::split_paths(&self.allowed_paths_env).collect();
+        let mut ld_entries = Vec::new();
+        let mut ld_value: Option<String> = None;
         for (key, value) in envs {
             match key.as_str() {
-                "PX_ALLOWED_PATHS" | "PYTHONPATH" | "PX_PROJECT_ROOT" | "PX_PYTHON"
-                | "VIRTUAL_ENV" | "PYTHONHOME" => continue,
+                "PX_ALLOWED_PATHS" | "PX_PROJECT_ROOT" | "PX_PYTHON" | "VIRTUAL_ENV"
+                | "PYTHONHOME" => continue,
                 "PATH" => {
                     base_path = Some(value.clone());
+                }
+                "LD_LIBRARY_PATH" => {
+                    let rewritten = rewrite_env_value(
+                        value,
+                        &self.host_project_root,
+                        &self.container_project_root,
+                        &self.host_env_root,
+                        &self.container_env_root,
+                    );
+                    ld_value = Some(rewritten.clone());
+                    for entry in std::env::split_paths(&rewritten) {
+                        ld_entries.push(entry);
+                    }
+                }
+                "PYTHONPATH" => {
+                    rewritten_pythonpath = Some(rewrite_env_value(
+                        value,
+                        &self.host_project_root,
+                        &self.container_project_root,
+                        &self.host_env_root,
+                        &self.container_env_root,
+                    ));
                 }
                 _ => {
                     env.push((
@@ -225,14 +253,49 @@ impl SandboxCommandRunner {
                 }
             }
         }
-        env.push(("PX_ALLOWED_PATHS".into(), self.allowed_paths_env.clone()));
-        env.push(("PYTHONPATH".into(), self.pythonpath.clone()));
+        let pythonpath_value = rewritten_pythonpath.unwrap_or_else(|| self.pythonpath.clone());
+        if let Some(sys_libs) = &self.container_system_libs {
+            allowed_entries.push(sys_libs.clone());
+            ld_entries.push(sys_libs.clone());
+        }
+        allowed_entries.extend(std::env::split_paths(&pythonpath_value));
+        let mut seen_ld = HashSet::new();
+        ld_entries.retain(|entry| seen_ld.insert(entry.clone()));
+        let ld_library_path = if ld_entries.is_empty() {
+            ld_value
+        } else {
+            Some(
+                std::env::join_paths(&ld_entries)
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("non-utf8 ld_library_path entry"))?,
+            )
+        };
+        if let Some(ref value) = ld_library_path {
+            allowed_entries.extend(std::env::split_paths(value));
+        }
+        let mut seen_allowed = HashSet::new();
+        allowed_entries.retain(|entry| seen_allowed.insert(entry.clone()));
+        let allowed_paths_env = std::env::join_paths(allowed_entries)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("non-utf8 allowed path entry"))?;
+        env.push(("PX_ALLOWED_PATHS".into(), allowed_paths_env));
+        env.push(("PYTHONPATH".into(), pythonpath_value));
+        if let Some(sys_libs) = &self.container_system_libs {
+            env.push((
+                "PX_LD_LIBRARY_PATH_EXTRA".into(),
+                sys_libs.display().to_string(),
+            ));
+        }
+        if let Some(ld_paths) = ld_library_path {
+            env.push(("LD_LIBRARY_PATH".into(), ld_paths));
+        }
         env.push((
             "PX_PROJECT_ROOT".into(),
             self.container_project_root.display().to_string(),
         ));
-        let container_python = self.container_env_root.join("bin").join("python");
-        env.push(("PX_PYTHON".into(), container_python.display().to_string()));
+        env.push(("PX_PYTHON".into(), "/px/runtime/bin/python".into()));
         env.push((
             "VIRTUAL_ENV".into(),
             self.container_env_root.display().to_string(),
@@ -264,7 +327,18 @@ impl SandboxCommandRunner {
             &self.host_env_root,
             &self.container_env_root,
         );
-        let mut args: Vec<String> = args.to_vec();
+        let mut args: Vec<String> = args
+            .iter()
+            .map(|arg| {
+                map_arg_for_container(
+                    arg,
+                    &self.host_project_root,
+                    &self.container_project_root,
+                    &self.host_env_root,
+                    &self.container_env_root,
+                )
+            })
+            .collect();
         let host_program = PathBuf::from(original_program);
         if host_program.is_absolute() {
             let program_canon = host_program
@@ -379,19 +453,13 @@ fn map_allowed_paths_for_container(
 ) -> Vec<PathBuf> {
     let mut mapped = Vec::new();
     for path in allowed_paths {
-        let mapped_path = if path.starts_with(project_root) {
-            container_project.join(
-                path.strip_prefix(project_root)
-                    .unwrap_or_else(|_| Path::new("")),
-            )
-        } else if path.starts_with(env_root) {
-            container_env.join(
-                path.strip_prefix(env_root)
-                    .unwrap_or_else(|_| Path::new("")),
-            )
-        } else {
-            path.clone()
-        };
+        let mapped_path = map_path_for_container(
+            path,
+            project_root,
+            env_root,
+            container_project,
+            container_env,
+        );
         if !mapped.iter().any(|p| p == &mapped_path) {
             mapped.push(mapped_path);
         }
@@ -400,6 +468,103 @@ fn map_allowed_paths_for_container(
         mapped.insert(0, container_project.to_path_buf());
     }
     mapped
+}
+
+fn map_path_for_container(
+    path: &Path,
+    project_root: &Path,
+    env_root: &Path,
+    container_project: &Path,
+    container_env: &Path,
+) -> PathBuf {
+    if path.starts_with(project_root) {
+        return container_project
+            .join(
+                path.strip_prefix(project_root)
+                    .unwrap_or_else(|_| Path::new("")),
+            )
+            .to_path_buf();
+    }
+    if path.starts_with(env_root) {
+        return container_env
+            .join(
+                path.strip_prefix(env_root)
+                    .unwrap_or_else(|_| Path::new("")),
+            )
+            .to_path_buf();
+    }
+    path.to_path_buf()
+}
+
+fn stage_system_libs(env_root: &Path) -> Result<Option<PathBuf>, ExecutionOutcome> {
+    let candidates = [
+        "/lib64",
+        "/lib",
+        "/usr/lib64",
+        "/usr/lib",
+        "/lib/x86_64-linux-gnu",
+        "/usr/lib/x86_64-linux-gnu",
+    ];
+    let needed = [
+        "libc.so.6",
+        "libm.so.6",
+        "libdl.so.2",
+        "libpthread.so.0",
+        "librt.so.1",
+        "libresolv.so.2",
+        "libnsl.so.1",
+        "libnss_dns.so.2",
+        "libnss_files.so.2",
+        "libnss_resolve.so.2",
+        "ld-linux-x86-64.so.2",
+    ];
+    let sys_dir = env_root.join("sys-libs");
+    fs::create_dir_all(&sys_dir).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to prepare sandbox system libraries",
+            json!({ "path": sys_dir.display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    for lib in needed {
+        let dest = sys_dir.join(lib);
+        if dest.exists() {
+            continue;
+        }
+        let mut source: Option<PathBuf> = None;
+        for root in candidates {
+            let candidate = Path::new(root).join(lib);
+            if candidate.exists() {
+                source = Some(candidate);
+                break;
+            }
+        }
+        if let Some(src) = source {
+            if let Err(err) = fs::copy(&src, &dest) {
+                return Err(ExecutionOutcome::failure(
+                    "failed to copy sandbox system library",
+                    json!({
+                        "source": src.display().to_string(),
+                        "dest": dest.display().to_string(),
+                        "error": err.to_string(),
+                    }),
+                ));
+            }
+        }
+    }
+    let has_contents = fs::read_dir(&sys_dir)
+        .map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to inspect sandbox system libraries",
+                json!({ "path": sys_dir.display().to_string(), "error": err.to_string() }),
+            )
+        })?
+        .next()
+        .is_some();
+    if has_contents {
+        Ok(Some(sys_dir))
+    } else {
+        Ok(None)
+    }
 }
 
 fn map_workdir_container(
@@ -455,6 +620,33 @@ fn map_program_for_container(
     program.to_string()
 }
 
+fn map_arg_for_container(
+    arg: &str,
+    host_project_root: &Path,
+    container_project_root: &Path,
+    host_env_root: &Path,
+    container_env_root: &Path,
+) -> String {
+    let path = Path::new(arg);
+    if !path.is_absolute() {
+        return arg.to_string();
+    }
+    let arg_canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let host_project_canon = host_project_root
+        .canonicalize()
+        .unwrap_or_else(|_| host_project_root.to_path_buf());
+    if let Ok(rel) = arg_canon.strip_prefix(&host_project_canon) {
+        return container_project_root.join(rel).display().to_string();
+    }
+    let host_env_canon = host_env_root
+        .canonicalize()
+        .unwrap_or_else(|_| host_env_root.to_path_buf());
+    if let Ok(rel) = arg_canon.strip_prefix(&host_env_canon) {
+        return container_env_root.join(rel).display().to_string();
+    }
+    arg.to_string()
+}
+
 fn rewrite_env_value(
     value: &str,
     host_project_root: &Path,
@@ -500,7 +692,24 @@ pub(crate) fn sandbox_runner_for_context(
         &container_project,
         &container_env,
     );
-    let allowed_env = env::join_paths(&mapped_allowed)
+    let mapped_pythonpath: Vec<PathBuf> = env::split_paths(&py_ctx.pythonpath)
+        .map(|path| {
+            map_path_for_container(
+                &path,
+                &py_ctx.project_root,
+                &sandbox.artifacts.env_root,
+                &container_project,
+                &container_env,
+            )
+        })
+        .collect();
+    let mut allowed_union = mapped_allowed.clone();
+    for entry in &mapped_pythonpath {
+        if !allowed_union.iter().any(|p| p == entry) {
+            allowed_union.push(entry.clone());
+        }
+    }
+    let allowed_env = env::join_paths(&allowed_union)
         .map_err(|err| {
             ExecutionOutcome::failure(
                 "failed to assemble sandbox allowed paths",
@@ -514,7 +723,7 @@ pub(crate) fn sandbox_runner_for_context(
                 json!({ "error": "non-utf8 path entry" }),
             )
         })?;
-    let pythonpath = env::join_paths(&mapped_allowed)
+    let pythonpath = env::join_paths(&mapped_pythonpath)
         .map_err(|err| {
             ExecutionOutcome::failure(
                 "failed to assemble sandbox python path",
@@ -528,6 +737,9 @@ pub(crate) fn sandbox_runner_for_context(
                 json!({ "error": "non-utf8 path entry" }),
             )
         })?;
+    let container_sys_libs = stage_system_libs(&sandbox.artifacts.env_root)?
+        .as_ref()
+        .map(|_| PathBuf::from("/px/env/sys-libs"));
     Ok(SandboxCommandRunner {
         backend,
         layout,
@@ -539,6 +751,7 @@ pub(crate) fn sandbox_runner_for_context(
         container_env_root: container_env,
         pythonpath,
         allowed_paths_env: allowed_env,
+        container_system_libs: container_sys_libs,
     })
 }
 
@@ -556,6 +769,28 @@ fn sandbox_mounts(py_ctx: &PythonContext, workdir: &Path, env_root: &Path) -> Ve
             guest: workdir.clone(),
             read_only: false,
         });
+    }
+    let sys_libs = env_root.join("sys-libs");
+    if sys_libs.exists() {
+        let sys_libs = canonical_path(&sys_libs);
+        mounts.push(Mount {
+            host: sys_libs.clone(),
+            guest: PathBuf::from("/px/env/sys-libs"),
+            read_only: false,
+        });
+        let ld_so = sys_libs.join("ld-linux-x86-64.so.2");
+        if ld_so.exists() {
+            mounts.push(Mount {
+                host: canonical_path(&ld_so),
+                guest: PathBuf::from("/lib64/ld-linux-x86-64.so.2"),
+                read_only: true,
+            });
+            mounts.push(Mount {
+                host: canonical_path(&ld_so),
+                guest: PathBuf::from("/lib/ld-linux-x86-64.so.2"),
+                read_only: true,
+            });
+        }
     }
     for path in &py_ctx.allowed_paths {
         if path.starts_with(&py_ctx.project_root) || path.starts_with(env_root) {
@@ -866,6 +1101,11 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
                 &command_args,
                 &workdir,
                 interactive,
+                if sandbox.is_some() {
+                    "python"
+                } else {
+                    &ws_ctx.py_ctx.python
+                },
             )?,
             RunTargetPlan::Executable(program) => run_executable(
                 ctx,
@@ -958,6 +1198,11 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             &command_args,
             &workdir,
             interactive,
+            if sandbox.is_some() {
+                "python"
+            } else {
+                &py_ctx.python
+            },
         )?,
         RunTargetPlan::Executable(program) => run_executable(
             ctx,
@@ -1085,6 +1330,11 @@ fn run_project_at_ref(
             &command_args,
             &workdir,
             interactive,
+            if sandbox.is_some() {
+                "python"
+            } else {
+                &commit_ctx.py_ctx.python
+            },
         )?,
         RunTargetPlan::Executable(program) => run_executable(
             ctx,
@@ -2369,15 +2619,16 @@ pub(crate) fn run_project_script(
     command_args: &Value,
     workdir: &Path,
     interactive: bool,
+    program: &str,
 ) -> Result<ExecutionOutcome> {
     let (envs, _) = build_env_with_preflight(core_ctx, py_ctx, command_args)?;
     let mut args = Vec::with_capacity(extra_args.len() + 1);
     args.push(script.display().to_string());
     args.extend(extra_args.iter().cloned());
     let output = if interactive {
-        runner.run_command_passthrough(&py_ctx.python, &args, &envs, workdir)?
+        runner.run_command_passthrough(program, &args, &envs, workdir)?
     } else {
-        runner.run_command(&py_ctx.python, &args, &envs, workdir)?
+        runner.run_command(program, &args, &envs, workdir)?
     };
     let details = json!({
         "mode": "script",

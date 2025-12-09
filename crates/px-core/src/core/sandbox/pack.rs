@@ -1539,7 +1539,7 @@ fn map_allowed_paths_for_image(
                 ),
             )
         } else {
-            None
+            Some(path.clone())
         };
         if let Some(mapped_path) = mapped_path {
             if !mapped.iter().any(|p| p == &mapped_path) {
