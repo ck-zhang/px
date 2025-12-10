@@ -433,9 +433,11 @@ fn build_with_container_builder(
         .clone()
         .unwrap_or_else(|| std::env::temp_dir());
     let py_version = python_version(request.python_path)?;
+    let pkg_key = sanitize_builder_id(&format!("{}-{}", request.normalized_name, request.version));
     let builder_home = builder_root
         .join("builders")
         .join(sanitize_builder_id(request.builder_id))
+        .join(pkg_key)
         .join(format!("py{py_version}"));
     let env_root = builder_home.join("env");
     let env_python = env_root.join("bin").join("python");
@@ -450,6 +452,8 @@ fn build_with_container_builder(
         "/work/{}",
         sdist_path.file_name().unwrap_or_default().to_string_lossy()
     );
+    let conda_name = request.normalized_name.replace('_', "-");
+    let conda_spec = format!("{conda_name}=={}", request.version);
     let script = format!(
         r#"set -euo pipefail
 umask 022
@@ -471,19 +475,23 @@ mkdir -p "$DIST_DIR"
 FRESH=0
 if [ ! -x "$PY_BIN" ]; then
   micromamba create -y -p "$ENV_ROOT" --override-channels -c conda-forge \
-    python=={py_version} pip wheel setuptools pkg-config c-compiler cxx-compiler fortran-compiler \
-    gdal proj geos
+    python=={py_version} pip wheel setuptools pkg-config c-compiler cxx-compiler fortran-compiler
   FRESH=1
 fi
 if [ "$FRESH" -eq 1 ]; then
   micromamba run -p "$ENV_ROOT" python -m pip install --upgrade pip build wheel
 fi
+micromamba install -y -p "$ENV_ROOT" --override-channels -c conda-forge "{conda_spec}" \
+  || micromamba install -y -p "$ENV_ROOT" --override-channels -c conda-forge "{conda_name}" \
+  || true
 micromamba run -p "$ENV_ROOT" python -m pip wheel --no-deps --wheel-dir "$DIST_DIR" "$SDIST"
 "#,
         dist_dir_container = dist_dir_container,
         sdist_container = sdist_container,
         env_root_container = env_root_container,
-        py_version = py_version
+        py_version = py_version,
+        conda_spec = conda_spec,
+        conda_name = conda_name,
     );
 
     let mut cmd = Command::new(&backend.program);

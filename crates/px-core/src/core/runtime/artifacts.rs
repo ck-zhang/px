@@ -123,25 +123,43 @@ fn download_artifact(
     } else {
         match select_wheel(&release.urls, tags, &pin.specifier) {
             Ok(wheel) => {
-                let request = ArtifactRequest {
-                    name: &pin.normalized,
-                    version: &pin.version,
-                    filename: &wheel.filename,
-                    url: &wheel.url,
-                    sha256: &wheel.sha256,
-                };
-                let cached = cache_store.cache_wheel(&cache.path, &request)?;
-                LockedArtifact {
-                    filename: wheel.filename.clone(),
-                    url: wheel.url.clone(),
-                    sha256: wheel.sha256.clone(),
-                    size: cached.size,
-                    cached_path: cached.wheel_path.display().to_string(),
-                    python_tag: wheel.python_tag.clone(),
-                    abi_tag: wheel.abi_tag.clone(),
-                    platform_tag: wheel.platform_tag.clone(),
-                    build_options_hash: default_build_hash.clone(),
-                    is_direct_url: false,
+                let native = !wheel.platform_tag.eq_ignore_ascii_case("any")
+                    || !wheel.abi_tag.eq_ignore_ascii_case("none")
+                    || wheel.filename.contains("manylinux")
+                    || wheel.filename.contains("win")
+                    || wheel.filename.contains("macosx");
+                if native {
+                    build_wheel_via_sdist(
+                        cache_store,
+                        cache,
+                        &release,
+                        &pin,
+                        python,
+                        &default_build_hash,
+                        &builder.builder_id,
+                        &cache.path,
+                    )?
+                } else {
+                    let request = ArtifactRequest {
+                        name: &pin.normalized,
+                        version: &pin.version,
+                        filename: &wheel.filename,
+                        url: &wheel.url,
+                        sha256: &wheel.sha256,
+                    };
+                    let cached = cache_store.cache_wheel(&cache.path, &request)?;
+                    LockedArtifact {
+                        filename: wheel.filename.clone(),
+                        url: wheel.url.clone(),
+                        sha256: wheel.sha256.clone(),
+                        size: cached.size,
+                        cached_path: cached.wheel_path.display().to_string(),
+                        python_tag: wheel.python_tag.clone(),
+                        abi_tag: wheel.abi_tag.clone(),
+                        platform_tag: wheel.platform_tag.clone(),
+                        build_options_hash: default_build_hash.clone(),
+                        is_direct_url: false,
+                    }
                 }
             }
             Err(_) => build_wheel_via_sdist(

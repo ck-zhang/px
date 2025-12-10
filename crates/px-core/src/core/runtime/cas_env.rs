@@ -156,7 +156,9 @@ pub(crate) fn ensure_profile_env(
             index_url: artifact.url.clone(),
             sha256: artifact.sha256.clone(),
         };
-        let builder_needed = artifact.build_options_hash.contains("native-libs");
+        let builder_needed = artifact.build_options_hash.contains("native-libs")
+            || !artifact.platform_tag.eq_ignore_ascii_case("any")
+            || !artifact.abi_tag.eq_ignore_ascii_case("none");
         let mut build_options_hash = if artifact.build_options_hash.is_empty() {
             default_build_options_hash.clone()
         } else {
