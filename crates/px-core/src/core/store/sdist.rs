@@ -13,7 +13,14 @@ use tracing::debug;
 use walkdir::WalkDir;
 
 use crate::core::runtime::builder::BUILDER_VERSION;
-use crate::core::sandbox::detect_container_backend;
+use crate::core::sandbox::{
+    base_apt_opts, detect_container_backend, internal_keep_proxies,
+    internal_proxy_env_overrides,
+};
+use crate::core::system_deps::{
+    base_apt_packages, capability_apt_map, package_capability_rules, system_deps_from_names,
+    write_sys_deps_metadata, SystemDeps,
+};
 
 use super::{
     cas::{
@@ -140,6 +147,14 @@ fn copy_native_libs(env_root: &Path, dist_path: &Path) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+fn load_builder_system_deps(build_root: &Path) -> SystemDeps {
+    let path = build_root.join("system-deps.json");
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return SystemDeps::default();
+    };
+    serde_json::from_str::<SystemDeps>(&contents).unwrap_or_default()
 }
 
 fn is_shared_lib(path: &Path) -> bool {
@@ -304,6 +319,10 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
     let build_method = BuildMethod::BuilderWheel;
     let build_python_path = builder.python_path.clone();
     let builder_env_root = Some(builder.env_root.clone());
+    let mut system_deps = load_builder_system_deps(&build_root);
+    if system_deps.is_empty() {
+        system_deps = system_deps_from_names([request.normalized_name]);
+    }
 
     let built_wheel_path = find_wheel(&dist_dir)?;
     let filename = built_wheel_path
@@ -331,6 +350,9 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
     if let Some(env_root) = &builder_env_root {
         copy_native_libs(env_root, &dist_path)?;
     }
+    if !system_deps.capabilities.is_empty() || !system_deps.apt_packages.is_empty() {
+        write_sys_deps_metadata(&dist_path, request.normalized_name, &system_deps)?;
+    }
     let runtime_abi = format!("{python_tag}-{abi_tag}-{platform_tag}");
     let mut build_options_hash = compute_build_options_hash(
         build_python_path.to_str().unwrap_or(request.python_path),
@@ -338,6 +360,9 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
     )?;
     if builder_env_root.is_some() {
         build_options_hash = format!("{build_options_hash}-native-libs");
+    }
+    if let Some(fingerprint) = system_deps.fingerprint() {
+        build_options_hash = format!("{build_options_hash}-sys{fingerprint}");
     }
     let archive = super::cas::archive_dir_canonical(&dist_path)?;
     let pkg_header = PkgBuildHeader {
@@ -366,6 +391,7 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
         abi_tag,
         platform_tag,
         build_options_hash,
+        system_deps: system_deps.clone(),
         build_method,
         builder_id: request.builder_id.to_string(),
     };
@@ -406,7 +432,12 @@ fn cache_hit_matches(request: &SdistRequest<'_>, built: &BuiltWheel) -> Result<b
         return Ok(false);
     }
     if built.build_method == BuildMethod::BuilderWheel {
-        return Ok(true);
+        let mut expected = compute_build_options_hash(request.python_path, built.build_method)?;
+        expected = format!("{expected}-native-libs");
+        if let Some(fingerprint) = built.system_deps.fingerprint() {
+            expected = format!("{expected}-sys{fingerprint}");
+        }
+        return Ok(built.build_options_hash == expected);
     }
     if built.build_options_hash.is_empty() {
         return Ok(false);
@@ -421,6 +452,13 @@ struct BuilderArtifacts {
     env_root: PathBuf,
 }
 
+fn builder_container_mounts(builder_mount: &Path, build_mount: &Path) -> Vec<String> {
+    vec![
+        format!("{}:/work:rw,Z", build_mount.display()),
+        format!("{}:/builder:rw,Z", builder_mount.display()),
+    ]
+}
+
 fn build_with_container_builder(
     request: &SdistRequest<'_>,
     sdist_path: &Path,
@@ -431,7 +469,7 @@ fn build_with_container_builder(
     let builder_root = request
         .builder_root
         .clone()
-        .unwrap_or_else(|| std::env::temp_dir());
+        .unwrap_or_else(std::env::temp_dir);
     let py_version = python_version(request.python_path)?;
     let pkg_key = sanitize_builder_id(&format!("{}-{}", request.normalized_name, request.version));
     let builder_home = builder_root
@@ -444,6 +482,28 @@ fn build_with_container_builder(
     fs::create_dir_all(&builder_home)?;
     fs::create_dir_all(dist_dir)?;
 
+    let mut cap_rules: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (cap, patterns) in package_capability_rules() {
+        cap_rules.insert(
+            (*cap).to_string(),
+            patterns.iter().map(|p| (*p).to_string()).collect(),
+        );
+    }
+    let mut apt_rules: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (cap, pkgs) in capability_apt_map() {
+        apt_rules.insert(
+            (*cap).to_string(),
+            pkgs.iter().map(|p| (*p).to_string()).collect(),
+        );
+    }
+    let cap_rules_json = serde_json::to_string(&cap_rules)?;
+    let apt_rules_json = serde_json::to_string(&apt_rules)?;
+    let base_apt = base_apt_packages().join(" ");
+    let keep_proxies = internal_keep_proxies();
+    let mut apt_opts = base_apt_opts();
+    if !keep_proxies || crate::core::sandbox::should_disable_apt_proxy() {
+        apt_opts.push_str(" -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false");
+    }
     let builder_mount = fs::canonicalize(&builder_home).unwrap_or(builder_home.clone());
     let build_mount = fs::canonicalize(build_root).unwrap_or_else(|_| build_root.to_path_buf());
     let dist_dir_container = "/work/dist";
@@ -452,19 +512,26 @@ fn build_with_container_builder(
         "/work/{}",
         sdist_path.file_name().unwrap_or_default().to_string_lossy()
     );
-    let conda_name = request.normalized_name.replace('_', "-");
-    let conda_spec = format!("{conda_name}=={}", request.version);
-    let script = format!(
-        r#"set -euo pipefail
+    let conda_spec = format!(
+        "{}=={}",
+        request.normalized_name.replace('_', "-"),
+        request.version
+    );
+    let mut script = r#"set -euo pipefail
 umask 022
-ENV_ROOT="{env_root_container}"
-DIST_DIR="{dist_dir_container}"
-SDIST="{sdist_container}"
+ENV_ROOT="__ENV_ROOT__"
+DIST_DIR="__DIST_DIR__"
+SDIST="__SDIST__"
 export MAMBA_PKGS_DIRS=/builder/pkgs
 export PIP_CACHE_DIR=/builder/pip-cache
 export PIP_NO_BUILD_ISOLATION=1
 export PROJ_LIB="$ENV_ROOT/share/proj"
 export GDAL_DATA="$ENV_ROOT/share/gdal"
+export PX_CAP_RULES='__CAP_RULES__'
+export PX_APT_RULES='__APT_RULES__'
+export PX_BASE_APT="__BASE_APT__"
+export CONDA_SPEC="__CONDA_SPEC__"
+APT_OPTS="__APT_OPTS__"
 PY_BIN="$ENV_ROOT/bin/python"
 if [ ! -d "$ENV_ROOT/conda-meta" ]; then
   rm -rf "$ENV_ROOT"
@@ -472,27 +539,105 @@ fi
 mkdir -p "$MAMBA_PKGS_DIRS" "$DIST_DIR" "$PIP_CACHE_DIR"
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
-FRESH=0
 if [ ! -x "$PY_BIN" ]; then
   micromamba create -y -p "$ENV_ROOT" --override-channels -c conda-forge \
-    python=={py_version} pip wheel setuptools pkg-config c-compiler cxx-compiler fortran-compiler
-  FRESH=1
+    python==__PY_VERSION__ pip wheel setuptools pkg-config c-compiler cxx-compiler fortran-compiler numpy >/dev/null
+  HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= micromamba run -p "$ENV_ROOT" python -m pip install --upgrade pip build wheel pysocks >/dev/null
 fi
-if [ "$FRESH" -eq 1 ]; then
-  micromamba run -p "$ENV_ROOT" python -m pip install --upgrade pip build wheel
+micromamba repoquery depends --json --override-channels -c conda-forge "$CONDA_SPEC" > /work/repoquery.json || true
+APT_LIST=$(micromamba run -p "$ENV_ROOT" python - <<'PY'
+import json, os
+from pathlib import Path
+
+repo = Path("/work/repoquery.json")
+data = {}
+if repo.exists():
+    try:
+        data = json.loads(repo.read_text())
+    except Exception:
+        data = {}
+rules = json.loads(os.environ.get("PX_CAP_RULES","{}") or "{}")
+apt_rules = json.loads(os.environ.get("PX_APT_RULES","{}") or "{}")
+spec = os.environ.get("CONDA_SPEC","")
+depends = data.get("result", {}).get("depends", []) if isinstance(data, dict) else []
+names = set()
+for entry in depends:
+    if isinstance(entry, str):
+        names.add(entry.split()[0].lower())
+if spec:
+    names.add(spec.split("==")[0].split("=")[0].lower())
+caps = set()
+for name in names:
+    for cap, patterns in rules.items():
+        if any(name.startswith(pat) for pat in patterns):
+            caps.add(cap)
+apt = set()
+for cap in caps:
+    for pkg in apt_rules.get(cap, []):
+        apt.add(pkg)
+meta = {"capabilities": sorted(caps), "apt_packages": sorted(apt)}
+Path("/work/system-deps.json").write_text(json.dumps(meta, sort_keys=True, indent=2))
+print(" ".join(sorted(apt)))
+PY
+)
+ALL_APT="$APT_LIST $PX_BASE_APT"
+if [ -n "$ALL_APT" ]; then
+  ALL_APT=$(printf "%s\n" "$ALL_APT" | tr ' ' '\n' | sed '/^$/d' | sort -u | xargs)
+  apt-get $APT_OPTS update -y >/dev/null
+  APT_INSTALL=$(micromamba run -p "$ENV_ROOT" python - <<'PY'
+import json, os, subprocess
+from pathlib import Path
+
+meta_path = Path("/work/system-deps.json")
+data = {}
+if meta_path.exists():
+    try:
+        data = json.loads(meta_path.read_text())
+    except Exception:
+        data = {}
+names = [name for name in os.environ.get("ALL_APT","").split() if name]
+packages = sorted(set(names + list(data.get("apt_packages", []))))
+versions = {}
+install = []
+for name in packages:
+    version = ""
+    try:
+        out = subprocess.check_output(["apt-cache", "policy", name], text=True)
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("Candidate:"):
+                version = line.split(":", 1)[-1].strip()
+                break
+    except Exception:
+        version = ""
+    if version:
+        install.append(f"{name}={version}")
+        versions[name] = version
+    else:
+        install.append(name)
+data["apt_packages"] = packages
+data["apt_versions"] = versions
+meta_path.write_text(json.dumps(data, sort_keys=True, indent=2))
+print(" ".join(install))
+PY
+)
+  if [ -n "$APT_INSTALL" ]; then
+    DEBIAN_FRONTEND=noninteractive apt-get $APT_OPTS install -y --no-install-recommends $APT_INSTALL >/dev/null
+  fi
 fi
-micromamba install -y -p "$ENV_ROOT" --override-channels -c conda-forge "{conda_spec}" \
-  || micromamba install -y -p "$ENV_ROOT" --override-channels -c conda-forge "{conda_name}" \
-  || true
 micromamba run -p "$ENV_ROOT" python -m pip wheel --no-deps --wheel-dir "$DIST_DIR" "$SDIST"
-"#,
-        dist_dir_container = dist_dir_container,
-        sdist_container = sdist_container,
-        env_root_container = env_root_container,
-        py_version = py_version,
-        conda_spec = conda_spec,
-        conda_name = conda_name,
-    );
+"#
+    .to_string();
+    script = script
+        .replace("__ENV_ROOT__", env_root_container)
+        .replace("__DIST_DIR__", dist_dir_container)
+        .replace("__SDIST__", &sdist_container)
+        .replace("__CAP_RULES__", &cap_rules_json)
+        .replace("__APT_RULES__", &apt_rules_json)
+        .replace("__BASE_APT__", &base_apt)
+        .replace("__CONDA_SPEC__", &conda_spec)
+        .replace("__PY_VERSION__", &py_version)
+        .replace("__APT_OPTS__", &apt_opts);
 
     let mut cmd = Command::new(&backend.program);
     cmd.arg("run")
@@ -500,20 +645,15 @@ micromamba run -p "$ENV_ROOT" python -m pip wheel --no-deps --wheel-dir "$DIST_D
         .arg("--user")
         .arg("0:0")
         .arg("--workdir")
-        .arg("/work")
-        .arg("--volume")
-        .arg(format!("{}:/work:rw,Z", build_mount.display()))
-        .arg("--volume")
-        .arg(format!("{}:/builder:rw,Z", builder_mount.display()));
-    for key in [
-        "HTTP_PROXY",
-        "http_proxy",
-        "HTTPS_PROXY",
-        "https_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-    ] {
-        cmd.arg("--env").arg(format!("{key}="));
+        .arg("/work");
+    for mount in builder_container_mounts(&builder_mount, &build_mount) {
+        cmd.arg("--volume").arg(mount);
+    }
+    if keep_proxies {
+        cmd.arg("--network").arg("host");
+    }
+    for proxy in internal_proxy_env_overrides(&backend) {
+        cmd.arg("--env").arg(proxy);
     }
     cmd.arg("--env").arg("MAMBA_PKGS_DIRS=/builder/pkgs");
     cmd.arg("--env").arg("PIP_CACHE_DIR=/builder/pip-cache");
@@ -539,6 +679,29 @@ micromamba run -p "$ENV_ROOT" python -m pip wheel --no-deps --wheel-dir "$DIST_D
 }
 
 fn download_sdist(request: &SdistRequest<'_>) -> Result<(NamedTempFile, String)> {
+    if request.url.starts_with("file://") || Path::new(request.url).exists() {
+        let path = if request.url.starts_with("file://") {
+            PathBuf::from(request.url.trim_start_matches("file://"))
+        } else {
+            PathBuf::from(request.url)
+        };
+        let mut src = File::open(&path)
+            .with_context(|| format!("failed to open local sdist at {}", path.display()))?;
+        let mut tmp = NamedTempFile::new()?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = src.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            tmp.write_all(&buffer[..read])?;
+        }
+        let sha256 = hex::encode(hasher.finalize());
+        return Ok((tmp, sha256));
+    }
+
     let mut last_err = None;
     for _ in 0..super::DOWNLOAD_ATTEMPTS {
         match download_sdist_once(request) {
@@ -748,6 +911,7 @@ mod tests {
     use super::*;
     use std::env;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     fn restore_env(key: &str, original: Option<String>) {
@@ -802,6 +966,55 @@ mod tests {
         let build = compute_build_options_hash(&python, BuildMethod::PythonBuild)?;
         assert_ne!(pip, build, "build method should influence options hash");
         Ok(())
+    }
+
+    #[test]
+    fn builder_container_mounts_do_not_include_apt_cache() {
+        let builder_mount = PathBuf::from("/tmp/builder");
+        let build_mount = PathBuf::from("/tmp/build");
+        let mounts = builder_container_mounts(&builder_mount, &build_mount);
+        assert_eq!(
+            mounts,
+            vec![
+                format!("{}:/work:rw,Z", build_mount.display()),
+                format!("{}:/builder:rw,Z", builder_mount.display())
+            ]
+        );
+        assert!(
+            mounts.iter().all(|mount| {
+                !mount.contains("apt-cache")
+                    && !mount.contains("/var/cache/apt")
+                    && !mount.contains("/var/lib/apt")
+            }),
+            "builder container should not mount host apt caches"
+        );
+    }
+
+    #[test]
+    fn builder_container_required_when_backend_missing() {
+        let temp = tempdir().unwrap();
+        let sdist = temp.path().join("demo-0.1.0.tar.gz");
+        fs::write(&sdist, b"demo").expect("write sdist");
+        let dist_dir = temp.path().join("dist");
+        fs::create_dir_all(&dist_dir).expect("dist dir");
+        let request = SdistRequest {
+            normalized_name: "demo",
+            version: "0.1.0",
+            filename: "demo-0.1.0.tar.gz",
+            url: "https://example.com/demo-0.1.0.tar.gz",
+            sha256: None,
+            python_path: "python",
+            builder_id: "demo-builder",
+            builder_root: Some(temp.path().to_path_buf()),
+        };
+        let previous = env::var("PX_SANDBOX_BACKEND").ok();
+        env::set_var("PX_SANDBOX_BACKEND", "/definitely/missing/backend");
+        let result = build_with_container_builder(&request, &sdist, &dist_dir, temp.path());
+        match previous {
+            Some(val) => env::set_var("PX_SANDBOX_BACKEND", val),
+            None => env::remove_var("PX_SANDBOX_BACKEND"),
+        }
+        assert!(result.is_err(), "builder should require container backend");
     }
 
     #[test]

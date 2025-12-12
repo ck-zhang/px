@@ -7,20 +7,100 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tempfile::tempdir;
 use time::OffsetDateTime;
 use walkdir::WalkDir;
 
+use crate::core::system_deps::{
+    capability_apt_map, package_capability_rules, read_sys_deps_metadata, resolve_system_deps,
+    SystemDeps,
+};
 use crate::{InstallUserError, PX_VERSION};
 use px_domain::{LockSnapshot, SandboxConfig, WorkspaceLock};
 
 const DEFAULT_BASE: &str = "debian-12";
-pub(crate) const SBX_VERSION: u32 = 1;
+pub(crate) const SBX_VERSION: u32 = 3;
 pub(crate) const PXAPP_VERSION: u32 = 1;
+pub(crate) const SYSTEM_DEPS_IMAGE: &str =
+    "docker.io/library/debian:12-slim@sha256:ef5c368548841bdd8199a8606f6307402f7f2a2f8edc4acbc9c1c70c340bc023";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SystemDepsMode {
+    Strict,
+    Offline,
+}
+
+pub(crate) fn system_deps_mode() -> SystemDepsMode {
+    if let Ok(raw) = env::var("PX_SYSTEM_DEPS_MODE") {
+        let value = raw.trim().to_ascii_lowercase();
+        if matches!(value.as_str(), "offline" | "skip" | "disabled") {
+            return SystemDepsMode::Offline;
+        }
+    }
+    if let Ok(raw) = env::var("PX_SYSTEM_DEPS_OFFLINE") {
+        let value = raw.trim().to_ascii_lowercase();
+        if matches!(value.as_str(), "1" | "true" | "yes") {
+            return SystemDepsMode::Offline;
+        }
+    }
+    SystemDepsMode::Strict
+}
+
+pub(crate) fn internal_keep_proxies() -> bool {
+    if should_disable_apt_proxy() {
+        return false;
+    }
+    const PROXY_KEYS: &[&str] = &[
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ];
+    PROXY_KEYS.iter().any(|key| {
+        env::var(key)
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+    })
+}
+
+pub(crate) fn internal_proxy_env_overrides(_backend: &ContainerBackend) -> Vec<String> {
+    const PROXY_KEYS: &[&str] = &[
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ];
+    if !internal_keep_proxies() {
+        return PROXY_KEYS
+            .iter()
+            .map(|key| format!("{key}="))
+            .collect::<Vec<_>>();
+    }
+    let mut envs = Vec::new();
+    for key in PROXY_KEYS {
+        if let Ok(value) = env::var(key) {
+            if value.trim().is_empty() {
+                continue;
+            }
+            envs.push(format!("{key}={value}"));
+        }
+    }
+    envs
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct SandboxBase {
@@ -33,6 +113,8 @@ pub(crate) struct SandboxBase {
 pub(crate) struct SandboxDefinition {
     pub(crate) base_os_oid: String,
     pub(crate) capabilities: BTreeSet<String>,
+    #[serde(default)]
+    pub(crate) system_deps: SystemDeps,
     pub(crate) profile_oid: String,
     pub(crate) sbx_version: u32,
 }
@@ -63,6 +145,12 @@ impl SandboxDefinition {
             "sbx_version".to_string(),
             serde_json::Value::Number(self.sbx_version.into()),
         );
+        if let Some(fingerprint) = self.system_deps.fingerprint() {
+            map.insert(
+                "system_deps".to_string(),
+                serde_json::Value::String(fingerprint),
+            );
+        }
         let wrapper = json!({ "sandbox": map });
         let encoded = serde_json::to_vec(&wrapper).unwrap_or_default();
         let mut hasher = Sha256::new();
@@ -77,9 +165,13 @@ pub(crate) struct SandboxImageManifest {
     pub(crate) base_os_oid: String,
     pub(crate) profile_oid: String,
     pub(crate) capabilities: BTreeSet<String>,
+    #[serde(default)]
+    pub(crate) system_deps: SystemDeps,
     pub(crate) image_digest: String,
     #[serde(default)]
     pub(crate) env_layer_digest: Option<String>,
+    #[serde(default)]
+    pub(crate) system_layer_digest: Option<String>,
     pub(crate) created_at: String,
     pub(crate) px_version: String,
     pub(crate) sbx_version: u32,
@@ -211,6 +303,28 @@ impl SandboxStore {
                     }),
                 ));
             }
+            if manifest.system_deps != definition.system_deps {
+                return Err(sandbox_error(
+                    "PX904",
+                    "sandbox image metadata does not match the requested sandbox definition",
+                    json!({
+                        "expected_system_deps": definition.system_deps,
+                        "found_system_deps": manifest.system_deps,
+                        "path": manifest_path.display().to_string(),
+                    }),
+                ));
+            }
+            if manifest.system_layer_digest.is_some()
+                && manifest.system_deps.apt_packages.is_empty()
+            {
+                return Err(sandbox_error(
+                    "PX904",
+                    "sandbox image metadata includes unexpected system layer",
+                    json!({
+                        "path": manifest_path.display().to_string(),
+                    }),
+                ));
+            }
             return Ok(manifest);
         }
 
@@ -232,8 +346,10 @@ impl SandboxStore {
             base_os_oid: definition.base_os_oid.clone(),
             profile_oid: definition.profile_oid.clone(),
             capabilities: definition.capabilities.clone(),
+            system_deps: definition.system_deps.clone(),
             image_digest: format!("sha256:{}", definition.sbx_id()),
             env_layer_digest: None,
+            system_layer_digest: None,
             created_at,
             px_version: PX_VERSION.to_string(),
             sbx_version: SBX_VERSION,
@@ -282,8 +398,9 @@ pub(crate) fn ensure_sandbox_image(
     env_root: &Path,
     site_packages: Option<&Path>,
 ) -> Result<SandboxArtifacts, InstallUserError> {
-    let resolution =
+    let mut resolution =
         resolve_sandbox_definition(config, lock, workspace_lock, profile_oid, site_packages)?;
+    pin_missing_apt_versions(&mut resolution.definition)?;
     let env_root = validate_env_root(env_root)?;
     store
         .ensure_base_manifest(&resolution.base)
@@ -304,6 +421,381 @@ pub(crate) fn ensure_sandbox_image(
         manifest,
         env_root,
     })
+}
+
+fn system_deps_container_args(
+    workdir: &Path,
+    keep_proxies: bool,
+    proxy_envs: &[String],
+) -> Vec<String> {
+    let mut args = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "--user".to_string(),
+        "0:0".to_string(),
+        "--workdir".to_string(),
+        "/work".to_string(),
+        "--volume".to_string(),
+        format!("{}:/work:rw,Z", workdir.display()),
+    ];
+    if keep_proxies {
+        args.push("--network".to_string());
+        args.push("host".to_string());
+    }
+    for proxy in proxy_envs {
+        args.push("--env".to_string());
+        args.push(proxy.clone());
+    }
+    args
+}
+
+pub(crate) fn pin_system_deps(deps: &mut SystemDeps) -> Result<(), InstallUserError> {
+    let mode = system_deps_mode();
+    let missing: Vec<String> = deps
+        .apt_packages
+        .iter()
+        .filter(|pkg| !deps.apt_versions.contains_key(*pkg))
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    if matches!(mode, SystemDepsMode::Offline) {
+        for pkg in &missing {
+            deps.apt_versions
+                .entry(pkg.clone())
+                .or_insert_with(|| "unpinned".to_string());
+        }
+        return Ok(());
+    }
+    let backend = detect_container_backend()?;
+    if matches!(backend.kind, BackendKind::Custom) {
+        for pkg in &missing {
+            deps.apt_versions
+                .entry(pkg.clone())
+                .or_insert_with(|| "unpinned".to_string());
+        }
+        return Ok(());
+    }
+    let temp = tempdir().map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to prepare sandbox work directory",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    let workdir = temp.path();
+    let proxies_allowed = internal_keep_proxies();
+    let mut apt_opts = base_apt_opts();
+    if !proxies_allowed || should_disable_apt_proxy() {
+        apt_opts.push_str(" -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false");
+    }
+    let mut script = r#"set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+PACKAGES="__PACKAGES__"
+APT_OPTS="__APT_OPTS__"
+apt-get $APT_OPTS update -y >/dev/null || true
+rm -f /work/apt-versions.txt
+for pkg in $PACKAGES; do
+  ver=$(apt-cache policy "$pkg" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')
+  echo "${pkg}=${ver}" >> /work/apt-versions.txt
+done
+"#
+    .to_string();
+    script = script
+        .replace("__PACKAGES__", &missing.join(" "))
+        .replace("__APT_OPTS__", &apt_opts);
+    let proxy_envs = internal_proxy_env_overrides(&backend);
+    let mut cmd = Command::new(&backend.program);
+    for arg in system_deps_container_args(workdir, proxies_allowed, &proxy_envs) {
+        cmd.arg(arg);
+    }
+    cmd.arg(SYSTEM_DEPS_IMAGE).arg("bash").arg("-c").arg(script);
+    let output = cmd.output().map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to pin sandbox system dependencies",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    if !output.status.success() {
+        return Err(sandbox_error(
+            "PX903",
+            "failed to pin sandbox system dependencies",
+            json!({
+                "code": output.status.code(),
+                "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+                "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+            }),
+        ));
+    }
+    let versions_path = workdir.join("apt-versions.txt");
+    let data = fs::read_to_string(&versions_path).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to read pinned apt versions",
+            json!({ "path": versions_path.display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    for line in data.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (pkg, ver) = match trimmed.split_once('=') {
+            Some((name, ver)) => (name.trim(), ver.trim()),
+            None => continue,
+        };
+        if pkg.is_empty() {
+            continue;
+        }
+        if !ver.is_empty() {
+            deps.apt_versions
+                .entry(pkg.to_string())
+                .or_insert_with(|| ver.to_string());
+        }
+    }
+    Ok(())
+}
+
+fn pin_missing_apt_versions(definition: &mut SandboxDefinition) -> Result<(), InstallUserError> {
+    pin_system_deps(&mut definition.system_deps)
+}
+
+pub(crate) fn ensure_system_deps_rootfs(
+    deps: &SystemDeps,
+) -> Result<Option<PathBuf>, InstallUserError> {
+    if deps.apt_packages.is_empty() || matches!(system_deps_mode(), SystemDepsMode::Offline) {
+        return Ok(None);
+    }
+    let Some(fingerprint) = deps.fingerprint() else {
+        return Ok(None);
+    };
+    let store_root = default_store_root().map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to resolve sandbox store",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    let target = store_root
+        .join("system-deps")
+        .join(&fingerprint)
+        .join("rootfs");
+    if target.exists() {
+        return Ok(Some(target));
+    }
+
+    let backend = detect_container_backend()?;
+    if matches!(backend.kind, BackendKind::Custom) {
+        return Ok(None);
+    }
+    let mut deps = deps.clone();
+    pin_system_deps(&mut deps)?;
+    let mut packages: Vec<String> = deps
+        .apt_packages
+        .iter()
+        .map(|pkg| {
+            deps.apt_versions
+                .get(pkg)
+                .map(|ver| format!("{pkg}={ver}"))
+                .unwrap_or_else(|| pkg.clone())
+        })
+        .collect();
+    packages.sort();
+    packages.dedup();
+    if packages.is_empty() {
+        return Ok(None);
+    }
+    let proxies_allowed = internal_keep_proxies();
+    let mut apt_opts = base_apt_opts();
+    if !proxies_allowed || should_disable_apt_proxy() {
+        apt_opts.push_str(" -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false");
+    }
+    let temp = tempdir().map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to prepare sandbox work directory",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    let workdir = temp.path();
+    let mut script = r#"set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+PACKAGES="__PACKAGES__"
+APT_OPTS="__APT_OPTS__"
+if [ -n "$PACKAGES" ]; then
+  apt-get $APT_OPTS update -y >/dev/null || true
+  rm -rf /work/rootfs
+  mkdir -p /work/rootfs
+  apt-get $APT_OPTS install -y --no-install-recommends --download-only $PACKAGES >/dev/null
+  for deb in /var/cache/apt/archives/*.deb; do
+    [ -f "$deb" ] || continue
+    dpkg -x "$deb" /work/rootfs
+  done
+fi
+"#
+    .to_string();
+    script = script
+        .replace("__PACKAGES__", &packages.join(" "))
+        .replace("__APT_OPTS__", &apt_opts);
+    let proxy_envs = internal_proxy_env_overrides(&backend);
+    let mut cmd = Command::new(&backend.program);
+    for arg in system_deps_container_args(workdir, proxies_allowed, &proxy_envs) {
+        cmd.arg(arg);
+    }
+    cmd.arg(SYSTEM_DEPS_IMAGE).arg("bash").arg("-c").arg(script);
+    let output = cmd.output().map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to prepare system dependencies",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    if !output.status.success() {
+        return Err(sandbox_error(
+            "PX903",
+            "failed to prepare system dependencies",
+            json!({
+                "code": output.status.code(),
+                "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+                "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+            }),
+        ));
+    }
+    let source = workdir.join("rootfs");
+    if !source.exists() {
+        return Ok(None);
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to create system dependency cache directory",
+                json!({ "path": parent.display().to_string(), "error": err.to_string() }),
+            )
+        })?;
+    }
+    if fs::rename(&source, &target).is_err() {
+        copy_dir(&source, &target)?;
+    }
+    Ok(Some(target))
+}
+
+fn copy_dir(src: &Path, dest: &Path) -> Result<(), InstallUserError> {
+    for entry in WalkDir::new(src) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                return Err(sandbox_error(
+                    "PX903",
+                    "failed to copy system dependency tree",
+                    json!({ "error": err.to_string() }),
+                ))
+            }
+        };
+        let path = entry.path();
+        let rel = match path.strip_prefix(src) {
+            Ok(rel) => rel,
+            Err(_) => continue,
+        };
+        let dest_path = dest.join(rel);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&dest_path).map_err(|err| {
+                sandbox_error(
+                    "PX903",
+                    "failed to prepare system dependency directory",
+                    json!({ "path": dest_path.display().to_string(), "error": err.to_string() }),
+                )
+            })?;
+        } else if entry.file_type().is_symlink() {
+            let target = fs::read_link(path).map_err(|err| {
+                sandbox_error(
+                    "PX903",
+                    "failed to read system dependency symlink",
+                    json!({ "path": path.display().to_string(), "error": err.to_string() }),
+                )
+            })?;
+            #[allow(clippy::redundant_closure_for_method_calls)]
+            if dest_path.exists() {
+                fs::remove_file(&dest_path).ok();
+            }
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&target, &dest_path).map_err(|err| {
+                    sandbox_error(
+                        "PX903",
+                        "failed to copy system dependency symlink",
+                        json!({
+                            "path": dest_path.display().to_string(),
+                            "error": err.to_string()
+                        }),
+                    )
+                })?;
+            }
+            #[cfg(not(unix))]
+            {
+                fs::copy(path, &dest_path).map_err(|err| {
+                    sandbox_error(
+                        "PX903",
+                        "failed to copy system dependency link",
+                        json!({
+                            "path": dest_path.display().to_string(),
+                            "error": err.to_string()
+                        }),
+                    )
+                })?;
+            }
+        } else {
+            if let Some(parent) = dest_path.parent() {
+                fs::create_dir_all(parent).map_err(|err| {
+                    sandbox_error(
+                        "PX903",
+                        "failed to prepare system dependency file",
+                        json!({
+                            "path": parent.display().to_string(),
+                            "error": err.to_string()
+                        }),
+                    )
+                })?;
+            }
+            fs::copy(path, &dest_path).map_err(|err| {
+                sandbox_error(
+                    "PX903",
+                    "failed to copy system dependency file",
+                    json!({
+                        "path": path.display().to_string(),
+                        "error": err.to_string()
+                    }),
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn base_apt_opts() -> String {
+    "-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30".to_string()
+}
+
+pub(crate) fn should_disable_apt_proxy() -> bool {
+    const KEYS: &[&str] = &[
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+    for key in KEYS {
+        if let Ok(val) = std::env::var(key) {
+            let lower = val.to_ascii_lowercase();
+            if lower.starts_with("socks") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub(crate) fn resolve_sandbox_definition(
@@ -331,9 +823,11 @@ pub(crate) fn resolve_sandbox_definition(
     };
     let capabilities = effective_capabilities(config, &inferred)?;
     validate_capabilities(&base, &capabilities)?;
+    let system_deps = resolve_system_deps(&capabilities, site_packages);
     let definition = SandboxDefinition {
         base_os_oid: base.base_os_oid.clone(),
         capabilities,
+        system_deps,
         profile_oid: profile_oid.to_string(),
         sbx_version: SBX_VERSION,
     };
@@ -383,99 +877,47 @@ fn base_os_identity(name: &str) -> String {
 }
 
 fn known_capabilities() -> BTreeSet<String> {
-    [
-        "postgres",
-        "mysql",
-        "imagecodecs",
-        "xml",
-        "ldap",
-        "ffi",
-        "curl",
-        "gdal",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
-}
-
-fn capability_package_map() -> &'static [(&'static str, &'static [&'static str])] {
-    &[
-        ("psycopg2", &["postgres"]),
-        ("psycopg2-binary", &["postgres"]),
-        ("asyncpg", &["postgres"]),
-        ("pg8000", &["postgres"]),
-        ("mysqlclient", &["mysql"]),
-        ("pymysql", &["mysql"]),
-        ("aiomysql", &["mysql"]),
-        ("pillow", &["imagecodecs"]),
-        ("Pillow", &["imagecodecs"]),
-        ("lxml", &["xml"]),
-        ("pyldap", &["ldap"]),
-        ("python-ldap", &["ldap"]),
-        ("cffi", &["ffi"]),
-        ("pycparser", &["ffi"]),
-        ("httpx", &["curl"]),
-        ("requests", &["curl"]),
-        ("gdal", &["gdal"]),
-        ("rasterio", &["gdal"]),
-        ("fiona", &["gdal"]),
-        ("pyproj", &["gdal"]),
-        ("shapely", &["gdal"]),
-    ]
-}
-
-fn library_capability_map() -> &'static [(&'static str, &'static str)] {
-    &[
-        ("libpq", "postgres"),
-        ("libmysqlclient", "mysql"),
-        ("libmysql", "mysql"),
-        ("libjpeg", "imagecodecs"),
-        ("libpng", "imagecodecs"),
-        ("libz", "imagecodecs"),
-        ("libxml2", "xml"),
-        ("libldap", "ldap"),
-        ("libffi", "ffi"),
-        ("libcurl", "curl"),
-        ("libssl", "curl"),
-        ("libgdal", "gdal"),
-        ("libproj", "gdal"),
-        ("libgeos", "gdal"),
-    ]
+    let mut caps: BTreeSet<String> = capability_apt_map()
+        .iter()
+        .map(|(cap, _)| (*cap).to_string())
+        .collect();
+    for (cap, _) in package_capability_rules() {
+        caps.insert((*cap).to_string());
+    }
+    caps
 }
 
 fn infer_capabilities_from_lock(lock: &LockSnapshot) -> BTreeSet<String> {
     let mut caps = BTreeSet::new();
-    let map = capability_package_map();
     for spec in &lock.dependencies {
         let name = crate::dependency_name(spec);
-        for (pkg, needed) in map {
-            if name.eq_ignore_ascii_case(pkg) {
-                caps.extend(needed.iter().map(|c| c.to_string()));
-            }
-        }
+        caps.extend(
+            crate::core::system_deps::capabilities_from_names([name.as_str()])
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+        );
     }
     for dep in &lock.resolved {
         let name = dep.name.trim();
-        for (pkg, needed) in map {
-            if name.eq_ignore_ascii_case(pkg) {
-                caps.extend(needed.iter().map(|c| c.to_string()));
-            }
-        }
+        caps.extend(
+            crate::core::system_deps::capabilities_from_names([name])
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+        );
     }
     caps
 }
 
 fn infer_capabilities_from_workspace(lock: &WorkspaceLock) -> BTreeSet<String> {
     let mut caps = BTreeSet::new();
-    let map = capability_package_map();
     for member in &lock.members {
         for dep in &member.dependencies {
             let name = crate::dependency_name(dep);
-            for (pkg, needed) in map {
-                if name.eq_ignore_ascii_case(pkg) {
-                    caps.extend(needed.iter().map(|c| c.to_string()));
-                }
-            }
+            caps.extend(
+                crate::core::system_deps::capabilities_from_names([name.as_str()])
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+            );
         }
     }
     caps
@@ -486,6 +928,8 @@ fn infer_capabilities_from_site(site: &Path) -> BTreeSet<String> {
     if !site.exists() {
         return caps;
     }
+    let meta = read_sys_deps_metadata(site);
+    caps.extend(meta.capabilities);
     for entry in WalkDir::new(site) {
         let entry = match entry {
             Ok(entry) => entry,
@@ -495,11 +939,11 @@ fn infer_capabilities_from_site(site: &Path) -> BTreeSet<String> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-        for (pattern, capability) in library_capability_map() {
-            if name.contains(pattern) {
-                caps.insert(capability.to_string());
-            }
-        }
+        caps.extend(
+            crate::core::system_deps::capabilities_from_libraries([name])
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+        );
     }
     caps
 }
@@ -664,6 +1108,7 @@ pub(crate) fn sandbox_error(code: &str, message: &str, details: Value) -> Instal
 
 pub use pack::{pack_app, pack_image, PackRequest, PackTarget};
 pub(crate) use pxapp::run_pxapp_bundle;
+use runner::BackendKind;
 pub(crate) use runner::{
     detect_container_backend, ensure_image_layout, run_container, ContainerBackend,
     ContainerRunArgs, Mount, RunMode, SandboxImageLayout,
@@ -672,10 +1117,16 @@ pub(crate) use runner::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::system_deps::{write_sys_deps_metadata, SystemDeps};
     use px_domain::LockSnapshot;
     use std::collections::BTreeSet;
+    use std::env;
     use std::fs;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
+
+    static PROXY_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn lock_with_deps(dependencies: Vec<String>) -> LockSnapshot {
         LockSnapshot {
@@ -693,22 +1144,182 @@ mod tests {
     }
 
     #[test]
+    fn system_deps_container_avoids_host_apt_cache_mounts() {
+        let workdir = PathBuf::from("/tmp/work");
+        let proxies = vec!["HTTP_PROXY=".to_string()];
+        let args = system_deps_container_args(&workdir, true, &proxies);
+        let volume = format!("{}:/work:rw,Z", workdir.display());
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--volume" && pair[1] == volume),
+            "work directory should be mounted into container"
+        );
+        assert!(
+            args.iter().all(|arg| {
+                !arg.contains("apt-cache")
+                    && !arg.contains("/var/cache/apt")
+                    && !arg.contains("/var/lib/apt/lists")
+            }),
+            "system deps container should not mount host apt cache directories"
+        );
+        assert!(
+            args.iter().any(|arg| arg == "--network"),
+            "host networking should be enabled when proxies are kept"
+        );
+    }
+
+    #[test]
+    fn internal_containers_forward_proxy_env_when_set() {
+        let _guard = PROXY_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let keys = [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+            "FTP_PROXY",
+        ];
+        let originals: Vec<(String, Option<String>)> = keys
+            .iter()
+            .map(|key| (key.to_string(), env::var(key).ok()))
+            .collect();
+
+        for key in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        ] {
+            env::remove_var(key);
+        }
+        env::set_var("HTTP_PROXY", "http://proxy.example:3128");
+        env::set_var("http_proxy", "http://proxy-lower.example:3128");
+        env::set_var("ALL_PROXY", "http://proxy.example:3128");
+        env::set_var("NO_PROXY", "localhost,127.0.0.1");
+        env::set_var("FTP_PROXY", "http://should-not-pass");
+
+        let backend = ContainerBackend {
+            program: PathBuf::from("docker"),
+            kind: runner::BackendKind::Docker,
+        };
+        let proxy_envs = internal_proxy_env_overrides(&backend);
+        assert!(
+            proxy_envs.contains(&"HTTP_PROXY=http://proxy.example:3128".to_string()),
+            "HTTP_PROXY should be forwarded"
+        );
+        assert!(
+            proxy_envs.contains(&"http_proxy=http://proxy-lower.example:3128".to_string()),
+            "http_proxy should be forwarded"
+        );
+        assert!(
+            proxy_envs.contains(&"ALL_PROXY=http://proxy.example:3128".to_string()),
+            "ALL_PROXY should be forwarded"
+        );
+        assert!(
+            proxy_envs.contains(&"NO_PROXY=localhost,127.0.0.1".to_string()),
+            "NO_PROXY should be forwarded"
+        );
+        assert!(
+            proxy_envs.iter().all(|env| !env.starts_with("FTP_PROXY=")),
+            "only allowlisted proxy env vars should be forwarded"
+        );
+
+        let workdir = PathBuf::from("/tmp/work");
+        let args = system_deps_container_args(&workdir, internal_keep_proxies(), &proxy_envs);
+        assert!(
+            args.windows(2).any(|pair| {
+                pair[0] == "--env" && pair[1] == "HTTP_PROXY=http://proxy.example:3128"
+            }),
+            "system deps container args should include forwarded proxy"
+        );
+
+        for (key, original) in originals {
+            match original {
+                Some(value) => env::set_var(&key, value),
+                None => env::remove_var(&key),
+            }
+        }
+    }
+
+    #[test]
+    fn internal_containers_do_not_forward_proxy_env_when_unset() {
+        let _guard = PROXY_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let keys = [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        ];
+        let originals: Vec<(String, Option<String>)> = keys
+            .iter()
+            .map(|key| (key.to_string(), env::var(key).ok()))
+            .collect();
+        for key in keys {
+            env::remove_var(key);
+        }
+
+        let backend = ContainerBackend {
+            program: PathBuf::from("docker"),
+            kind: runner::BackendKind::Docker,
+        };
+        let proxy_envs = internal_proxy_env_overrides(&backend);
+        for key in keys {
+            assert!(
+                proxy_envs.contains(&format!("{key}=")),
+                "{key} should be cleared when unset"
+            );
+        }
+        assert!(
+            !internal_keep_proxies(),
+            "internal_keep_proxies should be false without proxies"
+        );
+
+        for (key, original) in originals {
+            match original {
+                Some(value) => env::set_var(&key, value),
+                None => env::remove_var(&key),
+            }
+        }
+    }
+
+    #[test]
     fn sandbox_id_is_stable_when_capabilities_unsorted() {
         let mut caps_a = BTreeSet::new();
         caps_a.insert("postgres".to_string());
         caps_a.insert("imagecodecs".to_string());
+        let sys_deps_a = resolve_system_deps(&caps_a, None);
         let def_a = SandboxDefinition {
             base_os_oid: "base".to_string(),
             capabilities: caps_a,
+            system_deps: sys_deps_a,
             profile_oid: "profile".to_string(),
             sbx_version: SBX_VERSION,
         };
         let mut caps_b = BTreeSet::new();
         caps_b.insert("imagecodecs".to_string());
         caps_b.insert("postgres".to_string());
+        let sys_deps_b = resolve_system_deps(&caps_b, None);
         let def_b = SandboxDefinition {
             base_os_oid: "base".to_string(),
             capabilities: caps_b,
+            system_deps: sys_deps_b,
             profile_oid: "profile".to_string(),
             sbx_version: SBX_VERSION,
         };
@@ -716,8 +1327,37 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_id_reflects_system_dep_versions() {
+        let mut caps = BTreeSet::new();
+        caps.insert("postgres".to_string());
+        let mut deps_a = resolve_system_deps(&caps, None);
+        deps_a.apt_packages.insert("libpq-dev".into());
+        deps_a.apt_versions.insert("libpq-dev".into(), "1".into());
+        let def_a = SandboxDefinition {
+            base_os_oid: "base".to_string(),
+            capabilities: caps.clone(),
+            system_deps: deps_a,
+            profile_oid: "profile".to_string(),
+            sbx_version: SBX_VERSION,
+        };
+        let mut deps_b = resolve_system_deps(&caps, None);
+        deps_b.apt_packages.insert("libpq-dev".into());
+        deps_b.apt_versions.insert("libpq-dev".into(), "2".into());
+        let def_b = SandboxDefinition {
+            base_os_oid: "base".to_string(),
+            capabilities: caps,
+            system_deps: deps_b,
+            profile_oid: "profile".to_string(),
+            sbx_version: SBX_VERSION,
+        };
+        assert_ne!(def_a.sbx_id(), def_b.sbx_id());
+    }
+
+    #[test]
     fn ensure_image_writes_manifest_and_reuses_store() {
         let temp = tempdir().expect("tempdir");
+        let previous_mode = env::var("PX_SYSTEM_DEPS_MODE").ok();
+        env::set_var("PX_SYSTEM_DEPS_MODE", "offline");
         let mut config = SandboxConfig {
             auto: false,
             ..Default::default()
@@ -749,6 +1389,10 @@ mod tests {
         )
         .expect("reuse sandbox image");
         assert_eq!(artifacts.manifest.sbx_id, again.manifest.sbx_id);
+        match previous_mode {
+            Some(value) => env::set_var("PX_SYSTEM_DEPS_MODE", value),
+            None => env::remove_var("PX_SYSTEM_DEPS_MODE"),
+        }
     }
 
     #[test]
@@ -794,6 +1438,44 @@ mod tests {
         assert!(
             resolved.definition.capabilities.contains("gdal"),
             "libgdal should infer gdal capability"
+        );
+    }
+
+    #[test]
+    fn site_inference_reads_builder_metadata() {
+        let temp = tempdir().expect("tempdir");
+        let site = temp.path().join("site");
+        fs::create_dir_all(&site).expect("create site dir");
+        let deps = SystemDeps {
+            capabilities: ["postgres".into()].into_iter().collect(),
+            apt_packages: ["libpq-dev".into()].into_iter().collect(),
+            apt_versions: [("libpq-dev".into(), "1.0".into())].into_iter().collect(),
+        };
+        write_sys_deps_metadata(&site, "demo", &deps).expect("write metadata");
+        let config = SandboxConfig::default();
+        let lock = lock_with_deps(vec![]);
+        let resolved =
+            resolve_sandbox_definition(&config, Some(&lock), None, "profile", Some(site.as_path()))
+                .expect("resolution");
+        assert!(
+            resolved.definition.capabilities.contains("postgres"),
+            "metadata should propagate capabilities"
+        );
+        assert!(
+            resolved
+                .definition
+                .system_deps
+                .apt_packages
+                .contains("libpq-dev"),
+            "apt packages from metadata should propagate"
+        );
+        assert_eq!(
+            resolved
+                .definition
+                .system_deps
+                .apt_versions
+                .get("libpq-dev"),
+            Some(&"1.0".to_string())
         );
     }
 
