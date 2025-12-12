@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::core::system_deps::SystemDeps;
 use crate::python_sys::detect_interpreter;
 
 pub mod cas;
@@ -118,6 +119,7 @@ pub struct BuiltWheel {
     pub abi_tag: String,
     pub platform_tag: String,
     pub build_options_hash: String,
+    pub system_deps: SystemDeps,
     pub(crate) build_method: BuildMethod,
     pub(crate) builder_id: String,
 }
@@ -138,6 +140,8 @@ struct BuiltWheelMetadata {
     platform_tag: String,
     #[serde(default)]
     build_options_hash: String,
+    #[serde(default)]
+    system_deps: SystemDeps,
     #[serde(default)]
     build_method: BuildMethod,
     #[serde(default)]
@@ -169,6 +173,7 @@ fn load_cached_build(meta_path: &Path) -> Result<Option<BuiltWheel>> {
         abi_tag: meta.abi_tag,
         platform_tag: meta.platform_tag,
         build_options_hash: meta.build_options_hash,
+        system_deps: meta.system_deps,
         build_method: meta.build_method,
         builder_id: meta.builder_id,
     }))
@@ -187,6 +192,7 @@ fn persist_metadata(meta_path: &Path, built: &BuiltWheel) -> Result<()> {
         abi_tag: built.abi_tag.clone(),
         platform_tag: built.platform_tag.clone(),
         build_options_hash: built.build_options_hash.clone(),
+        system_deps: built.system_deps.clone(),
         build_method: built.build_method,
         builder_id: built.builder_id.clone(),
     };

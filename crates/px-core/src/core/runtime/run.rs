@@ -254,6 +254,17 @@ impl SandboxCommandRunner {
         }
         let pythonpath_value = rewritten_pythonpath.unwrap_or_else(|| self.pythonpath.clone());
         allowed_entries.extend(std::env::split_paths(&pythonpath_value));
+        for path in [
+            self.container_env_root.join("lib"),
+            self.container_env_root.join("lib64"),
+            self.container_env_root.join("site-packages"),
+            self.container_env_root
+                .join("site-packages")
+                .join("sys-libs"),
+            self.container_env_root.join("sys-libs"),
+        ] {
+            ld_entries.push(path);
+        }
         let mut seen_ld = HashSet::new();
         ld_entries.retain(|entry| seen_ld.insert(entry.clone()));
         let ld_library_path = if ld_entries.is_empty() {

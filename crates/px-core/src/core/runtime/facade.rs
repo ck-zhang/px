@@ -11,8 +11,11 @@ use std::{
 };
 
 use crate::context::{CommandContext, CommandInfo};
-use crate::core::runtime::artifacts::select_wheel;
+use crate::core::runtime::artifacts::{dependency_name, select_wheel};
 use crate::core::runtime::builder::{builder_identity_for_python, builder_identity_for_runtime};
+use crate::core::sandbox::{
+    ensure_system_deps_rootfs, pin_system_deps, system_deps_mode, SystemDepsMode,
+};
 use crate::core::tooling::diagnostics;
 use crate::diagnostics::commands as diag_commands;
 use crate::effects;
@@ -25,7 +28,9 @@ use crate::store::cas::{
     source_lookup_key, LoadedObject, ObjectKind, ObjectPayload, OwnerId, OwnerType, PkgBuildHeader,
     ProfilePackage, SourceHeader, MATERIALIZED_PKG_BUILDS_DIR,
 };
-use crate::store::{ensure_wheel_dist, wheel_build_options_hash, ArtifactRequest};
+use crate::store::{
+    ensure_sdist_build, ensure_wheel_dist, wheel_build_options_hash, ArtifactRequest, SdistRequest,
+};
 use crate::traceback::{analyze_python_traceback, TracebackContext};
 use anyhow::{anyhow, bail, Context, Result};
 use hex;
@@ -33,11 +38,11 @@ use pep508_rs::MarkerEnvironment;
 #[cfg(test)]
 use px_domain::LockSnapshot;
 use px_domain::{
-    analyze_lock_diff, autopin_pin_key, autopin_spec_key, canonicalize_spec, detect_lock_drift,
-    format_specifier, load_lockfile_optional, marker_applies, merge_resolved_dependencies,
-    missing_project_guidance, render_lockfile, resolve, spec_requires_pin, verify_locked_artifacts,
-    AutopinEntry, InstallOverride, MissingProjectGuidance, PinSpec, ProjectSnapshot, PxOptions,
-    ResolverRequest, ResolverTags,
+    analyze_lock_diff, autopin_pin_key, autopin_spec_key, canonicalize_package_name,
+    canonicalize_spec, detect_lock_drift, format_specifier, load_lockfile_optional, marker_applies,
+    merge_resolved_dependencies, missing_project_guidance, render_lockfile, resolve,
+    spec_requires_pin, verify_locked_artifacts, AutopinEntry, InstallOverride,
+    MissingProjectGuidance, PinSpec, ProjectSnapshot, PxOptions, ResolverRequest, ResolverTags,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -50,6 +55,7 @@ use super::artifacts::{ensure_exact_pins, parse_exact_pin, resolve_pins};
 use super::cas_env::{
     copy_tree, default_envs_root, ensure_profile_env, project_env_owner_id, write_python_shim,
 };
+use crate::core::system_deps::system_deps_from_names;
 use crate::effects::Effects;
 use crate::runtime_manager;
 use crate::tools::disable_proxy_env;
@@ -1526,7 +1532,14 @@ fn ensure_project_wheel_scripts(
         Some(path) => path,
         None => match reuse_cached_project_wheel(cache_root, snapshot, &cache_dir)? {
             Some(path) => path,
-            None => build_project_wheel(&python_path, &snapshot.root, &cache_dir, keep_proxies)?,
+            None => build_project_wheel(
+                &python_path,
+                &snapshot.root,
+                cache_root,
+                &cache_dir,
+                keep_proxies,
+                &builder.builder_id,
+            )?,
         },
     };
 
@@ -1595,8 +1608,10 @@ fn ensure_nonempty_wheel(path: &Path) -> Result<()> {
 fn build_project_wheel(
     python: &Path,
     project_root: &Path,
+    cache_root: &Path,
     out_dir: &Path,
     keep_proxies: bool,
+    builder_id: &str,
 ) -> Result<PathBuf> {
     fs::create_dir_all(out_dir)?;
     let staging = out_dir.join("build");
@@ -1605,41 +1620,11 @@ fn build_project_wheel(
     }
     fs::create_dir_all(&staging)?;
 
-    let mut pip_cmd = Command::new(python);
-    pip_cmd
-        .arg("-m")
-        .arg("pip")
-        .arg("wheel")
-        .arg("--no-deps")
-        .arg("--wheel-dir")
-        .arg(&staging)
-        .arg(project_root);
-    pip_cmd.current_dir(project_root);
-    if !keep_proxies {
-        strip_proxy_env(&mut pip_cmd);
-    }
-    let pip_output = pip_cmd
-        .output()
-        .with_context(|| format!("running python -m pip wheel in {}", project_root.display()))?;
-    if pip_output.status.success() {
-        let wheel = find_wheel_in_dir(&staging)?;
-        let final_path = out_dir.join(
-            wheel
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string(),
-        );
-        fs::rename(&wheel, &final_path)?;
-        let _ = fs::remove_dir_all(&staging);
-        return Ok(final_path);
-    }
-
     let mut build_cmd = Command::new(python);
     build_cmd
         .arg("-m")
         .arg("build")
-        .arg("--wheel")
+        .arg("--sdist")
         .arg("--outdir")
         .arg(&staging)
         .arg(project_root);
@@ -1649,50 +1634,78 @@ fn build_project_wheel(
     }
     let build_output = build_cmd.output().with_context(|| {
         format!(
-            "running python -m build --wheel in {}",
+            "running python -m build --sdist in {}",
             project_root.display()
         )
     })?;
-    if build_output.status.success() {
-        let wheel = find_wheel_in_dir(&staging)?;
-        let final_path = out_dir.join(
-            wheel
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string(),
-        );
-        fs::rename(&wheel, &final_path)?;
-        let _ = fs::remove_dir_all(&staging);
-        return Ok(final_path);
+    if !build_output.status.success() {
+        let build_stderr = String::from_utf8_lossy(&build_output.stderr);
+        bail!("failed to build project sdist: {build_stderr}");
     }
-
-    let pip_stderr = String::from_utf8_lossy(&pip_output.stderr);
-    let build_stderr = String::from_utf8_lossy(&build_output.stderr);
-    bail!(
-        "failed to build project wheel via pip and python -m build\npip stderr:\n{}\npython -m build stderr:\n{}",
-        pip_stderr,
-        build_stderr
-    );
+    let sdist = find_sdist_in_dir(&staging)?;
+    let sdist_sha = compute_file_sha256(&sdist)?;
+    let filename = sdist
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let sdist_url = format!("file://{}", sdist.display());
+    let (normalized_name, version) = parse_sdist_name_version(&filename);
+    let built = ensure_sdist_build(
+        cache_root,
+        &SdistRequest {
+            normalized_name: &normalized_name,
+            version: &version,
+            filename: &filename,
+            url: &sdist_url,
+            sha256: Some(&sdist_sha),
+            python_path: &python.display().to_string(),
+            builder_id,
+            builder_root: Some(cache_root.to_path_buf()),
+        },
+    )?;
+    let final_path = out_dir.join(&built.filename);
+    if let Some(parent) = final_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::rename(&built.cached_path, &final_path) {
+        Ok(_) => {}
+        Err(_) => {
+            fs::copy(&built.cached_path, &final_path)?;
+        }
+    }
+    let _ = fs::remove_dir_all(&staging);
+    Ok(final_path)
 }
 
-fn find_wheel_in_dir(dir: &Path) -> Result<PathBuf> {
-    let wheel = fs::read_dir(dir)?
+fn find_sdist_in_dir(dir: &Path) -> Result<PathBuf> {
+    let sdist = fs::read_dir(dir)?
         .flatten()
         .map(|entry| entry.path())
         .find(|path| {
             path.extension()
                 .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("whl"))
+                .is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("gz") || ext.eq_ignore_ascii_case("zip")
+                })
         })
-        .ok_or_else(|| {
-            anyhow!(
-                "project wheel build did not produce a wheel in {}",
-                dir.display()
-            )
-        })?;
-    ensure_nonempty_wheel(&wheel)?;
-    Ok(wheel)
+        .ok_or_else(|| anyhow!("project sdist not found in {}", dir.display()))?;
+    Ok(sdist)
+}
+
+fn parse_sdist_name_version(filename: &str) -> (String, String) {
+    let trimmed = filename
+        .trim_end_matches(".tar.gz")
+        .trim_end_matches(".zip")
+        .to_string();
+    let mut parts: Vec<&str> = trimmed.rsplitn(2, '-').collect();
+    if parts.len() == 2 {
+        let version = parts.remove(0).to_string();
+        let name = canonicalize_package_name(parts.remove(0));
+        (name, version)
+    } else {
+        (canonicalize_package_name(&trimmed), "0.0.0".to_string())
+    }
 }
 
 fn wheel_metadata(dist_dir: &Path) -> Result<(String, String)> {
@@ -2877,6 +2890,99 @@ pub(crate) struct ResolvedSpecOutput {
     pub(crate) pins: Vec<PinSpec>,
 }
 
+#[derive(Default)]
+struct SysEnvGuard {
+    saved: Vec<(String, Option<String>)>,
+}
+
+impl SysEnvGuard {
+    fn set_var(&mut self, key: &str, value: String) {
+        let prev = env::var(key).ok();
+        env::set_var(key, &value);
+        self.saved.push((key.to_string(), prev));
+    }
+
+    fn prepend_paths(&mut self, key: &str, entries: &[PathBuf]) {
+        let mut parts: Vec<PathBuf> = entries
+            .iter()
+            .filter(|path| path.exists())
+            .cloned()
+            .collect();
+        if let Some(existing) = env::var_os(key) {
+            parts.extend(env::split_paths(&existing));
+        }
+        if parts.is_empty() {
+            return;
+        }
+        if let Ok(joined) = env::join_paths(&parts) {
+            self.set_var(key, joined.to_string_lossy().to_string());
+        }
+    }
+
+    fn apply(&mut self, root: &Path) {
+        let path_entries = [
+            root.join("usr/bin"),
+            root.join("bin"),
+            root.join("usr/sbin"),
+        ];
+        self.prepend_paths("PATH", &path_entries);
+
+        let lib_paths = [
+            root.join("lib"),
+            root.join("lib/x86_64-linux-gnu"),
+            root.join("usr/lib"),
+            root.join("usr/lib/x86_64-linux-gnu"),
+        ];
+        self.prepend_paths("LD_LIBRARY_PATH", &lib_paths);
+        self.prepend_paths("LIBRARY_PATH", &lib_paths);
+
+        let include_paths = [
+            root.join("usr/include"),
+            root.join("usr/include/gdal"),
+            root.join("usr/local/include"),
+        ];
+        self.prepend_paths("CPATH", &include_paths);
+
+        let pkg_paths = [
+            root.join("usr/lib/pkgconfig"),
+            root.join("usr/lib/x86_64-linux-gnu/pkgconfig"),
+        ];
+        self.prepend_paths("PKG_CONFIG_PATH", &pkg_paths);
+
+        let gdal_data = root.join("usr/share/gdal");
+        if gdal_data.exists() {
+            self.set_var("GDAL_DATA", gdal_data.display().to_string());
+        }
+        let proj_lib = root.join("usr/share/proj");
+        if proj_lib.exists() {
+            self.set_var("PROJ_LIB", proj_lib.display().to_string());
+        }
+        if env::var_os("CC").is_none() {
+            let cc = root.join("usr/bin/gcc");
+            if cc.exists() {
+                self.set_var("CC", cc.display().to_string());
+            }
+        }
+        if env::var_os("CXX").is_none() {
+            let cxx = root.join("usr/bin/g++");
+            if cxx.exists() {
+                self.set_var("CXX", cxx.display().to_string());
+            }
+        }
+    }
+}
+
+impl Drop for SysEnvGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.drain(..).rev() {
+            match value {
+                Some(val) => env::set_var(&key, val),
+                None => env::remove_var(&key),
+            }
+        }
+    }
+}
+
 fn resolve_dependencies(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
@@ -2904,6 +3010,23 @@ pub(crate) fn resolve_dependencies_with_effects(
         .map(|spec| canonicalize_spec(spec))
         .filter(|spec| !spec.is_empty())
         .collect();
+    let dep_names: Vec<String> = requirements
+        .iter()
+        .map(|spec| dependency_name(spec))
+        .collect();
+    let mut system_deps = system_deps_from_names(dep_names);
+    let sysroot = if system_deps.capabilities.is_empty()
+        || matches!(system_deps_mode(), SystemDepsMode::Offline)
+    {
+        None
+    } else {
+        pin_system_deps(&mut system_deps).map_err(anyhow::Error::from)?;
+        ensure_system_deps_rootfs(&system_deps).map_err(anyhow::Error::from)?
+    };
+    let mut sys_env = SysEnvGuard::default();
+    if let Some(root) = sysroot.as_ref() {
+        sys_env.apply(root);
+    }
     tracing::debug!(?requirements, "resolver_requirements");
     let request = ResolverRequest {
         project: snapshot.name.clone(),
@@ -5430,14 +5553,6 @@ build-backend = "maturin"
             first_hash, second_hash,
             "build hash should vary with build env"
         );
-        let second_dir = project_wheel_cache_dir(
-            &cache_root,
-            &snapshot,
-            &runtime,
-            Path::new(&runtime.path),
-            false,
-            &second_hash,
-        );
 
         let env_root = project_root.join(".px").join("env");
         fs::create_dir_all(env_root.join("bin"))?;
@@ -5452,8 +5567,27 @@ build-backend = "maturin"
             script.exists(),
             "script should be installed from cached wheel even when build env changes"
         );
+        let cache_root = cache_root
+            .join("project-wheels")
+            .join(normalize_project_name(&snapshot.name));
+        let mut copied = false;
+        if let Ok(entries) = fs::read_dir(&cache_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path == first_dir || !path.is_dir() {
+                    continue;
+                }
+                if path.join("wheel.json").exists() {
+                    let candidate = path.join("maturin_change-0.1.0-py3-none-any.whl");
+                    if candidate.exists() && compute_file_sha256(&candidate)? == sha256 {
+                        copied = true;
+                        break;
+                    }
+                }
+            }
+        }
         assert!(
-            second_dir.join("wheel.json").exists(),
+            copied,
             "cached wheel should be copied into the current build cache directory"
         );
 

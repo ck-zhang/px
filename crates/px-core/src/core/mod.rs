@@ -7,6 +7,7 @@ pub mod runtime;
 pub mod sandbox;
 pub mod status;
 pub mod store;
+pub mod system_deps;
 pub mod tooling;
 pub mod tools;
 pub mod workspace;

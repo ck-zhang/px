@@ -187,6 +187,7 @@ fn download_artifact(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_wheel_via_sdist(
     cache_store: &dyn effects::CacheStore,
     cache: &CacheLocation,
