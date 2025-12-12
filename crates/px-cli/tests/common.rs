@@ -53,6 +53,8 @@ pub fn reset_test_store_env() {
         "PX_RUNTIME_HOST_ONLY",
         "PX_NO_ENSUREPIP",
         "PX_DEBUG_PIP",
+        "PX_SYSTEM_DEPS_MODE",
+        "PX_SYSTEM_DEPS_OFFLINE",
     ] {
         env::remove_var(key);
     }
@@ -92,6 +94,7 @@ pub fn ensure_test_store_env() {
         env::set_var("PX_TOOLS_DIR", tools);
         env::set_var("PX_NO_ENSUREPIP", "1");
         env::set_var("PX_RUNTIME_HOST_ONLY", "1");
+        env::set_var("PX_SYSTEM_DEPS_MODE", "offline");
     });
 }
 #[must_use]
@@ -211,11 +214,15 @@ case "$cmd" in
         ;;
     run)
         workdir=""
+        project_root="${PX_FAKE_SANDBOX_PROJECT_ROOT:-}"
         while [ "$#" -gt 0 ]; do
             case "$1" in
                 --workdir|-w)
                     shift
                     workdir="$1"
+                    if [ "$workdir" = "/app" ] && [ -n "$project_root" ]; then
+                        workdir="$project_root"
+                    fi
                     shift
                     continue
                     ;;
@@ -242,9 +249,25 @@ case "$cmd" in
             cd "$workdir" 2>/dev/null || true
         fi
         if [ "$#" -gt 0 ]; then
-            if [ -n "$PX_FAKE_SANDBOX_ENV_ROOT" ]; then
+        if [ -n "$project_root" ]; then
+            mapped=""
+            while [ "$#" -gt 0 ]; do
                 case "$1" in
-                    /px/env/*)
+                    /app/*)
+                        mapped="$mapped $project_root/${1#/app/}"
+                        ;;
+                    *)
+                        mapped="$mapped $1"
+                        ;;
+                esac
+                shift
+            done
+            # shellcheck disable=SC2086
+            set -- $mapped
+        fi
+        if [ -n "$PX_FAKE_SANDBOX_ENV_ROOT" ]; then
+            case "$1" in
+                /px/env/*)
                         candidate="$PX_FAKE_SANDBOX_ENV_ROOT/${1#/px/env/}"
                         if [ -x "$candidate" ]; then
                             shift
