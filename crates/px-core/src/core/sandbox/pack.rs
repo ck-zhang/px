@@ -19,13 +19,17 @@ use toml_edit::DocumentMut;
 use walkdir::WalkDir;
 
 use super::app_bundle::{write_pxapp_bundle, PxAppMetadata};
+use super::runner::{BackendKind, ContainerBackend};
+use super::system_deps_mode;
+use super::SystemDepsMode;
 use super::{
-    default_store_root, discover_site_packages, ensure_sandbox_image, env_root_from_site_packages,
-    sandbox_error, sandbox_image_tag, sandbox_timestamp_string, SandboxArtifacts,
-    SandboxImageManifest, SandboxStore,
+    default_store_root, detect_container_backend, discover_site_packages, ensure_sandbox_image,
+    env_root_from_site_packages, sandbox_error, sandbox_image_tag, sandbox_timestamp_string,
+    SandboxArtifacts, SandboxImageManifest, SandboxStore,
 };
 use crate::core::runtime::build_pythonpath;
 use crate::core::runtime::{load_project_state, ManifestSnapshot};
+use crate::core::system_deps::SystemDeps;
 use crate::project::evaluate_project_state;
 use crate::workspace::prepare_workspace_run_context;
 use crate::{
@@ -290,14 +294,21 @@ fn pack_project(
         }
     };
     let env_layer = load_layer_from_blobs(&base_blobs, &env_digest)?;
+    let mut layers = Vec::new();
+    if let Some(sys_digest) = artifacts.manifest.system_layer_digest.clone() {
+        let sys_layer = load_layer_from_blobs(&base_blobs, &sys_digest)?;
+        layers.push(sys_layer);
+    }
+    layers.push(env_layer);
     let mapped_paths =
         map_allowed_paths_for_image(&paths.allowed_paths, &snapshot.root, &artifacts.env_root);
     let pythonpath = join_paths_env(&mapped_paths)?;
     let app_layer = write_app_layer_tar(&snapshot.root, &pack_blobs)?;
+    layers.push(app_layer);
     let built = build_oci_image(
         &artifacts,
         &pack_root,
-        vec![env_layer, app_layer],
+        layers,
         tag.as_deref(),
         Path::new("/app"),
         Some(&pythonpath),
@@ -311,6 +322,7 @@ fn pack_project(
                 "sbx_id": artifacts.definition.sbx_id(),
                 "base": artifacts.base.name,
                 "capabilities": artifacts.definition.capabilities,
+                "system_deps": artifacts.definition.system_deps.clone(),
                 "profile_oid": artifacts.definition.profile_oid,
                 "image_digest": format!("sha256:{}", built.manifest_digest),
                 "store": pack_root.display().to_string(),
@@ -375,6 +387,7 @@ fn pack_project(
                 base_os_oid: artifacts.base.base_os_oid.clone(),
                 profile_oid: artifacts.definition.profile_oid.clone(),
                 capabilities: artifacts.definition.capabilities.clone(),
+                system_deps: artifacts.definition.system_deps.clone(),
                 entrypoint: entrypoint.clone(),
                 workdir: workdir.display().to_string(),
                 manifest_digest: String::new(),
@@ -394,6 +407,7 @@ fn pack_project(
                 "sbx_id": artifacts.definition.sbx_id(),
                 "base": artifacts.base.name,
                 "capabilities": artifacts.definition.capabilities,
+                "system_deps": artifacts.definition.system_deps.clone(),
                 "profile_oid": artifacts.definition.profile_oid,
                 "bundle": out_path.display().to_string(),
                 "allow_dirty": request.allow_dirty,
@@ -537,6 +551,12 @@ fn pack_workspace_member(
         }
     };
     let env_layer = load_layer_from_blobs(&base_blobs, &env_digest)?;
+    let mut layers = Vec::new();
+    if let Some(sys_digest) = artifacts.manifest.system_layer_digest.clone() {
+        let sys_layer = load_layer_from_blobs(&base_blobs, &sys_digest)?;
+        layers.push(sys_layer);
+    }
+    layers.push(env_layer);
     let mapped_paths = map_allowed_paths_for_image(
         &ws_ctx.py_ctx.allowed_paths,
         &ws_ctx.py_ctx.project_root,
@@ -544,10 +564,11 @@ fn pack_workspace_member(
     );
     let pythonpath = join_paths_env(&mapped_paths)?;
     let app_layer = write_app_layer_tar(&ws_ctx.py_ctx.project_root, &pack_blobs)?;
+    layers.push(app_layer);
     let built = build_oci_image(
         &artifacts,
         &pack_root,
-        vec![env_layer, app_layer],
+        layers,
         tag.as_deref(),
         Path::new("/app"),
         Some(&pythonpath),
@@ -561,6 +582,7 @@ fn pack_workspace_member(
                 "sbx_id": artifacts.definition.sbx_id(),
                 "base": artifacts.base.name,
                 "capabilities": artifacts.definition.capabilities,
+                "system_deps": artifacts.definition.system_deps.clone(),
                 "profile_oid": artifacts.definition.profile_oid,
                 "image_digest": format!("sha256:{}", built.manifest_digest),
                 "store": pack_root.display().to_string(),
@@ -630,6 +652,7 @@ fn pack_workspace_member(
                 base_os_oid: artifacts.base.base_os_oid.clone(),
                 profile_oid: artifacts.definition.profile_oid.clone(),
                 capabilities: artifacts.definition.capabilities.clone(),
+                system_deps: artifacts.definition.system_deps.clone(),
                 entrypoint: entrypoint.clone(),
                 workdir: workdir.display().to_string(),
                 manifest_digest: String::new(),
@@ -649,6 +672,7 @@ fn pack_workspace_member(
                 "sbx_id": artifacts.definition.sbx_id(),
                 "base": artifacts.base.name,
                 "capabilities": artifacts.definition.capabilities,
+                "system_deps": artifacts.definition.system_deps.clone(),
                 "profile_oid": artifacts.definition.profile_oid,
                 "bundle": out_path.display().to_string(),
                 "allow_dirty": request.allow_dirty,
@@ -876,6 +900,7 @@ pub(crate) fn build_oci_image(
             "base": artifacts.base.name,
             "capabilities": artifacts.definition.capabilities,
             "profile_oid": artifacts.definition.profile_oid,
+            "system_deps": artifacts.definition.system_deps.clone(),
         },
     });
     let config_bytes = serde_json::to_vec_pretty(&config).map_err(|err| {
@@ -986,47 +1011,18 @@ pub(crate) fn write_env_layer_tar(
         .as_ref()
         .and_then(|p| p.to_str())
         .map(|s| s.to_string());
-    let mut external_paths = Vec::new();
     let env_root_canon = env_root
         .canonicalize()
         .unwrap_or_else(|_| env_root.to_path_buf());
-    for entry in WalkDir::new(env_root)
-        .max_depth(4)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("pth") {
-            continue;
-        }
-        let Ok(contents) = fs::read_to_string(entry.path()) else {
-            continue;
-        };
-        for line in contents.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || !trimmed.starts_with('/') {
-                continue;
-            }
-            let path = PathBuf::from(trimmed);
-            if path.starts_with(&env_root_canon) || !path.exists() {
-                continue;
-            }
-            external_paths.push(path);
-        }
-    }
-    external_paths.sort();
-    external_paths.dedup();
     let mut extra_paths = Vec::new();
     if let Some(runtime_root) = runtime_root.as_ref() {
-        extra_paths.extend(shared_libs(&runtime_root.join("bin").join("python")));
-        extra_paths.extend(shared_libs(Path::new("/bin/bash")));
-        extra_paths.extend(shared_libs(Path::new("/usr/bin/env")));
-        extra_paths.extend(shared_libs(Path::new("/usr/bin/coreutils")));
-        extra_paths.push(PathBuf::from("/usr/bin/env"));
-        extra_paths.push(PathBuf::from("/bin/bash"));
-        extra_paths.push(PathBuf::from("/usr/bin/coreutils"));
+        let runtime_python = runtime_root.join("bin").join("python");
+        for lib in shared_libs(&runtime_python) {
+            if lib.starts_with(runtime_root) || lib.starts_with(&env_root_canon) {
+                extra_paths.push(lib);
+            }
+        }
+        extra_paths.push(runtime_python);
         extra_paths.sort();
         extra_paths.dedup();
     }
@@ -1123,25 +1119,52 @@ pub(crate) fn write_env_layer_tar(
             append_path(&mut builder, &archive_path, &host_path)?;
         }
     }
-    for ext in external_paths {
-        let walker = WalkDir::new(&ext)
-            .sort_by(|a, b| a.path().cmp(b.path()))
-            .into_iter()
-            .filter_map(Result::ok);
-        for entry in walker {
-            let path = entry.path();
-            if path == ext {
-                continue;
-            }
-            let rel = match path.strip_prefix(&ext) {
-                Ok(rel) => rel,
-                Err(_) => continue,
-            };
-            let archive_path = Path::new("").join(ext.strip_prefix("/").unwrap_or(&ext).join(rel));
-            if seen.insert(archive_path.clone()) {
-                append_path(&mut builder, &archive_path, path)?;
-            }
+    finalize_layer(builder, blobs)
+}
+
+pub(crate) fn write_system_deps_layer(
+    backend: &ContainerBackend,
+    deps: &SystemDeps,
+    blobs: &Path,
+) -> Result<Option<LayerTar>, InstallUserError> {
+    if deps.apt_packages.is_empty() || matches!(system_deps_mode(), SystemDepsMode::Offline) {
+        return Ok(None);
+    }
+    if matches!(backend.kind, BackendKind::Custom) {
+        return Ok(None);
+    }
+    let rootfs = match crate::core::sandbox::ensure_system_deps_rootfs(deps)? {
+        Some(path) => path,
+        None => return Ok(None),
+    };
+    let layer = write_rootfs_layer(&rootfs, blobs)?;
+    Ok(Some(layer))
+}
+
+fn write_rootfs_layer(rootfs: &Path, blobs: &Path) -> Result<LayerTar, InstallUserError> {
+    let mut builder = Builder::new(Vec::new());
+    let walker = WalkDir::new(rootfs).sort_by(|a, b| a.path().cmp(b.path()));
+    for entry in walker {
+        let entry = entry.map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to walk system dependency tree",
+                json!({ "error": err.to_string() }),
+            )
+        })?;
+        let path = entry.path();
+        if path == rootfs {
+            continue;
         }
+        let rel = match path.strip_prefix(rootfs) {
+            Ok(rel) => rel,
+            Err(_) => continue,
+        };
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let archive_path = Path::new("").join(rel);
+        append_path(&mut builder, &archive_path, path)?;
     }
     finalize_layer(builder, blobs)
 }
@@ -1577,10 +1600,13 @@ fn ensure_base_image(
     allowed_paths: &[PathBuf],
     tag: &str,
 ) -> Result<(), InstallUserError> {
+    let backend = detect_container_backend()?;
     let oci_dir = store.oci_dir(&artifacts.definition.sbx_id());
     let blobs = oci_dir.join("blobs").join("sha256");
     let runtime_root = runtime_home_from_env(&artifacts.env_root);
     let runtime_required = runtime_root.is_some();
+    let needs_system = !artifacts.definition.system_deps.apt_packages.is_empty()
+        && !matches!(backend.kind, BackendKind::Custom);
     let mut rebuild = !oci_dir.join("index.json").exists();
     if !rebuild {
         let digest = artifacts
@@ -1595,7 +1621,11 @@ fn ensure_base_image(
             .as_ref()
             .map(|d| blobs.join(d).exists())
             .unwrap_or(false);
-        rebuild = !manifest_path.exists() || !env_ok;
+        let sys_ok = match &artifacts.manifest.system_layer_digest {
+            Some(d) => blobs.join(d).exists(),
+            None => !needs_system,
+        };
+        rebuild = !manifest_path.exists() || !env_ok || !sys_ok;
     }
     if !rebuild && runtime_required {
         if let Some(env_digest) = artifacts.manifest.env_layer_digest.as_ref() {
@@ -1625,13 +1655,23 @@ fn ensure_base_image(
                 json!({ "path": blobs.display().to_string(), "error": err.to_string() }),
             )
         })?;
+        let mut layers = Vec::new();
+        if let Some(system_layer) =
+            write_system_deps_layer(&backend, &artifacts.definition.system_deps, &blobs)?
+        {
+            artifacts.manifest.system_layer_digest = Some(system_layer.digest.clone());
+            layers.push(system_layer);
+        } else {
+            artifacts.manifest.system_layer_digest = None;
+        }
         let env_layer = write_env_layer_tar(&artifacts.env_root, runtime_root.as_deref(), &blobs)?;
+        layers.push(env_layer.clone());
         let mapped = map_allowed_paths_for_image(allowed_paths, project_root, &artifacts.env_root);
         let pythonpath = join_paths_env(&mapped)?;
         let built = build_oci_image(
             artifacts,
             &oci_dir,
-            vec![env_layer.clone()],
+            layers,
             Some(tag),
             Path::new("/app"),
             Some(&pythonpath),
@@ -1838,6 +1878,7 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::core::sandbox::{SandboxBase, SandboxDefinition, SandboxImageManifest, SBX_VERSION};
+    use crate::core::system_deps::resolve_system_deps;
     use serde_json;
     use std::collections::BTreeSet;
     use std::env;
@@ -1861,9 +1902,11 @@ mod tests {
 
         let mut caps = BTreeSet::new();
         caps.insert("postgres".to_string());
+        let system_deps = resolve_system_deps(&caps, None);
         let definition = SandboxDefinition {
             base_os_oid: "base".into(),
             capabilities: caps.clone(),
+            system_deps: system_deps.clone(),
             profile_oid: "profile".into(),
             sbx_version: SBX_VERSION,
         };
@@ -1879,8 +1922,10 @@ mod tests {
                 base_os_oid: "base".into(),
                 profile_oid: "profile".into(),
                 capabilities: caps,
+                system_deps,
                 image_digest: String::new(),
                 env_layer_digest: None,
+                system_layer_digest: None,
                 created_at: String::new(),
                 px_version: "test".into(),
                 sbx_version: SBX_VERSION,

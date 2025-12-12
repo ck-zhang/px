@@ -9,6 +9,7 @@ use tar::{Archive, Builder, Header};
 
 use super::pack::sha256_hex;
 use super::{sandbox_error, PXAPP_VERSION, SBX_VERSION};
+use crate::core::system_deps::SystemDeps;
 use crate::{InstallUserError, PX_VERSION};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -19,6 +20,8 @@ pub(crate) struct PxAppMetadata {
     pub(crate) base_os_oid: String,
     pub(crate) profile_oid: String,
     pub(crate) capabilities: BTreeSet<String>,
+    #[serde(default)]
+    pub(crate) system_deps: SystemDeps,
     pub(crate) entrypoint: Vec<String>,
     pub(crate) workdir: String,
     pub(crate) manifest_digest: String,

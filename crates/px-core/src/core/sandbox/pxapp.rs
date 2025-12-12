@@ -121,6 +121,7 @@ fn validate_bundle_identity(
     let definition = SandboxDefinition {
         base_os_oid: bundle.metadata.base_os_oid.clone(),
         capabilities: bundle.metadata.capabilities.clone(),
+        system_deps: bundle.metadata.system_deps.clone(),
         profile_oid: bundle.metadata.profile_oid.clone(),
         sbx_version: bundle.metadata.sbx_version,
     };

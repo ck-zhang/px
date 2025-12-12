@@ -7,13 +7,15 @@ use std::process::{Command, Stdio};
 use serde_json::json;
 
 use super::{
-    sandbox_error, sandbox_timestamp_string, SandboxArtifacts, SandboxImageManifest, SandboxStore,
+    sandbox_error, sandbox_timestamp_string, system_deps_mode, SandboxArtifacts,
+    SandboxImageManifest, SandboxStore, SystemDepsMode,
 };
 use crate::core::runtime::process::{
     run_command, run_command_passthrough, run_command_streaming, run_command_with_stdin, RunOutput,
 };
 use crate::core::sandbox::pack::{
     build_oci_image, export_output, load_layer_from_blobs, write_env_layer_tar,
+    write_system_deps_layer,
 };
 use crate::{InstallUserError, PX_VERSION};
 
@@ -67,6 +69,10 @@ pub(crate) fn ensure_image_layout(
     allowed_paths: &[PathBuf],
     default_tag: &str,
 ) -> Result<SandboxImageLayout, InstallUserError> {
+    let backend = detect_container_backend()?;
+    let needs_system = matches!(system_deps_mode(), SystemDepsMode::Strict)
+        && !artifacts.definition.system_deps.apt_packages.is_empty()
+        && !matches!(backend.kind, BackendKind::Custom);
     let sbx_id = artifacts.definition.sbx_id();
     let oci_dir = store.oci_dir(&sbx_id);
     let index = oci_dir.join("index.json");
@@ -85,7 +91,11 @@ pub(crate) fn ensure_image_layout(
             .as_ref()
             .map(|d| blobs.join(d).exists())
             .unwrap_or(false);
-        rebuild = !manifest_path.exists() || !env_ok;
+        let sys_ok = match &artifacts.manifest.system_layer_digest {
+            Some(d) => blobs.join(d).exists(),
+            None => !needs_system,
+        };
+        rebuild = !manifest_path.exists() || !env_ok || !sys_ok;
     }
     if rebuild {
         if let Some(parent) = oci_dir.parent() {
@@ -104,14 +114,24 @@ pub(crate) fn ensure_image_layout(
                 json!({ "path": blobs.display().to_string(), "error": err.to_string() }),
             )
         })?;
+        let mut layers = Vec::new();
+        if let Some(system_layer) =
+            write_system_deps_layer(&backend, &artifacts.definition.system_deps, &blobs)?
+        {
+            artifacts.manifest.system_layer_digest = Some(system_layer.digest.clone());
+            layers.push(system_layer);
+        } else {
+            artifacts.manifest.system_layer_digest = None;
+        }
         let runtime_root = crate::core::sandbox::pack::runtime_home_from_env(&artifacts.env_root);
         let env_layer = write_env_layer_tar(&artifacts.env_root, runtime_root.as_deref(), &blobs)?;
+        layers.push(env_layer.clone());
         let mapped = map_allowed_paths(allowed_paths, source_root, &artifacts.env_root);
         let pythonpath = join_paths(&mapped)?;
         let built = build_oci_image(
             artifacts,
             &oci_dir,
-            vec![env_layer.clone()],
+            layers,
             Some(default_tag),
             Path::new("/app"),
             Some(&pythonpath),
@@ -135,13 +155,19 @@ pub(crate) fn ensure_image_layout(
                     }),
                 )
             })?;
+            let mut layers = Vec::new();
+            if let Some(sys_digest) = artifacts.manifest.system_layer_digest.clone() {
+                let sys_layer = load_layer_from_blobs(&blobs, &sys_digest)?;
+                layers.push(sys_layer);
+            }
             let env_layer = load_layer_from_blobs(&blobs, &digest)?;
+            layers.push(env_layer);
             let mapped = map_allowed_paths(allowed_paths, source_root, &artifacts.env_root);
             let pythonpath = join_paths(&mapped)?;
             build_oci_image(
                 artifacts,
                 &oci_dir,
-                vec![env_layer],
+                layers,
                 Some(default_tag),
                 Path::new("/app"),
                 Some(&pythonpath),
