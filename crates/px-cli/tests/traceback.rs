@@ -3,10 +3,11 @@ use serde_json::Value;
 
 mod common;
 
-use common::{prepare_fixture, prepare_traceback_fixture};
+use common::{prepare_fixture, prepare_traceback_fixture, test_env_guard};
 
 #[test]
 fn run_missing_import_surfaces_px_hint() {
+    let _guard = test_env_guard();
     let (_tmp, project) = prepare_fixture("traceback-missing-import");
     let Some(python) = find_python() else {
         eprintln!("skipping traceback test (python binary not found)");
@@ -39,6 +40,7 @@ fn run_missing_import_surfaces_px_hint() {
 
 #[test]
 fn run_missing_import_exposes_traceback_in_json() {
+    let _guard = test_env_guard();
     let (_tmp, project) = prepare_fixture("traceback-json-import");
     let Some(python) = find_python() else {
         eprintln!("skipping traceback test (python binary not found)");
@@ -79,6 +81,7 @@ fn run_missing_import_exposes_traceback_in_json() {
 
 #[test]
 fn run_traceback_is_not_duplicated_in_cli_output() {
+    let _guard = test_env_guard();
     let (_tmp, project) = prepare_traceback_fixture("traceback-cli-dedup");
     let Some(python) = find_python() else {
         eprintln!("skipping traceback dedup test (python binary not found)");
