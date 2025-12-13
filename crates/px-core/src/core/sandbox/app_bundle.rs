@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -32,11 +32,17 @@ pub(crate) struct PxAppMetadata {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct PxAppLayer {
+    pub(crate) digest: String,
+    pub(crate) bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct PxAppBundle {
     pub(crate) metadata: PxAppMetadata,
     pub(crate) manifest_bytes: Vec<u8>,
     pub(crate) config_bytes: Vec<u8>,
-    pub(crate) layers: Vec<super::pack::LayerTar>,
+    pub(crate) layers: Vec<PxAppLayer>,
 }
 
 pub(crate) fn bundle_identity(bundle: &PxAppBundle) -> String {
@@ -81,28 +87,29 @@ pub(crate) fn write_pxapp_bundle(
             )
         })?;
     }
-    let mut builder = Builder::new(Vec::new());
+    let file = fs::File::create(out).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to write pxapp bundle",
+            json!({ "path": out.display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    let mut builder = Builder::new(file);
     append_bytes(&mut builder, Path::new("metadata.json"), &encoded_meta)?;
     append_bytes(&mut builder, Path::new("manifest.json"), manifest_bytes)?;
     append_bytes(&mut builder, Path::new("config.json"), config_bytes)?;
     for layer in layers {
         let name = format!("layers/{}.tar", layer.digest);
-        append_bytes(&mut builder, Path::new(&name), &layer.bytes)?;
+        append_file(&mut builder, Path::new(&name), &layer.path, layer.size)?;
     }
-    let data = builder.into_inner().map_err(|err| {
+    builder.into_inner().map_err(|err| {
         sandbox_error(
             "PX903",
             "failed to finalize pxapp bundle",
             json!({ "error": err.to_string() }),
         )
     })?;
-    fs::write(out, data).map_err(|err| {
-        sandbox_error(
-            "PX903",
-            "failed to write pxapp bundle",
-            json!({ "path": out.display().to_string(), "error": err.to_string() }),
-        )
-    })
+    Ok(())
 }
 
 pub(crate) fn read_pxapp_bundle(path: &Path) -> Result<PxAppBundle, InstallUserError> {
@@ -175,9 +182,8 @@ pub(crate) fn read_pxapp_bundle(path: &Path) -> Result<PxAppBundle, InstallUserE
                         }),
                     ));
                 }
-                layers.push(super::pack::LayerTar {
+                layers.push(PxAppLayer {
                     digest,
-                    size: contents.len() as u64,
                     bytes: contents,
                 });
             }
@@ -313,7 +319,7 @@ pub(crate) fn read_pxapp_bundle(path: &Path) -> Result<PxAppBundle, InstallUserE
 }
 
 fn append_bytes(
-    builder: &mut Builder<Vec<u8>>,
+    builder: &mut Builder<impl Write>,
     path: &Path,
     data: &[u8],
 ) -> Result<(), InstallUserError> {
@@ -336,6 +342,42 @@ fn append_bytes(
             "PX903",
             "failed to write pxapp entry",
             json!({ "path": path.display().to_string(), "error": err.to_string() }),
+        )
+    })
+}
+
+fn append_file(
+    builder: &mut Builder<impl Write>,
+    archive_path: &Path,
+    path: &Path,
+    size: u64,
+) -> Result<(), InstallUserError> {
+    let mut header = Header::new_gnu();
+    header.set_path(archive_path).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to stage pxapp entry",
+            json!({ "path": archive_path.display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    header.set_size(size);
+    header.set_mode(0o644);
+    header.set_mtime(0);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_cksum();
+    let mut file = fs::File::open(path).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to read pxapp layer",
+            json!({ "path": path.display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    builder.append(&header, &mut file).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to write pxapp entry",
+            json!({ "path": archive_path.display().to_string(), "error": err.to_string() }),
         )
     })
 }

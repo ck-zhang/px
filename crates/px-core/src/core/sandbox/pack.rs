@@ -1,6 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::env;
 use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -13,7 +14,8 @@ use oci_distribution::Reference;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tar::{Archive, Builder, Header};
+use tar::{Archive, Builder, EntryType, Header, HeaderMode};
+use tempfile::NamedTempFile;
 use tokio::runtime::Runtime;
 use toml_edit::DocumentMut;
 use walkdir::WalkDir;
@@ -279,6 +281,18 @@ fn pack_project(
         None
     };
     let pack_root = store.pack_dir(&artifacts.definition.sbx_id());
+    if pack_root.exists() {
+        fs::remove_dir_all(&pack_root).map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to prepare sandbox pack directory",
+                json!({
+                    "path": pack_root.display().to_string(),
+                    "error": err.to_string(),
+                }),
+            )
+        })?;
+    }
     let pack_blobs = pack_root.join("blobs").join("sha256");
     let base_blobs = store
         .oci_dir(&artifacts.definition.sbx_id())
@@ -536,6 +550,18 @@ fn pack_workspace_member(
         None
     };
     let pack_root = store.pack_dir(&artifacts.definition.sbx_id());
+    if pack_root.exists() {
+        fs::remove_dir_all(&pack_root).map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to prepare sandbox pack directory",
+                json!({
+                    "path": pack_root.display().to_string(),
+                    "error": err.to_string(),
+                }),
+            )
+        })?;
+    }
     let pack_blobs = pack_root.join("blobs").join("sha256");
     let base_blobs = store
         .oci_dir(&artifacts.definition.sbx_id())
@@ -821,7 +847,7 @@ fn format_capabilities(artifacts: &SandboxArtifacts) -> String {
 pub(crate) struct LayerTar {
     pub(crate) digest: String,
     pub(crate) size: u64,
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) path: PathBuf,
 }
 
 pub(crate) struct BuiltImage {
@@ -839,9 +865,6 @@ pub(crate) fn build_oci_image(
     working_dir: &Path,
     pythonpath: Option<&str>,
 ) -> Result<BuiltImage, InstallUserError> {
-    if oci_root.exists() {
-        let _ = fs::remove_dir_all(oci_root);
-    }
     fs::create_dir_all(oci_root).map_err(|err| {
         sandbox_error(
             "PX903",
@@ -857,20 +880,28 @@ pub(crate) fn build_oci_image(
             json!({ "path": blobs.display().to_string(), "error": err.to_string() }),
         )
     })?;
-    for layer in &layers {
-        let path = blobs.join(&layer.digest);
-        if path.exists() {
-            continue;
+    let mut image_layers = Vec::with_capacity(layers.len());
+    for layer in layers {
+        let dest = blobs.join(&layer.digest);
+        if !dest.exists() {
+            link_or_copy(&layer.path, &dest).map_err(|err| {
+                sandbox_error(
+                    "PX903",
+                    "failed to write sandbox layer",
+                    json!({
+                        "path": dest.display().to_string(),
+                        "error": err.to_string(),
+                    }),
+                )
+            })?;
         }
-        fs::write(&path, &layer.bytes).map_err(|err| {
-            sandbox_error(
-                "PX903",
-                "failed to write sandbox layer",
-                json!({ "path": path.display().to_string(), "error": err.to_string() }),
-            )
-        })?;
+        image_layers.push(LayerTar {
+            digest: layer.digest,
+            size: layer.size,
+            path: dest,
+        });
     }
-    let diff_ids: Vec<String> = layers
+    let diff_ids: Vec<String> = image_layers
         .iter()
         .map(|layer| format!("sha256:{}", layer.digest))
         .collect();
@@ -919,7 +950,7 @@ pub(crate) fn build_oci_image(
             json!({ "path": config_path.display().to_string(), "error": err.to_string() }),
         )
     })?;
-    let manifest_layers: Vec<_> = layers
+    let manifest_layers: Vec<_> = image_layers
         .iter()
         .map(|layer| {
             json!({
@@ -996,7 +1027,7 @@ pub(crate) fn build_oci_image(
         manifest_digest,
         manifest_bytes,
         config_bytes,
-        layers,
+        layers: image_layers,
     })
 }
 
@@ -1005,7 +1036,7 @@ pub(crate) fn write_env_layer_tar(
     runtime_root: Option<&Path>,
     blobs: &Path,
 ) -> Result<LayerTar, InstallUserError> {
-    let mut builder = Builder::new(Vec::new());
+    let mut builder = layer_tar_builder(blobs)?;
     let runtime_root = runtime_root.and_then(|path| path.canonicalize().ok());
     let runtime_root_str = runtime_root
         .as_ref()
@@ -1014,6 +1045,7 @@ pub(crate) fn write_env_layer_tar(
     let env_root_canon = env_root
         .canonicalize()
         .unwrap_or_else(|_| env_root.to_path_buf());
+    let store_mapping = discover_store_mapping(&env_root_canon)?;
     let mut extra_paths = Vec::new();
     if let Some(runtime_root) = runtime_root.as_ref() {
         let runtime_python = runtime_root.join("bin").join("python");
@@ -1061,13 +1093,49 @@ pub(crate) fn write_env_layer_tar(
                     path,
                     env_root,
                     runtime_root_str.as_deref(),
+                    store_mapping.as_ref().map(|mapping| mapping.host_root_str.as_str()),
                 )?;
             } else if entry.file_type().is_file()
                 && path.file_name().and_then(|n| n.to_str()) == Some("pyvenv.cfg")
             {
                 append_rewritten_pyvenv(&mut builder, &archive_path, path)?;
+            } else if entry.file_type().is_file()
+                && path.extension().and_then(|ext| ext.to_str()) == Some("pth")
+            {
+                append_rewritten_pth(
+                    &mut builder,
+                    &archive_path,
+                    path,
+                    store_mapping.as_ref().map(|mapping| mapping.host_root_str.as_str()),
+                )?;
             } else {
                 append_path(&mut builder, &archive_path, path)?;
+            }
+        }
+    }
+    if let Some(mapping) = store_mapping {
+        for pkg_root in mapping.pkg_build_roots {
+            let walker = WalkDir::new(&pkg_root).sort_by(|a, b| a.path().cmp(b.path()));
+            for entry in walker {
+                let entry = entry.map_err(|err| {
+                    sandbox_error(
+                        "PX903",
+                        "failed to walk package build tree for sandbox image",
+                        json!({ "error": err.to_string() }),
+                    )
+                })?;
+                let path = entry.path();
+                if path == pkg_root {
+                    continue;
+                }
+                let rel = match path.strip_prefix(&mapping.host_root) {
+                    Ok(rel) => rel,
+                    Err(_) => continue,
+                };
+                let archive_path = Path::new("px").join("store").join(rel);
+                if seen.insert(archive_path.clone()) {
+                    append_path(&mut builder, &archive_path, path)?;
+                }
             }
         }
     }
@@ -1141,8 +1209,154 @@ pub(crate) fn write_system_deps_layer(
     Ok(Some(layer))
 }
 
+pub(crate) fn write_base_os_layer(
+    backend: &ContainerBackend,
+    blobs: &Path,
+) -> Result<LayerTar, InstallUserError> {
+    fs::create_dir_all(blobs).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to prepare OCI blob directory",
+            json!({ "path": blobs.display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+
+    let create = Command::new(&backend.program)
+        .arg("create")
+        .arg(super::SYSTEM_DEPS_IMAGE)
+        .output()
+        .map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to create base sandbox container",
+                json!({ "error": err.to_string(), "image": super::SYSTEM_DEPS_IMAGE }),
+            )
+        })?;
+    if !create.status.success() {
+        return Err(sandbox_error(
+            "PX903",
+            "failed to create base sandbox container",
+            json!({
+                "image": super::SYSTEM_DEPS_IMAGE,
+                "code": create.status.code(),
+                "stdout": String::from_utf8_lossy(&create.stdout).to_string(),
+                "stderr": String::from_utf8_lossy(&create.stderr).to_string(),
+            }),
+        ));
+    }
+    let id = String::from_utf8_lossy(&create.stdout).trim().to_string();
+    if id.is_empty() {
+        return Err(sandbox_error(
+            "PX903",
+            "failed to create base sandbox container",
+            json!({
+                "image": super::SYSTEM_DEPS_IMAGE,
+                "reason": "missing_container_id",
+                "stdout": String::from_utf8_lossy(&create.stdout).to_string(),
+            }),
+        ));
+    }
+
+    let temp = NamedTempFile::new_in(blobs).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to create base sandbox layer",
+            json!({ "path": blobs.display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    let out_file = temp.reopen().map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to prepare base sandbox layer",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    let export = Command::new(&backend.program)
+        .arg("export")
+        .arg(&id)
+        .stdout(out_file)
+        .stderr(std::process::Stdio::piped())
+        .output();
+
+    let _ = Command::new(&backend.program)
+        .arg("rm")
+        .arg("-f")
+        .arg(&id)
+        .output();
+
+    let export = export.map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to export base sandbox filesystem",
+            json!({ "error": err.to_string(), "image": super::SYSTEM_DEPS_IMAGE }),
+        )
+    })?;
+    if !export.status.success() {
+        return Err(sandbox_error(
+            "PX903",
+            "failed to export base sandbox filesystem",
+            json!({
+                "image": super::SYSTEM_DEPS_IMAGE,
+                "code": export.status.code(),
+                "stdout": String::from_utf8_lossy(&export.stdout).to_string(),
+                "stderr": String::from_utf8_lossy(&export.stderr).to_string(),
+            }),
+        ));
+    }
+
+    let mut file = File::open(temp.path()).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to read base sandbox layer",
+            json!({ "path": temp.path().display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to read base sandbox layer",
+                json!({ "path": temp.path().display().to_string(), "error": err.to_string() }),
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        size = size.saturating_add(read as u64);
+        hasher.update(&buffer[..read]);
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    let layer_path = blobs.join(&digest);
+    if !layer_path.exists() {
+        match temp.persist_noclobber(&layer_path) {
+            Ok(_) => {}
+            Err(err) => {
+                if err.error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(sandbox_error(
+                        "PX903",
+                        "failed to write base sandbox layer",
+                        json!({
+                            "path": layer_path.display().to_string(),
+                            "error": err.error.to_string(),
+                        }),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(LayerTar {
+        digest,
+        size,
+        path: layer_path,
+    })
+}
+
 fn write_rootfs_layer(rootfs: &Path, blobs: &Path) -> Result<LayerTar, InstallUserError> {
-    let mut builder = Builder::new(Vec::new());
+    let mut builder = layer_tar_builder(blobs)?;
     let walker = WalkDir::new(rootfs).sort_by(|a, b| a.path().cmp(b.path()));
     for entry in walker {
         let entry = entry.map_err(|err| {
@@ -1255,7 +1469,7 @@ fn layer_contains_runtime(blobs: &Path, digest: &str) -> Result<bool, InstallUse
 }
 
 fn write_app_layer_tar(source_root: &Path, blobs: &Path) -> Result<LayerTar, InstallUserError> {
-    let mut builder = Builder::new(Vec::new());
+    let mut builder = layer_tar_builder(blobs)?;
     let mut walker = WalkBuilder::new(source_root);
     walker
         .git_ignore(true)
@@ -1286,8 +1500,116 @@ fn write_app_layer_tar(source_root: &Path, blobs: &Path) -> Result<LayerTar, Ins
     finalize_layer(builder, blobs)
 }
 
-fn append_path(
-    builder: &mut Builder<Vec<u8>>,
+#[derive(Clone, Debug)]
+struct StoreMapping {
+    host_root: PathBuf,
+    host_root_str: String,
+    pkg_build_roots: Vec<PathBuf>,
+}
+
+fn discover_store_mapping(env_root: &Path) -> Result<Option<StoreMapping>, InstallUserError> {
+    let mut store_roots = BTreeSet::<String>::new();
+    let mut pkg_build_roots = Vec::<PathBuf>::new();
+
+    let walker = WalkDir::new(env_root).sort_by(|a, b| a.path().cmp(b.path()));
+    for entry in walker {
+        let entry = entry.map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to inspect environment for sandbox packaging",
+                json!({ "error": err.to_string() }),
+            )
+        })?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("pth") {
+            continue;
+        }
+        let contents = fs::read_to_string(path).map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to read environment path file for sandbox packaging",
+                json!({ "path": path.display().to_string(), "error": err.to_string() }),
+            )
+        })?;
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if !trimmed.starts_with('/') {
+                continue;
+            }
+            let Some(index) = trimmed.find("/store/pkg-builds/") else {
+                continue;
+            };
+            let Some(root) = trimmed.get(..index + "/store".len()) else {
+                continue;
+            };
+            store_roots.insert(root.to_string());
+            pkg_build_roots.push(PathBuf::from(trimmed));
+        }
+    }
+
+    if pkg_build_roots.is_empty() {
+        return Ok(None);
+    }
+    if store_roots.len() != 1 {
+        return Err(sandbox_error(
+            "PX904",
+            "sandbox environment references multiple package stores",
+            json!({
+                "reason": "multiple_store_roots",
+                "stores": store_roots.into_iter().collect::<Vec<_>>(),
+            }),
+        ));
+    }
+    let root = store_roots
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "/".to_string());
+    let host_root = PathBuf::from(&root)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(&root));
+    let host_root_str = host_root.to_string_lossy().to_string();
+
+    let mut canonical_roots = Vec::new();
+    for raw in pkg_build_roots {
+        let canonical = raw.canonicalize().unwrap_or(raw);
+        if !canonical.exists() {
+            return Err(sandbox_error(
+                "PX903",
+                "sandbox environment references a missing package build",
+                json!({
+                    "reason": "missing_pkg_build",
+                    "path": canonical.display().to_string(),
+                }),
+            ));
+        }
+        if !canonical.starts_with(&host_root) {
+            return Err(sandbox_error(
+                "PX903",
+                "sandbox environment references a package build outside the store root",
+                json!({
+                    "reason": "pkg_build_outside_store",
+                    "path": canonical.display().to_string(),
+                    "store_root": host_root_str,
+                }),
+            ));
+        }
+        canonical_roots.push(canonical);
+    }
+    canonical_roots.sort();
+    canonical_roots.dedup();
+
+    Ok(Some(StoreMapping {
+        host_root,
+        host_root_str,
+        pkg_build_roots: canonical_roots,
+    }))
+}
+
+fn append_path<W: Write>(
+    builder: &mut Builder<W>,
     archive_path: &Path,
     path: &Path,
 ) -> Result<(), InstallUserError> {
@@ -1307,8 +1629,19 @@ fn append_path(
             )
         })?;
     } else if metadata.file_type().is_symlink() {
+        let target = fs::read_link(path).map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to read symlink target for sandbox layer",
+                json!({ "path": path.display().to_string(), "error": err.to_string() }),
+            )
+        })?;
+        let mut header = Header::new_gnu();
+        header.set_metadata_in_mode(&metadata, HeaderMode::Deterministic);
+        header.set_entry_type(EntryType::Symlink);
+        header.set_size(0);
         builder
-            .append_path_with_name(path, archive_path)
+            .append_link(&mut header, archive_path, &target)
             .map_err(|err| {
                 sandbox_error(
                     "PX903",
@@ -1338,11 +1671,12 @@ fn append_path(
 }
 
 fn append_rewritten_python(
-    builder: &mut Builder<Vec<u8>>,
+    builder: &mut Builder<impl Write>,
     archive_path: &Path,
     path: &Path,
     env_root: &Path,
     runtime_root: Option<&str>,
+    store_root: Option<&str>,
 ) -> Result<(), InstallUserError> {
     let runtime_root = runtime_root.unwrap_or("/px/runtime");
     let env_root = env_root
@@ -1373,6 +1707,14 @@ fn append_rewritten_python(
         }
         let mut line = line.replace(&env_root_str, "/px/env");
         line = line.replace(runtime_root, "/px/runtime");
+        if let Some(store_root) = store_root {
+            line = line.replace(store_root, "/px/store");
+        }
+        if line.trim_start().starts_with("export LD_LIBRARY_PATH=") {
+            if let Some(rewritten) = rewrite_ld_library_path(&line) {
+                line = rewritten;
+            }
+        }
         let trimmed = line.trim_start();
         if trimmed.starts_with("export PX_PYTHON") {
             line = format!(r#"export PX_PYTHON="{target}""#);
@@ -1385,8 +1727,57 @@ fn append_rewritten_python(
     append_bytes_deterministic(builder, archive_path, rewritten.as_bytes(), Some(0o755))
 }
 
+fn rewrite_ld_library_path(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let rhs = trimmed.strip_prefix("export LD_LIBRARY_PATH=")?;
+    let rhs = rhs.trim();
+    let (quote, value) = match rhs.chars().next()? {
+        '\'' => ('\'', rhs.trim_matches('\'')),
+        '"' => ('"', rhs.trim_matches('"')),
+        _ => ('\0', rhs),
+    };
+    let filtered: Vec<&str> = value
+        .split(':')
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .filter(|part| !part.contains("/sys-libs"))
+        .collect();
+    let joined = filtered.join(":");
+    if quote == '\0' {
+        Some(format!("export LD_LIBRARY_PATH={joined}"))
+    } else {
+        Some(format!("export LD_LIBRARY_PATH={quote}{joined}{quote}"))
+    }
+}
+
+fn append_rewritten_pth(
+    builder: &mut Builder<impl Write>,
+    archive_path: &Path,
+    path: &Path,
+    store_root: Option<&str>,
+) -> Result<(), InstallUserError> {
+    let contents = fs::read_to_string(path).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to read .pth file for sandbox layer",
+            json!({ "path": path.display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    let rewritten = if let Some(store_root) = store_root {
+        contents.replace(store_root, "/px/store")
+    } else {
+        contents
+    };
+    let rewritten = if rewritten.ends_with('\n') {
+        rewritten
+    } else {
+        format!("{rewritten}\n")
+    };
+    append_bytes_deterministic(builder, archive_path, rewritten.as_bytes(), Some(0o644))
+}
+
 fn append_rewritten_pyvenv(
-    builder: &mut Builder<Vec<u8>>,
+    builder: &mut Builder<impl Write>,
     archive_path: &Path,
     path: &Path,
 ) -> Result<(), InstallUserError> {
@@ -1410,7 +1801,7 @@ fn append_rewritten_pyvenv(
 }
 
 fn append_bytes_deterministic(
-    builder: &mut Builder<Vec<u8>>,
+    builder: &mut Builder<impl Write>,
     archive_path: &Path,
     data: &[u8],
     mode: Option<u32>,
@@ -1438,35 +1829,109 @@ fn append_bytes_deterministic(
     })
 }
 
-fn finalize_layer(builder: Builder<Vec<u8>>, blobs: &Path) -> Result<LayerTar, InstallUserError> {
-    let data = builder.into_inner().map_err(|err| {
+struct HashingWriter<W> {
+    inner: W,
+    hasher: Sha256,
+    bytes_written: u64,
+}
+
+impl<W> HashingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+            bytes_written: 0,
+        }
+    }
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.hasher.update(&buf[..written]);
+        self.bytes_written = self
+            .bytes_written
+            .saturating_add(written.try_into().unwrap_or(u64::MAX));
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn layer_tar_builder(blobs: &Path) -> Result<Builder<HashingWriter<NamedTempFile>>, InstallUserError> {
+    fs::create_dir_all(blobs).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to prepare layer directory",
+            json!({ "path": blobs.display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    let file = NamedTempFile::new_in(blobs).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to create sandbox layer",
+            json!({ "path": blobs.display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    Ok(Builder::new(HashingWriter::new(file)))
+}
+
+fn finalize_layer(
+    builder: Builder<HashingWriter<NamedTempFile>>,
+    blobs: &Path,
+) -> Result<LayerTar, InstallUserError> {
+    let writer = builder.into_inner().map_err(|err| {
         sandbox_error(
             "PX903",
             "failed to finalize sandbox layer",
             json!({ "error": err.to_string() }),
         )
     })?;
-    let digest = sha256_hex(&data);
+    let HashingWriter {
+        inner: temp,
+        hasher,
+        bytes_written: size,
+    } = writer;
+    let digest = format!("{:x}", hasher.finalize());
     let layer_path = blobs.join(&digest);
-    fs::create_dir_all(layer_path.parent().unwrap_or(blobs)).map_err(|err| {
-        sandbox_error(
-            "PX903",
-            "failed to prepare layer directory",
-            json!({ "error": err.to_string() }),
-        )
-    })?;
-    fs::write(&layer_path, &data).map_err(|err| {
-        sandbox_error(
-            "PX903",
-            "failed to write sandbox layer",
-            json!({ "path": layer_path.display().to_string(), "error": err.to_string() }),
-        )
-    })?;
+    if !layer_path.exists() {
+        match temp.persist_noclobber(&layer_path) {
+            Ok(_) => {}
+            Err(err) => {
+                if err.error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(sandbox_error(
+                        "PX903",
+                        "failed to write sandbox layer",
+                        json!({
+                            "path": layer_path.display().to_string(),
+                            "error": err.error.to_string(),
+                        }),
+                    ));
+                }
+            }
+        }
+    }
     Ok(LayerTar {
         digest,
-        size: data.len() as u64,
-        bytes: data,
+        size,
+        path: layer_path,
     })
+}
+
+fn link_or_copy(from: &Path, to: &Path) -> std::io::Result<()> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::hard_link(from, to) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(_) => {
+            fs::copy(from, to)?;
+            Ok(())
+        }
+    }
 }
 
 pub(crate) fn export_output(
@@ -1615,6 +2080,12 @@ fn ensure_base_image(
             .trim_start_matches("sha256:")
             .to_string();
         let manifest_path = blobs.join(digest);
+        let base_ok = artifacts
+            .manifest
+            .base_layer_digest
+            .as_ref()
+            .map(|d| blobs.join(d).exists())
+            .unwrap_or(false);
         let env_ok = artifacts
             .manifest
             .env_layer_digest
@@ -1625,7 +2096,7 @@ fn ensure_base_image(
             Some(d) => blobs.join(d).exists(),
             None => !needs_system,
         };
-        rebuild = !manifest_path.exists() || !env_ok || !sys_ok;
+        rebuild = !manifest_path.exists() || !base_ok || !env_ok || !sys_ok;
     }
     if !rebuild && runtime_required {
         if let Some(env_digest) = artifacts.manifest.env_layer_digest.as_ref() {
@@ -1656,6 +2127,9 @@ fn ensure_base_image(
             )
         })?;
         let mut layers = Vec::new();
+        let base_layer = write_base_os_layer(&backend, &blobs)?;
+        artifacts.manifest.base_layer_digest = Some(base_layer.digest.clone());
+        layers.push(base_layer);
         if let Some(system_layer) =
             write_system_deps_layer(&backend, &artifacts.definition.system_deps, &blobs)?
         {
@@ -1690,14 +2164,31 @@ pub(crate) fn load_layer_from_blobs(
     digest: &str,
 ) -> Result<LayerTar, InstallUserError> {
     let path = blobs.join(digest);
-    let bytes = fs::read(&path).map_err(|err| {
+    let mut file = File::open(&path).map_err(|err| {
         sandbox_error(
             "PX903",
             "failed to read sandbox layer",
             json!({ "path": path.display().to_string(), "error": err.to_string() }),
         )
     })?;
-    let computed = sha256_hex(&bytes);
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to read sandbox layer",
+                json!({ "path": path.display().to_string(), "error": err.to_string() }),
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        size = size.saturating_add(read as u64);
+        hasher.update(&buffer[..read]);
+    }
+    let computed = format!("{:x}", hasher.finalize());
     if computed != digest {
         return Err(sandbox_error(
             "PX904",
@@ -1711,8 +2202,8 @@ pub(crate) fn load_layer_from_blobs(
     }
     Ok(LayerTar {
         digest: computed,
-        size: bytes.len() as u64,
-        bytes,
+        size,
+        path,
     })
 }
 
@@ -1738,13 +2229,20 @@ fn push_oci_image(tag: &str, built: &BuiltImage) -> Result<(), InstallUserError>
         .layers
         .iter()
         .map(|layer| {
-            ImageLayer::new(
-                layer.bytes.clone(),
+            let bytes = fs::read(&layer.path).map_err(|err| {
+                sandbox_error(
+                    "PX903",
+                    "failed to read sandbox layer for push",
+                    json!({ "path": layer.path.display().to_string(), "error": err.to_string() }),
+                )
+            })?;
+            Ok(ImageLayer::new(
+                bytes,
                 "application/vnd.oci.image.layer.v1.tar".to_string(),
                 None,
-            )
+            ))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, InstallUserError>>()?;
     let config = OciConfig::new(
         built.config_bytes.clone(),
         "application/vnd.oci.image.config.v1+json".to_string(),
@@ -1924,6 +2422,7 @@ mod tests {
                 capabilities: caps,
                 system_deps,
                 image_digest: String::new(),
+                base_layer_digest: None,
                 env_layer_digest: None,
                 system_layer_digest: None,
                 created_at: String::new(),
