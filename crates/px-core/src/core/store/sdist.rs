@@ -14,7 +14,8 @@ use walkdir::WalkDir;
 
 use crate::core::runtime::builder::BUILDER_VERSION;
 use crate::core::sandbox::{
-    base_apt_opts, detect_container_backend, internal_keep_proxies,
+    base_apt_opts, detect_container_backend, internal_apt_mirror_env_overrides,
+    internal_apt_mirror_setup_snippet, internal_keep_proxies,
     internal_proxy_env_overrides,
 };
 use crate::core::system_deps::{
@@ -583,6 +584,8 @@ PY
 ALL_APT="$APT_LIST $PX_BASE_APT"
 if [ -n "$ALL_APT" ]; then
   ALL_APT=$(printf "%s\n" "$ALL_APT" | tr ' ' '\n' | sed '/^$/d' | sort -u | xargs)
+  export ALL_APT
+  __APT_MIRROR_SETUP__
   apt-get $APT_OPTS update -y >/dev/null
   APT_INSTALL=$(micromamba run -p "$ENV_ROOT" python - <<'PY'
 import json, os, subprocess
@@ -625,7 +628,7 @@ PY
     DEBIAN_FRONTEND=noninteractive apt-get $APT_OPTS install -y --no-install-recommends $APT_INSTALL >/dev/null
   fi
 fi
-micromamba run -p "$ENV_ROOT" python -m pip wheel --no-deps --wheel-dir "$DIST_DIR" "$SDIST"
+micromamba run -p "$ENV_ROOT" env CC=/usr/bin/gcc CXX=/usr/bin/g++ "$PY_BIN" -m pip wheel --no-deps --wheel-dir "$DIST_DIR" "$SDIST"
 "#
     .to_string();
     script = script
@@ -637,7 +640,8 @@ micromamba run -p "$ENV_ROOT" python -m pip wheel --no-deps --wheel-dir "$DIST_D
         .replace("__BASE_APT__", &base_apt)
         .replace("__CONDA_SPEC__", &conda_spec)
         .replace("__PY_VERSION__", &py_version)
-        .replace("__APT_OPTS__", &apt_opts);
+        .replace("__APT_OPTS__", &apt_opts)
+        .replace("__APT_MIRROR_SETUP__", internal_apt_mirror_setup_snippet());
 
     let mut cmd = Command::new(&backend.program);
     cmd.arg("run")
@@ -654,6 +658,9 @@ micromamba run -p "$ENV_ROOT" python -m pip wheel --no-deps --wheel-dir "$DIST_D
     }
     for proxy in internal_proxy_env_overrides(&backend) {
         cmd.arg("--env").arg(proxy);
+    }
+    for mirror in internal_apt_mirror_env_overrides() {
+        cmd.arg("--env").arg(mirror);
     }
     cmd.arg("--env").arg("MAMBA_PKGS_DIRS=/builder/pkgs");
     cmd.arg("--env").arg("PIP_CACHE_DIR=/builder/pip-cache");

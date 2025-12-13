@@ -25,7 +25,7 @@ use crate::{InstallUserError, PX_VERSION};
 use px_domain::{LockSnapshot, SandboxConfig, WorkspaceLock};
 
 const DEFAULT_BASE: &str = "debian-12";
-pub(crate) const SBX_VERSION: u32 = 3;
+pub(crate) const SBX_VERSION: u32 = 5;
 pub(crate) const PXAPP_VERSION: u32 = 1;
 pub(crate) const SYSTEM_DEPS_IMAGE: &str =
     "docker.io/library/debian:12-slim@sha256:ef5c368548841bdd8199a8606f6307402f7f2a2f8edc4acbc9c1c70c340bc023";
@@ -71,6 +71,88 @@ pub(crate) fn internal_keep_proxies() -> bool {
             .map(|v| !v.trim().is_empty())
             .unwrap_or(false)
     })
+}
+
+pub(crate) fn internal_apt_mirror_env_overrides() -> Vec<String> {
+    fn normalize_url(raw: &str) -> Option<String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            return Some(trimmed.trim_end_matches('/').to_string());
+        }
+        None
+    }
+
+    let Some(raw_mirror) = env::var("PX_APT_MIRROR").ok() else {
+        return Vec::new();
+    };
+    let raw_mirror = raw_mirror.trim();
+    if raw_mirror.is_empty() {
+        return Vec::new();
+    }
+
+    let mut security_mirror = env::var("PX_APT_SECURITY_MIRROR").ok().and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            normalize_url(trimmed)
+        }
+    });
+
+    let debian_mirror =
+        if raw_mirror.eq_ignore_ascii_case("tsinghua") || raw_mirror.eq_ignore_ascii_case("tuna") {
+            if security_mirror.is_none() {
+                security_mirror =
+                    Some("http://mirrors.tuna.tsinghua.edu.cn/debian-security".to_string());
+            }
+            Some("http://mirrors.tuna.tsinghua.edu.cn/debian".to_string())
+        } else {
+            normalize_url(raw_mirror)
+        };
+    if security_mirror.is_none() {
+        if let Some(mirror) = debian_mirror.as_deref() {
+            if mirror.ends_with("/debian") {
+                security_mirror = Some(format!("{}-security", mirror));
+            }
+        }
+    }
+
+    let Some(debian_mirror) = debian_mirror else {
+        return Vec::new();
+    };
+
+    let mut envs = vec![format!("PX_APT_MIRROR={debian_mirror}")];
+    if let Some(security) = security_mirror {
+        envs.push(format!("PX_APT_SECURITY_MIRROR={security}"));
+    }
+    envs
+}
+
+pub(crate) fn internal_apt_mirror_setup_snippet() -> &'static str {
+    r#"
+if [ -n "${PX_APT_MIRROR:-}" ]; then
+  mirror="$PX_APT_MIRROR"
+  security="${PX_APT_SECURITY_MIRROR:-}"
+  codename=""
+  if [ -f /etc/os-release ]; then
+    codename="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
+  fi
+  if [ -z "$codename" ]; then
+    codename="bookworm"
+  fi
+  if [ -d /etc/apt/sources.list.d ]; then
+    rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources
+  fi
+  printf "deb %s %s main contrib non-free non-free-firmware\n" "$mirror" "$codename" > /etc/apt/sources.list
+  printf "deb %s %s-updates main contrib non-free non-free-firmware\n" "$mirror" "$codename" >> /etc/apt/sources.list
+  if [ -n "$security" ]; then
+    printf "deb %s %s-security main contrib non-free non-free-firmware\n" "$security" "$codename" >> /etc/apt/sources.list
+  fi
+fi
+"#
 }
 
 pub(crate) fn internal_proxy_env_overrides(_backend: &ContainerBackend) -> Vec<String> {
@@ -168,6 +250,8 @@ pub(crate) struct SandboxImageManifest {
     #[serde(default)]
     pub(crate) system_deps: SystemDeps,
     pub(crate) image_digest: String,
+    #[serde(default)]
+    pub(crate) base_layer_digest: Option<String>,
     #[serde(default)]
     pub(crate) env_layer_digest: Option<String>,
     #[serde(default)]
@@ -348,6 +432,7 @@ impl SandboxStore {
             capabilities: definition.capabilities.clone(),
             system_deps: definition.system_deps.clone(),
             image_digest: format!("sha256:{}", definition.sbx_id()),
+            base_layer_digest: None,
             env_layer_digest: None,
             system_layer_digest: None,
             created_at,
@@ -494,6 +579,7 @@ pub(crate) fn pin_system_deps(deps: &mut SystemDeps) -> Result<(), InstallUserEr
 export DEBIAN_FRONTEND=noninteractive
 PACKAGES="__PACKAGES__"
 APT_OPTS="__APT_OPTS__"
+__APT_MIRROR_SETUP__
 apt-get $APT_OPTS update -y >/dev/null || true
 rm -f /work/apt-versions.txt
 for pkg in $PACKAGES; do
@@ -504,8 +590,10 @@ done
     .to_string();
     script = script
         .replace("__PACKAGES__", &missing.join(" "))
-        .replace("__APT_OPTS__", &apt_opts);
-    let proxy_envs = internal_proxy_env_overrides(&backend);
+        .replace("__APT_OPTS__", &apt_opts)
+        .replace("__APT_MIRROR_SETUP__", internal_apt_mirror_setup_snippet());
+    let mut proxy_envs = internal_proxy_env_overrides(&backend);
+    proxy_envs.extend(internal_apt_mirror_env_overrides());
     let mut cmd = Command::new(&backend.program);
     for arg in system_deps_container_args(workdir, proxies_allowed, &proxy_envs) {
         cmd.arg(arg);
@@ -625,21 +713,65 @@ export DEBIAN_FRONTEND=noninteractive
 PACKAGES="__PACKAGES__"
 APT_OPTS="__APT_OPTS__"
 if [ -n "$PACKAGES" ]; then
+  __APT_MIRROR_SETUP__
   apt-get $APT_OPTS update -y >/dev/null || true
   rm -rf /work/rootfs
-  mkdir -p /work/rootfs
+  mkdir -p /work/rootfs/usr
+  mkdir -p /work/rootfs/usr/bin /work/rootfs/usr/sbin /work/rootfs/usr/lib /work/rootfs/usr/lib64
+  ln -s usr/bin /work/rootfs/bin
+  ln -s usr/sbin /work/rootfs/sbin
+  ln -s usr/lib /work/rootfs/lib
+  ln -s usr/lib64 /work/rootfs/lib64
   apt-get $APT_OPTS install -y --no-install-recommends --download-only $PACKAGES >/dev/null
   for deb in /var/cache/apt/archives/*.deb; do
     [ -f "$deb" ] || continue
     dpkg -x "$deb" /work/rootfs
   done
+  # Preserve Debian's merged-/usr layout so this layer does not clobber base symlinks.
+  for d in bin sbin lib lib64; do
+    if [ -d "/work/rootfs/$d" ] && [ ! -L "/work/rootfs/$d" ]; then
+      mkdir -p "/work/rootfs/usr/$d"
+      cp -a "/work/rootfs/$d/." "/work/rootfs/usr/$d/" || true
+      rm -rf "/work/rootfs/$d"
+    fi
+  done
+  ln -sfn usr/bin /work/rootfs/bin
+  ln -sfn usr/sbin /work/rootfs/sbin
+  ln -sfn usr/lib /work/rootfs/lib
+  ln -sfn usr/lib64 /work/rootfs/lib64
+  # Some Debian libs (e.g. BLAS/LAPACK) are installed under subdirs and rely on
+  # update-alternatives; when extracting .debs we need stable SONAME symlinks.
+  multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo x86_64-linux-gnu)"
+  libdir="/work/rootfs/usr/lib/$multiarch"
+  if [ -d "$libdir/blas" ] && [ ! -e "$libdir/libblas.so.3" ]; then
+    if [ -e "$libdir/blas/libblas.so.3" ]; then
+      ln -s "blas/libblas.so.3" "$libdir/libblas.so.3"
+    else
+      candidate="$(ls "$libdir/blas"/libblas.so.3.* 2>/dev/null | head -n 1 || true)"
+      if [ -n "$candidate" ]; then
+        ln -s "blas/$(basename "$candidate")" "$libdir/libblas.so.3"
+      fi
+    fi
+  fi
+  if [ -d "$libdir/lapack" ] && [ ! -e "$libdir/liblapack.so.3" ]; then
+    if [ -e "$libdir/lapack/liblapack.so.3" ]; then
+      ln -s "lapack/liblapack.so.3" "$libdir/liblapack.so.3"
+    else
+      candidate="$(ls "$libdir/lapack"/liblapack.so.3.* 2>/dev/null | head -n 1 || true)"
+      if [ -n "$candidate" ]; then
+        ln -s "lapack/$(basename "$candidate")" "$libdir/liblapack.so.3"
+      fi
+    fi
+  fi
 fi
 "#
     .to_string();
     script = script
         .replace("__PACKAGES__", &packages.join(" "))
-        .replace("__APT_OPTS__", &apt_opts);
-    let proxy_envs = internal_proxy_env_overrides(&backend);
+        .replace("__APT_OPTS__", &apt_opts)
+        .replace("__APT_MIRROR_SETUP__", internal_apt_mirror_setup_snippet());
+    let mut proxy_envs = internal_proxy_env_overrides(&backend);
+    proxy_envs.extend(internal_apt_mirror_env_overrides());
     let mut cmd = Command::new(&backend.program);
     for arg in system_deps_container_args(workdir, proxies_allowed, &proxy_envs) {
         cmd.arg(arg);
@@ -779,18 +911,31 @@ pub(crate) fn base_apt_opts() -> String {
 }
 
 pub(crate) fn should_disable_apt_proxy() -> bool {
-    const KEYS: &[&str] = &[
-        "HTTP_PROXY",
-        "http_proxy",
-        "HTTPS_PROXY",
-        "https_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-    ];
-    for key in KEYS {
+    fn is_socks_proxy(value: &str) -> bool {
+        value.trim().to_ascii_lowercase().starts_with("socks")
+    }
+
+    let mut has_http_proxy = false;
+    for key in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] {
         if let Ok(val) = std::env::var(key) {
-            let lower = val.to_ascii_lowercase();
-            if lower.starts_with("socks") {
+            if val.trim().is_empty() {
+                continue;
+            }
+            has_http_proxy = true;
+            if is_socks_proxy(&val) {
+                return true;
+            }
+        }
+    }
+    if has_http_proxy {
+        return false;
+    }
+    for key in ["ALL_PROXY", "all_proxy"] {
+        if let Ok(val) = std::env::var(key) {
+            if val.trim().is_empty() {
+                continue;
+            }
+            if is_socks_proxy(&val) {
                 return true;
             }
         }
@@ -1241,6 +1386,160 @@ mod tests {
                 pair[0] == "--env" && pair[1] == "HTTP_PROXY=http://proxy.example:3128"
             }),
             "system deps container args should include forwarded proxy"
+        );
+
+        for (key, original) in originals {
+            match original {
+                Some(value) => env::set_var(&key, value),
+                None => env::remove_var(&key),
+            }
+        }
+    }
+
+    #[test]
+    fn internal_apt_mirror_env_overrides_empty_when_unset() {
+        let _guard = PROXY_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let keys = ["PX_APT_MIRROR", "PX_APT_SECURITY_MIRROR"];
+        let originals: Vec<(String, Option<String>)> = keys
+            .iter()
+            .map(|key| (key.to_string(), env::var(key).ok()))
+            .collect();
+        for key in keys {
+            env::remove_var(key);
+        }
+
+        assert!(
+            internal_apt_mirror_env_overrides().is_empty(),
+            "apt mirror env list should be empty when unset"
+        );
+
+        for (key, original) in originals {
+            match original {
+                Some(value) => env::set_var(&key, value),
+                None => env::remove_var(&key),
+            }
+        }
+    }
+
+    #[test]
+    fn internal_apt_mirror_env_overrides_supports_tsinghua_preset() {
+        let _guard = PROXY_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let keys = ["PX_APT_MIRROR", "PX_APT_SECURITY_MIRROR"];
+        let originals: Vec<(String, Option<String>)> = keys
+            .iter()
+            .map(|key| (key.to_string(), env::var(key).ok()))
+            .collect();
+        for key in keys {
+            env::remove_var(key);
+        }
+        env::set_var("PX_APT_MIRROR", "tsinghua");
+
+        let envs = internal_apt_mirror_env_overrides();
+        assert!(
+            envs.contains(&"PX_APT_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/debian".to_string()),
+            "tsinghua preset should populate debian mirror"
+        );
+        assert!(
+            envs.contains(
+                &"PX_APT_SECURITY_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/debian-security"
+                    .to_string()
+            ),
+            "tsinghua preset should populate security mirror"
+        );
+
+        for (key, original) in originals {
+            match original {
+                Some(value) => env::set_var(&key, value),
+                None => env::remove_var(&key),
+            }
+        }
+    }
+
+    #[test]
+    fn internal_apt_mirror_env_overrides_derives_security_from_debian_suffix() {
+        let _guard = PROXY_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let keys = ["PX_APT_MIRROR", "PX_APT_SECURITY_MIRROR"];
+        let originals: Vec<(String, Option<String>)> = keys
+            .iter()
+            .map(|key| (key.to_string(), env::var(key).ok()))
+            .collect();
+        for key in keys {
+            env::remove_var(key);
+        }
+        env::set_var("PX_APT_MIRROR", "https://example.invalid/debian");
+
+        let envs = internal_apt_mirror_env_overrides();
+        assert!(
+            envs.contains(&"PX_APT_MIRROR=https://example.invalid/debian".to_string()),
+            "explicit mirror url should be forwarded"
+        );
+        assert!(
+            envs.contains(&"PX_APT_SECURITY_MIRROR=https://example.invalid/debian-security".to_string()),
+            "security mirror should be derived when mirror ends with /debian"
+        );
+
+        for (key, original) in originals {
+            match original {
+                Some(value) => env::set_var(&key, value),
+                None => env::remove_var(&key),
+            }
+        }
+    }
+
+    #[test]
+    fn apt_mirror_setup_snippet_writes_sources_list() {
+        let snippet = internal_apt_mirror_setup_snippet();
+        assert!(
+            snippet.contains("/etc/apt/sources.list"),
+            "apt mirror snippet should write sources.list"
+        );
+        assert!(
+            snippet.contains("PX_APT_MIRROR"),
+            "apt mirror snippet should be gated on PX_APT_MIRROR"
+        );
+    }
+
+    #[test]
+    fn should_not_disable_apt_proxy_when_all_proxy_is_socks_but_http_proxy_present() {
+        let _guard = PROXY_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let keys = [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ];
+        let originals: Vec<(String, Option<String>)> = keys
+            .iter()
+            .map(|key| (key.to_string(), env::var(key).ok()))
+            .collect();
+        for key in keys {
+            env::remove_var(key);
+        }
+
+        env::set_var("HTTP_PROXY", "http://127.0.0.1:3128");
+        env::set_var("HTTPS_PROXY", "http://127.0.0.1:3128");
+        env::set_var("ALL_PROXY", "socks5h://127.0.0.1:12334");
+        assert!(
+            !should_disable_apt_proxy(),
+            "ALL_PROXY socks should not disable apt when HTTP(S)_PROXY is set"
+        );
+        assert!(
+            internal_keep_proxies(),
+            "internal containers should keep proxies when HTTP(S)_PROXY is set"
         );
 
         for (key, original) in originals {
