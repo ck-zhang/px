@@ -22,8 +22,10 @@ Color: code + summary in error color; “Why” bullets normal; “Fix” bullet
 * **Lock missing / out-of-sync** – suggest `px sync` (fail under `--frozen`).
 * **Missing import in `px run`** – suggest `px add <pkg>` or `px sync` depending on whether `<pkg>` is already in M/L.
 * **Wrong interpreter (user ran `python` directly)** – suggest `px run python ...`.
+* **Ambiguous console script name** – px normally resolves this by falling back to a materialized env (so the `bin/` winner is deterministic). If you still see `ambiguous_console_script`, remove one of the conflicting dependencies, or run a specific module via `px run python -m <module>`.
 * **Runtime mismatch for tool** – suggest `px tool install <tool>` again or `px python install`.
 * **Mutating pip under `px run`** – **Why**: px envs are immutable CAS materializations; `pip install/uninstall` cannot change them. **Fix**: use `px add/remove/update/sync` to update dependencies, then rerun the command with `px run`.
+* **CAS-native fallback happened** – px may automatically fall back to a materialized env when CAS-native execution hits packaging/runtime quirks. Re-run with `-v` / `-vv` and look for a single log line containing `CAS_NATIVE_FALLBACK=<code>`, or inspect `--json` output under `details.cas_native_fallback`.
 
 ## Flags and CI behavior
 
@@ -56,6 +58,7 @@ Applies to all commands that show progress (resolver, env build, tool install, e
 * `runtime_mismatch`: run `px sync` after activating the desired Python, or pin `[tool.px].python`.
 * `invalid_state`: delete or repair `.px/state.json` and retry; state is validated and rewritten atomically.
 * `pyc_cache_unwritable`: px could not create the Python bytecode cache directory; ensure `~/.px/cache` (or `PX_CACHE_PATH`) is writable and retry. If bytecode caches grow too large, it is always safe to delete `~/.px/cache/pyc`.
+* `ambiguous_console_script`: multiple dists provide the same `console_scripts` name; px typically falls back to a materialized env to pick a deterministic winner, but if fallback is unavailable, remove one of the conflicting deps (or run a specific module via `px run python -m <module>`).
 
 ## Sandbox errors
 

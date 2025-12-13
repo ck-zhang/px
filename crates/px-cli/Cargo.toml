@@ -25,3 +25,4 @@ assert_cmd.workspace = true
 tempfile.workspace = true
 toml_edit = "0.22"
 tar = "0.4"
+px-domain = { path = "../px-domain" }

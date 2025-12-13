@@ -3068,6 +3068,7 @@ dependencies = [
  "clap_complete",
  "color-eyre",
  "px-core",
+ "px-domain",
  "serde",
  "serde_json",
  "tar",

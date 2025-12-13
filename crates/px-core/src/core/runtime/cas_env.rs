@@ -57,6 +57,13 @@ pub(crate) struct CasProfile {
     pub(crate) runtime_path: PathBuf,
 }
 
+/// Result of preparing a CAS-backed profile without materializing an environment directory.
+pub(crate) struct CasProfileManifest {
+    pub(crate) profile_oid: String,
+    pub(crate) runtime_path: PathBuf,
+    pub(crate) header: ProfileHeader,
+}
+
 /// Build CAS objects for the runtime and locked dependencies, then materialize the
 /// profile environment on disk. Returns the profile metadata and env path.
 pub(crate) fn ensure_profile_env(
@@ -66,6 +73,28 @@ pub(crate) fn ensure_profile_env(
     runtime: &RuntimeMetadata,
     env_owner: &OwnerId,
 ) -> Result<CasProfile> {
+    let manifest = ensure_profile_manifest(ctx, snapshot, lock, runtime, env_owner)?;
+    let env_root = materialize_profile_env(
+        snapshot,
+        runtime,
+        &manifest.header,
+        &manifest.profile_oid,
+        &manifest.runtime_path,
+    )?;
+    Ok(CasProfile {
+        profile_oid: manifest.profile_oid,
+        env_path: env_root,
+        runtime_path: manifest.runtime_path,
+    })
+}
+
+pub(crate) fn ensure_profile_manifest(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+    lock: &LockSnapshot,
+    runtime: &RuntimeMetadata,
+    env_owner: &OwnerId,
+) -> Result<CasProfileManifest> {
     // Host-only escape hatch: when PX_RUNTIME_HOST_ONLY=1, skip archiving the
     // runtime into CAS and rely on the host interpreter path directly.
     let host_runtime_passthrough = env::var("PX_RUNTIME_HOST_ONLY")
@@ -303,12 +332,10 @@ pub(crate) fn ensure_profile_env(
     let _ = store.add_ref(&owner, &manifest.runtime_oid);
     let _ = store.add_ref(env_owner, &profile_obj.oid);
 
-    let env_root =
-        materialize_profile_env(snapshot, runtime, &manifest, &profile_obj.oid, &runtime_exe)?;
-    Ok(CasProfile {
+    Ok(CasProfileManifest {
         profile_oid: profile_obj.oid,
-        env_path: env_root,
         runtime_path: runtime_exe,
+        header: manifest,
     })
 }
 
@@ -774,7 +801,7 @@ fn link_bin_entry(src: &Path, dest: &Path, env_python: Option<&Path>) -> Result<
     Ok(())
 }
 
-fn materialize_pkg_archive(oid: &str, archive: &[u8]) -> Result<PathBuf> {
+pub(crate) fn materialize_pkg_archive(oid: &str, archive: &[u8]) -> Result<PathBuf> {
     let store = global_store();
     let root = store.root().join(MATERIALIZED_PKG_BUILDS_DIR).join(oid);
     if root.exists() {

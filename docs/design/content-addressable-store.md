@@ -22,6 +22,11 @@ linked from project/workspace-local pointers (e.g. `<root>/.px/envs/current`).
 
 These projections are **immutable** from the user’s point of view: they are content-addressed materializations of a profile and runtime. User-initiated `pip install` cannot mutate them; dependency changes must flow through px (`px add/remove/update/sync`) so new artifacts are built into CAS and re-materialized. Envs are never “activated” directly—the supported entry points are `px run`, `px test`, and `px fmt`.
 
+px supports two execution modes over the same profile:
+
+* **CAS-native execution** (default for host runs): px executes *directly from the profile* without requiring an env directory at `~/.px/envs/<profile_oid>`. Runtime `sys.path` is assembled from the CAS `pkg-build` materializations (`<store>/pkg-builds/<pkg_oid>/...`), and `console_scripts` entry points are dispatched from dist metadata (via stdlib `importlib.metadata`) rather than a prebuilt `bin/` tree. Native extensions remain loadable because imports resolve to real file paths under the CAS materialized trees.
+* **Materialized env execution** (compatibility / sandbox / fallback): px builds a small on-disk “site” + “bin” projection for a profile (e.g. `~/.px/envs/<profile_oid>/`) so execution can rely on PATH and standard `console_scripts` wrappers. px automatically falls back to this mode when CAS-native execution can’t safely run due to packaging/runtime quirks, or when `--sandbox` requires a materialized env.
+
 Python still needs a writable place for runtime caches (notably `.pyc` bytecode). Because `pkg-build` trees and runtime materializations are read-only, px **redirects bytecode writes** using `PYTHONPYCACHEPREFIX`:
 
 * Host runs: `$PX_CACHE_PATH/pyc/<profile_oid>/…` (default `~/.px/cache/pyc/<profile_oid>/…`).
@@ -81,7 +86,7 @@ The CAS introduces a few new nouns:
   * a set of pkg-build objects,
   * optional config (env vars, path ordering, etc.).
 
-* **Env key (env_id)** – exactly the `profile_oid`; identifies a **profile materialization** under `~/.px/envs/<profile_oid>/` (with local pointers under `<root>/.px/envs/current`).
+* **Env key (env_id)** – exactly the `profile_oid`; identifies a profile. A profile may or may not have a materialized env directory under `~/.px/envs/<profile_oid>/` (with local pointers under `<root>/.px/envs/current`). px prefers CAS-native execution and materializes env directories only when needed (sandboxing, compatibility fallback, or explicit sync/build operations).
 
 * **Owner** – a higher-level thing that “uses” objects:
 

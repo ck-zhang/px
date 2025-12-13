@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{Cursor, IsTerminal, Write};
@@ -7,17 +7,21 @@ use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tar::Archive;
 use tempfile::TempDir;
 use tracing::{debug, warn};
 
-use super::cas_env::{ensure_profile_env, project_env_owner_id, workspace_env_owner_id};
+use super::cas_env::{
+    ensure_profile_env, ensure_profile_manifest, materialize_pkg_archive, project_env_owner_id,
+    workspace_env_owner_id,
+};
 use super::script::{detect_inline_script, run_inline_script};
 use crate::core::runtime::artifacts::dependency_name;
 use crate::core::runtime::facade::{
     build_pythonpath, compute_lock_hash_bytes, detect_runtime_metadata, load_project_state,
-    marker_env_for_snapshot, select_python_from_site, ManifestSnapshot,
+    marker_env_for_snapshot, prepare_project_runtime, select_python_from_site, ManifestSnapshot,
 };
 use crate::core::sandbox::{
     default_store_root, detect_container_backend, discover_site_packages, ensure_image_layout,
@@ -28,13 +32,18 @@ use crate::core::sandbox::{
 use crate::project::evaluate_project_state;
 use crate::run_plan::{plan_run_target, RunTargetPlan};
 use crate::tooling::{missing_pyproject_outcome, run_target_required_outcome};
-use crate::workspace::{prepare_workspace_run_context, WorkspaceStateKind, WorkspaceStateReport};
+use crate::workspace::{
+    discover_workspace_scope, prepare_workspace_run_context, WorkspaceScope, WorkspaceStateKind,
+    WorkspaceStateReport,
+};
 use crate::{
     attach_autosync_details, is_missing_project_error, manifest_snapshot, missing_project_outcome,
     outcome_from_output, python_context_with_mode, state_guard::guard_for_execution,
     CommandContext, ExecutionOutcome, OwnerId, OwnerType, PythonContext,
 };
-use px_domain::{detect_lock_drift, load_lockfile_optional, sandbox_config_from_manifest};
+use px_domain::{
+    detect_lock_drift, load_lockfile_optional, sandbox_config_from_manifest, verify_locked_artifacts,
+};
 
 #[derive(Clone, Debug)]
 pub struct TestRequest {
@@ -56,6 +65,89 @@ pub struct RunRequest {
 }
 
 type EnvPairs = Vec<(String, String)>;
+
+const CONSOLE_SCRIPT_DISPATCH: &str = r#"
+import sys
+from importlib.metadata import distribution
+
+def _main():
+    if len(sys.argv) < 3:
+        raise SystemExit("px: console script dispatch requires <script> <dist> [args...]")
+    script = sys.argv[1]
+    dist_name = sys.argv[2]
+    args = sys.argv[3:]
+    dist = distribution(dist_name)
+    eps = [ep for ep in dist.entry_points if ep.group == "console_scripts" and ep.name == script]
+    if not eps:
+        raise SystemExit(f"px: console script '{script}' not found in distribution '{dist_name}'")
+    if len(eps) > 1:
+        names = ", ".join(sorted({ep.value for ep in eps}))
+        raise SystemExit(
+            f"px: console script '{script}' is ambiguous within distribution '{dist_name}': {names}"
+        )
+    ep = eps[0]
+    func = ep.load()
+    sys.argv[:] = [script] + args
+    raise SystemExit(func())
+
+if __name__ == "__main__":
+    _main()
+"#;
+
+struct CasNativeRunContext {
+    py_ctx: PythonContext,
+    profile_oid: String,
+    runtime_path: PathBuf,
+    sys_path_entries: Vec<PathBuf>,
+    env_vars: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CasNativeFallbackReason {
+    AmbiguousConsoleScript,
+    ConsoleScriptIndexFailed,
+    UnresolvedConsoleScript,
+    NativeSiteSetupFailed,
+}
+
+impl CasNativeFallbackReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::AmbiguousConsoleScript => "ambiguous_console_script",
+            Self::ConsoleScriptIndexFailed => "cas_native_console_script_index_failed",
+            Self::UnresolvedConsoleScript => "cas_native_unresolved_console_script",
+            Self::NativeSiteSetupFailed => "cas_native_site_setup_failed",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CasNativeFallback {
+    reason: CasNativeFallbackReason,
+    summary: String,
+}
+
+struct ExecutionPlan {
+    runtime_path: PathBuf,
+    sys_path_entries: Vec<PathBuf>,
+    cwd: PathBuf,
+    envs: EnvPairs,
+    argv: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ConsoleScriptIndex {
+    version: u32,
+    scripts: BTreeMap<String, Vec<ConsoleScriptCandidate>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ConsoleScriptCandidate {
+    dist: String,
+    #[serde(default)]
+    dist_version: Option<String>,
+    entry_point: String,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct SandboxRunContext {
@@ -140,6 +232,662 @@ fn map_workdir(invocation_root: Option<&Path>, context_root: &Path) -> PathBuf {
     } else {
         context_root.to_path_buf()
     }
+}
+
+fn is_python_alias_target(entry: &str) -> bool {
+    let lower = entry.to_ascii_lowercase();
+    lower == "python"
+        || lower == "python3"
+        || lower.starts_with("python3.")
+        || lower == "py"
+        || lower == "py3"
+}
+
+fn prepare_cas_native_run_context(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+) -> Result<CasNativeRunContext, ExecutionOutcome> {
+    let Some(lock) = load_lockfile_optional(&snapshot.lock_path).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to load px.lock",
+            json!({
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "error": err.to_string(),
+            }),
+        )
+    })? else {
+        return Err(ExecutionOutcome::user_error(
+            "px.lock not found",
+            json!({
+                "reason": "missing_lock",
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "hint": "Run `px sync` to generate px.lock before running commands.",
+            }),
+        ));
+    };
+
+    if lock.manifest_fingerprint.as_deref() != Some(snapshot.manifest_fingerprint.as_str()) {
+        return Err(ExecutionOutcome::user_error(
+            "Project manifest has changed since px.lock was created",
+            json!({
+                "code": "PX120",
+                "reason": "lock_drift",
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "manifest_fingerprint": snapshot.manifest_fingerprint.clone(),
+                "lock_fingerprint": lock.manifest_fingerprint.clone(),
+                "hint": "Run `px sync` to update px.lock and dependencies before running commands.",
+            }),
+        ));
+    }
+
+    let marker_env = marker_env_for_snapshot(snapshot);
+    let drift = detect_lock_drift(snapshot, &lock, marker_env.as_ref());
+    if !drift.is_empty() {
+        return Err(ExecutionOutcome::user_error(
+            "px.lock is out of date for this project",
+            json!({
+                "reason": "lock_drift",
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "drift": drift,
+                "hint": "Run `px sync` to update px.lock and dependencies before running commands.",
+            }),
+        ));
+    }
+
+    let missing = verify_locked_artifacts(&lock);
+    if !missing.is_empty() {
+        return Err(ExecutionOutcome::user_error(
+            "cached artifacts missing",
+            json!({
+                "reason": "missing_artifacts",
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "missing": missing,
+                "hint": "Run `px sync` to rehydrate cached artifacts before running commands.",
+            }),
+        ));
+    }
+
+    let _ = prepare_project_runtime(snapshot).map_err(|err| {
+        install_error_outcome(err, "python runtime unavailable for native CAS execution")
+    })?;
+    let runtime = detect_runtime_metadata(ctx, snapshot).map_err(|err| {
+        install_error_outcome(err, "python runtime unavailable for native CAS execution")
+    })?;
+    let lock_id = lock.lock_id.clone().unwrap_or_else(|| {
+        compute_lock_hash_bytes(
+            &fs::read(&snapshot.lock_path).unwrap_or_else(|_| Vec::new()),
+        )
+    });
+    let env_owner = OwnerId {
+        owner_type: OwnerType::ProjectEnv,
+        owner_id: project_env_owner_id(&snapshot.root, &lock_id, &runtime.version).map_err(
+            |err| {
+                ExecutionOutcome::failure(
+                    "failed to compute project environment identity",
+                    json!({ "error": err.to_string() }),
+                )
+            },
+        )?,
+    };
+    let cas_profile = ensure_profile_manifest(ctx, snapshot, &lock, &runtime, &env_owner)
+        .map_err(|err| install_error_outcome(err, "failed to prepare CAS profile for execution"))?;
+
+    let sys_path_entries = materialize_profile_sys_path(&cas_profile.header).map_err(|err| {
+        let mut details = error_details_with_code(&err);
+        if let Value::Object(map) = &mut details {
+            map.insert("profile_oid".into(), json!(cas_profile.profile_oid.clone()));
+            map.insert("reason".into(), json!("cas_native_profile_sys_path_failed"));
+        }
+        ExecutionOutcome::failure("failed to materialize CAS profile sys.path", details)
+    })?;
+    let site_dir = ensure_cas_native_site_dir(
+        &ctx.cache().path,
+        &cas_profile.profile_oid,
+        &runtime.version,
+        &sys_path_entries,
+    )
+    .map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to prepare native execution site",
+            json!({
+                "reason": "cas_native_site_setup_failed",
+                "error": err.to_string(),
+                "profile_oid": cas_profile.profile_oid,
+            }),
+        )
+    })?;
+    let paths = build_pythonpath(ctx.fs(), &snapshot.root, Some(site_dir)).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to assemble PYTHONPATH for native CAS execution",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+
+    let pyc_cache_prefix = if env::var_os("PYTHONPYCACHEPREFIX").is_some() {
+        None
+    } else {
+        match crate::store::ensure_pyc_cache_prefix(&ctx.cache().path, &cas_profile.profile_oid) {
+            Ok(prefix) => Some(prefix),
+            Err(err) => {
+                let prefix =
+                    crate::store::pyc_cache_prefix(&ctx.cache().path, &cas_profile.profile_oid);
+                return Err(ExecutionOutcome::user_error(
+                    "python bytecode cache directory is not writable",
+                    json!({
+                        "reason": "pyc_cache_unwritable",
+                        "cache_dir": prefix.display().to_string(),
+                        "error": err.to_string(),
+                        "hint": "ensure the directory is writable or set PX_CACHE_PATH to a writable location",
+                    }),
+                ));
+            }
+        }
+    };
+
+    let py_ctx = PythonContext {
+        project_root: snapshot.root.clone(),
+        project_name: snapshot.name.clone(),
+        python: cas_profile.runtime_path.display().to_string(),
+        pythonpath: paths.pythonpath,
+        allowed_paths: paths.allowed_paths,
+        site_bin: paths.site_bin,
+        pep582_bin: paths.pep582_bin,
+        pyc_cache_prefix,
+        px_options: snapshot.px_options.clone(),
+    };
+    Ok(CasNativeRunContext {
+        py_ctx,
+        profile_oid: cas_profile.profile_oid,
+        runtime_path: cas_profile.runtime_path,
+        sys_path_entries,
+        env_vars: cas_profile.header.env_vars,
+    })
+}
+
+fn prepare_cas_native_workspace_run_context(
+    ctx: &CommandContext,
+    workspace: &crate::workspace::WorkspaceSnapshot,
+    member_root: &Path,
+) -> Result<CasNativeRunContext, ExecutionOutcome> {
+    let snapshot = workspace.lock_snapshot();
+    let Some(lock) = load_lockfile_optional(&snapshot.lock_path).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to load workspace lockfile",
+            json!({
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "error": err.to_string(),
+            }),
+        )
+    })? else {
+        return Err(ExecutionOutcome::user_error(
+            "workspace lockfile not found",
+            json!({
+                "reason": "missing_lock",
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "hint": "Run `px sync` to generate the workspace lock before running commands.",
+            }),
+        ));
+    };
+
+    if lock.manifest_fingerprint.as_deref() != Some(snapshot.manifest_fingerprint.as_str()) {
+        return Err(ExecutionOutcome::user_error(
+            "Workspace manifest has changed since the lockfile was created",
+            json!({
+                "code": "PX120",
+                "reason": "lock_drift",
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "manifest_fingerprint": snapshot.manifest_fingerprint.clone(),
+                "lock_fingerprint": lock.manifest_fingerprint.clone(),
+                "hint": "Run `px sync` to update the lockfile before running commands.",
+            }),
+        ));
+    }
+
+    let marker_env = marker_env_for_snapshot(&snapshot);
+    let drift = detect_lock_drift(&snapshot, &lock, marker_env.as_ref());
+    if !drift.is_empty() {
+        return Err(ExecutionOutcome::user_error(
+            "workspace lockfile is out of date",
+            json!({
+                "reason": "lock_drift",
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "drift": drift,
+                "hint": "Run `px sync` to update the workspace lock before running commands.",
+            }),
+        ));
+    }
+
+    let missing = verify_locked_artifacts(&lock);
+    if !missing.is_empty() {
+        return Err(ExecutionOutcome::user_error(
+            "cached artifacts missing",
+            json!({
+                "reason": "missing_artifacts",
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "missing": missing,
+                "hint": "Run `px sync` to rehydrate cached artifacts before running commands.",
+            }),
+        ));
+    }
+
+    let _ = prepare_project_runtime(&snapshot).map_err(|err| {
+        install_error_outcome(err, "python runtime unavailable for native CAS execution")
+    })?;
+    let runtime = detect_runtime_metadata(ctx, &snapshot).map_err(|err| {
+        install_error_outcome(err, "python runtime unavailable for native CAS execution")
+    })?;
+    let lock_id = lock.lock_id.clone().unwrap_or_else(|| {
+        compute_lock_hash_bytes(&fs::read(&snapshot.lock_path).unwrap_or_else(|_| Vec::new()))
+    });
+    let env_owner = OwnerId {
+        owner_type: OwnerType::WorkspaceEnv,
+        owner_id: workspace_env_owner_id(&snapshot.root, &lock_id, &runtime.version).map_err(
+            |err| {
+                ExecutionOutcome::failure(
+                    "failed to compute workspace environment identity",
+                    json!({ "error": err.to_string() }),
+                )
+            },
+        )?,
+    };
+    let cas_profile = ensure_profile_manifest(ctx, &snapshot, &lock, &runtime, &env_owner)
+        .map_err(|err| install_error_outcome(err, "failed to prepare CAS profile for execution"))?;
+
+    let sys_path_entries = materialize_profile_sys_path(&cas_profile.header).map_err(|err| {
+        let mut details = error_details_with_code(&err);
+        if let Value::Object(map) = &mut details {
+            map.insert("profile_oid".into(), json!(cas_profile.profile_oid.clone()));
+            map.insert("reason".into(), json!("cas_native_profile_sys_path_failed"));
+        }
+        ExecutionOutcome::failure("failed to materialize CAS profile sys.path", details)
+    })?;
+    let site_dir = ensure_cas_native_site_dir(
+        &ctx.cache().path,
+        &cas_profile.profile_oid,
+        &runtime.version,
+        &sys_path_entries,
+    )
+    .map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to prepare native execution site",
+            json!({
+                "reason": "cas_native_site_setup_failed",
+                "error": err.to_string(),
+                "profile_oid": cas_profile.profile_oid,
+            }),
+        )
+    })?;
+
+    let paths = build_pythonpath(ctx.fs(), member_root, Some(site_dir.clone())).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to build workspace PYTHONPATH for native execution",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+
+    let mut combined = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push_unique = |path: PathBuf| {
+        if seen.insert(path.clone()) {
+            combined.push(path);
+        }
+    };
+
+    let current_src = member_root.join("src");
+    if current_src.exists() {
+        push_unique(current_src);
+    }
+    push_unique(member_root.to_path_buf());
+    for member in &workspace.config.members {
+        let abs = workspace.config.root.join(member);
+        let src = abs.join("src");
+        if src.exists() {
+            push_unique(src);
+        }
+        push_unique(abs);
+    }
+    for path in paths.allowed_paths {
+        push_unique(path);
+    }
+    let allowed_paths = combined;
+    let pythonpath = env::join_paths(&allowed_paths)
+        .map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to assemble workspace PYTHONPATH",
+                json!({ "error": err.to_string() }),
+            )
+        })?
+        .into_string()
+        .map_err(|_| {
+            ExecutionOutcome::failure(
+                "failed to assemble workspace PYTHONPATH",
+                json!({ "error": "contains non-utf8 data" }),
+            )
+        })?;
+
+    let member_data = workspace
+        .members
+        .iter()
+        .find(|member| member.root == member_root);
+    let px_options = member_data
+        .map(|member| member.snapshot.px_options.clone())
+        .unwrap_or_default();
+    let project_name = member_data
+        .map(|member| member.snapshot.name.clone())
+        .or_else(|| {
+            member_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(std::string::ToString::to_string)
+        })
+        .unwrap_or_default();
+    let profile_oid = cas_profile.profile_oid.clone();
+    let pyc_cache_prefix = if env::var_os("PYTHONPYCACHEPREFIX").is_some() {
+        None
+    } else {
+        match crate::store::ensure_pyc_cache_prefix(&ctx.cache().path, &profile_oid) {
+            Ok(prefix) => Some(prefix),
+            Err(err) => {
+                let prefix = crate::store::pyc_cache_prefix(&ctx.cache().path, &profile_oid);
+                return Err(ExecutionOutcome::user_error(
+                    "python bytecode cache directory is not writable",
+                    json!({
+                        "reason": "pyc_cache_unwritable",
+                        "cache_dir": prefix.display().to_string(),
+                        "error": err.to_string(),
+                        "hint": "ensure the directory is writable or set PX_CACHE_PATH to a writable location",
+                    }),
+                ));
+            }
+        }
+    };
+
+    let py_ctx = PythonContext {
+        project_root: member_root.to_path_buf(),
+        project_name,
+        python: cas_profile.runtime_path.display().to_string(),
+        pythonpath,
+        allowed_paths,
+        site_bin: paths.site_bin,
+        pep582_bin: paths.pep582_bin,
+        pyc_cache_prefix,
+        px_options,
+    };
+    Ok(CasNativeRunContext {
+        py_ctx,
+        profile_oid: cas_profile.profile_oid,
+        runtime_path: cas_profile.runtime_path,
+        sys_path_entries,
+        env_vars: cas_profile.header.env_vars,
+    })
+}
+
+fn materialize_profile_sys_path(header: &crate::store::cas::ProfileHeader) -> Result<Vec<PathBuf>> {
+    let store = crate::store::cas::global_store();
+    let ordered: Vec<String> = if header.sys_path_order.is_empty() {
+        header
+            .packages
+            .iter()
+            .map(|pkg| pkg.pkg_build_oid.clone())
+            .collect()
+    } else {
+        header.sys_path_order.clone()
+    };
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+
+    let mut push_oid = |oid: &str| -> Result<()> {
+        if !seen.insert(oid.to_string()) {
+            return Ok(());
+        }
+        let loaded = store.load(oid)?;
+        let crate::LoadedObject::PkgBuild { archive, .. } = loaded else {
+            bail!("CAS object {oid} is not a pkg-build archive");
+        };
+        let root = materialize_pkg_archive(oid, &archive)?;
+        let site = root.join("site-packages");
+        if site.exists() {
+            paths.push(site);
+        } else {
+            paths.push(root);
+        }
+        Ok(())
+    };
+
+    for oid in ordered {
+        push_oid(&oid)?;
+    }
+    for pkg in &header.packages {
+        push_oid(&pkg.pkg_build_oid)?;
+    }
+
+    Ok(paths)
+}
+
+fn ensure_cas_native_site_dir(
+    cache_root: &Path,
+    profile_oid: &str,
+    runtime_version: &str,
+    sys_path_entries: &[PathBuf],
+) -> Result<PathBuf> {
+    let site_dir = cache_root
+        .join("native")
+        .join("profiles")
+        .join(profile_oid)
+        .join("site");
+    let temp_root = site_dir.with_extension("partial");
+    if temp_root.exists() {
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+    fs::create_dir_all(&temp_root)?;
+    fs::create_dir_all(temp_root.join("bin"))?;
+    let site_packages = crate::site_packages_dir(&temp_root, runtime_version);
+    fs::create_dir_all(&site_packages)?;
+
+    let mut pth_body = String::new();
+    for entry in sys_path_entries {
+        pth_body.push_str(&entry.display().to_string());
+        pth_body.push('\n');
+    }
+    fs::write(temp_root.join("px.pth"), pth_body.as_bytes())?;
+    fs::write(site_packages.join("px.pth"), pth_body.as_bytes())?;
+
+    fs::write(
+        temp_root.join("sitecustomize.py"),
+        crate::SITE_CUSTOMIZE.as_bytes(),
+    )?;
+    fs::write(
+        site_packages.join("sitecustomize.py"),
+        crate::SITE_CUSTOMIZE.as_bytes(),
+    )?;
+
+    let backup_root = site_dir.with_extension("backup");
+    if backup_root.exists() {
+        let _ = fs::remove_dir_all(&backup_root);
+    }
+    if site_dir.exists() {
+        fs::rename(&site_dir, &backup_root)?;
+    }
+    if let Err(err) = fs::rename(&temp_root, &site_dir) {
+        let _ = fs::remove_dir_all(&temp_root);
+        if backup_root.exists() {
+            let _ = fs::rename(&backup_root, &site_dir);
+        }
+        return Err(err).with_context(|| {
+            format!(
+                "failed to finalize native site directory at {}",
+                site_dir.display()
+            )
+        });
+    }
+    let _ = fs::remove_dir_all(&backup_root);
+
+    Ok(site_dir)
+}
+
+fn console_script_index_path(cache_root: &Path, profile_oid: &str) -> PathBuf {
+    cache_root
+        .join("native")
+        .join("profiles")
+        .join(profile_oid)
+        .join("console_scripts.json")
+}
+
+fn load_console_script_index(path: &Path) -> Option<ConsoleScriptIndex> {
+    let contents = fs::read_to_string(path).ok()?;
+    let parsed: ConsoleScriptIndex = serde_json::from_str(&contents).ok()?;
+    if parsed.version != 1 {
+        return None;
+    }
+    Some(parsed)
+}
+
+fn write_console_script_index(path: &Path, index: &ConsoleScriptIndex) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut bytes = serde_json::to_vec_pretty(index)?;
+    bytes.push(b'\n');
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+fn load_or_build_console_script_index(
+    cache_root: &Path,
+    native: &CasNativeRunContext,
+) -> Result<ConsoleScriptIndex> {
+    let path = console_script_index_path(cache_root, &native.profile_oid);
+    if let Some(index) = load_console_script_index(&path) {
+        return Ok(index);
+    }
+    let index = build_console_script_index(&native.sys_path_entries)?;
+    write_console_script_index(&path, &index)?;
+    Ok(index)
+}
+
+fn build_console_script_index(sys_path_entries: &[PathBuf]) -> Result<ConsoleScriptIndex> {
+    let mut scripts: BTreeMap<String, Vec<ConsoleScriptCandidate>> = BTreeMap::new();
+    for sys_path in sys_path_entries {
+        if !sys_path.is_dir() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(sys_path) else {
+            continue;
+        };
+        let mut dist_infos = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("dist-info"))
+                && path.is_dir()
+            {
+                dist_infos.push(path);
+            }
+        }
+        dist_infos.sort();
+        for dist_info in dist_infos {
+            let entry_points = dist_info.join("entry_points.txt");
+            if !entry_points.exists() {
+                continue;
+            }
+            let contents = match fs::read_to_string(&entry_points) {
+                Ok(contents) => contents,
+                Err(_) => continue,
+            };
+            let candidates = parse_console_scripts_from_entry_points(&contents);
+            if candidates.is_empty() {
+                continue;
+            }
+            let (dist, dist_version) = read_dist_metadata_name_version(&dist_info);
+            for (name, entry_point) in candidates {
+                scripts
+                    .entry(name)
+                    .or_default()
+                    .push(ConsoleScriptCandidate {
+                        dist: dist.clone(),
+                        dist_version: dist_version.clone(),
+                        entry_point,
+                    });
+            }
+        }
+    }
+    for candidates in scripts.values_mut() {
+        candidates.sort_by(|a, b| {
+            a.dist
+                .cmp(&b.dist)
+                .then(a.dist_version.cmp(&b.dist_version))
+                .then(a.entry_point.cmp(&b.entry_point))
+        });
+    }
+    Ok(ConsoleScriptIndex { version: 1, scripts })
+}
+
+fn parse_console_scripts_from_entry_points(contents: &str) -> Vec<(String, String)> {
+    let mut in_console_scripts = false;
+    let mut scripts = Vec::new();
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let section = &trimmed[1..trimmed.len() - 1];
+            in_console_scripts = section.trim() == "console_scripts";
+            continue;
+        }
+        if !in_console_scripts {
+            continue;
+        }
+        let Some((name, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        let value = value.trim();
+        if name.is_empty() || value.is_empty() {
+            continue;
+        }
+        scripts.push((name.to_string(), value.to_string()));
+    }
+    scripts
+}
+
+fn read_dist_metadata_name_version(dist_info: &Path) -> (String, Option<String>) {
+    let metadata = dist_info.join("METADATA");
+    let mut name = None;
+    let mut version = None;
+    if let Ok(contents) = fs::read_to_string(&metadata) {
+        for line in contents.lines() {
+            if name.is_none() {
+                if let Some(value) = line.strip_prefix("Name:") {
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        name = Some(trimmed.to_string());
+                    }
+                }
+            }
+            if version.is_none() {
+                if let Some(value) = line.strip_prefix("Version:") {
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        version = Some(trimmed.to_string());
+                    }
+                }
+            }
+            if name.is_some() && version.is_some() {
+                break;
+            }
+        }
+    }
+    let fallback = dist_info
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown.dist-info")
+        .to_string();
+    (name.unwrap_or(fallback), version)
 }
 
 impl CommandRunner for HostCommandRunner<'_> {
@@ -986,6 +1734,99 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         }
     }
 
+    let mut workspace_cas_native_fallback: Option<CasNativeFallback> = None;
+    if !request.sandbox && !strict && !target.trim().is_empty() {
+        let scope = match discover_workspace_scope() {
+            Ok(scope) => scope,
+            Err(err) => {
+                return Ok(ExecutionOutcome::failure(
+                    "failed to detect workspace",
+                    json!({ "error": err.to_string() }),
+                ));
+            }
+        };
+        if let Some(WorkspaceScope::Member {
+            workspace,
+            member_root,
+        }) = scope
+        {
+            match prepare_cas_native_workspace_run_context(ctx, &workspace, &member_root) {
+                Ok(native_ctx) => {
+                    let deps = DependencyContext::from_sources(
+                        &workspace.dependencies,
+                        Some(&workspace.lock_path),
+                    );
+                    let mut command_args = json!({
+                        "target": &target,
+                        "args": &request.args,
+                    });
+                    deps.inject(&mut command_args);
+                    let workdir = invocation_workdir(&native_ctx.py_ctx.project_root);
+                    let host_runner = HostCommandRunner::new(ctx);
+                    let plan = plan_run_target(
+                        &native_ctx.py_ctx,
+                        &member_root.join("pyproject.toml"),
+                        &target,
+                        &workdir,
+                    )?;
+                    let outcome = match plan {
+                        RunTargetPlan::Script(path) => run_project_script_cas_native(
+                            ctx,
+                            &host_runner,
+                            &native_ctx,
+                            &path,
+                            &request.args,
+                            &command_args,
+                            &workdir,
+                            interactive,
+                        )?,
+                        RunTargetPlan::Executable(program) => run_executable_cas_native(
+                            ctx,
+                            &host_runner,
+                            &native_ctx,
+                            &program,
+                            &request.args,
+                            &command_args,
+                            &workdir,
+                            interactive,
+                        )?,
+                    };
+                    if let Some(reason) = cas_native_fallback_reason(&outcome) {
+                        if is_integrity_failure(&outcome) {
+                            return Ok(outcome);
+                        }
+                        let summary = cas_native_fallback_summary(&outcome);
+                        debug!(
+                            CAS_NATIVE_FALLBACK = reason.as_str(),
+                            error = %summary,
+                            "CAS_NATIVE_FALLBACK={} falling back to env materialization",
+                            reason.as_str()
+                        );
+                        workspace_cas_native_fallback = Some(CasNativeFallback { reason, summary });
+                    } else {
+                        return Ok(outcome);
+                    }
+                }
+                Err(outcome) => {
+                    let Some(reason) = cas_native_fallback_reason(&outcome) else {
+                        return Ok(outcome);
+                    };
+                    if is_integrity_failure(&outcome) {
+                        return Ok(outcome);
+                    }
+                    let summary = cas_native_fallback_summary(&outcome);
+                    debug!(
+                        CAS_NATIVE_FALLBACK = reason.as_str(),
+                        error = %summary,
+                        "CAS_NATIVE_FALLBACK={} falling back to env materialization",
+                        reason.as_str()
+                    );
+                    workspace_cas_native_fallback = Some(CasNativeFallback { reason, summary });
+                }
+            }
+        }
+    }
+
     if let Some(ws_ctx) = match prepare_workspace_run_context(ctx, strict, "run", request.sandbox) {
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
@@ -1062,6 +1903,9 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             )?,
         };
         attach_autosync_details(&mut outcome, ws_ctx.sync_report);
+        if let Some(ref fallback) = workspace_cas_native_fallback {
+            attach_cas_native_fallback(&mut outcome, fallback);
+        }
         if let Some(ref sbx) = sandbox {
             attach_sandbox_details(&mut outcome, sbx);
         }
@@ -1084,6 +1928,80 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
     };
     if target.trim().is_empty() {
         return Ok(run_target_required_outcome());
+    }
+
+    let mut cas_native_fallback: Option<CasNativeFallback> = None;
+    if !request.sandbox && !strict {
+        match prepare_cas_native_run_context(ctx, &snapshot) {
+            Ok(native_ctx) => {
+                let manifest = native_ctx.py_ctx.project_root.join("pyproject.toml");
+                let deps = DependencyContext::from_sources(
+                    &snapshot.requirements,
+                    Some(&snapshot.lock_path),
+                );
+                let mut command_args = json!({
+                    "target": &target,
+                    "args": &request.args,
+                });
+                deps.inject(&mut command_args);
+                let workdir = invocation_workdir(&native_ctx.py_ctx.project_root);
+                let host_runner = HostCommandRunner::new(ctx);
+                let plan = plan_run_target(&native_ctx.py_ctx, &manifest, &target, &workdir)?;
+                let outcome = match plan {
+                    RunTargetPlan::Script(path) => run_project_script_cas_native(
+                        ctx,
+                        &host_runner,
+                        &native_ctx,
+                        &path,
+                        &request.args,
+                        &command_args,
+                        &workdir,
+                        interactive,
+                    )?,
+                    RunTargetPlan::Executable(program) => run_executable_cas_native(
+                        ctx,
+                        &host_runner,
+                        &native_ctx,
+                        &program,
+                        &request.args,
+                        &command_args,
+                        &workdir,
+                        interactive,
+                    )?,
+                };
+                if let Some(reason) = cas_native_fallback_reason(&outcome) {
+                    if is_integrity_failure(&outcome) {
+                        return Ok(outcome);
+                    }
+                    let summary = cas_native_fallback_summary(&outcome);
+                    debug!(
+                        CAS_NATIVE_FALLBACK = reason.as_str(),
+                        error = %summary,
+                        "CAS_NATIVE_FALLBACK={} falling back to env materialization",
+                        reason.as_str()
+                    );
+                    cas_native_fallback = Some(CasNativeFallback { reason, summary });
+                } else {
+                    return Ok(outcome);
+                }
+            }
+            Err(outcome) => {
+                let Some(reason) = cas_native_fallback_reason(&outcome) else {
+                    return Ok(outcome);
+                };
+                if is_integrity_failure(&outcome) {
+                    return Ok(outcome);
+                }
+                let summary = cas_native_fallback_summary(&outcome);
+                debug!(
+                    CAS_NATIVE_FALLBACK = reason.as_str(),
+                    error = %summary,
+                    "CAS_NATIVE_FALLBACK={} falling back to env materialization",
+                    reason.as_str()
+                );
+                cas_native_fallback = Some(CasNativeFallback { reason, summary });
+            }
+        }
     }
     let state_report = match crate::state_guard::state_or_violation(ctx, &snapshot, "run") {
         Ok(report) => report,
@@ -1159,6 +2077,9 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         )?,
     };
     attach_autosync_details(&mut outcome, sync_report);
+    if let Some(ref fallback) = cas_native_fallback {
+        attach_cas_native_fallback(&mut outcome, fallback);
+    }
     if let Some(ref sbx) = sandbox {
         attach_sandbox_details(&mut outcome, sbx);
     }
@@ -2396,12 +3317,100 @@ fn commit_stdlib_guard(ctx: &CommandContext, git_ref: &str) -> Option<EnvVarGuar
     ))
 }
 
+fn error_details_with_code(err: &anyhow::Error) -> Value {
+    let mut details = json!({ "error": err.to_string() });
+    if let Some(code) = store_error_code(err) {
+        if let Value::Object(map) = &mut details {
+            map.insert("code".into(), json!(code));
+        }
+    }
+    details
+}
+
+fn store_error_code(err: &anyhow::Error) -> Option<&'static str> {
+    err.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<crate::StoreError>()
+            .map(crate::StoreError::code)
+    })
+}
+
 fn install_error_outcome(err: anyhow::Error, context: &str) -> ExecutionOutcome {
     match err.downcast::<crate::InstallUserError>() {
         Ok(user) => {
             ExecutionOutcome::user_error(user.message().to_string(), user.details().clone())
         }
-        Err(other) => ExecutionOutcome::failure(context, json!({ "error": other.to_string() })),
+        Err(other) => {
+            let mut details = json!({ "error": other.to_string() });
+            if let Some(code) = store_error_code(&other) {
+                if let Value::Object(map) = &mut details {
+                    map.insert("code".into(), json!(code));
+                }
+            }
+            ExecutionOutcome::failure(context, details)
+        }
+    }
+}
+
+fn cas_integrity_code(code: &str) -> bool {
+    matches!(
+        code,
+        crate::diagnostics::cas::MISSING_OR_CORRUPT
+            | crate::diagnostics::cas::STORE_WRITE_FAILURE
+            | crate::diagnostics::cas::INDEX_CORRUPT
+            | crate::diagnostics::cas::FORMAT_INCOMPATIBLE
+    )
+}
+
+fn is_integrity_failure(outcome: &ExecutionOutcome) -> bool {
+    outcome
+        .details
+        .get("code")
+        .and_then(Value::as_str)
+        .is_some_and(cas_integrity_code)
+}
+
+fn cas_native_fallback_reason(outcome: &ExecutionOutcome) -> Option<CasNativeFallbackReason> {
+    let reason = outcome.details.get("reason").and_then(Value::as_str)?;
+    match reason {
+        "ambiguous_console_script" => Some(CasNativeFallbackReason::AmbiguousConsoleScript),
+        "cas_native_console_script_index_failed" => {
+            Some(CasNativeFallbackReason::ConsoleScriptIndexFailed)
+        }
+        "cas_native_unresolved_console_script" => Some(CasNativeFallbackReason::UnresolvedConsoleScript),
+        "cas_native_site_setup_failed" => Some(CasNativeFallbackReason::NativeSiteSetupFailed),
+        _ => None,
+    }
+}
+
+fn cas_native_fallback_summary(outcome: &ExecutionOutcome) -> String {
+    let mut summary = outcome.message.clone();
+    if let Some(err) = outcome.details.get("error").and_then(Value::as_str) {
+        let sanitized = err.replace('\n', " ");
+        if !sanitized.trim().is_empty() {
+            summary.push_str(": ");
+            summary.push_str(sanitized.trim());
+        }
+    }
+    summary
+}
+
+fn attach_cas_native_fallback(outcome: &mut ExecutionOutcome, fallback: &CasNativeFallback) {
+    let payload = json!({
+        "code": fallback.reason.as_str(),
+        "error": fallback.summary,
+    });
+    match &mut outcome.details {
+        Value::Object(map) => {
+            map.insert("cas_native_fallback".into(), payload);
+        }
+        Value::Null => {
+            outcome.details = json!({ "cas_native_fallback": payload });
+        }
+        other => {
+            let prev = other.take();
+            outcome.details = json!({ "value": prev, "cas_native_fallback": payload });
+        }
     }
 }
 
@@ -2630,6 +3639,227 @@ pub(crate) fn run_project_script(
     ))
 }
 
+fn json_env_value(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+fn set_env_pair(envs: &mut EnvPairs, key: &str, value: String) {
+    if let Some((_, existing)) = envs.iter_mut().find(|(k, _)| k == key) {
+        *existing = value;
+    } else {
+        envs.push((key.to_string(), value));
+    }
+}
+
+fn apply_profile_env_vars(envs: &mut EnvPairs, vars: &BTreeMap<String, Value>) {
+    for (key, value) in vars {
+        set_env_pair(envs, key, json_env_value(value));
+    }
+}
+
+fn apply_runtime_python_home(envs: &mut EnvPairs, runtime: &Path) {
+    let Some(runtime_root) = runtime.parent().and_then(|bin| bin.parent()) else {
+        return;
+    };
+    set_env_pair(
+        envs,
+        "PYTHONHOME",
+        runtime_root.display().to_string(),
+    );
+}
+
+fn program_on_path(program: &str, envs: &EnvPairs) -> bool {
+    let value = envs
+        .iter()
+        .find(|(key, _)| key == "PATH")
+        .map(|(_, value)| value.clone())
+        .or_else(|| env::var("PATH").ok())
+        .unwrap_or_default();
+    for entry in env::split_paths(&value) {
+        if entry.join(program).is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+fn execute_plan(
+    runner: &dyn CommandRunner,
+    plan: &ExecutionPlan,
+    interactive: bool,
+    inherit_stdin: bool,
+) -> Result<crate::RunOutput> {
+    let Some((program, args)) = plan.argv.split_first() else {
+        bail!("execution plan missing argv[0]");
+    };
+    if inherit_stdin {
+        runner.run_command_with_stdin(program, args, &plan.envs, &plan.cwd, true)
+    } else if interactive {
+        runner.run_command_passthrough(program, args, &plan.envs, &plan.cwd)
+    } else {
+        runner.run_command(program, args, &plan.envs, &plan.cwd)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_project_script_cas_native(
+    core_ctx: &CommandContext,
+    runner: &dyn CommandRunner,
+    native: &CasNativeRunContext,
+    script: &Path,
+    extra_args: &[String],
+    command_args: &Value,
+    workdir: &Path,
+    interactive: bool,
+) -> Result<ExecutionOutcome> {
+    let (mut envs, _) = build_env_with_preflight(core_ctx, &native.py_ctx, command_args)?;
+    apply_runtime_python_home(&mut envs, &native.runtime_path);
+    apply_profile_env_vars(&mut envs, &native.env_vars);
+    let mut argv = Vec::with_capacity(extra_args.len() + 2);
+    argv.push(native.py_ctx.python.clone());
+    argv.push(script.display().to_string());
+    argv.extend(extra_args.iter().cloned());
+    let plan = ExecutionPlan {
+        runtime_path: native.runtime_path.clone(),
+        sys_path_entries: native.sys_path_entries.clone(),
+        cwd: workdir.to_path_buf(),
+        envs,
+        argv,
+    };
+    let output = execute_plan(runner, &plan, interactive, false)?;
+    let details = json!({
+        "mode": "script",
+        "script": script.display().to_string(),
+        "args": extra_args,
+        "interactive": interactive,
+        "execution": {
+            "runtime": plan.runtime_path.display().to_string(),
+            "profile_oid": native.profile_oid.clone(),
+            "sys_path": plan
+                .sys_path_entries
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>(),
+        }
+    });
+    Ok(outcome_from_output(
+        "run",
+        &script.display().to_string(),
+        &output,
+        "px run",
+        Some(details),
+    ))
+}
+
+fn resolve_console_script_candidate(
+    ctx: &CommandContext,
+    native: &CasNativeRunContext,
+    script: &str,
+) -> Result<Option<ConsoleScriptCandidate>, ExecutionOutcome> {
+    let index = load_or_build_console_script_index(&ctx.cache().path, native).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to index console scripts for native execution",
+            json!({
+                "reason": "cas_native_console_script_index_failed",
+                "error": err.to_string(),
+                "profile_oid": native.profile_oid.clone(),
+            }),
+        )
+    })?;
+    let Some(candidates) = index.scripts.get(script) else {
+        return Ok(None);
+    };
+    if candidates.len() == 1 {
+        return Ok(Some(
+            candidates
+                .first()
+                .expect("candidates non-empty")
+                .clone(),
+        ));
+    }
+    let rendered = candidates
+        .iter()
+        .map(|candidate| {
+            json!({
+                "distribution": &candidate.dist,
+                "version": candidate.dist_version.as_deref(),
+                "entry_point": &candidate.entry_point,
+            })
+        })
+        .collect::<Vec<_>>();
+    Err(ExecutionOutcome::user_error(
+        format!("console script `{script}` is provided by multiple distributions"),
+        json!({
+            "reason": "ambiguous_console_script",
+            "script": script,
+            "candidates": rendered,
+            "hint": "Remove one of the distributions providing this script, or run a module directly via `px run python -m <module>`.",
+        }),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_console_script_cas_native(
+    core_ctx: &CommandContext,
+    runner: &dyn CommandRunner,
+    native: &CasNativeRunContext,
+    script: &str,
+    candidate: &ConsoleScriptCandidate,
+    extra_args: &[String],
+    command_args: &Value,
+    workdir: &Path,
+    interactive: bool,
+) -> Result<ExecutionOutcome> {
+    let (mut envs, _) = build_env_with_preflight(core_ctx, &native.py_ctx, command_args)?;
+    apply_runtime_python_home(&mut envs, &native.runtime_path);
+    apply_profile_env_vars(&mut envs, &native.env_vars);
+    let mut argv = Vec::with_capacity(extra_args.len() + 5);
+    argv.push(native.py_ctx.python.clone());
+    argv.push("-c".to_string());
+    argv.push(CONSOLE_SCRIPT_DISPATCH.to_string());
+    argv.push(script.to_string());
+    argv.push(candidate.dist.clone());
+    argv.extend(extra_args.iter().cloned());
+    let plan = ExecutionPlan {
+        runtime_path: native.runtime_path.clone(),
+        sys_path_entries: native.sys_path_entries.clone(),
+        cwd: workdir.to_path_buf(),
+        envs,
+        argv,
+    };
+    let output = execute_plan(runner, &plan, interactive, false)?;
+    let details = json!({
+        "mode": "console_script",
+        "script": script,
+        "distribution": &candidate.dist,
+        "entry_point": &candidate.entry_point,
+        "args": extra_args,
+        "interactive": interactive,
+        "execution": {
+            "runtime": plan.runtime_path.display().to_string(),
+            "profile_oid": native.profile_oid.clone(),
+            "sys_path": plan
+                .sys_path_entries
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>(),
+        }
+    });
+    Ok(outcome_from_output(
+        "run",
+        script,
+        &output,
+        "px run",
+        Some(details),
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_executable(
     core_ctx: &CommandContext,
@@ -2670,6 +3900,112 @@ fn run_executable(
     Ok(outcome_from_output(
         "run",
         program,
+        &output,
+        "px run",
+        Some(details),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_executable_cas_native(
+    core_ctx: &CommandContext,
+    runner: &dyn CommandRunner,
+    native: &CasNativeRunContext,
+    program: &str,
+    extra_args: &[String],
+    command_args: &Value,
+    workdir: &Path,
+    interactive: bool,
+) -> Result<ExecutionOutcome> {
+    let display_program = program.to_string();
+    let is_python_alias = is_python_alias_target(program);
+    let exec_program = if is_python_alias {
+        native.py_ctx.python.clone()
+    } else {
+        display_program.clone()
+    };
+
+    if let Some(subcommand) = mutating_pip_invocation(&exec_program, extra_args, &native.py_ctx) {
+        return Ok(pip_mutation_outcome(&display_program, &subcommand, extra_args));
+    }
+
+    let mut missing_console_script = false;
+    if !is_python_alias
+        && Path::new(&display_program).components().count() == 1
+        && !program_matches_python(&display_program, &native.py_ctx)
+    {
+        match resolve_console_script_candidate(core_ctx, native, &display_program) {
+            Ok(Some(candidate)) => {
+                return run_console_script_cas_native(
+                    core_ctx,
+                    runner,
+                    native,
+                    &display_program,
+                    &candidate,
+                    extra_args,
+                    command_args,
+                    workdir,
+                    interactive,
+                );
+            }
+            Ok(None) => {
+                missing_console_script = true;
+            }
+            Err(outcome) => return Ok(outcome),
+        }
+    }
+
+    let (mut envs, _) = build_env_with_preflight(core_ctx, &native.py_ctx, command_args)?;
+    if missing_console_script && !program_on_path(&display_program, &envs) {
+        return Ok(ExecutionOutcome::user_error(
+            "native execution could not resolve command",
+            json!({
+                "reason": "cas_native_unresolved_console_script",
+                "program": display_program,
+            }),
+        ));
+    }
+    let uses_px_python = program_matches_python(&exec_program, &native.py_ctx);
+    let needs_stdin = uses_px_python && extra_args.first().is_some_and(|arg| arg == "-");
+    if uses_px_python {
+        apply_runtime_python_home(&mut envs, &native.runtime_path);
+        apply_profile_env_vars(&mut envs, &native.env_vars);
+    } else {
+        envs.retain(|(key, _)| key != "PX_PYTHON");
+    }
+    let interactive = interactive || needs_stdin;
+    let mut argv = Vec::with_capacity(extra_args.len() + 1);
+    argv.push(exec_program.clone());
+    argv.extend(extra_args.iter().cloned());
+    let plan = ExecutionPlan {
+        runtime_path: native.runtime_path.clone(),
+        sys_path_entries: native.sys_path_entries.clone(),
+        cwd: workdir.to_path_buf(),
+        envs,
+        argv,
+    };
+    let output = execute_plan(runner, &plan, interactive, needs_stdin)?;
+    let mut details = json!({
+        "mode": if uses_px_python { "passthrough" } else { "executable" },
+        "program": &display_program,
+        "args": extra_args,
+        "interactive": interactive,
+        "execution": {
+            "runtime": plan.runtime_path.display().to_string(),
+            "profile_oid": native.profile_oid.clone(),
+            "sys_path": plan
+                .sys_path_entries
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>(),
+        }
+    });
+    if uses_px_python {
+        details["uses_px_python"] = Value::Bool(true);
+    }
+    Ok(outcome_from_output(
+        "run",
+        &display_program,
         &output,
         "px run",
         Some(details),
@@ -2805,6 +4141,56 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
     let strict = request.frozen || ctx.env_flag_enabled("CI");
     let mut sandbox: Option<SandboxRunContext> = None;
 
+    let mut workspace_cas_native_fallback: Option<CasNativeFallback> = None;
+    if !request.sandbox && !strict {
+        let scope = match discover_workspace_scope() {
+            Ok(scope) => scope,
+            Err(err) => {
+                return Ok(ExecutionOutcome::failure(
+                    "failed to detect workspace",
+                    json!({ "error": err.to_string() }),
+                ));
+            }
+        };
+        if let Some(WorkspaceScope::Member {
+            workspace,
+            member_root,
+        }) = scope
+        {
+            match prepare_cas_native_workspace_run_context(ctx, &workspace, &member_root) {
+                Ok(native_ctx) => {
+                    let workdir = invocation_workdir(&native_ctx.py_ctx.project_root);
+                    let host_runner = HostCommandRunner::new(ctx);
+                    let outcome = run_tests_for_context_cas_native(
+                        ctx,
+                        &host_runner,
+                        &native_ctx,
+                        request,
+                        None,
+                        &workdir,
+                    )?;
+                    return Ok(outcome);
+                }
+                Err(outcome) => {
+                    let Some(reason) = cas_native_fallback_reason(&outcome) else {
+                        return Ok(outcome);
+                    };
+                    if is_integrity_failure(&outcome) {
+                        return Ok(outcome);
+                    }
+                    let summary = cas_native_fallback_summary(&outcome);
+                    debug!(
+                        CAS_NATIVE_FALLBACK = reason.as_str(),
+                        error = %summary,
+                        "CAS_NATIVE_FALLBACK={} falling back to env materialization",
+                        reason.as_str()
+                    );
+                    workspace_cas_native_fallback = Some(CasNativeFallback { reason, summary });
+                }
+            }
+        }
+    }
+
     if let Some(ws_ctx) = match prepare_workspace_run_context(ctx, strict, "test", request.sandbox)
     {
         Ok(result) => result,
@@ -2852,6 +4238,9 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
             ws_ctx.sync_report,
             &workdir,
         )?;
+        if let Some(ref fallback) = workspace_cas_native_fallback {
+            attach_cas_native_fallback(&mut outcome, fallback);
+        }
         if let Some(ref sbx) = sandbox {
             attach_sandbox_details(&mut outcome, sbx);
         }
@@ -2872,6 +4261,34 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
             return Err(err);
         }
     };
+    let mut cas_native_fallback: Option<CasNativeFallback> = None;
+    if !request.sandbox && !strict {
+        match prepare_cas_native_run_context(ctx, &snapshot) {
+            Ok(native_ctx) => {
+                let workdir = invocation_workdir(&native_ctx.py_ctx.project_root);
+                let host_runner = HostCommandRunner::new(ctx);
+                let outcome =
+                    run_tests_for_context_cas_native(ctx, &host_runner, &native_ctx, request, None, &workdir)?;
+                return Ok(outcome);
+            }
+            Err(outcome) => {
+                let Some(reason) = cas_native_fallback_reason(&outcome) else {
+                    return Ok(outcome);
+                };
+                if is_integrity_failure(&outcome) {
+                    return Ok(outcome);
+                }
+                let summary = cas_native_fallback_summary(&outcome);
+                debug!(
+                    CAS_NATIVE_FALLBACK = reason.as_str(),
+                    error = %summary,
+                    "CAS_NATIVE_FALLBACK={} falling back to env materialization",
+                    reason.as_str()
+                );
+                cas_native_fallback = Some(CasNativeFallback { reason, summary });
+            }
+        }
+    }
     let state_report = match crate::state_guard::state_or_violation(ctx, &snapshot, "test") {
         Ok(report) => report,
         Err(outcome) => return Ok(outcome),
@@ -2907,6 +4324,9 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
         None => &host_runner,
     };
     let mut outcome = run_tests_for_context(ctx, runner, &py_ctx, request, sync_report, &workdir)?;
+    if let Some(ref fallback) = cas_native_fallback {
+        attach_cas_native_fallback(&mut outcome, fallback);
+    }
     if let Some(ref sbx) = sandbox {
         attach_sandbox_details(&mut outcome, sbx);
     }
@@ -2966,6 +4386,57 @@ fn run_tests_for_context(
                 ctx,
                 runner,
                 py_ctx,
+                envs,
+                &request.args,
+                stream_runner,
+                allow_missing_pytest_fallback,
+                workdir,
+            )?
+        }
+    };
+    attach_autosync_details(&mut outcome, sync_report);
+    Ok(outcome)
+}
+
+fn run_tests_for_context_cas_native(
+    ctx: &CommandContext,
+    runner: &dyn CommandRunner,
+    native: &CasNativeRunContext,
+    request: &TestRequest,
+    sync_report: Option<crate::EnvironmentSyncReport>,
+    workdir: &Path,
+) -> Result<ExecutionOutcome> {
+    let command_args = json!({ "test_args": request.args });
+    let (mut envs, _preflight) = build_env_with_preflight(ctx, &native.py_ctx, &command_args)?;
+    apply_runtime_python_home(&mut envs, &native.runtime_path);
+    apply_profile_env_vars(&mut envs, &native.env_vars);
+
+    let stream_runner = !ctx.global.json;
+    let allow_missing_pytest_fallback = sync_report
+        .as_ref()
+        .map(|report| report.action() == "env-recreate")
+        .unwrap_or(false);
+
+    let mut outcome = match select_test_runner(ctx, &native.py_ctx) {
+        TestRunner::Builtin => {
+            run_builtin_tests(ctx, runner, &native.py_ctx, envs, stream_runner, workdir)?
+        }
+        TestRunner::Script(script) => run_script_runner(
+            ctx,
+            runner,
+            &native.py_ctx,
+            envs,
+            &script,
+            &request.args,
+            stream_runner,
+            workdir,
+        )?,
+        TestRunner::Pytest => {
+            envs.push(("PX_TEST_RUNNER".into(), "pytest".into()));
+            run_pytest_runner(
+                ctx,
+                runner,
+                &native.py_ctx,
                 envs,
                 &request.args,
                 stream_runner,

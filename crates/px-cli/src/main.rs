@@ -176,6 +176,7 @@ fn init_tracing(trace: bool, verbose: u8) {
         .with_env_filter(filter)
         .with_target(false)
         .with_level(true)
+        .with_writer(std::io::stderr)
         .finish();
 
     let _ = tracing::subscriber::set_global_default(subscriber);
