@@ -7,6 +7,8 @@ use hex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+const SYSTEM_DEPS_FINGERPRINT_VERSION: u32 = 3;
+
 /// Normalized system dependency metadata derived from capability inference.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemDeps {
@@ -233,11 +235,13 @@ impl SystemDeps {
         }
         #[derive(Serialize)]
         struct Fingerprint<'a> {
+            version: u32,
             capabilities: &'a BTreeSet<String>,
             apt_packages: &'a BTreeSet<String>,
             apt_versions: &'a BTreeMap<String, String>,
         }
         let payload = Fingerprint {
+            version: SYSTEM_DEPS_FINGERPRINT_VERSION,
             capabilities: &self.capabilities,
             apt_packages: &self.apt_packages,
             apt_versions: &self.apt_versions,
