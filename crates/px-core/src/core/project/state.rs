@@ -4,7 +4,7 @@ use crate::{
     compute_lock_hash, ensure_env_matches_lock, load_project_state, marker_env_for_snapshot,
     CommandContext, ExecutionOutcome, InstallUserError, ManifestSnapshot,
 };
-use px_domain::{detect_lock_drift, load_lockfile_optional, ProjectStateReport};
+use px_domain::{detect_lock_drift, load_lockfile_optional, verify_locked_artifacts, ProjectStateReport};
 use serde_json::json;
 
 use super::MutationCommand;
@@ -62,13 +62,27 @@ pub(crate) fn evaluate_project_state(
     let mut env_clean = false;
     let mut env_issue = None;
     if manifest_clean && lock_issue.is_none() {
-        if let Some(lock_id) = lock_id.as_deref() {
-            match ensure_env_matches_lock(ctx, snapshot, lock_id) {
-                Ok(()) => env_clean = true,
-                Err(err) => match err.downcast::<InstallUserError>() {
-                    Ok(user) => env_issue = Some(user.details),
-                    Err(other) => return Err(other),
-                },
+        if env_exists {
+            if let Some(lock) = &lock {
+                let missing = verify_locked_artifacts(lock);
+                if !missing.is_empty() {
+                    env_issue = Some(json!({
+                        "reason": "missing_artifacts",
+                        "missing": missing,
+                        "lockfile": snapshot.lock_path.display().to_string(),
+                    }));
+                }
+            }
+        }
+        if env_issue.is_none() {
+            if let Some(lock_id) = lock_id.as_deref() {
+                match ensure_env_matches_lock(ctx, snapshot, lock_id) {
+                    Ok(()) => env_clean = true,
+                    Err(err) => match err.downcast::<InstallUserError>() {
+                        Ok(user) => env_issue = Some(user.details),
+                        Err(other) => return Err(other),
+                    },
+                }
             }
         }
     }

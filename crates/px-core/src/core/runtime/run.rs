@@ -106,6 +106,7 @@ struct CasNativeRunContext {
 enum CasNativeFallbackReason {
     AmbiguousConsoleScript,
     ConsoleScriptIndexFailed,
+    MissingArtifacts,
     UnresolvedConsoleScript,
     NativeSiteSetupFailed,
 }
@@ -115,6 +116,7 @@ impl CasNativeFallbackReason {
         match self {
             Self::AmbiguousConsoleScript => "ambiguous_console_script",
             Self::ConsoleScriptIndexFailed => "cas_native_console_script_index_failed",
+            Self::MissingArtifacts => "missing_artifacts",
             Self::UnresolvedConsoleScript => "cas_native_unresolved_console_script",
             Self::NativeSiteSetupFailed => "cas_native_site_setup_failed",
         }
@@ -3377,6 +3379,7 @@ fn cas_native_fallback_reason(outcome: &ExecutionOutcome) -> Option<CasNativeFal
         "cas_native_console_script_index_failed" => {
             Some(CasNativeFallbackReason::ConsoleScriptIndexFailed)
         }
+        "missing_artifacts" => Some(CasNativeFallbackReason::MissingArtifacts),
         "cas_native_unresolved_console_script" => Some(CasNativeFallbackReason::UnresolvedConsoleScript),
         "cas_native_site_setup_failed" => Some(CasNativeFallbackReason::NativeSiteSetupFailed),
         _ => None,

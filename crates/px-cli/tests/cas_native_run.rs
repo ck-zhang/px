@@ -728,6 +728,88 @@ fn cas_native_fallback_is_silent_without_verbose() {
 }
 
 #[test]
+fn sync_repairs_stale_cached_paths_and_run_succeeds() {
+    let _guard = test_env_guard();
+    reset_test_store_env();
+    ensure_test_store_env();
+    let Some(python) = find_python() else {
+        eprintln!("skipping cached path repair test (python binary not found)");
+        return;
+    };
+    let temp = tempfile::Builder::new()
+        .prefix("px-cached-path-repair")
+        .tempdir()
+        .expect("tempdir");
+    let project = temp.path();
+
+    let cache_root = PathBuf::from(env::var("PX_CACHE_PATH").expect("PX_CACHE_PATH"));
+    let cached_wheel = cache_root
+        .join("wheels")
+        .join("hello_console")
+        .join("0.1.0")
+        .join("hello_console-0.1.0-py3-none-any.whl");
+    let (sha256, size) = build_wheel(
+        &python,
+        &cached_wheel,
+        "hello_console",
+        "0.1.0",
+        vec![serde_json::json!({
+            "kind": "text",
+            "path": "hello_console.py",
+            "contents": "def main():\n    print('ok')\n",
+        })],
+        vec![],
+    );
+
+    write_pyproject(
+        project,
+        "cached_path_repair",
+        ">=3.11",
+        &["hello_console==0.1.0".to_string()],
+    );
+    write_lock(
+        project,
+        "cached_path_repair",
+        ">=3.11",
+        &[LockEntry {
+            name: "hello_console".to_string(),
+            version: "0.1.0".to_string(),
+            filename: cached_wheel
+                .file_name()
+                .expect("wheel filename")
+                .to_string_lossy()
+                .to_string(),
+            cached_path: "artifacts/stale-hello_console-0.1.0.whl".to_string(),
+            sha256,
+            size,
+        }],
+    );
+
+    assert_envs_empty("before sync");
+    cargo_bin_cmd!("px")
+        .current_dir(project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["sync"])
+        .assert()
+        .success();
+    assert_envs_non_empty("after sync");
+
+    let lock_text = fs::read_to_string(project.join("px.lock")).expect("read px.lock");
+    assert!(
+        lock_text.contains(&cached_wheel.display().to_string()),
+        "px sync should repair cached_path to point at {}",
+        cached_wheel.display()
+    );
+
+    cargo_bin_cmd!("px")
+        .current_dir(project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["--json", "run", "python", "-c", "import hello_console; hello_console.main()"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn sandbox_bypasses_cas_native_default() {
     let _guard = test_env_guard();
     reset_test_store_env();
