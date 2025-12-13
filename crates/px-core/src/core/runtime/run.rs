@@ -119,6 +119,7 @@ pub(crate) struct SandboxCommandRunner {
     host_env_root: PathBuf,
     container_project_root: PathBuf,
     container_env_root: PathBuf,
+    container_pyc_cache_prefix: Option<PathBuf>,
     pythonpath: String,
     allowed_paths_env: String,
 }
@@ -212,7 +213,7 @@ impl SandboxCommandRunner {
         for (key, value) in envs {
             match key.as_str() {
                 "PX_ALLOWED_PATHS" | "PX_PROJECT_ROOT" | "PX_PYTHON" | "VIRTUAL_ENV"
-                | "PYTHONHOME" => continue,
+                | "PYTHONHOME" | "PYTHONPYCACHEPREFIX" => continue,
                 "PATH" => {
                     base_path = Some(value.clone());
                 }
@@ -288,6 +289,12 @@ impl SandboxCommandRunner {
             .map_err(|_| anyhow::anyhow!("non-utf8 allowed path entry"))?;
         env.push(("PX_ALLOWED_PATHS".into(), allowed_paths_env));
         env.push(("PYTHONPATH".into(), pythonpath_value));
+        if let Some(prefix) = self.container_pyc_cache_prefix.as_ref() {
+            env.push((
+                "PYTHONPYCACHEPREFIX".into(),
+                prefix.display().to_string(),
+            ));
+        }
         if let Some(ld_paths) = ld_library_path {
             env.push(("LD_LIBRARY_PATH".into(), ld_paths));
         }
@@ -666,15 +673,48 @@ pub(crate) fn sandbox_runner_for_context(
                 json!({ "error": "non-utf8 path entry" }),
             )
         })?;
+    let profile_oid = sandbox.artifacts.definition.profile_oid.clone();
+    let cache_root = crate::store::resolve_cache_store_path().map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to resolve px cache directory",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    let host_pyc_cache_prefix = match crate::store::ensure_pyc_cache_prefix(&cache_root.path, &profile_oid)
+    {
+        Ok(prefix) => prefix,
+        Err(err) => {
+            let prefix = crate::store::pyc_cache_prefix(&cache_root.path, &profile_oid);
+            return Err(ExecutionOutcome::user_error(
+                "python bytecode cache directory is not writable",
+                json!({
+                    "reason": "pyc_cache_unwritable",
+                    "cache_dir": prefix.display().to_string(),
+                    "error": err.to_string(),
+                    "hint": "ensure the directory is writable or set PX_CACHE_PATH to a writable location",
+                }),
+            ));
+        }
+    };
+    let container_pyc_cache_prefix = PathBuf::from("/px/cache/pyc").join(&profile_oid);
+    let mut mounts = sandbox_mounts(py_ctx, workdir, &sandbox.artifacts.env_root);
+    mounts.push(Mount {
+        host: canonical_path(&host_pyc_cache_prefix),
+        guest: container_pyc_cache_prefix.clone(),
+        read_only: false,
+    });
+    let mut seen = HashSet::new();
+    mounts.retain(|m| seen.insert((m.host.clone(), m.guest.clone())));
     Ok(SandboxCommandRunner {
         backend,
         layout,
         sbx_id: sandbox.artifacts.definition.sbx_id(),
-        mounts: sandbox_mounts(py_ctx, workdir, &sandbox.artifacts.env_root),
+        mounts,
         host_project_root: py_ctx.project_root.clone(),
         host_env_root: sandbox.artifacts.env_root.clone(),
         container_project_root: container_project,
         container_env_root: container_env,
+        container_pyc_cache_prefix: Some(container_pyc_cache_prefix),
         pythonpath,
         allowed_paths_env: allowed_env,
     })
@@ -1478,6 +1518,26 @@ fn commit_project_context(
     let runtime_path = cas_profile.runtime_path.display().to_string();
     let python = select_python_from_site(&paths.site_bin, &runtime_path, &runtime.version);
     let deps = DependencyContext::from_sources(&snapshot.requirements, Some(&lock_path));
+    let pyc_cache_prefix = if env::var_os("PYTHONPYCACHEPREFIX").is_some() {
+        None
+    } else {
+        match crate::store::ensure_pyc_cache_prefix(&ctx.cache().path, &cas_profile.profile_oid) {
+            Ok(prefix) => Some(prefix),
+            Err(err) => {
+                let prefix =
+                    crate::store::pyc_cache_prefix(&ctx.cache().path, &cas_profile.profile_oid);
+                return Err(ExecutionOutcome::user_error(
+                    "python bytecode cache directory is not writable",
+                    json!({
+                        "reason": "pyc_cache_unwritable",
+                        "cache_dir": prefix.display().to_string(),
+                        "error": err.to_string(),
+                        "hint": "ensure the directory is writable or set PX_CACHE_PATH to a writable location",
+                    }),
+                ));
+            }
+        }
+    };
     Ok(CommitRunContext {
         py_ctx: PythonContext {
             project_root: project_root_at_ref,
@@ -1487,6 +1547,7 @@ fn commit_project_context(
             allowed_paths: paths.allowed_paths,
             site_bin: paths.site_bin,
             pep582_bin: paths.pep582_bin,
+            pyc_cache_prefix,
             px_options: snapshot.px_options.clone(),
         },
         manifest_path,
@@ -1849,6 +1910,26 @@ fn commit_workspace_context(
                 .to_string()
         });
     let deps = DependencyContext::from_sources(&workspace_snapshot.dependencies, Some(&lock_path));
+    let pyc_cache_prefix = if env::var_os("PYTHONPYCACHEPREFIX").is_some() {
+        None
+    } else {
+        match crate::store::ensure_pyc_cache_prefix(&ctx.cache().path, &cas_profile.profile_oid) {
+            Ok(prefix) => Some(prefix),
+            Err(err) => {
+                let prefix =
+                    crate::store::pyc_cache_prefix(&ctx.cache().path, &cas_profile.profile_oid);
+                return Err(ExecutionOutcome::user_error(
+                    "python bytecode cache directory is not writable",
+                    json!({
+                        "reason": "pyc_cache_unwritable",
+                        "cache_dir": prefix.display().to_string(),
+                        "error": err.to_string(),
+                        "hint": "ensure the directory is writable or set PX_CACHE_PATH to a writable location",
+                    }),
+                ));
+            }
+        }
+    };
     Ok(CommitRunContext {
         py_ctx: PythonContext {
             project_root: member_root_at_ref.clone(),
@@ -1858,6 +1939,7 @@ fn commit_workspace_context(
             allowed_paths: combined,
             site_bin: paths.site_bin,
             pep582_bin: paths.pep582_bin,
+            pyc_cache_prefix,
             px_options,
         },
         manifest_path: member_root_at_ref.join("pyproject.toml"),
@@ -3882,6 +3964,7 @@ mod tests {
             allowed_paths: vec![temp.path().to_path_buf()],
             site_bin: None,
             pep582_bin: Vec::new(),
+            pyc_cache_prefix: None,
             px_options: PxOptions::default(),
         };
 
@@ -3901,6 +3984,7 @@ mod tests {
             allowed_paths: vec![temp.path().to_path_buf()],
             site_bin: None,
             pep582_bin: Vec::new(),
+            pyc_cache_prefix: None,
             px_options: PxOptions::default(),
         };
 
@@ -3925,6 +4009,7 @@ mod tests {
             allowed_paths: vec![temp.path().to_path_buf()],
             site_bin: None,
             pep582_bin: Vec::new(),
+            pyc_cache_prefix: None,
             px_options: PxOptions::default(),
         };
 
@@ -4054,6 +4139,7 @@ oid sha256:deadbeef\nsize 4\n",
             allowed_paths: vec![temp.path().to_path_buf()],
             site_bin: None,
             pep582_bin: Vec::new(),
+            pyc_cache_prefix: None,
             px_options: PxOptions::default(),
         };
 
@@ -4109,6 +4195,7 @@ oid sha256:deadbeef\nsize 4\n",
             allowed_paths: vec![temp.path().to_path_buf()],
             site_bin: None,
             pep582_bin: Vec::new(),
+            pyc_cache_prefix: None,
             px_options: PxOptions::default(),
         };
 
@@ -4150,6 +4237,7 @@ oid sha256:deadbeef\nsize 4\n",
             allowed_paths: vec![temp.path().to_path_buf()],
             site_bin: None,
             pep582_bin: Vec::new(),
+            pyc_cache_prefix: None,
             px_options: PxOptions {
                 manage_command: Some("self".into()),
                 plugin_imports: vec!["json".into()],
@@ -4184,6 +4272,7 @@ oid sha256:deadbeef\nsize 4\n",
             allowed_paths: vec![temp.path().to_path_buf()],
             site_bin: None,
             pep582_bin: Vec::new(),
+            pyc_cache_prefix: None,
             px_options: PxOptions {
                 manage_command: None,
                 plugin_imports: vec!["px_missing_plugin_mod".into()],
@@ -4215,6 +4304,7 @@ oid sha256:deadbeef\nsize 4\n",
             allowed_paths: vec![temp.path().to_path_buf()],
             site_bin: None,
             pep582_bin: Vec::new(),
+            pyc_cache_prefix: None,
             px_options: PxOptions::default(),
         };
         let envs = py_ctx.base_env(&json!({}))?;

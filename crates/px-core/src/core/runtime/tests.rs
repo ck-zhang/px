@@ -79,6 +79,7 @@ fn base_env_exports_manage_command_alias() -> Result<()> {
         allowed_paths: vec![temp.path().to_path_buf()],
         site_bin: Some(site_bin.clone()),
         pep582_bin: Vec::new(),
+        pyc_cache_prefix: None,
         px_options: PxOptions {
             manage_command: Some("self".to_string()),
             plugin_imports: Vec::new(),

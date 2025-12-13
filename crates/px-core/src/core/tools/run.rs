@@ -5,8 +5,8 @@ use std::io::{self, Write};
 
 use crate::process::{run_command, run_command_passthrough};
 use crate::{
-    build_pythonpath, ensure_project_environment_synced, outcome_from_output, CommandContext,
-    ExecutionOutcome, InstallUserError,
+    build_pythonpath, ensure_project_environment_synced, load_project_state, outcome_from_output,
+    CommandContext, ExecutionOutcome, InstallUserError,
 };
 use px_domain::ProjectSnapshot;
 
@@ -90,6 +90,32 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
             Err(other) => Err(other),
         };
     }
+    let state = load_project_state(ctx.fs(), &tool_root)?;
+    let profile_oid = state
+        .current_env
+        .as_ref()
+        .and_then(|env| env.profile_oid.clone().or_else(|| Some(env.id.clone())));
+    let pyc_cache_prefix = if env::var_os("PYTHONPYCACHEPREFIX").is_some() {
+        None
+    } else if let Some(oid) = profile_oid.as_deref() {
+        match crate::store::ensure_pyc_cache_prefix(&ctx.cache().path, oid) {
+            Ok(prefix) => Some(prefix),
+            Err(err) => {
+                let prefix = crate::store::pyc_cache_prefix(&ctx.cache().path, oid);
+                return Ok(ExecutionOutcome::user_error(
+                    "python bytecode cache directory is not writable",
+                    json!({
+                        "reason": "pyc_cache_unwritable",
+                        "cache_dir": prefix.display().to_string(),
+                        "error": err.to_string(),
+                        "hint": "ensure the directory is writable or set PX_CACHE_PATH to a writable location",
+                    }),
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let mut script_name = request.console.clone();
     if script_name.is_none() && metadata.console_scripts.contains_key(&metadata.name) {
         script_name = Some(metadata.name.clone());
@@ -149,6 +175,17 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
         ("PX_TOOL_ROOT".into(), tool_root.display().to_string()),
         ("PX_COMMAND_JSON".into(), env_payload.to_string()),
     ];
+    if let Ok(existing) = env::var("PYTHONPYCACHEPREFIX") {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            envs.push(("PYTHONPYCACHEPREFIX".into(), trimmed.to_string()));
+        }
+    } else if let Some(prefix) = pyc_cache_prefix.as_ref() {
+        envs.push((
+            "PYTHONPYCACHEPREFIX".into(),
+            prefix.display().to_string(),
+        ));
+    }
     if let Some(alias) = snapshot.px_options.manage_command.as_ref() {
         let trimmed = alias.trim();
         if !trimmed.is_empty() {

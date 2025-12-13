@@ -1749,6 +1749,31 @@ pub fn prepare_workspace_run_context(
         })
         .unwrap_or_default();
     let python_path = env.python.path.clone();
+    let profile_oid = env
+        .profile_oid
+        .clone()
+        .or_else(|| Some(env.id.clone()));
+    let pyc_cache_prefix = if env::var_os("PYTHONPYCACHEPREFIX").is_some() {
+        None
+    } else if let Some(oid) = profile_oid.as_deref() {
+        match crate::store::ensure_pyc_cache_prefix(&ctx.cache().path, oid) {
+            Ok(prefix) => Some(prefix),
+            Err(err) => {
+                let prefix = crate::store::pyc_cache_prefix(&ctx.cache().path, oid);
+                return Err(ExecutionOutcome::user_error(
+                    "python bytecode cache directory is not writable",
+                    json!({
+                        "reason": "pyc_cache_unwritable",
+                        "cache_dir": prefix.display().to_string(),
+                        "error": err.to_string(),
+                        "hint": "ensure the directory is writable or set PX_CACHE_PATH to a writable location",
+                    }),
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let py_ctx = PythonContext {
         project_root: member_root.clone(),
         project_name,
@@ -1757,6 +1782,7 @@ pub fn prepare_workspace_run_context(
         allowed_paths,
         site_bin: paths.site_bin,
         pep582_bin: paths.pep582_bin,
+        pyc_cache_prefix,
         px_options,
     };
     Ok(Some(WorkspaceRunContext {
@@ -1765,7 +1791,7 @@ pub fn prepare_workspace_run_context(
         sync_report,
         workspace_deps: workspace.dependencies.clone(),
         lock_path: workspace.lock_path.clone(),
-        profile_oid: env.profile_oid.clone(),
+        profile_oid,
         workspace_root: workspace.config.root.clone(),
         workspace_manifest: workspace.config.manifest_path.clone(),
         site_packages: site_dir,

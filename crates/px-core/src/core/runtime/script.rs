@@ -11,8 +11,8 @@ use crate::core::project::evaluate_project_state;
 use crate::core::runtime::facade::{
     attach_autosync_details, auto_sync_environment, build_pythonpath,
     ensure_environment_with_guard, manifest_snapshot_at, prepare_project_runtime,
-    select_python_from_site, EnvironmentIssue, EnvironmentSyncReport, ManifestSnapshot,
-    PythonContext,
+    load_project_state, select_python_from_site, EnvironmentIssue, EnvironmentSyncReport,
+    ManifestSnapshot, PythonContext,
 };
 use crate::core::runtime::run::{
     run_project_script, sandbox_runner_for_context, CommandRunner, HostCommandRunner,
@@ -320,6 +320,37 @@ fn inline_python_context(
         &runtime.record.path,
         &runtime.record.full_version,
     );
+    let state = load_project_state(ctx.fs(), &snapshot.root).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to read project state",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    let profile_oid = state
+        .current_env
+        .as_ref()
+        .and_then(|env| env.profile_oid.clone().or_else(|| Some(env.id.clone())));
+    let pyc_cache_prefix = if env::var_os("PYTHONPYCACHEPREFIX").is_some() {
+        None
+    } else if let Some(oid) = profile_oid.as_deref() {
+        match crate::store::ensure_pyc_cache_prefix(&ctx.cache().path, oid) {
+            Ok(prefix) => Some(prefix),
+            Err(err) => {
+                let prefix = crate::store::pyc_cache_prefix(&ctx.cache().path, oid);
+                return Err(ExecutionOutcome::user_error(
+                    "python bytecode cache directory is not writable",
+                    json!({
+                        "reason": "pyc_cache_unwritable",
+                        "cache_dir": prefix.display().to_string(),
+                        "error": err.to_string(),
+                        "hint": "ensure the directory is writable or set PX_CACHE_PATH to a writable location",
+                    }),
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let py_ctx = PythonContext {
         project_root: script.working_dir.clone(),
         project_name: snapshot.name.clone(),
@@ -328,6 +359,7 @@ fn inline_python_context(
         allowed_paths,
         site_bin: paths.site_bin,
         pep582_bin: paths.pep582_bin,
+        pyc_cache_prefix,
         px_options: snapshot.px_options.clone(),
     };
     Ok((py_ctx, sync_report))

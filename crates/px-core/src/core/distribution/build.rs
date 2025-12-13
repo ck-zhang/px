@@ -111,6 +111,7 @@ fn dry_run_context(snapshot: &ManifestSnapshot) -> PythonContext {
         allowed_paths: vec![snapshot.root.clone()],
         site_bin: None,
         pep582_bin: Vec::new(),
+        pyc_cache_prefix: None,
         px_options: snapshot.px_options.clone(),
     }
 }

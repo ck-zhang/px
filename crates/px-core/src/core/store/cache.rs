@@ -1,4 +1,5 @@
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -70,6 +71,23 @@ pub fn resolve_cache_store_path() -> Result<CacheLocation> {
         path: base.join("cache"),
         source,
     })
+}
+
+#[must_use]
+pub fn pyc_cache_prefix(cache_root: &Path, profile_oid: &str) -> PathBuf {
+    cache_root.join("pyc").join(profile_oid)
+}
+
+/// Ensure the per-profile Python bytecode cache prefix exists on disk.
+///
+/// # Errors
+///
+/// Returns an error if the directory cannot be created.
+pub fn ensure_pyc_cache_prefix(cache_root: &Path, profile_oid: &str) -> Result<PathBuf> {
+    let prefix = pyc_cache_prefix(cache_root, profile_oid);
+    fs::create_dir_all(&prefix)
+        .with_context(|| format!("failed to create pyc cache directory {}", prefix.display()))?;
+    Ok(prefix)
 }
 
 /// Compute aggregate statistics for every file under the cache path.

@@ -3494,6 +3494,7 @@ pub(crate) struct PythonContext {
     pub(crate) allowed_paths: Vec<PathBuf>,
     pub(crate) site_bin: Option<PathBuf>,
     pub(crate) pep582_bin: Vec<PathBuf>,
+    pub(crate) pyc_cache_prefix: Option<PathBuf>,
     pub(crate) px_options: PxOptions,
 }
 
@@ -3632,6 +3633,33 @@ impl PythonContext {
         let snapshot = manifest_snapshot_at(&project_root)?;
         let runtime = prepare_project_runtime(&snapshot)?;
         let sync_report = ensure_environment_with_guard(ctx, &snapshot, guard)?;
+        let state = load_project_state(ctx.fs(), &project_root)?;
+        let profile_oid = state
+            .current_env
+            .as_ref()
+            .and_then(|env| env.profile_oid.clone().or_else(|| Some(env.id.clone())));
+        let pyc_cache_prefix = if env::var_os("PYTHONPYCACHEPREFIX").is_some() {
+            None
+        } else if let Some(oid) = profile_oid.as_deref() {
+            match crate::store::ensure_pyc_cache_prefix(&ctx.cache().path, oid) {
+                Ok(prefix) => Some(prefix),
+                Err(err) => {
+                    let prefix = crate::store::pyc_cache_prefix(&ctx.cache().path, oid);
+                    return Err(InstallUserError::new(
+                        "python bytecode cache directory is not writable",
+                        json!({
+                            "reason": "pyc_cache_unwritable",
+                            "cache_dir": prefix.display().to_string(),
+                            "error": err.to_string(),
+                            "hint": "ensure the directory is writable or set PX_CACHE_PATH to a writable location",
+                        }),
+                    )
+                    .into());
+                }
+            }
+        } else {
+            None
+        };
         let paths = build_pythonpath(ctx.fs(), &project_root, None)?;
         let python = select_python_from_site(
             &paths.site_bin,
@@ -3647,6 +3675,7 @@ impl PythonContext {
                 allowed_paths: paths.allowed_paths,
                 site_bin: paths.site_bin,
                 pep582_bin: paths.pep582_bin,
+                pyc_cache_prefix,
                 px_options: snapshot.px_options.clone(),
             },
             sync_report,
@@ -3677,9 +3706,22 @@ impl PythonContext {
         let mut envs = vec![
             ("PYTHONPATH".into(), pythonpath),
             ("PYTHONUNBUFFERED".into(), "1".into()),
-            ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
             ("PYTHONSAFEPATH".into(), "1".into()),
         ];
+        if env::var_os("PYTHONPYCACHEPREFIX").is_none() {
+            if let Some(prefix) = self.pyc_cache_prefix.as_ref() {
+                fs::create_dir_all(prefix).with_context(|| {
+                    format!(
+                        "failed to create python bytecode cache directory {}",
+                        prefix.display()
+                    )
+                })?;
+                envs.push((
+                    "PYTHONPYCACHEPREFIX".into(),
+                    prefix.display().to_string(),
+                ));
+            }
+        }
         envs.push(("PX_ALLOWED_PATHS".into(), allowed));
         envs.push((
             "PX_PROJECT_ROOT".into(),
@@ -5290,8 +5332,10 @@ mod tests {
     static PIP_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
-    fn base_env_disables_pyc_writes() -> Result<()> {
+    fn base_env_sets_pyc_cache_prefix() -> Result<()> {
+        env::remove_var("PYTHONPYCACHEPREFIX");
         let temp = tempdir()?;
+        let prefix = temp.path().join("pyc-prefix");
         let ctx = PythonContext {
             project_root: temp.path().to_path_buf(),
             project_name: "demo".to_string(),
@@ -5300,14 +5344,20 @@ mod tests {
             allowed_paths: vec![temp.path().to_path_buf()],
             site_bin: None,
             pep582_bin: Vec::new(),
+            pyc_cache_prefix: Some(prefix.clone()),
             px_options: PxOptions::default(),
         };
         let envs = ctx.base_env(&json!({}))?;
-        let flag = envs
+        assert!(
+            envs.iter().all(|(key, _)| key != "PYTHONDONTWRITEBYTECODE"),
+            "base env should not disable bytecode writes"
+        );
+        let value = envs
             .iter()
-            .find(|(key, _)| key == "PYTHONDONTWRITEBYTECODE")
-            .map(|(_, value)| value.as_str());
-        assert_eq!(flag, Some("1"));
+            .find(|(key, _)| key == "PYTHONPYCACHEPREFIX")
+            .map(|(_, value)| value.clone());
+        assert_eq!(value, Some(prefix.display().to_string()));
+        assert!(prefix.exists(), "expected cache prefix {} to exist", prefix.display());
         Ok(())
     }
 

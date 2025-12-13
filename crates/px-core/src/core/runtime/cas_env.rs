@@ -939,7 +939,29 @@ pub(crate) fn write_python_shim(
     script.push_str("fi\n");
     script.push_str(&format!("export PX_PYTHON=\"{}\"\n", runtime.display()));
     script.push_str("export PYTHONUNBUFFERED=1\n");
-    script.push_str("export PYTHONDONTWRITEBYTECODE=1\n");
+    let profile_key = bin_dir
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+    script.push_str("if [ -z \"${PYTHONPYCACHEPREFIX:-}\" ]; then\n");
+    script.push_str("  if [ -n \"${PX_CACHE_PATH:-}\" ]; then\n");
+    script.push_str("    cache_root=\"$PX_CACHE_PATH\"\n");
+    script.push_str("  elif [ -n \"${HOME:-}\" ]; then\n");
+    script.push_str("    cache_root=\"$HOME/.px/cache\"\n");
+    script.push_str("  else\n");
+    script.push_str("    cache_root=\"/tmp/px/cache\"\n");
+    script.push_str("  fi\n");
+    script.push_str(&format!(
+        "  export PYTHONPYCACHEPREFIX=\"$cache_root/pyc/{profile_key}\"\n"
+    ));
+    script.push_str("fi\n");
+    script.push_str("if [ -n \"${PYTHONPYCACHEPREFIX:-}\" ]; then\n");
+    script.push_str("  mkdir -p \"$PYTHONPYCACHEPREFIX\" 2>/dev/null || {\n");
+    script.push_str("    echo \"px: python bytecode cache directory is not writable: $PYTHONPYCACHEPREFIX\" >&2\n");
+    script.push_str("    exit 1\n");
+    script.push_str("  }\n");
+    script.push_str("fi\n");
     // Profile env_vars override the parent environment for the launched runtime.
     for (key, value) in env_vars {
         let rendered = env_var_value(value);
@@ -1531,6 +1553,7 @@ mod tests {
         write_python_shim(&env_bin, &runtime, &site, &env_vars)?;
         let shim = env_bin.join("python");
         let output = Command::new(&shim)
+            .env("PX_CACHE_PATH", temp.path())
             .env("FOO_FROM_PROFILE", "ignored")
             .output()?;
         assert!(
@@ -1572,7 +1595,10 @@ mod tests {
         let runtime_site = runtime_root.join("lib/python3.11/site-packages");
         let expected = format!("{existing}:{}:{}", site.display(), runtime_site.display());
 
-        let output = Command::new(&shim).env("PYTHONPATH", existing).output()?;
+        let output = Command::new(&shim)
+            .env("PX_CACHE_PATH", temp.path())
+            .env("PYTHONPATH", existing)
+            .output()?;
         assert!(
             output.status.success(),
             "shim should run successfully: {:?}",

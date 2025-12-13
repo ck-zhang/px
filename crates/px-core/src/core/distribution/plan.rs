@@ -229,6 +229,7 @@ mod tests {
             allowed_paths: Vec::new(),
             site_bin: None,
             pep582_bin: Vec::new(),
+            pyc_cache_prefix: None,
             px_options: px_domain::PxOptions::default(),
         };
 

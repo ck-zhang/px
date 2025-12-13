@@ -22,6 +22,13 @@ linked from project/workspace-local pointers (e.g. `<root>/.px/envs/current`).
 
 These projections are **immutable** from the user’s point of view: they are content-addressed materializations of a profile and runtime. User-initiated `pip install` cannot mutate them; dependency changes must flow through px (`px add/remove/update/sync`) so new artifacts are built into CAS and re-materialized. Envs are never “activated” directly—the supported entry points are `px run`, `px test`, and `px fmt`.
 
+Python still needs a writable place for runtime caches (notably `.pyc` bytecode). Because `pkg-build` trees and runtime materializations are read-only, px **redirects bytecode writes** using `PYTHONPYCACHEPREFIX`:
+
+* Host runs: `$PX_CACHE_PATH/pyc/<profile_oid>/…` (default `~/.px/cache/pyc/<profile_oid>/…`).
+* Sandbox runs: the same per-profile directory is mounted into the container and `PYTHONPYCACHEPREFIX` points at the container mount.
+
+This keeps CAS objects immutable while allowing Python’s import caches to work normally.
+
 The CAS must be:
 
 * **Content‑addressed** – object identity is a digest of content + type.

@@ -24,6 +24,7 @@ fn prefers_console_script_from_site_bin() -> anyhow::Result<()> {
         allowed_paths: vec![],
         site_bin: Some(site_bin.clone()),
         pep582_bin: Vec::new(),
+        pyc_cache_prefix: None,
         px_options: PxOptions::default(),
     };
 
@@ -63,6 +64,7 @@ demo = "demo.cli:main"
         allowed_paths: vec![],
         site_bin: None,
         pep582_bin: Vec::new(),
+        pyc_cache_prefix: None,
         px_options: PxOptions::default(),
     };
 
@@ -96,6 +98,7 @@ scripts = { demo = "demo.cli:main" }
         allowed_paths: vec![],
         site_bin: None,
         pep582_bin: Vec::new(),
+        pyc_cache_prefix: None,
         px_options: PxOptions::default(),
     };
 
@@ -123,6 +126,7 @@ fn resolves_existing_project_script_under_root() -> anyhow::Result<()> {
         allowed_paths: vec![],
         site_bin: None,
         pep582_bin: Vec::new(),
+        pyc_cache_prefix: None,
         px_options: PxOptions::default(),
     };
 
@@ -156,6 +160,7 @@ fn does_not_guess_missing_python_script_targets() -> anyhow::Result<()> {
         allowed_paths: vec![],
         site_bin: None,
         pep582_bin: Vec::new(),
+        pyc_cache_prefix: None,
         px_options: PxOptions::default(),
     };
 
@@ -188,6 +193,7 @@ fn python_alias_runs_as_plain_executable() -> anyhow::Result<()> {
         allowed_paths: vec![],
         site_bin: None,
         pep582_bin: Vec::new(),
+        pyc_cache_prefix: None,
         px_options: PxOptions::default(),
     };
 
@@ -220,6 +226,7 @@ fn resolves_script_relative_to_working_dir_within_project() -> anyhow::Result<()
         allowed_paths: vec![],
         site_bin: None,
         pep582_bin: Vec::new(),
+        pyc_cache_prefix: None,
         px_options: PxOptions::default(),
     };
 
