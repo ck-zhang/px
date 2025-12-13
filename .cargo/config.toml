@@ -2,5 +2,8 @@
 target-dir = "target"
 rustflags = ["-C", "force-frame-pointers=yes"]
 
+[resolver]
+incompatible-rust-versions = "fallback"
+
 [env]
 RUST_LOG = { value = "info", force = false }
