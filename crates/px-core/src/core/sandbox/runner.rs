@@ -15,7 +15,7 @@ use crate::core::runtime::process::{
 };
 use crate::core::sandbox::pack::{
     build_oci_image, export_output, load_layer_from_blobs, write_env_layer_tar,
-    write_system_deps_layer,
+    write_base_os_layer, write_system_deps_layer,
 };
 use crate::{InstallUserError, PX_VERSION};
 
@@ -23,6 +23,7 @@ use crate::{InstallUserError, PX_VERSION};
 pub(crate) struct SandboxImageLayout {
     pub(crate) archive: PathBuf,
     pub(crate) tag: String,
+    pub(crate) image_digest: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,11 +74,13 @@ pub(crate) fn ensure_image_layout(
     let needs_system = matches!(system_deps_mode(), SystemDepsMode::Strict)
         && !artifacts.definition.system_deps.apt_packages.is_empty()
         && !matches!(backend.kind, BackendKind::Custom);
+    let needs_base_layer = !matches!(backend.kind, BackendKind::Custom);
     let sbx_id = artifacts.definition.sbx_id();
     let oci_dir = store.oci_dir(&sbx_id);
     let index = oci_dir.join("index.json");
     let blobs = oci_dir.join("blobs").join("sha256");
     let mut rebuild = !index.exists();
+    let mut wrote_oci = false;
     if !rebuild {
         let digest = artifacts
             .manifest
@@ -85,6 +88,12 @@ pub(crate) fn ensure_image_layout(
             .trim_start_matches("sha256:")
             .to_string();
         let manifest_path = blobs.join(&digest);
+        let base_ok = artifacts
+            .manifest
+            .base_layer_digest
+            .as_ref()
+            .map(|d| blobs.join(d).exists())
+            .unwrap_or(!needs_base_layer);
         let env_ok = artifacts
             .manifest
             .env_layer_digest
@@ -95,7 +104,7 @@ pub(crate) fn ensure_image_layout(
             Some(d) => blobs.join(d).exists(),
             None => !needs_system,
         };
-        rebuild = !manifest_path.exists() || !env_ok || !sys_ok;
+        rebuild = !manifest_path.exists() || !base_ok || !env_ok || !sys_ok;
     }
     if rebuild {
         if let Some(parent) = oci_dir.parent() {
@@ -115,6 +124,13 @@ pub(crate) fn ensure_image_layout(
             )
         })?;
         let mut layers = Vec::new();
+        if needs_base_layer {
+            let base_layer = write_base_os_layer(&backend, &blobs)?;
+            artifacts.manifest.base_layer_digest = Some(base_layer.digest.clone());
+            layers.push(base_layer);
+        } else {
+            artifacts.manifest.base_layer_digest = None;
+        }
         if let Some(system_layer) =
             write_system_deps_layer(&backend, &artifacts.definition.system_deps, &blobs)?
         {
@@ -141,6 +157,7 @@ pub(crate) fn ensure_image_layout(
         artifacts.manifest.created_at = sandbox_timestamp_string();
         artifacts.manifest.px_version = PX_VERSION.to_string();
         write_manifest(store, &artifacts.manifest)?;
+        wrote_oci = true;
     }
     let tag = match discover_tag(&oci_dir)? {
         Some(tag) => tag,
@@ -156,6 +173,20 @@ pub(crate) fn ensure_image_layout(
                 )
             })?;
             let mut layers = Vec::new();
+            if needs_base_layer {
+                let base_digest = artifacts.manifest.base_layer_digest.clone().ok_or_else(|| {
+                    sandbox_error(
+                        "PX903",
+                        "sandbox image metadata is incomplete",
+                        json!({
+                            "path": oci_dir.display().to_string(),
+                            "reason": "missing_base_layer",
+                        }),
+                    )
+                })?;
+                let base_layer = load_layer_from_blobs(&blobs, &base_digest)?;
+                layers.push(base_layer);
+            }
             if let Some(sys_digest) = artifacts.manifest.system_layer_digest.clone() {
                 let sys_layer = load_layer_from_blobs(&blobs, &sys_digest)?;
                 layers.push(sys_layer);
@@ -172,11 +203,12 @@ pub(crate) fn ensure_image_layout(
                 Path::new("/app"),
                 Some(&pythonpath),
             )?;
+            wrote_oci = true;
             default_tag.to_string()
         }
     };
     let archive = archive_path(&oci_dir);
-    if !archive.exists() {
+    if wrote_oci || !archive.exists() {
         if let Some(parent) = archive.parent() {
             fs::create_dir_all(parent).map_err(|err| {
                 sandbox_error(
@@ -188,7 +220,11 @@ pub(crate) fn ensure_image_layout(
         }
         export_output(&oci_dir, &archive, Path::new("/"))?;
     }
-    Ok(SandboxImageLayout { archive, tag })
+    Ok(SandboxImageLayout {
+        archive,
+        tag,
+        image_digest: artifacts.manifest.image_digest.clone(),
+    })
 }
 
 pub(crate) fn detect_container_backend() -> Result<ContainerBackend, InstallUserError> {
@@ -240,7 +276,16 @@ pub(crate) fn ensure_image_loaded(
     backend: &ContainerBackend,
     layout: &SandboxImageLayout,
 ) -> Result<(), InstallUserError> {
-    if image_exists(backend, &layout.tag) {
+    let marker = layout
+        .archive
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("loaded-{}.txt", backend_name(backend)));
+    let already_loaded = fs::read_to_string(&marker)
+        .ok()
+        .map(|raw| raw.trim().to_string())
+        .is_some_and(|value| value == layout.image_digest);
+    if already_loaded && image_exists(backend, &layout.tag) {
         return Ok(());
     }
     let args = vec![
@@ -274,6 +319,7 @@ pub(crate) fn ensure_image_loaded(
             }),
         ));
     }
+    let _ = fs::write(&marker, format!("{}\n", layout.image_digest));
     Ok(())
 }
 

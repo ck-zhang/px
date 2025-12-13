@@ -277,6 +277,7 @@ fn ensure_bundle_image(
     Ok(SandboxImageLayout {
         archive,
         tag: tag.to_string(),
+        image_digest: format!("sha256:{manifest_digest}"),
     })
 }
 
