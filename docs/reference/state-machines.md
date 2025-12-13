@@ -21,7 +21,7 @@ Storage/materialization details for envs and artifacts live in the [Content Addr
   * platform tags
   * manifest fingerprint
 
-* **E (Env)** – the current project environment under `.px/envs/...`:
+* **E (Env)** – the current project environment materialized under `~/.px/envs/<profile_oid>` with a local pointer at `.px/envs/current`:
 
   * pointer to `L` it was built from (lock hash / ID)
   * runtime used
@@ -87,7 +87,7 @@ project_consistent := manifest_clean && env_clean
 
   * `manifest_clean == true`
   * (`env_exists == false`) or (`env_clean == false`)
-  * Typical cause: first install on a machine or user wiped `.px/envs`.
+  * Typical cause: first install on a machine or user wiped `~/.px/envs` (or removed the project’s `.px/envs/current` pointer).
 
 * **Consistent**
 

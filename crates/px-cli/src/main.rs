@@ -1,6 +1,6 @@
 #![deny(clippy::all, warnings)]
 
-use std::{env, ffi::OsString, path::PathBuf, sync::Arc};
+use std::{env, ffi::OsStr, ffi::OsString, path::PathBuf, sync::Arc};
 
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
@@ -193,13 +193,33 @@ fn apply_env_overrides(cli: &PxCli) {
         env::set_var("PX_FORCE_SDIST", "0");
     }
 
-    // Keep the CAS store aligned with an explicit cache override. This avoids
-    // surprises (and format mismatches) when a caller sets PX_CACHE_PATH but
-    // forgets to pin PX_STORE_PATH as well.
-    if env::var_os("PX_STORE_PATH").is_none() {
-        if let Some(cache) = env::var_os("PX_CACHE_PATH") {
-            let store = PathBuf::from(cache).join("store");
-            env::set_var("PX_STORE_PATH", store);
+    // Keep the rest of px's global layout aligned with an explicit cache
+    // override, so callers can relocate all state without having to pin every
+    // root individually.
+    if let Some(cache) = env::var_os("PX_CACHE_PATH") {
+        let cache_path = PathBuf::from(cache);
+        let base = match cache_path.file_name() {
+            Some(name) if name == OsStr::new("cache") => cache_path
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| cache_path.clone()),
+            _ => cache_path.clone(),
+        };
+
+        if env::var_os("PX_STORE_PATH").is_none() {
+            env::set_var("PX_STORE_PATH", base.join("store"));
+        }
+        if env::var_os("PX_ENVS_PATH").is_none() {
+            env::set_var("PX_ENVS_PATH", base.join("envs"));
+        }
+        if env::var_os("PX_TOOLS_DIR").is_none() {
+            env::set_var("PX_TOOLS_DIR", base.join("tools"));
+        }
+        if env::var_os("PX_SANDBOX_STORE").is_none() {
+            env::set_var("PX_SANDBOX_STORE", base.join("sandbox"));
+        }
+        if env::var_os("PX_RUNTIME_REGISTRY").is_none() {
+            env::set_var("PX_RUNTIME_REGISTRY", base.join("runtimes.json"));
         }
     }
 }

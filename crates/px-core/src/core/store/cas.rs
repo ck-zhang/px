@@ -2995,6 +2995,45 @@ mod tests {
     }
 
     #[test]
+    fn default_roots_match_documented_layout() -> Result<()> {
+        for key in [
+            "PX_CACHE_PATH",
+            "PX_STORE_PATH",
+            "PX_ENVS_PATH",
+            "PX_TOOLS_DIR",
+            "PX_TOOL_STORE",
+            "PX_SANDBOX_STORE",
+            "PX_RUNTIME_REGISTRY",
+        ] {
+            if std::env::var_os(key).is_some() {
+                eprintln!("skipping default_roots_match_documented_layout ({key} is set)");
+                return Ok(());
+            }
+        }
+
+        let home = dirs_next::home_dir().context("home directory not found")?;
+        let px_root = home.join(".px");
+
+        assert_eq!(default_root()?, px_root.join("store"));
+        assert_eq!(default_envs_root_path()?, px_root.join("envs"));
+        assert_eq!(default_tools_root_path()?, px_root.join("tools"));
+        assert_eq!(
+            crate::core::sandbox::default_store_root()?,
+            px_root.join("sandbox")
+        );
+        assert_eq!(
+            crate::store::resolve_cache_store_path()?.path,
+            px_root.join("cache")
+        );
+        assert_eq!(
+            crate::core::runtime::cas_env::default_envs_root()?,
+            px_root.join("envs")
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn creates_layout_and_schema() -> Result<()> {
         let (_temp, store) = new_store()?;
         let root = store.root().to_path_buf();

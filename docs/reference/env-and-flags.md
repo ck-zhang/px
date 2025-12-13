@@ -56,10 +56,13 @@ Prefer the flags above for interactive use; env vars remain for CI/automation or
 * `PX_RUNTIME_PYTHON` – explicit interpreter px should use for resolution/env builds (else px finds `python3`/`python`).
 * `PX_RUNTIME_REGISTRY` – override the location of the runtime registry file (default `~/.px/runtimes.json`).
 * `PX_PYTHON_DOWNLOADS_URL` – alternate Python downloads manifest for `px python install` (supports `http(s)://` or `file://`).
-* `PX_CACHE_PATH` – root for the shared artifact cache (default under `$HOME/.cache/px/store`).
-* `PX_TOOLS_DIR` – root for installed tools (metadata/locks/envs; default `~/.px/tools`).
-* `PX_TOOL_STORE` – location for cached tool environments (default `~/.px/tools/store/envs`).
-* `PX_NO_ENSUREPIP=1` – skip the automatic `python -m ensurepip --default-pip --upgrade` when px refreshes a project site. By default px runs ensurepip only when pip is absent in the project’s `.px` site, and it also seeds a baseline `setuptools` so `python setup.py`/`pkg_resources` keep working without declaring it.
+* `PX_CACHE_PATH` – root for the shared download/build cache (wheels, sdist builds, Python downloads manifest, etc; default `~/.px/cache`). If set and the other roots below are unset, px will derive them from the same base directory (e.g. `PX_CACHE_PATH=/tmp/px/cache` implies `PX_STORE_PATH=/tmp/px/store`, `PX_ENVS_PATH=/tmp/px/envs`, etc.).
+* `PX_STORE_PATH` – root for the content-addressable store (CAS) (default `~/.px/store`).
+* `PX_ENVS_PATH` – root for global env materializations (default `~/.px/envs`).
+* `PX_SANDBOX_STORE` – root for sandbox images/bases (default `~/.px/sandbox`).
+* `PX_TOOLS_DIR` – root for installed tools (metadata/locks; default `~/.px/tools`).
+* `PX_TOOL_STORE` – root for cached tool environments (default `~/.px/tools/store`; tool envs live under `<PX_TOOL_STORE>/envs/`).
+* `PX_NO_ENSUREPIP=1` – skip the automatic `python -m ensurepip --default-pip --upgrade` when px refreshes an env. `pip`/`setuptools` are treated as implicit base packages (not recorded in `px.lock`); `px why pip` and `px why setuptools` report them as implicit.
 * `PX_DEBUG_SITE_PATHS=/path/to/file` – write the final `sys.path` computed by px’s `sitecustomize` to the given file (for debugging path issues).
 
 ### Dependency selection and execution behavior

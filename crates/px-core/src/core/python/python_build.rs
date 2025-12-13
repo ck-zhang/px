@@ -237,8 +237,8 @@ fn parse_manifest(bytes: &[u8]) -> Result<Vec<PythonDownload>> {
 }
 
 fn manifest_cache_path() -> Result<PathBuf> {
-    let home = home_dir().ok_or_else(|| anyhow!("home directory not found"))?;
-    let cache_dir = home.join(".px").join("cache");
+    let location = crate::store::resolve_cache_store_path()?;
+    let cache_dir = location.path;
     fs::create_dir_all(&cache_dir)
         .with_context(|| format!("creating cache directory at {}", cache_dir.display()))?;
     Ok(cache_dir.join("python-downloads.json"))

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use anyhow::Result;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::{
     dependency_name, manifest_snapshot, marker_env_for_snapshot, python_context_with_mode,
@@ -91,8 +91,29 @@ pub fn project_why(ctx: &CommandContext, request: &ProjectWhyRequest) -> Result<
             Err(outcome) => return Ok(outcome),
         }
     };
+    let implicit_base = matches!(target.as_str(), "pip" | "setuptools");
     let entry = graph.packages.get(&target);
     if entry.is_none() {
+        if implicit_base {
+            let reason = if target == "pip" {
+                "provided by the selected Python runtime (ensurepip)"
+            } else {
+                "seeded by px as a deterministic base layer"
+            };
+            return Ok(ExecutionOutcome::success(
+                format!("{package} is an implicit base package ({reason})"),
+                json!({
+                    "package": package,
+                    "normalized": target,
+                    "version": Value::Null,
+                    "direct": false,
+                    "chains": Vec::<Vec<String>>::new(),
+                    "implicit": true,
+                    "implicit_reason": reason,
+                    "hint": "Run `px sync` to materialize the environment, then retry to see the installed version.",
+                }),
+            ));
+        }
         let mut details = json!({
             "package": package,
             "hint": "run `px sync` to refresh the environment, then retry",
@@ -111,18 +132,37 @@ pub fn project_why(ctx: &CommandContext, request: &ProjectWhyRequest) -> Result<
     let chains = find_dependency_chains(&graph.reverse, &roots, &target, 5);
     let direct = roots.contains(&target);
     let version = entry.version.clone();
-    let message = if direct {
-        format!("{}=={} is declared in pyproject.toml", entry.name, version)
+    let (message, implicit_reason) = if implicit_base && !direct && chains.is_empty() {
+        let reason = if target == "pip" {
+            "provided by the selected Python runtime (ensurepip)"
+        } else {
+            "seeded by px as a deterministic base layer"
+        };
+        (
+            format!(
+                "{}=={} is an implicit base package ({reason})",
+                entry.name, version
+            ),
+            Some(reason),
+        )
+    } else if direct {
+        (
+            format!("{}=={} is declared in pyproject.toml", entry.name, version),
+            None,
+        )
     } else if chains.is_empty() {
-        format!(
-            "{}=={} is present but no dependency chain was found",
-            entry.name, version
+        (
+            format!(
+                "{}=={} is present but no dependency chain was found",
+                entry.name, version
+            ),
+            None,
         )
     } else {
         let chain = chains
             .first()
             .map_or_else(|| entry.name.clone(), |path| path.join(" -> "));
-        format!("{}=={} is required by {chain}", entry.name, version)
+        (format!("{}=={} is required by {chain}", entry.name, version), None)
     };
     let mut details = json!({
         "package": entry.name,
@@ -131,6 +171,10 @@ pub fn project_why(ctx: &CommandContext, request: &ProjectWhyRequest) -> Result<
         "direct": direct,
         "chains": chains,
     });
+    if let Some(reason) = implicit_reason {
+        details["implicit"] = json!(true);
+        details["implicit_reason"] = json!(reason);
+    }
     if !state_report.env_clean {
         details["hint"] =
             json!("Environment is out of sync with px.lock; run `px sync` to rebuild it.");

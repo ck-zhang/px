@@ -44,7 +44,7 @@ px may create/modify only:
   * `px.lock` – locked dependency graph for this project when it is managed standalone (no governing workspace).
   * `.px/`
 
-    * `.px/envs/` – envs owned by this project or workspace.
+    * `.px/envs/current` – pointer (symlink) to the current global env materialization under `~/.px/envs/<profile_oid>`.
     * `.px/logs/` – logs.
     * `.px/state.json` – metadata (current env ID(s), stored lock_id(s), runtime/platform fingerprints; validated and rewritten atomically).
 
@@ -55,6 +55,18 @@ px may create/modify only:
   * Workspace env metadata under `.px/` at the workspace root (WE). Physical layout is an implementation detail, but workspace envs are distinguishable from per-project envs and are always tied to `px.workspace.lock` and a runtime.
 
 px must not create other top-level files or directories.
+
+## Global px state (per user)
+
+px also maintains a shared, per-user state directory at `~/.px/`:
+
+* `~/.px/store/` – content-addressable store (CAS) for immutable artifacts.
+* `~/.px/envs/` – global env materializations (one per `profile_oid`).
+* `~/.px/tools/` – tool metadata and cached tool envs.
+* `~/.px/sandbox/` – sandbox bases/images.
+* `~/.px/cache/` – download/build cache (wheels, sdist builds, Python downloads manifest, etc.).
+
+Project/workspace roots only contain small pointers/state under their local `.px/` directories; heavy content lives under `~/.px/`.
 
 **Sandbox artifacts (derived)**
 
@@ -75,7 +87,7 @@ px must not create other top-level files or directories.
 
 * After `px add` / `px sync`:
 
-  Same as above, with `pyproject.toml` dependencies and `px.lock` graph populated, and `.px/envs/...` containing a built env.
+  Same as above, with `pyproject.toml` dependencies and `px.lock` graph populated, and `.px/envs/current` pointing at the built env.
 
 * After `px build`:
 
@@ -114,16 +126,15 @@ Both lockfiles are machine-generated only; direct edits are unsupported.
 
 **Project environment**
 
-* px-managed environment under `.px/envs/...` tied to a project lock (`px.lock`) and a runtime/platform.
-* Contains exactly the packages described by that project’s lock.
-* Materializes a venv-like layout (`site/lib/pythonX.Y/site-packages`) with `px.pth`/`sitecustomize.py` and python shims under `site/bin` so tools that expect VIRTUAL_ENV-style markers behave consistently.
+* Global env materialization under `~/.px/envs/<profile_oid>` tied to a project lock (`px.lock`) and a runtime/platform, with a local pointer at `<project_root>/.px/envs/current`.
+* Contains the packages described by that project’s lock, plus a small implicit base layer (`pip` from the runtime + a seeded `setuptools` when needed).
+* Materializes a venv-like layout (`lib/pythonX.Y/site-packages`) with `px.pth`/`sitecustomize.py` and python shims under `bin/` so tools that expect `VIRTUAL_ENV`-style markers behave consistently.
 * Used only when the project is not governed by a workspace. In a workspace, member projects use the workspace env.
 
 **Workspace environment**
 
-* px-managed environment under `.px/envs/...` at the workspace root.
-* Tied to `px.workspace.lock` hash, runtime, and platform.
-* Contains exactly the packages described by WL.
+* Global env materialization under `~/.px/envs/<profile_oid>` tied to the workspace lock (`px.workspace.lock`), runtime, and platform, with a local pointer at `<workspace_root>/.px/envs/current`.
+* Contains the packages described by WL, plus the same implicit base layer (`pip`/`setuptools`).
 * Member projects run against WE; per-project envs are ignored in that context.
 
 **Sandbox layer**

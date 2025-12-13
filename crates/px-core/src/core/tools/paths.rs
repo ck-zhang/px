@@ -28,8 +28,7 @@ pub(crate) fn tools_env_store_root() -> Result<PathBuf> {
     let base = if let Some(dir) = env::var_os(TOOL_STORE_ENV) {
         PathBuf::from(dir)
     } else {
-        let home = home_dir().ok_or_else(|| anyhow!("home directory not found"))?;
-        home.join(".px").join("tools").join("store")
+        tools_root()?.join("store")
     };
     fs::create_dir_all(&base)?;
     let envs = base.join("envs");

@@ -18,9 +18,9 @@ Environments (E/WE) are **thin projections** over the CAS:
   env := profile(profile_id) + runtime(runtime_id)
   ```
 
-linked from `.px/envs/...`.
+linked from project/workspace-local pointers (e.g. `<root>/.px/envs/current`).
 
-These projections are **immutable**: they are content-addressed materializations of a profile and runtime. Tools like `pip install` cannot mutate them; dependency changes must flow through px (`px add/remove/update/sync`) so new artifacts are built into CAS and re-materialized. Envs are never “activated” directly—the supported entry points are `px run`, `px test`, and `px fmt`.
+These projections are **immutable** from the user’s point of view: they are content-addressed materializations of a profile and runtime. User-initiated `pip install` cannot mutate them; dependency changes must flow through px (`px add/remove/update/sync`) so new artifacts are built into CAS and re-materialized. Envs are never “activated” directly—the supported entry points are `px run`, `px test`, and `px fmt`.
 
 The CAS must be:
 
@@ -74,7 +74,7 @@ The CAS introduces a few new nouns:
   * a set of pkg-build objects,
   * optional config (env vars, path ordering, etc.).
 
-* **Env key (env_id)** – exactly the `profile_oid`; identifies a **profile materialization** under `.px/envs`.
+* **Env key (env_id)** – exactly the `profile_oid`; identifies a **profile materialization** under `~/.px/envs/<profile_oid>/` (with local pointers under `<root>/.px/envs/current`).
 
 * **Owner** – a higher-level thing that “uses” objects:
 
@@ -345,6 +345,13 @@ python -> runtime shim    # launcher that uses runtime_oid + profile_oid
   * invokes the runtime from `runtime_oid`,
   * sets `PYTHONPATH` / `sys.path` using the packages declared in the profile in a deterministic order.
   * applies `env_vars` from the profile/env manifest, overriding any parent environment values when launching.
+
+**Implicit base packages (`pip`, `setuptools`)**
+
+* `manifest.json`’s `packages` list describes only locked dependencies.
+* `pip` is treated as a runtime base package (provided by the selected interpreter via `ensurepip`) and is not recorded in the lock/profile.
+* `setuptools` may be seeded by px as a deterministic base layer for legacy workflows and is not recorded in the lock/profile.
+* `px why pip` / `px why setuptools` report them as implicit base packages.
 
 Env materialization is idempotent and manifest-driven:
 

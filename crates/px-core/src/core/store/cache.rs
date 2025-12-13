@@ -67,7 +67,7 @@ pub fn resolve_cache_store_path() -> Result<CacheLocation> {
     let (base, source) = resolve_unix_cache_base()?;
 
     Ok(CacheLocation {
-        path: base.join("px").join("store"),
+        path: base.join("cache"),
         source,
     })
 }
@@ -197,31 +197,37 @@ pub fn prune_cache_entries(walk: &CacheWalk) -> CachePruneResult {
 #[cfg(not(target_os = "windows"))]
 fn resolve_unix_cache_base() -> Result<(PathBuf, &'static str)> {
     if let Some(home) = home_dir() {
-        return Ok((home.join(".cache"), "HOME/.cache"));
+        return Ok((home.join(".px"), "HOME/.px"));
     }
 
-    let fallback = PathBuf::from("/tmp/px-cache");
-    Ok((fallback, "default (/tmp/px-cache)"))
+    let fallback = PathBuf::from("/tmp/px");
+    Ok((fallback, "default (/tmp/px)"))
 }
 
 #[cfg(target_os = "windows")]
 fn resolve_windows_cache_base() -> Result<(PathBuf, &'static str)> {
     if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
         let path = PathBuf::from(local_app_data);
-        return Ok((path, "LOCALAPPDATA"));
+        return Ok((path.join("px"), "LOCALAPPDATA/px"));
     }
 
     if let Some(home) = env::var_os("USERPROFILE") {
-        let path = PathBuf::from(home).join("AppData").join("Local");
-        return Ok((path, "USERPROFILE/AppData/Local"));
+        let path = PathBuf::from(home)
+            .join("AppData")
+            .join("Local")
+            .join("px");
+        return Ok((path, "USERPROFILE/AppData/Local/px"));
     }
 
     if let Some(home) = home_dir() {
-        return Ok((home.join("AppData").join("Local"), "HOME/AppData/Local"));
+        return Ok((
+            home.join("AppData").join("Local").join("px"),
+            "HOME/AppData/Local/px",
+        ));
     }
 
-    let fallback = PathBuf::from("C:\\px-cache");
-    Ok((fallback, "default (C:\\px-cache)"))
+    let fallback = PathBuf::from("C:\\px");
+    Ok((fallback, "default (C:\\px)"))
 }
 
 fn absolutize(path: PathBuf) -> Result<PathBuf> {

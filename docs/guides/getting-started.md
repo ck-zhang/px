@@ -17,7 +17,7 @@ px currently supports Linux and macOS only; Windows is not supported yet. Use WS
 * **Runtime** – a Python interpreter px knows about; chosen deterministically from `[tool.px].python`, `[project].requires-python`, or px default.
 * **Manifest** – dependencies in `pyproject.toml`.
 * **Lockfile** – `px.lock`, generated only by px; don’t edit by hand.
-* **Env** – under `.px/envs/...`, tied to the lock and runtime.
+* **Env** – project-local pointer at `.px/envs/current` to a global env materialization under `~/.px/envs/<profile_oid>` (tied to the lock and runtime).
 
 ## When things drift
 

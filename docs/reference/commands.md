@@ -66,7 +66,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
   * Create/update `pyproject.toml` with minimal `[project]` and `[tool.px]`.
   * Choose a runtime satisfying `requires-python` (prefer px-managed; otherwise process Python if compatible).
   * Create an empty `px.lock` for the chosen runtime.
-  * Create a project env under `.px/envs/...` matching `px.lock`.
+  * Materialize a global env under `~/.px/envs/<profile_oid>` matching `px.lock` and update the local pointer at `.px/envs/current`.
 
 * **Postconditions**: manifest, lock, and env exist; project is self-consistent.
 * **Failure**: no partial lock/env; at worst, logs under `.px/logs/`.
