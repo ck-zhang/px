@@ -24,6 +24,16 @@ fn is_proxy_env(key: &str) -> bool {
 
 use anyhow::{Context, Result};
 
+const DEFAULT_MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+
+fn max_capture_bytes() -> usize {
+    std::env::var("PX_MAX_CAPTURE_BYTES")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_CAPTURE_BYTES)
+}
+
 #[derive(Debug, Clone)]
 pub struct RunOutput {
     pub code: i32,
@@ -68,12 +78,37 @@ pub fn run_command_with_stdin(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let output = command
-        .output()
+    let mut child = command
+        .spawn()
         .with_context(|| format!("failed to start {program}"))?;
-    let code = output.status.code().unwrap_or(-1);
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("stdout missing for {program}"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("stderr missing for {program}"))?;
+    let limit = max_capture_bytes();
+    let stdout_handle = thread::spawn(move || read_to_string_limited(stdout, limit));
+    let stderr_handle = thread::spawn(move || read_to_string_limited(stderr, limit));
+
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to wait for {program}"))?;
+    let code = status.code().unwrap_or(-1);
+    let (mut stdout, stdout_truncated) = stdout_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("stdout thread panicked"))??;
+    let (mut stderr, stderr_truncated) = stderr_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("stderr thread panicked"))??;
+    if stdout_truncated {
+        stdout.push_str("\n[...truncated...]\n");
+    }
+    if stderr_truncated {
+        stderr.push_str("\n[...truncated...]\n");
+    }
     Ok(RunOutput {
         code,
         stdout,
@@ -110,8 +145,9 @@ pub fn run_command_streaming(
         .take()
         .ok_or_else(|| anyhow::anyhow!("stderr missing for {program}"))?;
 
-    let stdout_handle = thread::spawn(move || tee_to_string(&mut stdout, io::stdout()));
-    let stderr_handle = thread::spawn(move || tee_to_string(&mut stderr, io::stderr()));
+    let limit = max_capture_bytes();
+    let stdout_handle = thread::spawn(move || tee_to_string_limited(&mut stdout, io::stdout(), limit));
+    let stderr_handle = thread::spawn(move || tee_to_string_limited(&mut stderr, io::stderr(), limit));
 
     let status = child
         .wait()
@@ -177,8 +213,27 @@ pub fn run_command_passthrough(
     })
 }
 
-fn tee_to_string(reader: &mut dyn Read, mut writer: impl Write) -> Result<String> {
+fn read_to_string_limited(mut reader: impl Read, limit: usize) -> Result<(String, bool)> {
     let mut buffer = Vec::new();
+    let mut truncated = false;
+    let mut chunk = [0u8; 8192];
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        append_limited(&mut buffer, &chunk[..read], limit, &mut truncated);
+    }
+    Ok((String::from_utf8_lossy(&buffer).to_string(), truncated))
+}
+
+fn tee_to_string_limited(
+    reader: &mut dyn Read,
+    mut writer: impl Write,
+    limit: usize,
+) -> Result<String> {
+    let mut buffer = Vec::new();
+    let mut truncated = false;
     let mut chunk = [0u8; 8192];
     loop {
         let read = reader.read(&mut chunk)?;
@@ -186,10 +241,35 @@ fn tee_to_string(reader: &mut dyn Read, mut writer: impl Write) -> Result<String
             break;
         }
         writer.write_all(&chunk[..read])?;
-        buffer.extend_from_slice(&chunk[..read]);
+        append_limited(&mut buffer, &chunk[..read], limit, &mut truncated);
     }
     writer.flush().ok();
-    Ok(String::from_utf8_lossy(&buffer).to_string())
+    let mut text = String::from_utf8_lossy(&buffer).to_string();
+    if truncated {
+        text.push_str("\n[...truncated...]\n");
+    }
+    Ok(text)
+}
+
+fn append_limited(buffer: &mut Vec<u8>, chunk: &[u8], limit: usize, truncated: &mut bool) {
+    if limit == 0 {
+        return;
+    }
+    if buffer.len().saturating_add(chunk.len()) <= limit {
+        buffer.extend_from_slice(chunk);
+        return;
+    }
+    *truncated = true;
+    let old_len = buffer.len();
+    let excess = old_len.saturating_add(chunk.len()).saturating_sub(limit);
+    if excess >= old_len {
+        buffer.clear();
+        let drop_from_chunk = excess.saturating_sub(old_len).min(chunk.len());
+        buffer.extend_from_slice(&chunk[drop_from_chunk..]);
+    } else {
+        buffer.drain(0..excess);
+        buffer.extend_from_slice(chunk);
+    }
 }
 
 #[cfg(test)]
@@ -212,6 +292,30 @@ mod tests {
         assert_eq!(output.code, 7);
         assert_eq!(output.stdout, "out");
         assert_eq!(output.stderr, "err");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_truncates_large_output_unix() -> Result<()> {
+        let bytes = DEFAULT_MAX_CAPTURE_BYTES + 1024;
+        let output = run_command(
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                format!("head -c {bytes} /dev/zero | tr '\\\\0' a"),
+            ],
+            &[],
+            Path::new("."),
+        )?;
+        assert!(
+            output.stdout.contains("[...truncated...]"),
+            "stdout should include truncation marker"
+        );
+        assert!(
+            output.stdout.len() <= DEFAULT_MAX_CAPTURE_BYTES + 64,
+            "stdout should be bounded"
+        );
         Ok(())
     }
 
