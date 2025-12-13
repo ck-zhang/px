@@ -55,7 +55,7 @@ Applies to all commands that show progress (resolver, env build, tool install, e
 * `missing_env` / `env_outdated` (`PX201`): run `px sync` to (re)build the relevant project/workspace env; `--frozen` refuses to repair.
 * `runtime_mismatch`: run `px sync` after activating the desired Python, or pin `[tool.px].python`.
 * `invalid_state`: delete or repair `.px/state.json` and retry; state is validated and rewritten atomically.
-* `pyc_cache_unwritable`: px could not create the Python bytecode cache directory; ensure `~/.px/cache` (or `PX_CACHE_PATH`) is writable and retry.
+* `pyc_cache_unwritable`: px could not create the Python bytecode cache directory; ensure `~/.px/cache` (or `PX_CACHE_PATH`) is writable and retry. If bytecode caches grow too large, it is always safe to delete `~/.px/cache/pyc`.
 
 ## Sandbox errors
 

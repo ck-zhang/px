@@ -27,7 +27,7 @@ Python still needs a writable place for runtime caches (notably `.pyc` bytecode)
 * Host runs: `$PX_CACHE_PATH/pyc/<profile_oid>/…` (default `~/.px/cache/pyc/<profile_oid>/…`).
 * Sandbox runs: the same per-profile directory is mounted into the container and `PYTHONPYCACHEPREFIX` points at the container mount.
 
-This keeps CAS objects immutable while allowing Python’s import caches to work normally.
+This keeps CAS objects immutable while allowing Python’s import caches to work normally. px may also prune older per-profile bytecode caches under `~/.px/cache/pyc` (LRU/age-based) to avoid unbounded cache growth; deleting this directory manually is safe (it will be regenerated).
 
 The CAS must be:
 

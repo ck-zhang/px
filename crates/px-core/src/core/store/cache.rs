@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use dirs_next::home_dir;
@@ -78,6 +79,25 @@ pub fn pyc_cache_prefix(cache_root: &Path, profile_oid: &str) -> PathBuf {
     cache_root.join("pyc").join(profile_oid)
 }
 
+const PYC_CACHE_MARKER: &str = ".px-last-used";
+
+#[derive(Clone, Copy)]
+struct PycCachePolicy {
+    max_profiles: usize,
+    target_profiles: usize,
+    max_age: Duration,
+}
+
+const DEFAULT_PYC_CACHE_POLICY: PycCachePolicy = PycCachePolicy {
+    // Upper bound on the number of per-profile cache directories kept under cache_root/pyc/.
+    // Older directories are removed (LRU) once this threshold is exceeded.
+    max_profiles: 256,
+    // Target count after pruning. This provides some hysteresis so we don't prune on every run.
+    target_profiles: 192,
+    // Opportunistically delete cache directories that haven't been used recently.
+    max_age: Duration::from_secs(30 * 24 * 60 * 60),
+};
+
 /// Ensure the per-profile Python bytecode cache prefix exists on disk.
 ///
 /// # Errors
@@ -87,7 +107,120 @@ pub fn ensure_pyc_cache_prefix(cache_root: &Path, profile_oid: &str) -> Result<P
     let prefix = pyc_cache_prefix(cache_root, profile_oid);
     fs::create_dir_all(&prefix)
         .with_context(|| format!("failed to create pyc cache directory {}", prefix.display()))?;
+    touch_pyc_cache_marker(&prefix)?;
+    let pyc_root = cache_root.join("pyc");
+    let _ = prune_pyc_cache_root(&pyc_root, Some(profile_oid), DEFAULT_PYC_CACHE_POLICY);
     Ok(prefix)
+}
+
+fn touch_pyc_cache_marker(prefix: &Path) -> Result<()> {
+    let marker = prefix.join(PYC_CACHE_MARKER);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    fs::write(&marker, format!("{now}\n").as_bytes())
+        .with_context(|| format!("failed to write pyc cache marker {}", marker.display()))?;
+    Ok(())
+}
+
+fn prune_pyc_cache_root(
+    pyc_root: &Path,
+    active_profile_oid: Option<&str>,
+    policy: PycCachePolicy,
+) -> Result<()> {
+    if !pyc_root.exists() {
+        return Ok(());
+    }
+    if policy.target_profiles > policy.max_profiles {
+        return Ok(());
+    }
+
+    let now = SystemTime::now();
+    let mut entries = Vec::new();
+    let read_dir = fs::read_dir(pyc_root)
+        .with_context(|| format!("failed to list pyc cache directory {}", pyc_root.display()))?;
+    for entry in read_dir {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() || !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(oid) = name.to_str() else {
+            continue;
+        };
+        if oid.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        let last_used = last_used_time(&path).unwrap_or(now);
+        entries.push((oid.to_string(), path, last_used));
+    }
+
+    for (oid, path, last_used) in entries.iter() {
+        if active_profile_oid.is_some_and(|active| active == oid) {
+            continue;
+        }
+        if now
+            .duration_since(*last_used)
+            .unwrap_or_default()
+            .saturating_sub(policy.max_age)
+            .as_secs()
+            == 0
+        {
+            continue;
+        }
+        let _ = fs::remove_dir_all(path);
+    }
+
+    let mut remaining = Vec::new();
+    for entry in fs::read_dir(pyc_root)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() || !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(oid) = name.to_str() else {
+            continue;
+        };
+        if oid.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        let last_used = last_used_time(&path).unwrap_or(now);
+        remaining.push((oid.to_string(), path, last_used));
+    }
+
+    if remaining.len() <= policy.max_profiles {
+        return Ok(());
+    }
+    remaining.sort_by(|a, b| a.2.cmp(&b.2));
+
+    let mut count = remaining.len();
+    for (oid, path, _) in remaining {
+        if count <= policy.target_profiles {
+            break;
+        }
+        if active_profile_oid.is_some_and(|active| active == oid) {
+            continue;
+        }
+        if fs::remove_dir_all(&path).is_ok() {
+            count = count.saturating_sub(1);
+        }
+    }
+    Ok(())
+}
+
+fn last_used_time(path: &Path) -> Option<SystemTime> {
+    let marker = path.join(PYC_CACHE_MARKER);
+    if let Ok(meta) = fs::metadata(&marker) {
+        if let Ok(modified) = meta.modified() {
+            return Some(modified);
+        }
+    }
+    fs::metadata(path).ok()?.modified().ok()
 }
 
 /// Compute aggregate statistics for every file under the cache path.
@@ -255,5 +388,99 @@ fn absolutize(path: PathBuf) -> Result<PathBuf> {
         Ok(std::env::current_dir()
             .context("failed to resolve PX_CACHE_PATH")?
             .join(path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use filetime::{set_file_mtime, FileTime};
+    use tempfile::tempdir;
+
+    fn seed_pyc_dir(root: &Path, oid: &str, last_used_secs_ago: u64) -> Result<PathBuf> {
+        fs::create_dir_all(root)?;
+        let dir = root.join(oid);
+        fs::create_dir_all(&dir)?;
+        let marker = dir.join(PYC_CACHE_MARKER);
+        fs::write(&marker, b"")?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let target = now.saturating_sub(last_used_secs_ago as i64);
+        set_file_mtime(&marker, FileTime::from_unix_time(target, 0))?;
+        Ok(dir)
+    }
+
+    #[test]
+    fn pyc_cache_prunes_oldest_when_over_profile_limit() -> Result<()> {
+        let temp = tempdir()?;
+        let pyc_root = temp.path().join("pyc");
+        seed_pyc_dir(&pyc_root, "a", 300)?;
+        seed_pyc_dir(&pyc_root, "b", 200)?;
+        seed_pyc_dir(&pyc_root, "c", 100)?;
+
+        prune_pyc_cache_root(
+            &pyc_root,
+            Some("c"),
+            PycCachePolicy {
+                max_profiles: 2,
+                target_profiles: 2,
+                max_age: Duration::from_secs(365 * 24 * 60 * 60),
+            },
+        )?;
+
+        assert!(!pyc_root.join("a").exists(), "expected oldest cache removed");
+        assert!(pyc_root.join("b").exists(), "expected newer cache retained");
+        assert!(
+            pyc_root.join("c").exists(),
+            "expected active cache retained"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pyc_cache_prunes_entries_older_than_max_age() -> Result<()> {
+        let temp = tempdir()?;
+        let pyc_root = temp.path().join("pyc");
+        seed_pyc_dir(&pyc_root, "old", 1_000)?;
+        seed_pyc_dir(&pyc_root, "new", 10)?;
+
+        prune_pyc_cache_root(
+            &pyc_root,
+            Some("new"),
+            PycCachePolicy {
+                max_profiles: 50,
+                target_profiles: 50,
+                max_age: Duration::from_secs(100),
+            },
+        )?;
+
+        assert!(!pyc_root.join("old").exists(), "expected old cache removed");
+        assert!(pyc_root.join("new").exists(), "expected recent cache retained");
+        Ok(())
+    }
+
+    #[test]
+    fn pyc_cache_never_removes_active_profile_dir() -> Result<()> {
+        let temp = tempdir()?;
+        let pyc_root = temp.path().join("pyc");
+        seed_pyc_dir(&pyc_root, "active", 10_000)?;
+
+        prune_pyc_cache_root(
+            &pyc_root,
+            Some("active"),
+            PycCachePolicy {
+                max_profiles: 1,
+                target_profiles: 1,
+                max_age: Duration::from_secs(1),
+            },
+        )?;
+
+        assert!(
+            pyc_root.join("active").exists(),
+            "active cache should never be pruned"
+        );
+        Ok(())
     }
 }
