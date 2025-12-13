@@ -1,9 +1,8 @@
 use std::env;
 use std::io::{self, IsTerminal, Write};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
-use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(crate) fn progress_enabled() -> bool {
     match env::var("PX_PROGRESS") {
@@ -12,19 +11,188 @@ pub(crate) fn progress_enabled() -> bool {
     }
 }
 
-pub(crate) struct ProgressReporter {
-    current: Arc<AtomicUsize>,
-    stop: Option<Arc<AtomicBool>>,
-    handle: Option<thread::JoinHandle<()>>,
+static OUTPUT_LOCK: Mutex<()> = Mutex::new(());
+static MANAGER: OnceLock<ProgressManager> = OnceLock::new();
+
+fn manager() -> &'static ProgressManager {
+    MANAGER.get_or_init(ProgressManager::new)
+}
+
+fn clear_progress_line() {
+    let _guard = OUTPUT_LOCK.lock().ok();
+    let _ = io::stderr().write_all(b"\r\x1b[2K");
+    let _ = io::stderr().flush();
+}
+
+#[derive(Clone)]
+struct ProgressTask {
+    id: u64,
+    label: String,
+    total: Option<usize>,
+    current: usize,
+    started_at: Instant,
+}
+
+struct ProgressManager {
+    state: Mutex<ProgressState>,
+}
+
+struct ProgressState {
+    next_id: u64,
+    suspend_count: usize,
+    tasks: Vec<ProgressTask>,
+    renderer_started: bool,
+}
+
+impl ProgressManager {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ProgressState {
+                next_id: 1,
+                suspend_count: 0,
+                tasks: Vec::new(),
+                renderer_started: false,
+            }),
+        }
+    }
+
+    fn start_renderer(&self) {
+        let mut state = self.state.lock().expect("progress lock");
+        if state.renderer_started {
+            return;
+        }
+        state.renderer_started = true;
+        drop(state);
+
+        thread::spawn(|| {
+            const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            const TICK: Duration = Duration::from_millis(80);
+            const START_DELAY: Duration = Duration::from_millis(120);
+            let mut idx = 0usize;
+            let mut rendered = false;
+            loop {
+                let (suspended, task) = {
+                    let state = manager().state.lock().expect("progress lock");
+                    let suspended = state.suspend_count > 0 || !progress_enabled();
+                    let task = state.tasks.last().cloned();
+                    (suspended, task)
+                };
+
+                if suspended || task.is_none() {
+                    if rendered {
+                        clear_progress_line();
+                        rendered = false;
+                    }
+                    thread::sleep(TICK);
+                    continue;
+                }
+
+                let task = task.expect("task is_some");
+                let elapsed = Instant::now().saturating_duration_since(task.started_at);
+                if elapsed < START_DELAY {
+                    if rendered {
+                        clear_progress_line();
+                        rendered = false;
+                    }
+                    thread::sleep(TICK);
+                    continue;
+                }
+
+                let frame = FRAMES[idx % FRAMES.len()];
+                idx = idx.wrapping_add(1);
+                let line = if let Some(total) = task.total {
+                    let current = task.current.min(total);
+                    format!(
+                        "\r\x1b[2Kpx ▸ {} [{current}/{total}] {frame}",
+                        task.label
+                    )
+                } else {
+                    format!("\r\x1b[2Kpx ▸ {} {frame}", task.label)
+                };
+                {
+                    let _guard = OUTPUT_LOCK.lock().ok();
+                    let _ = io::stderr().write_all(line.as_bytes());
+                    let _ = io::stderr().flush();
+                }
+                rendered = true;
+                thread::sleep(TICK);
+            }
+        });
+    }
+
+    fn push_task(&self, label: String, total: Option<usize>) -> u64 {
+        let mut state = self.state.lock().expect("progress lock");
+        let id = state.next_id;
+        state.next_id = state.next_id.saturating_add(1);
+        state.tasks.push(ProgressTask {
+            id,
+            label,
+            total,
+            current: 0,
+            started_at: Instant::now(),
+        });
+        id
+    }
+
+    fn update_current(&self, id: u64, delta: usize) {
+        let mut state = self.state.lock().expect("progress lock");
+        if let Some(task) = state.tasks.iter_mut().find(|task| task.id == id) {
+            task.current = task.current.saturating_add(delta);
+        }
+    }
+
+    fn remove_task(&self, id: u64) {
+        let mut state = self.state.lock().expect("progress lock");
+        if let Some(pos) = state.tasks.iter().position(|task| task.id == id) {
+            state.tasks.remove(pos);
+        }
+    }
+
+    fn suspend(&self) {
+        let mut state = self.state.lock().expect("progress lock");
+        state.suspend_count = state.suspend_count.saturating_add(1);
+    }
+
+    fn resume(&self) {
+        let mut state = self.state.lock().expect("progress lock");
+        state.suspend_count = state.suspend_count.saturating_sub(1);
+    }
+}
+
+pub(crate) struct ProgressSuspendGuard {
+    enabled: bool,
+}
+
+impl ProgressSuspendGuard {
+    pub(crate) fn new() -> Self {
+        if !progress_enabled() {
+            return Self { enabled: false };
+        }
+        manager().suspend();
+        clear_progress_line();
+        Self { enabled: true }
+    }
+}
+
+impl Drop for ProgressSuspendGuard {
+    fn drop(&mut self) {
+        if self.enabled {
+            manager().resume();
+        }
+    }
+}
+
+pub struct ProgressReporter {
+    id: Option<u64>,
     enabled: bool,
 }
 
 impl ProgressReporter {
-    pub(crate) fn spinner(label: impl Into<String>) -> Self {
+    pub fn spinner(label: impl Into<String>) -> Self {
         Self::start(label, None)
     }
 
-    pub(crate) fn bar(label: impl Into<String>, total: usize) -> Self {
+    pub fn bar(label: impl Into<String>, total: usize) -> Self {
         if total == 0 {
             return Self::spinner(label);
         }
@@ -35,66 +203,38 @@ impl ProgressReporter {
         let label = label.into();
         if !progress_enabled() {
             return Self {
-                current: Arc::new(AtomicUsize::new(0)),
-                stop: None,
-                handle: None,
+                id: None,
                 enabled: false,
             };
         }
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let current = Arc::new(AtomicUsize::new(0));
-        let thread_label = label.clone();
-        let thread_total = total;
-        let thread_stop = Arc::clone(&stop);
-        let thread_current = Arc::clone(&current);
-        let handle = thread::spawn(move || {
-            ProgressReporter::run(&thread_label, thread_total, &thread_current, &thread_stop);
-        });
-
+        manager().start_renderer();
+        let id = manager().push_task(label, total);
         Self {
-            current,
-            stop: Some(stop),
-            handle: Some(handle),
+            id: Some(id),
             enabled: true,
         }
     }
 
-    pub(crate) fn increment(&self) {
+    pub fn increment(&self) {
         if self.enabled {
-            self.current.fetch_add(1, AtomicOrdering::Relaxed);
+            if let Some(id) = self.id {
+                manager().update_current(id, 1);
+            }
         }
     }
 
-    pub(crate) fn finish(mut self, message: impl Into<String>) {
-        if self.enabled {
-            if let Some(stop) = self.stop.take() {
-                stop.store(true, AtomicOrdering::Relaxed);
-            }
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.join();
-            }
-            let _ = io::stderr().write_all(b"\r\x1b[2K");
-            let _ = io::stderr().flush();
-        }
+    pub fn finish(mut self, message: impl Into<String>) {
+        self.stop();
         eprintln!("px ▸ {}", message.into());
     }
 
-    fn run(label: &str, total: Option<usize>, current: &Arc<AtomicUsize>, stop: &Arc<AtomicBool>) {
-        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let mut idx = 0;
-        while !stop.load(AtomicOrdering::Relaxed) {
-            let frame = FRAMES[idx % FRAMES.len()];
-            idx += 1;
-            let line = if let Some(total) = total {
-                let current = current.load(AtomicOrdering::Relaxed).min(total);
-                format!("\r\x1b[2Kpx ▸ {label} [{current}/{total}] {frame}")
-            } else {
-                format!("\r\x1b[2Kpx ▸ {label} {frame}")
-            };
-            let _ = io::stderr().write_all(line.as_bytes());
-            let _ = io::stderr().flush();
-            thread::sleep(Duration::from_millis(80));
+    fn stop(&mut self) {
+        if self.enabled {
+            if let Some(id) = self.id.take() {
+                manager().remove_task(id);
+                clear_progress_line();
+            }
+            self.enabled = false;
         }
     }
 }
@@ -113,15 +253,6 @@ pub(crate) fn download_concurrency(total: usize) -> usize {
 
 impl Drop for ProgressReporter {
     fn drop(&mut self) {
-        if self.enabled {
-            if let Some(stop) = self.stop.take() {
-                stop.store(true, AtomicOrdering::Relaxed);
-            }
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.join();
-            }
-            let _ = io::stderr().write_all(b"\r\x1b[2K");
-            let _ = io::stderr().flush();
-        }
+        self.stop();
     }
 }

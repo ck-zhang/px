@@ -23,7 +23,7 @@ pub fn dispatch_command(
         CommandGroupCli::Init(args) => {
             let info = CommandInfo::new(CommandGroup::Init, "init");
             let request = project_init_request_from_args(args);
-            core_call(info, px_core::project_init(ctx, &request))
+            core_call(info, || px_core::project_init(ctx, &request))
         }
         CommandGroupCli::Add(args) => {
             let info = CommandInfo::new(CommandGroup::Add, "add");
@@ -31,7 +31,7 @@ pub fn dispatch_command(
                 specs: args.specs.clone(),
                 dry_run: args.common.dry_run,
             };
-            core_call(info, px_core::project_add(ctx, &request))
+            core_call(info, || px_core::project_add(ctx, &request))
         }
         CommandGroupCli::Remove(args) => {
             let info = CommandInfo::new(CommandGroup::Remove, "remove");
@@ -39,12 +39,12 @@ pub fn dispatch_command(
                 specs: args.specs.clone(),
                 dry_run: args.common.dry_run,
             };
-            core_call(info, px_core::project_remove(ctx, &request))
+            core_call(info, || px_core::project_remove(ctx, &request))
         }
         CommandGroupCli::Sync(args) => {
             let info = CommandInfo::new(CommandGroup::Sync, "sync");
             let request = project_sync_request_from_args(args);
-            core_call(info, px_core::project_sync(ctx, &request))
+            core_call(info, || px_core::project_sync(ctx, &request))
         }
         CommandGroupCli::Update(args) => {
             let info = CommandInfo::new(CommandGroup::Update, "update");
@@ -52,103 +52,103 @@ pub fn dispatch_command(
                 specs: args.specs.clone(),
                 dry_run: args.common.dry_run,
             };
-            core_call(info, px_core::project_update(ctx, &request))
+            core_call(info, || px_core::project_update(ctx, &request))
         }
         CommandGroupCli::Run(args) => {
             let info = CommandInfo::new(CommandGroup::Run, "run");
             let request = run_request_from_args(args);
-            core_call(info, px_core::run_project(ctx, &request))
+            core_call(info, || px_core::run_project(ctx, &request))
         }
         CommandGroupCli::Test(args) => {
             let info = CommandInfo::new(CommandGroup::Test, "test");
             let request = test_request_from_args(args);
-            core_call(info, px_core::test_project(ctx, &request))
+            core_call(info, || px_core::test_project(ctx, &request))
         }
         CommandGroupCli::Fmt(args) => {
             let info = CommandInfo::new(CommandGroup::Fmt, "fmt");
             let request = fmt_request_from_args(args);
-            core_call(info, px_core::run_fmt(ctx, &request))
+            core_call(info, || px_core::run_fmt(ctx, &request))
         }
         CommandGroupCli::Status(_args) => {
             let info = CommandInfo::new(CommandGroup::Status, "status");
-            core_call(info, px_core::project_status(ctx))
+            core_call(info, || px_core::project_status(ctx))
         }
         CommandGroupCli::Build(args) => {
             let info = CommandInfo::new(CommandGroup::Build, "build");
             let request = build_request_from_args(args);
-            core_call(info, px_core::build_project(ctx, &request))
+            core_call(info, || px_core::build_project(ctx, &request))
         }
         CommandGroupCli::Publish(args) => {
             let info = CommandInfo::new(CommandGroup::Publish, "publish");
             let request = publish_request_from_args(args);
-            core_call(info, px_core::publish_project(ctx, &request))
+            core_call(info, || px_core::publish_project(ctx, &request))
         }
         CommandGroupCli::Pack(cmd) => match cmd {
             PackCommand::Image(args) => {
                 let info = CommandInfo::new(CommandGroup::Pack, "pack image");
                 let request = pack_image_request_from_args(args);
-                core_call(info, px_core::pack_image(ctx, &request))
+                core_call(info, || px_core::pack_image(ctx, &request))
             }
             PackCommand::App(args) => {
                 let info = CommandInfo::new(CommandGroup::Pack, "pack app");
                 let request = pack_app_request_from_args(args);
-                core_call(info, px_core::pack_app(ctx, &request))
+                core_call(info, || px_core::pack_app(ctx, &request))
             }
         },
         CommandGroupCli::Migrate(args) => {
             let info = CommandInfo::new(CommandGroup::Migrate, "migrate");
             let request = migrate_request_from_args(args);
-            core_call(info, px_core::migrate(ctx, &request))
+            core_call(info, || px_core::migrate(ctx, &request))
         }
         CommandGroupCli::Why(args) => {
             let info = CommandInfo::new(CommandGroup::Why, "why");
             let request = project_why_request_from_args(args);
-            core_call(info, px_core::project_why(ctx, &request))
+            core_call(info, || px_core::project_why(ctx, &request))
         }
         CommandGroupCli::Tool(cmd) => match cmd {
             ToolCommand::Install(args) => {
                 let info = CommandInfo::new(CommandGroup::Tool, "install");
                 let request = tool_install_request_from_args(args);
-                core_call(info, px_core::tool_install(ctx, &request))
+                core_call(info, || px_core::tool_install(ctx, &request))
             }
             ToolCommand::Run(args) => {
                 let info = CommandInfo::new(CommandGroup::Tool, "run");
                 let request = tool_run_request_from_args(args);
-                core_call(info, px_core::tool_run(ctx, &request))
+                core_call(info, || px_core::tool_run(ctx, &request))
             }
             ToolCommand::List => {
                 let info = CommandInfo::new(CommandGroup::Tool, "list");
-                core_call(info, px_core::tool_list(ctx, ToolListRequest))
+                core_call(info, || px_core::tool_list(ctx, ToolListRequest))
             }
             ToolCommand::Remove(args) => {
                 let info = CommandInfo::new(CommandGroup::Tool, "remove");
                 let request = tool_remove_request_from_args(args);
-                core_call(info, px_core::tool_remove(ctx, &request))
+                core_call(info, || px_core::tool_remove(ctx, &request))
             }
             ToolCommand::Upgrade(args) => {
                 let info = CommandInfo::new(CommandGroup::Tool, "upgrade");
                 let request = tool_upgrade_request_from_args(args);
-                core_call(info, px_core::tool_upgrade(ctx, &request))
+                core_call(info, || px_core::tool_upgrade(ctx, &request))
             }
         },
         CommandGroupCli::Python(cmd) => match cmd {
             PythonCommand::List => {
                 let info = CommandInfo::new(CommandGroup::Python, "list");
-                core_call(info, px_core::python_list(ctx, &px_core::PythonListRequest))
+                core_call(info, || px_core::python_list(ctx, &px_core::PythonListRequest))
             }
             PythonCommand::Info => {
                 let info = CommandInfo::new(CommandGroup::Python, "info");
-                core_call(info, px_core::python_info(ctx, &px_core::PythonInfoRequest))
+                core_call(info, || px_core::python_info(ctx, &px_core::PythonInfoRequest))
             }
             PythonCommand::Install(args) => {
                 let info = CommandInfo::new(CommandGroup::Python, "install");
                 let request = python_install_request_from_args(args);
-                core_call(info, px_core::python_install(ctx, &request))
+                core_call(info, || px_core::python_install(ctx, &request))
             }
             PythonCommand::Use(args) => {
                 let info = CommandInfo::new(CommandGroup::Python, "use");
                 let request = python_use_request_from_args(args);
-                core_call(info, px_core::python_use(ctx, &request))
+                core_call(info, || px_core::python_use(ctx, &request))
             }
         },
         CommandGroupCli::Completions(args) => {
@@ -158,10 +158,22 @@ pub fn dispatch_command(
     }
 }
 
-fn core_call(
+fn core_call<F>(
     info: CommandInfo,
-    outcome: anyhow::Result<px_core::ExecutionOutcome>,
-) -> Result<(CommandInfo, px_core::ExecutionOutcome)> {
+    action: F,
+) -> Result<(CommandInfo, px_core::ExecutionOutcome)>
+where
+    F: FnOnce() -> anyhow::Result<px_core::ExecutionOutcome>,
+{
+    let group = info.group.to_string();
+    let name = info.name;
+    let label = if name.starts_with(&group) {
+        name.to_string()
+    } else {
+        format!("{group} {name}")
+    };
+    let _spinner = px_core::progress::ProgressReporter::spinner(format!("Running {label}"));
+    let outcome = action();
     match outcome {
         Ok(result) => Ok((info, result)),
         Err(err) => {

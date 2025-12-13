@@ -24,6 +24,8 @@ fn is_proxy_env(key: &str) -> bool {
 
 use anyhow::{Context, Result};
 
+use crate::progress::ProgressSuspendGuard;
+
 const DEFAULT_MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 
 fn max_capture_bytes() -> usize {
@@ -128,6 +130,7 @@ pub fn run_command_streaming(
     envs: &[(String, String)],
     cwd: &Path,
 ) -> Result<RunOutput> {
+    let _suspend = ProgressSuspendGuard::new();
     let mut command = configured_command(program, args, envs, cwd);
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
@@ -197,6 +200,7 @@ pub fn run_command_passthrough(
     envs: &[(String, String)],
     cwd: &Path,
 ) -> Result<RunOutput> {
+    let _suspend = ProgressSuspendGuard::new();
     let mut command = configured_command(program, args, envs, cwd);
     command.stdin(Stdio::inherit());
     command.stdout(Stdio::inherit());

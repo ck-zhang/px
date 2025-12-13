@@ -23,7 +23,8 @@ pub use crate::core::store::cas::{
 };
 pub(crate) use crate::core::store::pypi;
 pub(crate) use crate::core::tooling;
-pub(crate) use crate::core::tooling::{diagnostics, outcome, progress};
+pub(crate) use crate::core::tooling::{diagnostics, outcome};
+pub use crate::core::tooling::progress;
 pub(crate) use crate::core::{project, tools};
 
 pub use crate::core::config::context::{CommandContext, CommandHandler, CommandInfo};
