@@ -1,5 +1,5 @@
 // Mapping note: the former `facade.rs` mega-module was split into focused files:
-// - `context.rs`: command/runtime context wiring, PYTHONPATH assembly, version-file logic
+// - `context/`: command/runtime context wiring, PYTHONPATH assembly, version-file logic
 // - `plan.rs`: lock/manifest resolution + dependency planning helpers
 // - `env_materialize.rs`: env materialization, site layout, state.json helpers
 // - `cas_native.rs`: CAS/native environment validation + consistency checks
