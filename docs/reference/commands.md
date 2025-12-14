@@ -1,6 +1,6 @@
 # Commands
 
-Commands operate over the project or workspace state machines. Use this doc alongside `docs/reference/state-machines.md` for allowed states and invariants.
+Commands operate over the project or workspace state machines. Use this doc alongside [State machines](./state-machines.md) for allowed states and invariants.
 
 For a quick inventory of CLI flags and environment toggles, see [Env Vars and Flags](./env-and-flags.md).
 
@@ -33,11 +33,16 @@ For a quick inventory of CLI flags and environment toggles, see [Env Vars and Fl
 * `px python use`     – Select runtime for the current project.
 * `px python info`    – Show details about current runtime(s).
 
+### Shell integration
+
+* `px completions` – Print a shell completion setup snippet (one-time setup).
+
 ### Distribution / migration
 
 * `px build`    – Build sdists/wheels into `dist/`.
 * `px publish`  – Upload artifacts from `dist/` to a registry.
 * `px pack image` – Build a sandbox-backed OCI image from the current env profile and `[tool.px.sandbox]`.
+* `px pack app` – Build a portable `.pxapp` bundle runnable via `px run <file>.pxapp`.
 * `px migrate`  – Plan migration of a legacy project into px.
 * `px migrate --apply` – Apply that migration.
 
@@ -115,11 +120,18 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 
 * **Intent**: run a command using the project env with deterministic state behavior and deterministic target resolution.
 * **Preconditions**:
+  * **`.pxapp` bundle targets**: no local project is required; px executes the bundle in a sandbox and does not read or write `pyproject.toml`, lockfiles, or `.px/` from the current directory.
   * **Project targets**: project root exists. Lock must exist and match manifest (otherwise suggest `px sync`). In CI/`--frozen`, px never re-resolves; if a materialized env is required (e.g. `--sandbox` or compatibility fallback), it must already be consistent.
   * **Run-by-reference targets** (`gh:` / `git+`): no local project is required; px runs from a commit-pinned repository snapshot stored in the CAS and does not write `pyproject.toml`, `px.lock`, or `.px/` into the caller directory.
 * **Target resolution**:
 
-  0. **Run by reference** (explicit prefixes only):
+  0. **Execute a `.pxapp` bundle**:
+
+     * If `<target>` is a filesystem path that exists and ends with `.pxapp`, px runs it as a portable sandbox app bundle.
+     * All args after the bundle path are forwarded to the bundle’s entrypoint.
+     * This mode does not support `--at` (commit-scoped execution).
+
+  1. **Run by reference** (explicit prefixes only):
 
      * **GitHub shorthand**: `gh:ORG/REPO@<sha>:path/to/script.py`
      * **Git URL**: `git+file:///abs/path/to/repo@<sha>:path/to/script.py` (also supports `git+https://…@<sha>:…`)
@@ -133,15 +145,15 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
      * **No project mutation**: the snapshot is materialized into px’s cache (read-only) and never touches the caller’s working directory.
      * **Current limitations**: run-by-reference currently supports Python scripts only and does not support `--sandbox` or `--at`.
 
-  1. If `<target>` is a file under the project root, run it as a script with the project runtime.
-  2. If `<target>` is a Python alias (`python`, `python3`, `py`, etc.), run the project runtime directly.
-  3. If `<target>` matches a `console_scripts` entry point from the resolved environment, run that entry point.
+  2. If `<target>` is a file under the project root, run it as a script with the project runtime.
+  3. If `<target>` is a Python alias (`python`, `python3`, `py`, etc.), run the project runtime directly.
+  4. If `<target>` matches a `console_scripts` entry point from the resolved environment, run that entry point.
 
      * CAS-native (default): px dispatches via stdlib `importlib.metadata` without relying on a prebuilt `bin/` tree.
      * If multiple distributions claim the same `console_scripts` name (or native dispatch fails for packaging quirks), px automatically falls back to materialized env execution and runs the deterministic `bin/` winner instead.
      * Materialized env fallback: uses the env’s `bin/` projection and PATH-based wrappers.
 
-  4. Otherwise run `<target>` as an executable, relying on PATH from the project env.
+  5. Otherwise run `<target>` as an executable, relying on PATH from the project env.
 
   No implicit module/CLI guessing (`python -m`, `.cli`, etc.).
 
@@ -218,6 +230,13 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 * **Behavior**: resolves sandbox base/capabilities → `sbx_id`; copies the working tree (respecting ignores) into the image; reuses or builds the sandbox image; supports `--tag`, `--out <path>` (OCI tar/dir), and `--push` to a registry. Uses the existing env contents; never re-resolves or mutates manifests/locks/envs.
 * **Postconditions**: project/workspace state unchanged; sandbox image cached/addressable by `sbx_id`.
 
+### `px pack app`
+
+* **Intent**: package the current project/workspace into a portable `.pxapp` bundle runnable via `px run <bundle>.pxapp`.
+* **Preconditions**: same as `px pack image` (manifest present; env clean; clean worktree by default unless `--allow-dirty` is passed).
+* **Behavior**: derives `sbx_id` from the env profile + `[tool.px.sandbox]`, snapshots app code, and writes a single-file `.pxapp` bundle (default: `dist/<name>-<version>.pxapp`).
+* **Postconditions**: project/workspace state unchanged; `.pxapp` written to disk; sandbox images may be built/reused as an implementation detail.
+
 ### `px status`
 
 * **Intent**: read-only snapshot of manifest/lock/env alignment plus runtime identity.
@@ -238,4 +257,5 @@ When a workspace root is detected above CWD and CWD is inside a member project, 
 * `px update` (member or workspace root) – update workspace lock within constraints and rebuild workspace env.
 * `px run` / `px test` (member) – prefers CAS-native execution from the workspace profile (no persistent env directory required). If a materialized env is needed for compatibility or `--sandbox`, px builds/reuses the workspace env from the workspace lock. In CI, lock drift is still a hard error; `--sandbox` continues to require a consistent workspace env.
 * `px pack image` (workspace root or member) – requires workspace `Consistent`; builds/reuses sandbox image from workspace env + `[tool.px.sandbox]`; copies workspace member code into the image; no workspace writes.
+* `px pack app` (workspace root or member) – requires workspace `Consistent`; writes a `.pxapp` bundle from workspace env + `[tool.px.sandbox]`; copies workspace member code into the bundle; no workspace writes.
 * `px status` – at workspace root: report workspace state plus member manifest health; in a member: report workspace state and whether that member manifest is included; under the workspace root but outside members: emit a note about the non-member path.

@@ -1,6 +1,8 @@
-## 13. Content‑addressed store (CAS)
+# 13. Content-Addressable Store (CAS)
 
-### 13.1 Goal & scope
+> Note: This design note uses section numbering (13.x) so cross-references stay stable across edits.
+
+## 13.1 Goal & scope
 
 The px CAS is the **single source of truth** for all immutable build artifacts:
 
@@ -20,7 +22,7 @@ Environments (E/WE) are **thin projections** over the CAS:
 
 linked from project/workspace-local pointers (e.g. `<root>/.px/envs/current`).
 
-These projections are **immutable** from the user’s point of view: they are content-addressed materializations of a profile and runtime. User-initiated `pip install` cannot mutate them; dependency changes must flow through px (`px add/remove/update/sync`) so new artifacts are built into CAS and re-materialized. Envs are never “activated” directly—the supported entry points are `px run`, `px test`, and `px fmt`.
+These projections are **immutable** from the user’s point of view: they are content-addressable materializations of a profile and runtime. User-initiated `pip install` cannot mutate them; dependency changes must flow through px (`px add/remove/update/sync`) so new artifacts are built into CAS and re-materialized. Envs are never “activated” directly—the supported entry points are `px run`, `px test`, and `px fmt`.
 
 px supports two execution modes over the same profile:
 
@@ -36,7 +38,7 @@ This keeps CAS objects immutable while allowing Python’s import caches to work
 
 The CAS must be:
 
-* **Content‑addressed** – object identity is a digest of content + type.
+* **Content-addressable** – object identity is a digest of content + type.
 * **Immutable** – objects, once stored, are never modified in place.
 * **Deduplicating** – identical content is stored once.
 * **Concurrency‑safe** – multi‑process use cannot corrupt the store.
@@ -64,7 +66,7 @@ Backward‑incompatible changes to on‑disk layout or payload schemas must bump
 
 ---
 
-### 13.2 CAS nouns
+## 13.2 CAS nouns
 
 The CAS introduces a few new nouns:
 
@@ -113,9 +115,9 @@ The CAS is deliberately orthogonal to M/L/E and WM/WL/WE:
 
 ---
 
-### 13.3 Object identity
+## 13.3 Object identity
 
-#### 13.3.1 Digests & canonical form
+### 13.3.1 Digests & canonical form
 
 Every CAS object has an identity:
 
@@ -161,7 +163,7 @@ Digest is **authoritative**:
 * On read, px may rehash and must reject any on-disk blob whose digest doesn’t match its path.
 * Digest never depends on machine‑local paths or timestamps.
 
-#### 13.3.2 Object kinds
+### 13.3.2 Object kinds
 
 **1. `source`**
 
@@ -270,7 +272,7 @@ A profile is essentially “L + runtime” rewritten into CAS IDs.
 
 ---
 
-### 13.4 Store layout
+## 13.4 Store layout
 
 On disk, the store looks like:
 
@@ -314,7 +316,7 @@ Authoritative sources:
 * Env materializations under `~/.px/envs/<profile_oid>/manifest.json` (and future runtime manifests) are the source of truth for which profiles/runtimes are “live roots”.
 * `index.sqlite` must always be reconstructible from these authoritative sources (see §13.8.4).
 
-#### Store immutability
+### Store immutability
 
 * CAS objects, once created, are never modified in place.
 * After successful creation, store objects under `objects/` are made read-only at the filesystem level (e.g. removing write bits) to prevent accidental mutation by tools.
@@ -323,11 +325,11 @@ Authoritative sources:
 
 ---
 
-### 13.5 Profiles & envs (no venvs)
+## 13.5 Profiles & envs (no venvs)
 
 px environments (E, WE) no longer own site‑packages; they’re just **profiles materialized on disk**.
 
-#### 13.5.1 Profile identity
+### 13.5.1 Profile identity
 
 Given:
 
@@ -339,7 +341,7 @@ px builds a profile payload and its `profile_oid`.
 
 For a fixed px version, runtime, lock, and build options, `profile_oid` is deterministic.
 
-#### 13.5.2 Env directories
+### 13.5.2 Env directories
 
 Env identity is:
 
@@ -406,7 +408,7 @@ Env materialization is idempotent and manifest-driven:
 
 Local symlinks under project/workspace `.px/envs/` keep your existing UX (“env belongs to project/workspace”), but all heavy content lives in `~/.px/envs` + `~/.px/store`.
 
-#### 13.5.3 Project state integration
+### 13.5.3 Project state integration
 
 For a project:
 
@@ -432,11 +434,11 @@ For workspaces, WE is analogous; they just use WL/WE → `profile_oid`.
 
 ---
 
-### 13.6 CAS operations & lifecycle
+## 13.6 CAS operations & lifecycle
 
 This section defines the key CAS operations px uses.
 
-#### 13.6.1 `cas.ensure_source(lock_entry)`
+### 13.6.1 `cas.ensure_source(lock_entry)`
 
 Input:
 
@@ -469,7 +471,7 @@ On failure:
 * No partial blob is left referenced from `objects`.
 * Leftover `tmp/*.partial` is cleaned by startup self‑check.
 
-#### 13.6.2 `cas.ensure_pkg_build(source_oid, runtime)`
+### 13.6.2 `cas.ensure_pkg_build(source_oid, runtime)`
 
 Input:
 
@@ -541,7 +543,7 @@ Builds never run directly on the host OS; they always run inside a px-managed
 builder environment. `[tool.px.sandbox]` does **not** affect which builder is
 chosen or how `pkg-build` objects are produced.
 
-#### 13.6.3 `cas.ensure_profile(L/WL, runtime)`
+### 13.6.3 `cas.ensure_profile(L/WL, runtime)`
 
 Input:
 
@@ -579,7 +581,7 @@ Behavior:
 
 Return `profile_oid`.
 
-#### 13.6.4 `env.materialize(profile_oid)`
+### 13.6.4 `env.materialize(profile_oid)`
 
 Input:
 
@@ -616,11 +618,11 @@ Behavior:
 
 ---
 
-### 13.7 Ownership & GC
+## 13.7 Ownership & GC
 
 The CAS uses **reference tracking** for safe cleanup.
 
-#### 13.7.1 Ownership model
+### 13.7.1 Ownership model
 
 Owners:
 
@@ -641,7 +643,7 @@ On env deletion (e.g. project removed or lock superseded):
 * px deletes the corresponding `refs(owner_type, owner_id, profile_oid)` row.
 * If a profile has no refs, it can be collected *after* its grace period.
 
-#### 13.7.2 GC algorithm
+### 13.7.2 GC algorithm
 
 GC is a **mark-and-sweep** over objects, driven by `refs`. The index is treated as a cache, so GC has a precondition:
 
@@ -674,11 +676,11 @@ Invariants:
 
 ---
 
-### 13.8 Concurrency & crash safety
+## 13.8 Concurrency & crash safety
 
 The CAS must be robust under multiple concurrent px processes.
 
-#### 13.8.1 Per‑object lock protocol
+### 13.8.1 Per‑object lock protocol
 
 For each `oid` being created:
 
@@ -700,7 +702,7 @@ For each `oid` being created:
 
 * Other processes seeing a present `objects/<prefix>/<oid>` or `objects` row treat the object as complete.
 
-#### 13.8.2 Index transactional semantics
+### 13.8.2 Index transactional semantics
 
 All mutations to `index.sqlite` happen inside transactions:
 
@@ -715,7 +717,7 @@ On crash:
 * Store may contain unreferenced objects (safe).
 * `refs` table always describes a self‑consistent world (no half‑written rows).
 
-#### 13.8.3 Startup / self‑check
+### 13.8.3 Startup / self‑check
 
 Optional background health checks:
 
@@ -724,7 +726,7 @@ Optional background health checks:
 * Check CAS format/schema version in `index.sqlite` and fail cleanly on incompatibility.
 * If `index.sqlite` is missing or fails integrity checks, reconstruct it from the store + manifests as per §13.8.4 before any GC/cleanup.
 
-#### 13.8.4 Index reconstruction & GC gating
+### 13.8.4 Index reconstruction & GC gating
 
 * Create a fresh index (schema + meta).
 * Rebuild `objects` by walking `~/.px/store/objects/**`, reading canonical headers, and recording `(oid, kind, size, timestamps)`.
@@ -735,13 +737,13 @@ Optional background health checks:
 
 ---
 
-### 13.9 Remote CAS
+## 13.9 Remote CAS
 
 The current implementation only supports a local on-disk CAS. Remote backends (HTTP/S3/etc.) are not part of the current design and may be revisited in the future.
 
 ---
 
-### 13.10 Error model & observability
+## 13.10 Error model & observability
 
 CAS introduces a new error family (example codes):
 

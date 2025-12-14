@@ -101,6 +101,6 @@ Sandbox errors are prefixed `PX9xx` and do not change manifests/locks/envs.
 
 * `PX900` (sandbox base unavailable) – base name is unknown/incompatible; change `[tool.px.sandbox].base` or upgrade px.
 * `PX901` (capability resolution failure) – capability cannot be satisfied on the chosen base; pick another base or disable that capability.
-* `PX902` (missing system dependency) – sandbox image lacks a required library (e.g., `libpq.so.5`); add the capability (`px sandbox add postgres` or set `[tool.px.sandbox.capabilities].postgres = true`) and rerun.
+* `PX902` (missing system dependency) – sandbox image lacks a required library (e.g., `libpq.so.5`); add the capability (e.g. set `[tool.px.sandbox.capabilities].postgres = true`) and rerun.
 * `PX903` (sandbox build failure) – underlying image build/backend failed; check disk space/registry credentials and retry.
 * `PX904` (sandbox format/version mismatch) – sandbox image was built with an incompatible `sbx_version` or px version; rebuild with the current px or clear the sandbox store.

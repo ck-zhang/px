@@ -7,9 +7,9 @@ Rule of thumb: user-facing behavior should be a CLI flag first; env vars stay as
 * `-q/--quiet` – suppress human-oriented output (errors still print).
 * `-v/--verbose` (repeatable) – increase logging; `-vv` reaches trace.
 * `--trace` – force trace logging even without `-v`.
-* `--json` – emit `{status,message,details}` JSON envelopes.
+* `--debug` – enable debug output and full tracebacks.
+* `--json` – emit `{status,message,details}` JSON envelopes (for `px fmt`, `px fmt --json` is an equivalent shortcut).
 * `--no-color` – disable colored output.
-* `--config <path>` – explicit px config file.
 * `--offline` / `--online` – force network mode for this run (sets `PX_ONLINE`).
 * `--force-sdist` / `--prefer-wheels` – pick sdists vs wheels when both exist (sets `PX_FORCE_SDIST`).
 
@@ -25,19 +25,21 @@ Rule of thumb: user-facing behavior should be a CLI flag first; env vars stay as
 * `px init` – `--package NAME`, `--py VERSION`, `--dry-run`, `--force`.
 * `px add/remove/update` – `--dry-run`.
 * `px sync` – `--dry-run`, `--frozen`.
-* `px run` – `--target NAME`, `--interactive`, `--non-interactive`, `--sandbox`, `--frozen`, `--` forwards args.
-* `px test` – `--sandbox`, `--frozen`, `--` forwards pytest args.
-* `px fmt` – `--frozen`, `--json` (fmt-only), `--` forwards tool args.
+* `px run` – `--target TARGET`, `--allow-floating`, `--at GIT_REF`, `--interactive`, `--non-interactive`, `--sandbox`, `--frozen` (args after the target are forwarded).
+* `px test` – `--sandbox`, `--frozen`, `--at GIT_REF`, `--` forwards test runner args (e.g. pytest flags).
+* `px fmt` – `--frozen`, `--json` (JSON output), `--` forwards tool args.
 * `px status` – `--brief`.
 * `px build` – format selector `sdist|wheel|both` (positional), `--out DIR`, `--dry-run`.
 * `px publish` – `--registry NAME`, `--token-env VAR` (defaults to `PX_PUBLISH_TOKEN`), `--dry-run` (default), `--upload` (uploads require `PX_ONLINE=1`).
 * `px pack image` – `--tag NAME`, `--out PATH`, `--push`, `--allow-dirty`.
+* `px pack app` – `--out PATH`, `--allow-dirty`, `--entrypoint CMD`, `--workdir DIR`.
 * `px migrate` – `--python VERSION`, `--apply/--write`, `--yes`, `--no-input`, `--source PATH`, `--dev-source PATH`, `--allow-dirty`, `--lock-only`, `--no-autopin`.
 * `px why` – `--issue ID` (mutually exclusive with package arg).
 * `px tool install` – `--python VERSION`, `--module MODULE`.
-* `px tool run` – `--console SCRIPT`, `--` forwards tool args.
+* `px tool run` – `--console SCRIPT` (args after the tool name are forwarded; use `--` if you want to pass flags without ambiguity).
 * `px tool upgrade` – `--python VERSION`.
 * `px python install` – `--path /path/to/python`, `--default`.
+* `px completions` – `bash|zsh|fish|powershell` (positional).
 
 ## Environment variables
 

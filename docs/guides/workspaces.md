@@ -9,7 +9,7 @@ A workspace lets multiple px projects in one tree share a single dependency univ
 
 ## Setup
 
-1. Run `px init` in each member project to create `pyproject.toml`.
+1. Ensure each member project has a `pyproject.toml` (for a new repo, running `px init` in each member is the easiest way to scaffold one).
 2. At the repo root, add `[tool.px.workspace]` to `pyproject.toml` and list member project paths.
 3. Run `px sync` from the workspace root or any member:
 
@@ -18,6 +18,11 @@ A workspace lets multiple px projects in one tree share a single dependency univ
    * Builds a shared workspace env under `.px/` at the workspace root.
 
 4. Commit the workspace manifest and `px.workspace.lock`, plus each member’s `pyproject.toml`.
+
+Notes:
+
+* Once a workspace governs a member, per-project `px.lock` files for members are ignored (px uses `px.workspace.lock` instead). `px sync` won’t update member `px.lock`.
+* Workspace state is stored under `.px/` at the workspace root; member-local `.px/` pointers are not used while the workspace governs that member.
 
 ## Command routing inside a workspace
 

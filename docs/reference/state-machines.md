@@ -2,7 +2,7 @@
 
 Projects and workspaces share the same shape: Manifest (M/WM), Lock (L/WL), and Env (E/WE). Command contracts are defined as transitions over these state machines.
 
-Storage/materialization details for envs and artifacts live in the [Content Addressable Store](../design/content-addressable-store.md) design note.
+Storage/materialization details for envs and artifacts live in the [Content-Addressable Store](../design/content-addressable-store.md) design note.
 
 ## Project state machine
 

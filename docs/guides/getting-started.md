@@ -56,6 +56,6 @@ These forms are pinned-by-default; floating refs require `--allow-floating` and 
 
 ## Going further
 
-* Multi-project repo? See `docs/guides/workspaces.md`.
-* Global tools? See `docs/guides/tools.md`.
-* Python installations? See `docs/guides/runtimes.md`.
+- Multi-project repo? See [Workspaces](./workspaces.md).
+- Global tools? See [Tools](./tools.md).
+- Python installations? See [Runtimes](./runtimes.md).

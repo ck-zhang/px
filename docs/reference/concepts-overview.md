@@ -8,9 +8,9 @@ px is the **front door for Python**. It owns **projects**, **tools**, and **runt
 * **Workspace** – a set of related px projects in one tree that share a single dependency universe (one lock, one env) for development.
 * **Tool** – a named Python CLI installed into its own isolated, CAS-backed environment, runnable from anywhere.
 * **Runtime** – a Python interpreter (e.g. 3.10, 3.11) that px knows about and can assign to projects, tools, and workspaces.
-* **Sandbox** – optional containerized layer derived from `[tool.px.sandbox]` + an env profile; adds curated system capabilities on top of px envs for `px run --sandbox`, `px test --sandbox`, and `px pack image`.
+* **Sandbox** – optional containerized layer derived from `[tool.px.sandbox]` + an env profile; adds curated system capabilities on top of px envs for `px run --sandbox`, `px test --sandbox`, `px pack image`, and `px pack app`.
 
-Everything else – envs, lockfiles, caches – are implementation details.
+Everything else—env directories, caches, and CAS internals—is an implementation detail. Lockfiles are user-facing artifacts, but you shouldn’t need to read them; use `px status`, `px explain`, and `px why` instead.
 Inline `px`-annotated scripts are treated internally as tiny, cached px projects backed by the CAS; you don't need to think about them as a new noun.
 
 `px explain` is **execution introspection**: it prints what px *would* execute (runtime selection, profile/source, engine path like `cas_native` vs `materialized_env`, argv/workdir/sys.path) without doing repairs or running the target. Use it when you suspect “wrong Python”, “wrong entrypoint”, or an unexpected CAS-native fallback.
@@ -44,9 +44,9 @@ Tools are isolated from projects and from each other. Upgrading Python or changi
 ## Design principles (at a glance)
 
 * **Two parallel state machines, same shape** – projects and workspaces each have Manifest/Lock/Env artifacts and state machines; commands are transitions over these machines.
-* **Content-addressable store** – artifacts and env materialization rely on a digest-keyed store; see [Content Addressable Store](../design/content-addressable-store.md) for layout and invariants.
+* **Content-addressable store** – artifacts and env materialization rely on a digest-keyed store; see [Content-Addressable Store](../design/content-addressable-store.md) for layout and invariants.
 * **Determinism** – given the same inputs, px chooses the same runtimes, lockfiles, envs, and command resolution paths.
 * **Sandbox as a derived layer** – sandbox images are derived from env profiles plus a small manifest; they never mutate project/workspace state and stay optional for workflows that need system packages or deployable images.
 * **Smooth UX, explicit mutation** – mutating operations are explicit (`init`, `add`, `remove`, `sync`, `update`, `tool install/upgrade/remove`); reader commands never change manifests or lockfiles.
 
-See `docs/design/determinism-and-ci.md` for deeper rationale and CI rules, and `docs/design/non-goals.md` for boundaries.
+See [Determinism and CI](../design/determinism-and-ci.md) for deeper rationale and CI rules, and [Non-goals](../design/non-goals.md) for boundaries.

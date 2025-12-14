@@ -1,6 +1,8 @@
-## 14. Sandbox (SBX)
+# 14. Sandbox (SBX)
 
-### 14.1 Goal & scope
+> Note: This design note uses section numbering (14.x) so cross-references stay stable across edits.
+
+## 14.1 Goal & scope
 
 Sandboxing adds a second deterministic layer on top of px envs:
 
@@ -47,7 +49,7 @@ Invariants:
 
 ---
 
-### 14.2 Sandbox nouns
+## 14.2 Sandbox nouns
 
 Sandbox introduces a small number of new nouns:
 
@@ -109,7 +111,7 @@ Sandbox consumes `profile_oid` as an input; it never changes locks or envs. `.px
 
 ---
 
-### 14.3 Identity & determinism
+## 14.3 Identity & determinism
 
 Sandbox identity is defined to make sandbox behavior reproducible across machines.
 
@@ -169,7 +171,7 @@ Properties:
 
 ---
 
-### 14.4 Sandbox bases (SB)
+## 14.4 Sandbox bases (SB)
 
 px ships a curated set of **sandbox bases**:
 
@@ -213,7 +215,7 @@ px ships a curated set of **sandbox bases**:
 
 ---
 
-### 14.5 Capabilities (SC)
+## 14.5 Capabilities (SC)
 
 Capabilities abstract system‑level requirements away from distro package names.
 
@@ -253,7 +255,7 @@ sandbox model.
 
 ---
 
-### 14.6 Sandbox manifest (SM) & configuration
+## 14.6 Sandbox manifest (SM) & configuration
 
 Per project/workspace, `SM` is derived from `pyproject.toml`:
 
@@ -301,7 +303,7 @@ capabilities_effective :=
 
 ---
 
-### 14.7 Capability inference
+## 14.7 Capability inference
 
 Inference is best‑effort and may be disabled (`auto = false`). It must be deterministic for a given px version, base, and profile.
 
@@ -309,7 +311,7 @@ Inference is **pure**: it affects only the sandbox build; px never writes inferr
 
 Inference has three layers, applied in order:
 
-#### 14.7.1 Lock‑based mapping
+### 14.7.1 Lock‑based mapping
 
 Given a lockfile (L/WL) and `profile_oid`:
 
@@ -319,7 +321,7 @@ Given a lockfile (L/WL) and `profile_oid`:
 
 Mappings live in px code and are versioned with `sbx_version`.
 
-#### 14.7.2 CAS `.so` inspection
+### 14.7.2 CAS `.so` inspection
 
 Given a profile and its `pkg-build` objects:
 
@@ -341,7 +343,7 @@ This pass runs:
 * Once per `pkg-build` object, cached by `pkg-build` oid.
 * Inside the sandbox base OS environment or a neutral analyzer env, but never uses the host OS.
 
-#### 14.7.3 Error‑driven inference
+### 14.7.3 Error‑driven inference
 
 When `px run --sandbox`, `px test --sandbox`, or `px pack image` fails with known patterns:
 
@@ -358,13 +360,12 @@ px maps these patterns to capabilities and may:
 
 * Offer a fix suggestion:
 
-  ```text
-  PX9xx  Missing Postgres client libraries in sandbox base.
+	  ```text
+	  PX9xx  Missing Postgres client libraries in sandbox base.
 
-  Fix:
-    • Run: px sandbox add postgres
-    • Or set [tool.px.sandbox.capabilities].postgres = true
-  ```
+	  Fix:
+	    • Set [tool.px.sandbox.capabilities].postgres = true
+	  ```
 
 * Optionally (controlled by a flag) auto‑add the capability when `auto = true`.
 
@@ -377,9 +378,9 @@ Frozen/CI (`--frozen` / `CI=1`) behavior:
 
 ---
 
-### 14.8 Sandbox lifecycle & storage
+## 14.8 Sandbox lifecycle & storage
 
-Sandbox images are treated as **deriveable artifacts** like envs.
+Sandbox images are treated as **derivable artifacts** like envs.
 
 Structure under a sandbox store root (e.g. `~/.px/sandbox/`):
 
@@ -435,7 +436,7 @@ Sandbox store invariants:
 
 ---
 
-### 14.9 Sandbox execution semantics (`px run --sandbox`, `px test --sandbox`)
+## 14.9 Sandbox execution semantics (`px run --sandbox`, `px test --sandbox`)
 
 Sandbox execution wraps the existing env execution model.
 
@@ -568,7 +569,7 @@ Sandbox execution wraps the existing env execution model.
 
 ---
 
-### 14.10 Pack semantics (`px pack image`, `px pack app`)
+## 14.10 Pack semantics (`px pack image`, `px pack app`)
 
 Packing freezes an SD and a snapshot of the app code into a deployable artifact.
 
@@ -579,7 +580,7 @@ Two artifact forms are supported:
 
 Both reuse the same sandbox definition, sandbox image pipeline, and app code snapshot behavior.
 
-#### 14.10.1 Pack image (`px pack image`)
+### 14.10.1 Pack image (`px pack image`)
 
 `px pack image` freezes an SD into a named, deployable OCI image.
 
@@ -636,7 +637,7 @@ Both reuse the same sandbox definition, sandbox image pipeline, and app code sna
    * `px pack image` **never** mutates project/workspace manifests or locks.
    * SI and registry state are mutable; GC and retention policies are implementation details.
 
-#### 14.10.2 Pack app (`px pack app`) – portable `.pxapp` bundles
+### 14.10.2 Pack app (`px pack app`) – portable `.pxapp` bundles
 
 `px pack app` produces a **single‑file portable bundle** encoding the same sandboxed app as `px pack image`, but in a `.pxapp` format optimized for distribution and `px run`.
 
@@ -710,7 +711,7 @@ Both reuse the same sandbox definition, sandbox image pipeline, and app code sna
 
 ---
 
-### 14.11 Integration with project & workspace state machines
+## 14.11 Integration with project & workspace state machines
 
 Sandbox is layered strictly **on top** of existing state machines:
 
@@ -752,7 +753,7 @@ Introducing `.pxapp` therefore does not add new state‑machine surfaces; it reu
 
 ---
 
-### 14.12 Error model & observability
+## 14.12 Error model & observability
 
 Sandbox introduces a dedicated error family, e.g.:
 
@@ -786,7 +787,7 @@ Sandbox introduces a dedicated error family, e.g.:
 
   * **Fix**:
 
-    * `• Run 'px sandbox add postgres' or set [tool.px.sandbox.capabilities].postgres = true.`
+    * `• Set [tool.px.sandbox.capabilities].postgres = true.`
     * `• Re-run 'px run --sandbox', 'px pack image', or 'px pack app'.`
     * `• If running a .pxapp, verify the bundle was built with the needed capability and recreate if not.`
 
@@ -823,14 +824,11 @@ Observability:
   * pack actions (`px pack image`, `px pack app`) including app snapshot roots and bundle/image outputs,
   * `.pxapp` execution details (which `sbx_id` and entrypoint were used).
 
-* Optional command `px sandbox explain`:
-
-  * Prints the effective sandbox configuration (base, capabilities, sources of each capability: static map, CAS, explicit).
-  * May include, when relevant, information about which `sbx_id` and capabilities a given `.pxapp` depends on.
+* Future UX: a dedicated “sandbox explain” mode should print the effective sandbox configuration (base, capabilities, `sbx_id`, and why each capability was selected), and may include which `sbx_id`/capabilities a given `.pxapp` depends on.
 
 ---
 
-### 14.13 Packaging & portability: images vs `.pxapp` bundles
+## 14.13 Packaging & portability: images vs `.pxapp` bundles
 
 Sandbox supports two complementary distribution mechanisms for sandboxed apps:
 
