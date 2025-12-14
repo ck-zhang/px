@@ -15,7 +15,7 @@ use crate::{
     ExecutionOutcome, InstallUserError, ManifestSnapshot, ProjectStatusPayload, RuntimeRole,
     RuntimeSource, RuntimeStatus, StatusContext, StatusContextKind, StatusPayload,
 };
-use px_domain::{
+use px_domain::api::{
     discover_project_root, discover_workspace_root, load_lockfile_optional,
     missing_project_guidance, MissingProjectGuidance, ProjectStateKind,
 };

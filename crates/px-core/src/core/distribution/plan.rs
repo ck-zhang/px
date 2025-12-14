@@ -230,7 +230,7 @@ mod tests {
             site_bin: None,
             pep582_bin: Vec::new(),
             pyc_cache_prefix: None,
-            px_options: px_domain::PxOptions::default(),
+            px_options: px_domain::api::PxOptions::default(),
         };
 
         let rel = PathBuf::from("custom/dist");

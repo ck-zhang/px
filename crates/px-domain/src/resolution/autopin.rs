@@ -59,7 +59,8 @@ pub fn plan_autopin(
     resolver_snapshot.dependencies.clone_from(&resolver_specs);
     resolver_snapshot.dependency_groups.clear();
     resolver_snapshot.declared_dependency_groups.clear();
-    resolver_snapshot.dependency_group_source = crate::DependencyGroupSource::None;
+    resolver_snapshot.dependency_group_source =
+        crate::project::manifest::DependencyGroupSource::None;
     resolver_snapshot.group_dependencies.clear();
     resolver_snapshot.requirements = resolver_snapshot.dependencies.clone();
     let resolved_pin_specs = resolve_pins(&resolver_snapshot, &resolver_specs)?;

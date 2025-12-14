@@ -465,8 +465,8 @@ impl LockDiffReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::{DependencyGroupSource, ProjectSnapshot};
     use crate::lockfile::types::{LockSnapshot, LOCK_MODE_PINNED, LOCK_VERSION};
-    use crate::{DependencyGroupSource, ProjectSnapshot};
 
     #[test]
     fn drift_detects_missing_dependency_group_entries() {

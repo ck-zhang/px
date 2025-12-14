@@ -4,7 +4,9 @@ use crate::{
     compute_lock_hash, ensure_env_matches_lock, load_project_state, marker_env_for_snapshot,
     CommandContext, ExecutionOutcome, InstallUserError, ManifestSnapshot,
 };
-use px_domain::{detect_lock_drift, load_lockfile_optional, verify_locked_artifacts, ProjectStateReport};
+use px_domain::api::{
+    detect_lock_drift, load_lockfile_optional, verify_locked_artifacts, ProjectStateReport,
+};
 use serde_json::json;
 
 use super::MutationCommand;
@@ -113,8 +115,9 @@ pub(crate) fn ensure_mutation_allowed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CommandContext, GlobalOptions, SystemEffects, PX_VERSION};
-    use px_domain::{DependencyGroupSource, ProjectStateReport};
+    use crate::api::{GlobalOptions, SystemEffects};
+    use crate::{CommandContext, PX_VERSION};
+    use px_domain::api::{DependencyGroupSource, ProjectStateReport};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -136,7 +139,7 @@ mod tests {
             group_dependencies: vec![],
             requirements: vec![],
             python_override: None,
-            px_options: px_domain::PxOptions::default(),
+            px_options: px_domain::api::PxOptions::default(),
             manifest_fingerprint: "mf".into(),
         };
         let state = ProjectStateReport::new(
@@ -173,7 +176,7 @@ mod tests {
             group_dependencies: vec![],
             requirements: vec![],
             python_override: None,
-            px_options: px_domain::PxOptions::default(),
+            px_options: px_domain::api::PxOptions::default(),
             manifest_fingerprint: "mf".into(),
         };
         let state = ProjectStateReport::new(
@@ -210,7 +213,7 @@ mod tests {
             group_dependencies: vec![],
             requirements: vec![],
             python_override: None,
-            px_options: px_domain::PxOptions::default(),
+            px_options: px_domain::api::PxOptions::default(),
             manifest_fingerprint: "mf".into(),
         };
         let state = ProjectStateReport::new(
@@ -245,7 +248,7 @@ mod tests {
             group_dependencies: vec![],
             requirements: vec![],
             python_override: None,
-            px_options: px_domain::PxOptions::default(),
+            px_options: px_domain::api::PxOptions::default(),
             manifest_fingerprint: "mf".into(),
         };
         let state = ProjectStateReport::new(
@@ -280,7 +283,7 @@ mod tests {
             group_dependencies: vec![],
             requirements: vec!["demo==1.0".into()],
             python_override: None,
-            px_options: px_domain::PxOptions::default(),
+            px_options: px_domain::api::PxOptions::default(),
             manifest_fingerprint: "mf".into(),
         };
         let state = ProjectStateReport::new(
@@ -320,8 +323,8 @@ dependencies = []
 [tool.px]
 "#,
         )?;
-        let snapshot = px_domain::ProjectSnapshot::read_from(root)?;
-        let lock_contents = px_domain::render_lockfile(&snapshot, &[], PX_VERSION)?;
+        let snapshot = px_domain::api::ProjectSnapshot::read_from(root)?;
+        let lock_contents = px_domain::api::render_lockfile(&snapshot, &[], PX_VERSION)?;
         let mut doc: DocumentMut = lock_contents.parse().expect("parse lock");
         if let Some(meta) = doc
             .get_mut("metadata")
@@ -338,12 +341,15 @@ dependencies = []
             json: false,
         };
         let ctx = CommandContext::new(&globals, Arc::new(SystemEffects::new()))?;
-        let snapshot = px_domain::ProjectSnapshot::read_from(root)?;
+        let snapshot = px_domain::api::ProjectSnapshot::read_from(root)?;
 
         let report = evaluate_project_state(&ctx, &snapshot)?;
 
         assert!(!report.manifest_clean);
-        assert_eq!(report.canonical, px_domain::ProjectStateKind::NeedsLock);
+        assert_eq!(
+            report.canonical,
+            px_domain::api::ProjectStateKind::NeedsLock
+        );
         Ok(())
     }
 }

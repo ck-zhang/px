@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result as AnyhowResult;
 use serde_json::json;
@@ -8,11 +8,11 @@ use toml_edit::DocumentMut;
 use super::execution_plan;
 use super::run::{
     git_repo_root, install_error_outcome, materialize_ref_tree, parse_run_reference_target,
-    validate_lock_for_ref,
+    validate_lock_for_ref, RunRequest,
 };
 use crate::tooling::run_target_required_outcome;
-use crate::{marker_env_for_snapshot, CommandContext, ExecutionOutcome, RunRequest};
-use px_domain::ProjectSnapshot;
+use crate::{marker_env_for_snapshot, CommandContext, ExecutionOutcome};
+use px_domain::api::ProjectSnapshot;
 
 fn sh_quote(raw: &str) -> String {
     if raw.is_empty() {
@@ -32,7 +32,9 @@ fn sh_quote(raw: &str) -> String {
 fn render_plan_human(plan: &execution_plan::ExecutionPlan, verbose: u8) -> String {
     let mut lines = Vec::new();
     match &plan.provenance.source {
-        execution_plan::SourceProvenance::WorkingTree => lines.push("source: working_tree".to_string()),
+        execution_plan::SourceProvenance::WorkingTree => {
+            lines.push("source: working_tree".to_string())
+        }
         execution_plan::SourceProvenance::GitRef {
             git_ref,
             manifest_repo_path,
@@ -71,9 +73,15 @@ fn render_plan_human(plan: &execution_plan::ExecutionPlan, verbose: u8) -> Strin
     lines.push(format!("engine: {engine}"));
     if let Some(version) = plan.runtime.python_version.as_deref() {
         if let Some(abi) = plan.runtime.python_abi.as_deref() {
-            lines.push(format!("runtime: {} (version={version} abi={abi})", plan.runtime.executable));
+            lines.push(format!(
+                "runtime: {} (version={version} abi={abi})",
+                plan.runtime.executable
+            ));
         } else {
-            lines.push(format!("runtime: {} (version={version})", plan.runtime.executable));
+            lines.push(format!(
+                "runtime: {} (version={version})",
+                plan.runtime.executable
+            ));
         }
     } else {
         lines.push(format!("runtime: {}", plan.runtime.executable));
@@ -81,7 +89,12 @@ fn render_plan_human(plan: &execution_plan::ExecutionPlan, verbose: u8) -> Strin
     if let Some(profile) = plan.lock_profile.profile_oid.as_deref() {
         lines.push(format!("profile_oid: {profile}"));
     }
-    if let Some(lock_id) = plan.lock_profile.l_id.as_deref().or(plan.lock_profile.wl_id.as_deref()) {
+    if let Some(lock_id) = plan
+        .lock_profile
+        .l_id
+        .as_deref()
+        .or(plan.lock_profile.wl_id.as_deref())
+    {
         lines.push(format!("lock_id: {lock_id}"));
     }
     lines.push(format!("workdir: {}", plan.working_dir));
@@ -152,12 +165,18 @@ fn detect_script_under_root(root: &Path, cwd: &Path, target: &str) -> Option<Pat
         .filter(|path| path.starts_with(root))
 }
 
-fn runtime_plan_for_executable(executable: &str, python_version: Option<String>) -> execution_plan::RuntimePlan {
+fn runtime_plan_for_executable(
+    executable: &str,
+    python_version: Option<String>,
+) -> execution_plan::RuntimePlan {
     let tags = crate::python_sys::detect_interpreter_tags(executable).ok();
     let python_abi = tags
         .as_ref()
         .and_then(|t| t.abi.first().cloned())
-        .or_else(|| tags.as_ref().and_then(|t| t.supported.first().map(|t| t.abi.clone())));
+        .or_else(|| {
+            tags.as_ref()
+                .and_then(|t| t.supported.first().map(|t| t.abi.clone()))
+        });
     execution_plan::RuntimePlan {
         python_version,
         python_abi,
@@ -255,9 +274,7 @@ fn plan_run_by_reference(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string());
-    let commit = ref_value
-        .as_deref()
-        .and_then(normalize_pinned_commit);
+    let commit = ref_value.as_deref().and_then(normalize_pinned_commit);
     let git_ref = match (&commit, &ref_value) {
         (Some(_), _) => None,
         (None, Some(value)) => Some(value.clone()),
@@ -318,16 +335,14 @@ fn plan_run_by_reference(
     }
 
     let store = crate::store::cas::global_store();
-    let repo_snapshot_oid = commit
-        .as_deref()
-        .and_then(|commit| {
-            let spec = crate::RepoSnapshotSpec {
-                locator: reference.locator.clone(),
-                commit: commit.to_string(),
-                subdir: None,
-            };
-            store.lookup_repo_snapshot_oid(&spec).ok().flatten()
-        });
+    let repo_snapshot_oid = commit.as_deref().and_then(|commit| {
+        let spec = crate::RepoSnapshotSpec {
+            locator: reference.locator.clone(),
+            commit: commit.to_string(),
+            subdir: None,
+        };
+        store.lookup_repo_snapshot_oid(&spec).ok().flatten()
+    });
 
     let runtime_exe = ctx
         .python_runtime()
@@ -426,16 +441,18 @@ fn plan_run_at_ref(
                 )
             })?;
             let workspace_root_at_ref = archive_root.join(workspace_rel);
-            let workspace_at_ref = crate::workspace::load_workspace_snapshot(&workspace_root_at_ref)
-                .map_err(|err| {
-                    ExecutionOutcome::failure(
-                        "failed to load workspace manifest from git ref",
-                        json!({
-                            "git_ref": git_ref,
-                            "error": err.to_string(),
-                        }),
-                    )
-                })?;
+            let workspace_at_ref = crate::workspace::load_workspace_snapshot(
+                &workspace_root_at_ref,
+            )
+            .map_err(|err| {
+                ExecutionOutcome::failure(
+                    "failed to load workspace manifest from git ref",
+                    json!({
+                        "git_ref": git_ref,
+                        "error": err.to_string(),
+                    }),
+                )
+            })?;
             let member_rel = member_root
                 .strip_prefix(&workspace_root)
                 .unwrap_or(&member_root)
@@ -469,7 +486,7 @@ fn plan_run_at_ref(
                     }),
                 )
             })?;
-            let lock = px_domain::parse_lockfile(&lock_contents).map_err(|err| {
+            let lock = px_domain::api::parse_lockfile(&lock_contents).map_err(|err| {
                 ExecutionOutcome::failure(
                     "failed to parse workspace lockfile from git ref",
                     json!({
@@ -490,12 +507,15 @@ fn plan_run_at_ref(
                 &lock_rel,
                 marker_env.as_ref(),
             )?;
-            let _ = crate::prepare_project_runtime(&snapshot)
-                .map_err(|err| install_error_outcome(err, "python runtime unavailable for git-ref execution"))?;
-            let runtime = crate::detect_runtime_metadata(ctx, &snapshot)
-                .map_err(|err| install_error_outcome(err, "python runtime unavailable for git-ref execution"))?;
+            let _ = crate::prepare_project_runtime(&snapshot).map_err(|err| {
+                install_error_outcome(err, "python runtime unavailable for git-ref execution")
+            })?;
+            let runtime = crate::detect_runtime_metadata(ctx, &snapshot).map_err(|err| {
+                install_error_outcome(err, "python runtime unavailable for git-ref execution")
+            })?;
 
-            let runtime_plan = runtime_plan_for_executable(&runtime.path, Some(runtime.version.clone()));
+            let runtime_plan =
+                runtime_plan_for_executable(&runtime.path, Some(runtime.version.clone()));
             let workdir = map_workdir(Some(&member_root), &workspace_root_at_ref.join(&member_rel));
             let target_resolution = if let Some(script) =
                 detect_script_under_root(&workspace_root_at_ref.join(&member_rel), &workdir, target)
@@ -515,7 +535,9 @@ fn plan_run_at_ref(
                 plan_default_target_resolution(&runtime.path, target, &request.args)
             };
 
-            let manifest_path = workspace_root_at_ref.join(&member_rel).join("pyproject.toml");
+            let manifest_path = workspace_root_at_ref
+                .join(&member_rel)
+                .join("pyproject.toml");
             let workspace_lock = lock.workspace.as_ref();
             let sandbox_plan = execution_plan::sandbox_plan(
                 &manifest_path,
@@ -532,7 +554,10 @@ fn plan_run_at_ref(
                 context: execution_plan::PlanContext::Workspace {
                     workspace_root: workspace_root.display().to_string(),
                     workspace_manifest: workspace_root.join("pyproject.toml").display().to_string(),
-                    workspace_lock_path: workspace_root.join("px.workspace.lock").display().to_string(),
+                    workspace_lock_path: workspace_root
+                        .join("px.workspace.lock")
+                        .display()
+                        .to_string(),
                     member_root: member_root.display().to_string(),
                     member_manifest: member_root.join("pyproject.toml").display().to_string(),
                 },
@@ -567,7 +592,10 @@ fn plan_run_at_ref(
                     source: execution_plan::SourceProvenance::GitRef {
                         git_ref: git_ref.to_string(),
                         repo_root: repo_root.display().to_string(),
-                        manifest_repo_path: workspace_rel.join("pyproject.toml").display().to_string(),
+                        manifest_repo_path: workspace_rel
+                            .join("pyproject.toml")
+                            .display()
+                            .to_string(),
                         lock_repo_path: lock_rel.display().to_string(),
                     },
                 },
@@ -609,16 +637,17 @@ fn plan_run_at_ref(
                     }),
                 )
             })?;
-            let manifest_doc: DocumentMut = manifest_contents.parse::<DocumentMut>().map_err(|err| {
-                ExecutionOutcome::failure(
-                    "failed to parse pyproject.toml from git ref",
-                    json!({
-                        "git_ref": git_ref,
-                        "path": manifest_rel.display().to_string(),
-                        "error": err.to_string(),
-                    }),
-                )
-            })?;
+            let manifest_doc: DocumentMut =
+                manifest_contents.parse::<DocumentMut>().map_err(|err| {
+                    ExecutionOutcome::failure(
+                        "failed to parse pyproject.toml from git ref",
+                        json!({
+                            "git_ref": git_ref,
+                            "path": manifest_rel.display().to_string(),
+                            "error": err.to_string(),
+                        }),
+                    )
+                })?;
             if !manifest_has_px(&manifest_doc) {
                 return Err(ExecutionOutcome::user_error(
                     "px project not found at the requested git ref",
@@ -629,21 +658,18 @@ fn plan_run_at_ref(
                     }),
                 ));
             }
-            let snapshot = ProjectSnapshot::from_document(
-                &project_root_at_ref,
-                &manifest_path,
-                manifest_doc,
-            )
-            .map_err(|err| {
-                ExecutionOutcome::failure(
-                    "failed to load pyproject.toml from git ref",
-                    json!({
-                        "git_ref": git_ref,
-                        "path": manifest_rel.display().to_string(),
-                        "error": err.to_string(),
-                    }),
-                )
-            })?;
+            let snapshot =
+                ProjectSnapshot::from_document(&project_root_at_ref, &manifest_path, manifest_doc)
+                    .map_err(|err| {
+                        ExecutionOutcome::failure(
+                            "failed to load pyproject.toml from git ref",
+                            json!({
+                                "git_ref": git_ref,
+                                "path": manifest_rel.display().to_string(),
+                                "error": err.to_string(),
+                            }),
+                        )
+                    })?;
             let lock_rel = rel_root.join("px.lock");
             let lock_path = project_root_at_ref.join("px.lock");
             let lock_contents = std::fs::read_to_string(&lock_path).map_err(|err| {
@@ -657,7 +683,7 @@ fn plan_run_at_ref(
                     }),
                 )
             })?;
-            let lock = px_domain::parse_lockfile(&lock_contents).map_err(|err| {
+            let lock = px_domain::api::parse_lockfile(&lock_contents).map_err(|err| {
                 ExecutionOutcome::failure(
                     "failed to parse px.lock from git ref",
                     json!({
@@ -677,13 +703,18 @@ fn plan_run_at_ref(
                 &lock_rel,
                 marker_env.as_ref(),
             )?;
-            let _ = crate::prepare_project_runtime(&snapshot)
-                .map_err(|err| install_error_outcome(err, "python runtime unavailable for git-ref execution"))?;
-            let runtime = crate::detect_runtime_metadata(ctx, &snapshot)
-                .map_err(|err| install_error_outcome(err, "python runtime unavailable for git-ref execution"))?;
-            let runtime_plan = runtime_plan_for_executable(&runtime.path, Some(runtime.version.clone()));
+            let _ = crate::prepare_project_runtime(&snapshot).map_err(|err| {
+                install_error_outcome(err, "python runtime unavailable for git-ref execution")
+            })?;
+            let runtime = crate::detect_runtime_metadata(ctx, &snapshot).map_err(|err| {
+                install_error_outcome(err, "python runtime unavailable for git-ref execution")
+            })?;
+            let runtime_plan =
+                runtime_plan_for_executable(&runtime.path, Some(runtime.version.clone()));
             let workdir_fs = map_workdir(Some(&project_root), &project_root_at_ref);
-            let workdir_rel = workdir_fs.strip_prefix(&archive_root).unwrap_or(&workdir_fs);
+            let workdir_rel = workdir_fs
+                .strip_prefix(&archive_root)
+                .unwrap_or(&workdir_fs);
             let target_resolution = if let Some(script) =
                 detect_script_under_root(&project_root_at_ref, &workdir_fs, target)
             {
@@ -810,10 +841,7 @@ pub fn explain_run(ctx: &CommandContext, request: &RunRequest) -> AnyhowResult<E
     Ok(ExecutionOutcome::success(message, details))
 }
 
-pub fn explain_entrypoint(
-    ctx: &CommandContext,
-    name: &str,
-) -> AnyhowResult<ExecutionOutcome> {
+pub fn explain_entrypoint(ctx: &CommandContext, name: &str) -> AnyhowResult<ExecutionOutcome> {
     let name = name.trim();
     if name.is_empty() {
         return Ok(ExecutionOutcome::user_error(
@@ -836,7 +864,8 @@ pub fn explain_entrypoint(
             "entrypoint": name,
         });
         if plan.would_repair_env {
-            details["hint"] = json!("run `px sync` to build the environment before resolving entrypoints");
+            details["hint"] =
+                json!("run `px sync` to build the environment before resolving entrypoints");
         }
         return Ok(ExecutionOutcome::user_error(
             "environment profile is not available",
@@ -1024,10 +1053,7 @@ pub fn explain_entrypoint(
         ));
     }
 
-    let candidate = candidates
-        .first()
-        .expect("single candidate")
-        .clone();
+    let candidate = candidates.first().expect("single candidate").clone();
     let details = json!({
         "schema_version": 1,
         "entrypoint": name,

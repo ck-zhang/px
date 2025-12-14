@@ -7,7 +7,7 @@ use crate::{
     is_missing_project_error, manifest_snapshot, progress::ProgressReporter, runtime_manager,
     CommandContext, ExecutionOutcome, InstallUserError,
 };
-use px_domain::ManifestEditor;
+use px_domain::api::ManifestEditor;
 
 pub struct PythonListRequest;
 

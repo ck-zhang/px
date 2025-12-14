@@ -13,7 +13,7 @@ use crate::{
     tools::{disable_proxy_env, load_installed_tool, MIN_PYTHON_REQUIREMENT},
     CommandContext, ExecutionOutcome, InstallUserError,
 };
-use px_domain::ProjectSnapshot;
+use px_domain::api::ProjectSnapshot;
 
 #[derive(Clone, Debug)]
 pub struct FmtRequest {

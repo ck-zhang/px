@@ -5,12 +5,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use assert_cmd::cargo::cargo_bin_cmd;
-use px_domain::ProjectSnapshot;
+use px_domain::api::ProjectSnapshot;
 use serde_json::Value;
 
 mod common;
 
-use common::{ensure_test_store_env, find_python, parse_json, reset_test_store_env, test_env_guard};
+use common::{
+    ensure_test_store_env, find_python, parse_json, reset_test_store_env, test_env_guard,
+};
 
 const WHEEL_BUILDER: &str = r#"
 import hashlib
@@ -392,10 +394,7 @@ fn explain_entrypoint_reports_provider_and_target() {
         .assert()
         .success();
     let after = snapshot_paths(&project);
-    assert_eq!(
-        before, after,
-        "px explain entrypoint must not write to CWD"
-    );
+    assert_eq!(before, after, "px explain entrypoint must not write to CWD");
 
     let payload = parse_json(&assert);
     assert_eq!(payload["status"], "ok");
@@ -511,10 +510,7 @@ fn explain_entrypoint_reports_conflicts_deterministically() {
         .assert()
         .failure();
     let after = snapshot_paths(&project);
-    assert_eq!(
-        before, after,
-        "px explain entrypoint must not write to CWD"
-    );
+    assert_eq!(before, after, "px explain entrypoint must not write to CWD");
 
     let payload = parse_json(&assert);
     assert_eq!(payload["status"], "user-error");
@@ -532,4 +528,3 @@ fn explain_entrypoint_reports_conflicts_deterministically() {
         Value::String("bbb_console".to_string())
     );
 }
-

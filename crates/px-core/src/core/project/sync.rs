@@ -10,7 +10,7 @@ use crate::{
 
 use super::evaluate_project_state;
 use crate::state_guard::StateViolation;
-use px_domain::ProjectStateKind;
+use px_domain::api::ProjectStateKind;
 
 #[derive(Clone, Debug)]
 pub struct ProjectSyncRequest {

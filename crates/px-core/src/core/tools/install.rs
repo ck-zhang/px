@@ -14,7 +14,7 @@ use crate::{
     refresh_project_site, resolve_dependencies_with_effects, runtime_manager, CommandContext,
     ExecutionOutcome, InstallOverride, InstallUserError,
 };
-use px_domain::{load_lockfile_optional, merge_resolved_dependencies, ManifestEditor};
+use px_domain::api::{load_lockfile_optional, merge_resolved_dependencies, ManifestEditor};
 
 use super::metadata::{timestamp_string, write_metadata, ToolMetadata, MIN_PYTHON_REQUIREMENT};
 use super::paths::{
@@ -77,7 +77,7 @@ pub fn tool_install(
     editor.write_dependencies(std::slice::from_ref(&spec))?;
     editor.set_tool_python(&runtime_selection.record.version)?;
 
-    let snapshot = px_domain::ProjectSnapshot::read_from(&tool_root)?;
+    let snapshot = px_domain::api::ProjectSnapshot::read_from(&tool_root)?;
     let resolved = match resolve_dependencies_with_effects(ctx.effects(), &snapshot, true) {
         Ok(resolved) => resolved,
         Err(err) => match err.downcast::<InstallUserError>() {
@@ -216,7 +216,7 @@ fn scaffold_tool_pyproject(root: &Path, name: &str) -> Result<()> {
 
 fn finalize_tool_environment(
     root: &Path,
-    snapshot: &px_domain::ProjectSnapshot,
+    snapshot: &px_domain::api::ProjectSnapshot,
     runtime: &runtime_manager::RuntimeSelection,
 ) -> Result<PathBuf> {
     let state_path = root.join(".px").join("state.json");

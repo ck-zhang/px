@@ -1,22 +1,5 @@
-pub mod init;
-pub mod manifest;
-pub mod onboard;
-pub mod snapshot;
-pub mod state;
-
-pub use init::{infer_package_name, sanitize_package_candidate, ProjectInitializer};
-pub use manifest::{
-    canonicalize_package_name, canonicalize_spec, collect_pyproject_packages,
-    collect_requirement_packages, collect_setup_cfg_packages, read_requirements_file,
-    read_setup_cfg_requires, sandbox_config_from_doc, sandbox_config_from_manifest,
-    DependencyGroupSource, ManifestAddReport, ManifestEditor, ManifestRemoveReport,
-    OnboardPackagePlan, PxOptions, SandboxConfig,
-};
-pub use onboard::{
-    prepare_pyproject_plan, resolve_onboard_path, BackupManager, BackupSummary, PyprojectPlan,
-};
-pub use snapshot::{
-    current_project_root, discover_project_root, ensure_pyproject_exists, missing_project_guidance,
-    project_name_from_pyproject, MissingProjectGuidance, ProjectSnapshot,
-};
-pub use state::{canonical_state, ProjectStateKind, ProjectStateReport};
+pub(crate) mod init;
+pub(crate) mod manifest;
+pub(crate) mod onboard;
+pub(crate) mod snapshot;
+pub(crate) mod state;

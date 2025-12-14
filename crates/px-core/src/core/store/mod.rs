@@ -23,8 +23,8 @@ use sdist::BuildMethod;
 
 #[allow(unused_imports)]
 pub use cache::{
-    collect_cache_walk, compute_cache_usage, prune_cache_entries, resolve_cache_store_path,
-    ensure_pyc_cache_prefix, pyc_cache_prefix, CacheEntry, CacheLocation, CachePruneError,
+    collect_cache_walk, compute_cache_usage, ensure_pyc_cache_prefix, prune_cache_entries,
+    pyc_cache_prefix, resolve_cache_store_path, CacheEntry, CacheLocation, CachePruneError,
     CachePruneResult, CacheUsage, CacheWalk,
 };
 pub use prefetch::prefetch_artifacts;

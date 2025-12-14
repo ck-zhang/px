@@ -735,7 +735,7 @@ fn normalized_from_graph(graph: &LockGraphSnapshot) -> (Vec<String>, Vec<LockedD
     let mut resolved = Vec::new();
     for node in nodes {
         let marker = node.marker.as_deref().filter(|m| !m.is_empty());
-        let spec = super::format_specifier(&node.name, &node.extras, &node.version, marker);
+        let spec = super::spec::format_specifier(&node.name, &node.extras, &node.version, marker);
         dependencies.push(spec.clone());
         let artifact = graph
             .artifacts

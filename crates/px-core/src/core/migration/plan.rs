@@ -6,7 +6,7 @@ use anyhow::Result;
 use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement, StringVersion};
 use toml_edit::{DocumentMut, Item};
 
-use px_domain::{OnboardPackagePlan, PyprojectPlan};
+use px_domain::api::{OnboardPackagePlan, PyprojectPlan};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PackageConflict {

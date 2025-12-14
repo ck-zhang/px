@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use anyhow::Result;
 use pep508_rs::MarkerEnvironment;
-use px_domain::current_project_root;
+use px_domain::api::current_project_root;
 
 use crate::config::{Config, EnvSnapshot, GlobalOptions};
 use crate::effects::{self, Effects, SharedEffects};

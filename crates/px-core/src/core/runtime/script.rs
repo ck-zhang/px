@@ -10,8 +10,8 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 use crate::core::project::evaluate_project_state;
 use crate::core::runtime::facade::{
     attach_autosync_details, auto_sync_environment, build_pythonpath,
-    ensure_environment_with_guard, manifest_snapshot_at, prepare_project_runtime,
-    load_project_state, select_python_from_site, EnvironmentIssue, EnvironmentSyncReport,
+    ensure_environment_with_guard, load_project_state, manifest_snapshot_at,
+    prepare_project_runtime, select_python_from_site, EnvironmentIssue, EnvironmentSyncReport,
     ManifestSnapshot, PythonContext,
 };
 use crate::core::runtime::run::{
@@ -20,8 +20,7 @@ use crate::core::runtime::run::{
 };
 use crate::core::runtime::EnvGuard;
 use crate::{CommandContext, ExecutionOutcome, InstallUserError};
-use px_domain::project::manifest::manifest_fingerprint;
-use px_domain::{ProjectStateKind, ProjectStateReport, PxOptions};
+use px_domain::api::{manifest_fingerprint, ProjectStateKind, ProjectStateReport, PxOptions};
 
 const DEFAULT_INLINE_REQUIRES_PYTHON: &str = ">=3.8";
 

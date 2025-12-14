@@ -363,10 +363,7 @@ fn resolve_windows_cache_base() -> Result<(PathBuf, &'static str)> {
     }
 
     if let Some(home) = env::var_os("USERPROFILE") {
-        let path = PathBuf::from(home)
-            .join("AppData")
-            .join("Local")
-            .join("px");
+        let path = PathBuf::from(home).join("AppData").join("Local").join("px");
         return Ok((path, "USERPROFILE/AppData/Local/px"));
     }
 
@@ -430,7 +427,10 @@ mod tests {
             },
         )?;
 
-        assert!(!pyc_root.join("a").exists(), "expected oldest cache removed");
+        assert!(
+            !pyc_root.join("a").exists(),
+            "expected oldest cache removed"
+        );
         assert!(pyc_root.join("b").exists(), "expected newer cache retained");
         assert!(
             pyc_root.join("c").exists(),
@@ -457,7 +457,10 @@ mod tests {
         )?;
 
         assert!(!pyc_root.join("old").exists(), "expected old cache removed");
-        assert!(pyc_root.join("new").exists(), "expected recent cache retained");
+        assert!(
+            pyc_root.join("new").exists(),
+            "expected recent cache retained"
+        );
         Ok(())
     }
 

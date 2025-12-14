@@ -7,7 +7,7 @@ use std::{thread, time::Duration};
 use anyhow::{anyhow, Context, Result};
 use pep440_rs::{Operator, VersionSpecifiers};
 use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement, VersionOrUrl};
-use px_domain::{
+use px_domain::api::{
     canonical_extras, canonicalize_package_name, format_specifier, marker_applies,
     normalize_dist_name, LockedArtifact, PinSpec, ResolvedDependency,
 };

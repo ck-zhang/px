@@ -5,18 +5,20 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::json;
 
+use super::cas_env::{project_env_owner_id, workspace_env_owner_id};
 use crate::core::config::state_guard;
 use crate::core::sandbox;
 use crate::core::store::cas::{global_store, MATERIALIZED_PKG_BUILDS_DIR};
 use crate::python_sys::detect_interpreter_tags;
+use crate::tooling::missing_pyproject_outcome;
 use crate::workspace::{discover_workspace_scope, WorkspaceScope};
 use crate::{
     detect_runtime_metadata, load_project_state, manifest_snapshot, prepare_project_runtime,
     CommandContext, ExecutionOutcome,
 };
-use super::cas_env::{project_env_owner_id, workspace_env_owner_id};
-use crate::tooling::missing_pyproject_outcome;
-use px_domain::{load_lockfile_optional, sandbox_config_from_manifest, verify_locked_artifacts};
+use px_domain::api::{
+    load_lockfile_optional, sandbox_config_from_manifest, verify_locked_artifacts,
+};
 
 const SYS_PATH_SUMMARY_PREFIX: usize = 5;
 
@@ -87,9 +89,7 @@ pub(crate) enum PlanContext {
         member_manifest: String,
     },
     #[allow(dead_code)]
-    Tool {
-        tool_name: String,
-    },
+    Tool { tool_name: String },
     UrlRun {
         locator: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -286,8 +286,8 @@ fn summarize_sys_path(entries: &[String]) -> SysPathSummary {
 pub(crate) fn sandbox_plan(
     manifest_path: &Path,
     want_sandbox: bool,
-    lock: Option<&px_domain::LockSnapshot>,
-    workspace_lock: Option<&px_domain::WorkspaceLock>,
+    lock: Option<&px_domain::api::LockSnapshot>,
+    workspace_lock: Option<&px_domain::api::WorkspaceLock>,
     profile_oid: Option<&str>,
     site_packages: Option<&Path>,
 ) -> Result<SandboxPlan, ExecutionOutcome> {
@@ -341,7 +341,10 @@ fn runtime_plan_for_executable(
     let python_abi = tags
         .as_ref()
         .and_then(|t| t.abi.first().cloned())
-        .or_else(|| tags.as_ref().and_then(|t| t.supported.first().map(|t| t.abi.clone())));
+        .or_else(|| {
+            tags.as_ref()
+                .and_then(|t| t.supported.first().map(|t| t.abi.clone()))
+        });
     RuntimePlan {
         python_version,
         python_abi,
@@ -417,7 +420,10 @@ fn plan_execution(
                 crate::workspace::StateViolation::MissingLock,
             ));
         }
-        if matches!(state.canonical, crate::workspace::WorkspaceStateKind::NeedsLock) {
+        if matches!(
+            state.canonical,
+            crate::workspace::WorkspaceStateKind::NeedsLock
+        ) {
             return Err(crate::workspace::workspace_violation(
                 command,
                 &workspace,
@@ -457,27 +463,29 @@ fn plan_execution(
         })?;
         let state_file = crate::workspace::load_workspace_state(ctx.fs(), &workspace.config.root)
             .map_err(|err| {
-                ExecutionOutcome::failure(
-                    "workspace state unreadable",
-                    json!({ "error": err.to_string() }),
-                )
-            })?;
-        let lock_for_sandbox = load_lockfile_optional(&workspace.lock_path)
-            .map_err(|err| {
-                ExecutionOutcome::failure(
-                    "failed to load workspace lockfile",
-                    json!({
-                        "lockfile": workspace.lock_path.display().to_string(),
-                        "error": err.to_string(),
-                    }),
-                )
-            })?;
+            ExecutionOutcome::failure(
+                "workspace state unreadable",
+                json!({ "error": err.to_string() }),
+            )
+        })?;
+        let lock_for_sandbox = load_lockfile_optional(&workspace.lock_path).map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to load workspace lockfile",
+                json!({
+                    "lockfile": workspace.lock_path.display().to_string(),
+                    "error": err.to_string(),
+                }),
+            )
+        })?;
         let env_state = state_file.current_env.as_ref();
-        let profile_oid = env_state
-            .and_then(|env| env.profile_oid.clone().or_else(|| Some(env.id.clone())));
+        let profile_oid =
+            env_state.and_then(|env| env.profile_oid.clone().or_else(|| Some(env.id.clone())));
         let python_version = runtime.version.clone();
         let (runtime_exe, site_packages) = if let Some(env) = env_state {
-            (env.python.path.clone(), Some(PathBuf::from(&env.site_packages)))
+            (
+                env.python.path.clone(),
+                Some(PathBuf::from(&env.site_packages)),
+            )
         } else {
             (runtime.path.clone(), None)
         };
@@ -491,17 +499,15 @@ fn plan_execution(
             fallback_reason_code: None,
         };
         if matches!(engine.mode, EngineMode::CasNative) {
-            if let Some(lock) = load_lockfile_optional(&workspace.lock_path)
-                .map_err(|err| {
-                    ExecutionOutcome::failure(
-                        "failed to load workspace lockfile",
-                        json!({
-                            "lockfile": workspace.lock_path.display().to_string(),
-                            "error": err.to_string(),
-                        }),
-                    )
-                })?
-            {
+            if let Some(lock) = load_lockfile_optional(&workspace.lock_path).map_err(|err| {
+                ExecutionOutcome::failure(
+                    "failed to load workspace lockfile",
+                    json!({
+                        "lockfile": workspace.lock_path.display().to_string(),
+                        "error": err.to_string(),
+                    }),
+                )
+            })? {
                 let missing = verify_locked_artifacts(&lock);
                 if !missing.is_empty() {
                     engine.mode = EngineMode::MaterializedEnv;
@@ -543,24 +549,24 @@ fn plan_execution(
                     _ => None,
                 })
         });
-        let runtime_plan = runtime_plan_for_executable(&runtime_exe, Some(python_version), runtime_oid);
+        let runtime_plan =
+            runtime_plan_for_executable(&runtime_exe, Some(python_version), runtime_oid);
 
         let workdir = map_workdir(Some(&member_root), &member_root);
-        let target_resolution = if let Some(script) =
-            detect_script_under_root(&member_root, &workdir, target)
-        {
-            let mut argv = Vec::with_capacity(args.len() + 2);
-            argv.push(runtime_exe.clone());
-            argv.push(script.display().to_string());
-            argv.extend(args.iter().cloned());
-            TargetResolution {
-                kind: TargetKind::File,
-                resolved: script.display().to_string(),
-                argv,
-            }
-        } else {
-            default_target_resolution(&runtime_exe, target, args)
-        };
+        let target_resolution =
+            if let Some(script) = detect_script_under_root(&member_root, &workdir, target) {
+                let mut argv = Vec::with_capacity(args.len() + 2);
+                argv.push(runtime_exe.clone());
+                argv.push(script.display().to_string());
+                argv.extend(args.iter().cloned());
+                TargetResolution {
+                    kind: TargetKind::File,
+                    resolved: script.display().to_string(),
+                    argv,
+                }
+            } else {
+                default_target_resolution(&runtime_exe, target, args)
+            };
 
         let manifest_path = member_root.join("pyproject.toml");
         let workspace_lock = lock_for_sandbox
@@ -607,10 +613,7 @@ fn plan_execution(
             let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             missing_pyproject_outcome(command, &root)
         } else {
-            ExecutionOutcome::failure(
-                "failed to load project manifest",
-                json!({ "error": msg }),
-            )
+            ExecutionOutcome::failure("failed to load project manifest", json!({ "error": msg }))
         }
     })?;
     let state_report = state_guard::state_or_violation(ctx, &snapshot, command)?;
@@ -635,8 +638,8 @@ fn plan_execution(
         )
     })?;
     let env_state = state.current_env.as_ref();
-    let profile_oid = env_state
-        .and_then(|env| env.profile_oid.clone().or_else(|| Some(env.id.clone())));
+    let profile_oid =
+        env_state.and_then(|env| env.profile_oid.clone().or_else(|| Some(env.id.clone())));
     let python_version = runtime.version.clone();
     let runtime_exe = env_state
         .map(|env| env.python.path.clone())
@@ -651,17 +654,15 @@ fn plan_execution(
         fallback_reason_code: None,
     };
     if matches!(engine.mode, EngineMode::CasNative) {
-        if let Some(lock) = load_lockfile_optional(&snapshot.lock_path)
-            .map_err(|err| {
-                ExecutionOutcome::failure(
-                    "failed to load px.lock",
-                    json!({
-                        "lockfile": snapshot.lock_path.display().to_string(),
-                        "error": err.to_string(),
-                    }),
-                )
-            })?
-        {
+        if let Some(lock) = load_lockfile_optional(&snapshot.lock_path).map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to load px.lock",
+                json!({
+                    "lockfile": snapshot.lock_path.display().to_string(),
+                    "error": err.to_string(),
+                }),
+            )
+        })? {
             let missing = verify_locked_artifacts(&lock);
             if !missing.is_empty() {
                 engine.mode = EngineMode::MaterializedEnv;
@@ -706,33 +707,32 @@ fn plan_execution(
     let runtime_plan = runtime_plan_for_executable(&runtime_exe, Some(python_version), runtime_oid);
 
     let workdir = map_workdir(Some(&snapshot.root), &snapshot.root);
-    let target_resolution = if let Some(script) = detect_script_under_root(&snapshot.root, &workdir, target)
-    {
-        let mut argv = Vec::with_capacity(args.len() + 2);
-        argv.push(runtime_exe.clone());
-        argv.push(script.display().to_string());
-        argv.extend(args.iter().cloned());
-        TargetResolution {
-            kind: TargetKind::File,
-            resolved: script.display().to_string(),
-            argv,
-        }
-    } else {
-        default_target_resolution(&runtime_exe, target, args)
-    };
+    let target_resolution =
+        if let Some(script) = detect_script_under_root(&snapshot.root, &workdir, target) {
+            let mut argv = Vec::with_capacity(args.len() + 2);
+            argv.push(runtime_exe.clone());
+            argv.push(script.display().to_string());
+            argv.extend(args.iter().cloned());
+            TargetResolution {
+                kind: TargetKind::File,
+                resolved: script.display().to_string(),
+                argv,
+            }
+        } else {
+            default_target_resolution(&runtime_exe, target, args)
+        };
 
     let manifest_path = snapshot.root.join("pyproject.toml");
     let site_packages = env_state.map(|env| PathBuf::from(&env.site_packages));
-    let lock_for_sandbox = load_lockfile_optional(&snapshot.lock_path)
-        .map_err(|err| {
-            ExecutionOutcome::failure(
-                "failed to load px.lock",
-                json!({
-                    "lockfile": snapshot.lock_path.display().to_string(),
-                    "error": err.to_string(),
-                }),
-            )
-        })?;
+    let lock_for_sandbox = load_lockfile_optional(&snapshot.lock_path).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to load px.lock",
+            json!({
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "error": err.to_string(),
+            }),
+        )
+    })?;
     let sandbox_plan = sandbox_plan(
         &manifest_path,
         sandbox,

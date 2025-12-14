@@ -1,0 +1,487 @@
+use std::{borrow::Cow, collections::BTreeMap, env, fs, path::PathBuf, process::Command};
+
+use anyhow::Result;
+use flate2::read::GzDecoder;
+use px_domain::api::{DependencyGroupSource, PxOptions};
+use serde_json::Value;
+use tar::Archive;
+use tempfile::tempdir;
+
+use crate::core::runtime::facade::RuntimeMetadata;
+use crate::store::cas::{
+    archive_dir_canonical, global_store, ObjectPayload, PkgBuildHeader, ProfileHeader,
+    ProfilePackage, RuntimeHeader, MATERIALIZED_PKG_BUILDS_DIR,
+};
+use crate::ManifestSnapshot;
+
+use super::{materialize, profile, runtime, write_python_shim};
+
+#[test]
+fn runtime_archive_captures_full_tree() -> Result<()> {
+    let temp = tempdir()?;
+    let root = temp.path().join("runtime");
+    let bin = root.join("bin");
+    let lib = root.join("lib/python3.11");
+    let include = root.join("include");
+    fs::create_dir_all(&bin)?;
+    fs::create_dir_all(&lib)?;
+    fs::create_dir_all(&include)?;
+    fs::write(bin.join("python"), b"#!python")?;
+    fs::write(lib.join("stdlib.py"), b"# stdlib")?;
+    fs::write(include.join("Python.h"), b"// header")?;
+
+    let runtime_meta = RuntimeMetadata {
+        path: bin.join("python").display().to_string(),
+        version: "3.11.0".to_string(),
+        platform: "linux".to_string(),
+    };
+    let archive = runtime::runtime_archive(&runtime_meta)?;
+    let decoder = GzDecoder::new(&archive[..]);
+    let mut tar = Archive::new(decoder);
+    let mut seen = Vec::new();
+    for entry in tar.entries()? {
+        let entry = entry?;
+        seen.push(entry.path()?.into_owned());
+    }
+    assert!(
+        seen.contains(&PathBuf::from("bin/python")),
+        "interpreter should be captured"
+    );
+    assert!(
+        seen.contains(&PathBuf::from("lib/python3.11/stdlib.py")),
+        "stdlib should be captured"
+    );
+    assert!(
+        seen.contains(&PathBuf::from("include/Python.h")),
+        "headers should be captured"
+    );
+    Ok(())
+}
+
+#[test]
+fn python_shim_carries_runtime_site_and_home() -> Result<()> {
+    let temp = tempdir()?;
+    let runtime_root = temp.path().join("runtime");
+    let bin_dir = runtime_root.join("bin");
+    fs::create_dir_all(&bin_dir)?;
+    let runtime = bin_dir.join("python");
+    fs::write(&runtime, b"#!/bin/false")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755))?;
+    }
+
+    let env_root = temp.path().join("env");
+    let env_bin = env_root.join("bin");
+    let site = env_root.join("lib/python3.11/site-packages");
+    fs::create_dir_all(&site)?;
+
+    write_python_shim(&env_bin, &runtime, &site, &BTreeMap::new())?;
+    let shim = fs::read_to_string(env_bin.join("python"))?;
+    assert!(
+        shim.contains(&runtime_root.display().to_string()),
+        "PYTHONHOME should include runtime root"
+    );
+    let runtime_site = runtime_root.join("lib/python3.11/site-packages");
+    assert!(
+        shim.contains(&runtime_site.display().to_string()),
+        "PYTHONPATH should include runtime site-packages"
+    );
+    assert!(
+        shim.contains(&site.display().to_string()),
+        "PYTHONPATH should include env site-packages"
+    );
+    Ok(())
+}
+
+#[test]
+fn env_bin_entries_link_to_store_materialization() -> Result<()> {
+    let store = global_store();
+    let temp = tempdir()?;
+
+    // Minimal runtime executable.
+    let runtime_root = temp.path().join("runtime");
+    let runtime_bin = runtime_root.join("bin");
+    fs::create_dir_all(&runtime_bin)?;
+    let runtime_exe = runtime_bin.join("python");
+    fs::write(&runtime_exe, b"#!/bin/false")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&runtime_exe, fs::Permissions::from_mode(0o755))?;
+    }
+
+    // CAS pkg-build with a bin script.
+    let pkg_root = temp.path().join("pkg");
+    let pkg_bin = pkg_root.join("bin");
+    let pkg_site = pkg_root.join("site-packages");
+    fs::create_dir_all(&pkg_bin)?;
+    fs::create_dir_all(&pkg_site)?;
+    let script = pkg_bin.join("demo");
+    fs::write(&script, b"#!/bin/echo demo")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
+    }
+
+    let pkg_archive = archive_dir_canonical(&pkg_root)?;
+    let pkg_obj = store.store(&ObjectPayload::PkgBuild {
+        header: PkgBuildHeader {
+            source_oid: "src".into(),
+            runtime_abi: "abi".into(),
+            builder_id: "builder".into(),
+            build_options_hash: "opts".into(),
+        },
+        archive: Cow::Owned(pkg_archive),
+    })?;
+
+    // Runtime object to back the profile.
+    let runtime_header = RuntimeHeader {
+        version: "3.11.0".to_string(),
+        abi: "cp311".to_string(),
+        platform: "linux".to_string(),
+        build_config_hash: "abc".to_string(),
+        exe_path: "bin/python".to_string(),
+    };
+    let runtime_obj = store.store(&ObjectPayload::Runtime {
+        header: runtime_header.clone(),
+        archive: Cow::Owned(archive_dir_canonical(&runtime_root)?),
+    })?;
+
+    let profile_header = ProfileHeader {
+        runtime_oid: runtime_obj.oid.clone(),
+        packages: vec![ProfilePackage {
+            name: "demo".to_string(),
+            version: "1.0.0".to_string(),
+            pkg_build_oid: pkg_obj.oid.clone(),
+        }],
+        sys_path_order: Vec::new(),
+        env_vars: BTreeMap::new(),
+    };
+    let profile_obj = store.store(&ObjectPayload::Profile {
+        header: profile_header.clone(),
+    })?;
+
+    let snapshot = ManifestSnapshot {
+        root: temp.path().to_path_buf(),
+        manifest_path: temp.path().join("pyproject.toml"),
+        lock_path: temp.path().join("px.lock"),
+        name: "demo".to_string(),
+        python_requirement: ">=3.11".to_string(),
+        dependencies: Vec::new(),
+        dependency_groups: Vec::new(),
+        declared_dependency_groups: Vec::new(),
+        dependency_group_source: DependencyGroupSource::None,
+        group_dependencies: Vec::new(),
+        requirements: Vec::new(),
+        python_override: None,
+        px_options: PxOptions::default(),
+        manifest_fingerprint: "fp".to_string(),
+    };
+
+    let env_root = materialize::materialize_profile_env(
+        &snapshot,
+        &RuntimeMetadata {
+            path: runtime_exe.display().to_string(),
+            version: "3.11.0".to_string(),
+            platform: "linux".to_string(),
+        },
+        &profile_header,
+        &profile_obj.oid,
+        &runtime_exe,
+    )?;
+
+    let env_bin = env_root.join("bin").join("demo");
+    let store_bin = store
+        .root()
+        .join(MATERIALIZED_PKG_BUILDS_DIR)
+        .join(&pkg_obj.oid)
+        .join("bin")
+        .join("demo");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::symlink_metadata(&env_bin)?;
+        if meta.file_type().is_symlink() {
+            let target = fs::read_link(&env_bin)?;
+            assert_eq!(target, store_bin, "bin entry should be a symlink into CAS");
+        } else {
+            let src_meta = fs::metadata(&store_bin)?;
+            let dest_meta = fs::metadata(&env_bin)?;
+            assert_eq!(
+                src_meta.ino(),
+                dest_meta.ino(),
+                "bin entry should be hard-linked to CAS materialization"
+            );
+            assert_eq!(
+                src_meta.dev(),
+                dest_meta.dev(),
+                "bin entry should share the same device"
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        assert_eq!(
+            fs::metadata(&env_bin)?.len(),
+            fs::metadata(&store_bin)?.len(),
+            "bin entry should point to CAS materialization"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn python_bin_entries_are_rewritten_to_env_python() -> Result<()> {
+    let store = global_store();
+    let temp = tempdir()?;
+
+    // Minimal runtime executable.
+    let runtime_root = temp.path().join("runtime");
+    let runtime_bin = runtime_root.join("bin");
+    fs::create_dir_all(&runtime_bin)?;
+    let runtime_exe = runtime_bin.join("python");
+    fs::write(&runtime_exe, b"#!/bin/false")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&runtime_exe, fs::Permissions::from_mode(0o755))?;
+    }
+
+    // CAS pkg-build with a python shebang.
+    let pkg_root = temp.path().join("pkg");
+    let pkg_bin = pkg_root.join("bin");
+    let pkg_site = pkg_root.join("site-packages");
+    fs::create_dir_all(&pkg_bin)?;
+    fs::create_dir_all(&pkg_site)?;
+    let script = pkg_bin.join("demo");
+    fs::write(&script, b"#!/usr/bin/env python3\nprint('hi from demo')\n")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
+    }
+
+    let pkg_archive = archive_dir_canonical(&pkg_root)?;
+    let pkg_obj = store.store(&ObjectPayload::PkgBuild {
+        header: PkgBuildHeader {
+            source_oid: "src".into(),
+            runtime_abi: "abi".into(),
+            builder_id: "builder".into(),
+            build_options_hash: "opts".into(),
+        },
+        archive: Cow::Owned(pkg_archive),
+    })?;
+
+    let runtime_header = RuntimeHeader {
+        version: "3.11.0".to_string(),
+        abi: "cp311".to_string(),
+        platform: "linux".to_string(),
+        build_config_hash: "abc".to_string(),
+        exe_path: "bin/python".to_string(),
+    };
+    let runtime_obj = store.store(&ObjectPayload::Runtime {
+        header: runtime_header.clone(),
+        archive: Cow::Owned(archive_dir_canonical(&runtime_root)?),
+    })?;
+
+    let profile_header = ProfileHeader {
+        runtime_oid: runtime_obj.oid.clone(),
+        packages: vec![ProfilePackage {
+            name: "demo".to_string(),
+            version: "1.0.0".to_string(),
+            pkg_build_oid: pkg_obj.oid.clone(),
+        }],
+        sys_path_order: Vec::new(),
+        env_vars: BTreeMap::new(),
+    };
+    let profile_obj = store.store(&ObjectPayload::Profile {
+        header: profile_header.clone(),
+    })?;
+
+    let snapshot = ManifestSnapshot {
+        root: temp.path().to_path_buf(),
+        manifest_path: temp.path().join("pyproject.toml"),
+        lock_path: temp.path().join("px.lock"),
+        name: "demo".to_string(),
+        python_requirement: ">=3.11".to_string(),
+        dependencies: Vec::new(),
+        dependency_groups: Vec::new(),
+        declared_dependency_groups: Vec::new(),
+        dependency_group_source: DependencyGroupSource::None,
+        group_dependencies: Vec::new(),
+        requirements: Vec::new(),
+        python_override: None,
+        px_options: PxOptions::default(),
+        manifest_fingerprint: "fp".to_string(),
+    };
+
+    let env_root = materialize::materialize_profile_env(
+        &snapshot,
+        &RuntimeMetadata {
+            path: runtime_exe.display().to_string(),
+            version: "3.11.0".to_string(),
+            platform: "linux".to_string(),
+        },
+        &profile_header,
+        &profile_obj.oid,
+        &runtime_exe,
+    )?;
+
+    let env_script = env_root.join("bin").join("demo");
+    let contents = fs::read_to_string(&env_script)?;
+    let expected_shebang = format!("#!{}\n", env_root.join("bin").join("python").display());
+    assert!(
+        contents.starts_with(&expected_shebang),
+        "shebang should point at env python"
+    );
+    assert!(
+        contents.contains("hi from demo"),
+        "script body should be preserved"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert!(
+            !fs::symlink_metadata(&env_script)?.file_type().is_symlink(),
+            "python bin shims should be copied, not linked"
+        );
+        let mode = fs::metadata(&env_script)?.mode();
+        assert!(
+            mode & 0o111 != 0,
+            "rewritten script should remain executable"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn python_shim_applies_profile_env_vars() -> Result<()> {
+    let temp = tempdir()?;
+    let runtime_root = temp.path().join("runtime");
+    let bin_dir = runtime_root.join("bin");
+    fs::create_dir_all(&bin_dir)?;
+    let runtime = bin_dir.join("python");
+    fs::write(
+        &runtime,
+        "#!/usr/bin/env bash\nprintf \"%s\" \"$FOO_FROM_PROFILE\"\n",
+    )?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755))?;
+
+    let env_root = temp.path().join("env");
+    let env_bin = env_root.join("bin");
+    let site = env_root.join("lib/python3.11/site-packages");
+    fs::create_dir_all(&site)?;
+
+    let mut env_vars = BTreeMap::new();
+    env_vars.insert(
+        "FOO_FROM_PROFILE".to_string(),
+        Value::String("from_profile".to_string()),
+    );
+    write_python_shim(&env_bin, &runtime, &site, &env_vars)?;
+    let shim = env_bin.join("python");
+    let output = Command::new(&shim)
+        .env("PX_CACHE_PATH", temp.path())
+        .env("FOO_FROM_PROFILE", "ignored")
+        .output()?;
+    assert!(
+        output.status.success(),
+        "shim should run successfully: {:?}",
+        output
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout, "from_profile",
+        "profile env vars should override parent values"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn python_shim_preserves_existing_pythonpath() -> Result<()> {
+    let temp = tempdir()?;
+    let runtime_root = temp.path().join("runtime");
+    let bin_dir = runtime_root.join("bin");
+    fs::create_dir_all(&bin_dir)?;
+    let runtime = bin_dir.join("python");
+    fs::write(
+        &runtime,
+        "#!/usr/bin/env bash\nprintf \"%s\" \"$PYTHONPATH\"\n",
+    )?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755))?;
+
+    let env_root = temp.path().join("env");
+    let env_bin = env_root.join("bin");
+    let site = env_root.join("lib/python3.11/site-packages");
+    fs::create_dir_all(&site)?;
+
+    write_python_shim(&env_bin, &runtime, &site, &BTreeMap::new())?;
+    let shim = env_bin.join("python");
+    let existing = "/tmp/custom";
+    let runtime_site = runtime_root.join("lib/python3.11/site-packages");
+    let expected = format!("{existing}:{}:{}", site.display(), runtime_site.display());
+
+    let output = Command::new(&shim)
+        .env("PX_CACHE_PATH", temp.path())
+        .env("PYTHONPATH", existing)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "shim should run successfully: {:?}",
+        output
+    );
+    let value = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(value, expected);
+    Ok(())
+}
+
+#[test]
+fn profile_env_vars_merge_snapshot_and_env_override() -> Result<()> {
+    let snapshot = px_domain::api::ProjectSnapshot {
+        root: PathBuf::from("/tmp/demo"),
+        manifest_path: PathBuf::from("/tmp/demo/pyproject.toml"),
+        lock_path: PathBuf::from("/tmp/demo/px.lock"),
+        name: "demo".to_string(),
+        python_requirement: ">=3.11".to_string(),
+        dependencies: vec![],
+        dependency_groups: vec![],
+        declared_dependency_groups: vec![],
+        dependency_group_source: DependencyGroupSource::None,
+        group_dependencies: vec![],
+        requirements: vec![],
+        python_override: None,
+        px_options: px_domain::api::PxOptions {
+            manage_command: None,
+            plugin_imports: vec![],
+            env_vars: BTreeMap::from([("FROM_SNAPSHOT".to_string(), "snap".to_string())]),
+        },
+        manifest_fingerprint: "fp".to_string(),
+    };
+    let prev_env = env::var("PX_PROFILE_ENV_VARS").ok();
+    env::set_var(
+        "PX_PROFILE_ENV_VARS",
+        r#"{"FROM_ENV":"env","FROM_SNAPSHOT":"override"}"#,
+    );
+    let merged = profile::profile_env_vars(&snapshot)?;
+    if let Some(val) = prev_env {
+        env::set_var("PX_PROFILE_ENV_VARS", val);
+    } else {
+        env::remove_var("PX_PROFILE_ENV_VARS");
+    }
+    assert_eq!(
+        merged.get("FROM_SNAPSHOT"),
+        Some(&Value::String("override".to_string()))
+    );
+    assert_eq!(
+        merged.get("FROM_ENV"),
+        Some(&Value::String("env".to_string()))
+    );
+    Ok(())
+}

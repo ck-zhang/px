@@ -2,7 +2,7 @@ use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
 use pep508_rs::MarkerEnvironment;
-use px_domain::ResolverEnv;
+use px_domain::api::ResolverEnv;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::from_slice;

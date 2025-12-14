@@ -16,7 +16,7 @@ use crate::{
     CommandContext, ExecutionOutcome, InstallOutcome, InstallOverride, InstallState,
     InstallUserError, ManifestSnapshot,
 };
-use px_domain::ManifestEditor;
+use px_domain::api::ManifestEditor;
 
 use crate::workspace::WorkspaceScope;
 use crate::workspace::{

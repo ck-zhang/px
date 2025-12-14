@@ -7,7 +7,7 @@ use toml_edit::DocumentMut;
 
 use crate::core::runtime::facade::StoredEnvironment;
 use crate::core::workspace::{discover_workspace_scope, WorkspaceScope};
-use px_domain::discover_project_root;
+use px_domain::api::discover_project_root;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunTargetKind {

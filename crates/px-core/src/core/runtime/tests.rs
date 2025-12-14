@@ -1,4 +1,5 @@
 use super::*;
+use crate::api::{Config, SystemEffects};
 use crate::core::config::settings::EnvSnapshot;
 use crate::core::python::python_sys::{
     current_marker_environment, InterpreterSupportedTag, InterpreterTags,
@@ -7,12 +8,11 @@ use crate::core::runtime::artifacts::{parse_exact_pin, select_wheel};
 use crate::core::runtime::effects::Effects;
 use crate::core::runtime::materialize_project_site;
 use crate::core::store::pypi::{PypiDigests, PypiFile};
-use crate::Config;
-use crate::SystemEffects;
 use anyhow::Result;
-use px_domain::lockfile::{LockSnapshot, LockedArtifact, LockedDependency};
-use px_domain::marker_applies;
-use px_domain::{DependencyGroupSource, PxOptions};
+use px_domain::api::marker_applies;
+use px_domain::api::{
+    DependencyGroupSource, LockSnapshot, LockedArtifact, LockedDependency, PxOptions,
+};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;

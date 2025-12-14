@@ -12,7 +12,7 @@ use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement};
 use serde_json::{json, Value};
 use toml_edit::{DocumentMut, Item};
 
-use px_domain::{
+use px_domain::api::{
     autopin_pin_key, collect_pyproject_packages, collect_requirement_packages,
     collect_setup_cfg_packages, format_specifier, normalize_dist_name, plan_autopin,
     prepare_pyproject_plan, resolve_onboard_path, AutopinEntry, AutopinPending, AutopinState,
@@ -473,7 +473,7 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     let autopin_lock_only = project_lock_only || uv_pins.is_some() || poetry_pins.is_some();
 
     if pyproject_path.exists() {
-        let autopin_snapshot = px_domain::ProjectSnapshot::read_from(&root)?;
+        let autopin_snapshot = px_domain::api::ProjectSnapshot::read_from(&root)?;
         let effects = ctx.shared_effects();
         let autopin_state = match plan_autopin(
             &autopin_snapshot,
@@ -987,7 +987,7 @@ fn pin_from_locked_versions(
         ));
     }
 
-    let extras = px_domain::canonical_extras(
+    let extras = px_domain::api::canonical_extras(
         &requirement
             .extras
             .iter()

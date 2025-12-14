@@ -5,7 +5,7 @@ use std::{env, ffi::OsStr, ffi::OsString, path::PathBuf, sync::Arc};
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 use color_eyre::{eyre::eyre, Result};
-use px_core::{CommandContext, GlobalOptions, SystemEffects};
+use px_core::api::{CommandContext, GlobalOptions, SystemEffects};
 
 mod cli;
 mod completion;

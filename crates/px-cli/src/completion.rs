@@ -4,7 +4,7 @@ use std::path::Path;
 
 use clap::builder::StyledStr;
 use clap_complete::engine::{CompletionCandidate, PathCompleter, ValueCompleter};
-use px_core::{run_target_completions, RunTargetKind};
+use px_core::api::{run_target_completions, RunTargetKind};
 
 pub fn run_target_completer(current: &OsStr) -> Vec<CompletionCandidate> {
     let current_str = current.to_string_lossy();

@@ -102,10 +102,7 @@ impl ProgressManager {
                 idx = idx.wrapping_add(1);
                 let line = if let Some(total) = task.total {
                     let current = task.current.min(total);
-                    format!(
-                        "\r\x1b[2Kpx ▸ {} [{current}/{total}] {frame}",
-                        task.label
-                    )
+                    format!("\r\x1b[2Kpx ▸ {} [{current}/{total}] {frame}", task.label)
                 } else {
                     format!("\r\x1b[2Kpx ▸ {} {frame}", task.label)
                 };

@@ -1,11 +1,13 @@
 use color_eyre::{eyre::eyre, Result};
+use px_core::api as px_core;
 use px_core::{
-    self, is_missing_project_error, missing_project_outcome as core_missing_project_outcome,
-    explain_entrypoint, explain_run, AutopinPreference, BuildRequest, CommandContext, CommandGroup,
-    CommandInfo, FmtRequest, LockBehavior, MigrateRequest, MigrationMode, ProjectAddRequest,
-    ProjectInitRequest, ProjectRemoveRequest, ProjectSyncRequest, ProjectUpdateRequest,
-    ProjectWhyRequest, PublishRequest, RunRequest, TestRequest, ToolInstallRequest, ToolListRequest,
-    ToolRemoveRequest, ToolRunRequest, ToolUpgradeRequest, WorkspacePolicy,
+    explain_entrypoint, explain_run, is_missing_project_error,
+    missing_project_outcome as core_missing_project_outcome, AutopinPreference, BuildRequest,
+    CommandContext, CommandGroup, CommandInfo, FmtRequest, LockBehavior, MigrateRequest,
+    MigrationMode, ProjectAddRequest, ProjectInitRequest, ProjectRemoveRequest, ProjectSyncRequest,
+    ProjectUpdateRequest, ProjectWhyRequest, PublishRequest, RunRequest, TestRequest,
+    ToolInstallRequest, ToolListRequest, ToolRemoveRequest, ToolRunRequest, ToolUpgradeRequest,
+    WorkspacePolicy,
 };
 
 use crate::{
@@ -146,11 +148,15 @@ pub fn dispatch_command(
         CommandGroupCli::Python(cmd) => match cmd {
             PythonCommand::List => {
                 let info = CommandInfo::new(CommandGroup::Python, "list");
-                core_call(info, || px_core::python_list(ctx, &px_core::PythonListRequest))
+                core_call(info, || {
+                    px_core::python_list(ctx, &px_core::PythonListRequest)
+                })
             }
             PythonCommand::Info => {
                 let info = CommandInfo::new(CommandGroup::Python, "info");
-                core_call(info, || px_core::python_info(ctx, &px_core::PythonInfoRequest))
+                core_call(info, || {
+                    px_core::python_info(ctx, &px_core::PythonInfoRequest)
+                })
             }
             PythonCommand::Install(args) => {
                 let info = CommandInfo::new(CommandGroup::Python, "install");
@@ -170,10 +176,7 @@ pub fn dispatch_command(
     }
 }
 
-fn core_call<F>(
-    info: CommandInfo,
-    action: F,
-) -> Result<(CommandInfo, px_core::ExecutionOutcome)>
+fn core_call<F>(info: CommandInfo, action: F) -> Result<(CommandInfo, px_core::ExecutionOutcome)>
 where
     F: FnOnce() -> anyhow::Result<px_core::ExecutionOutcome>,
 {

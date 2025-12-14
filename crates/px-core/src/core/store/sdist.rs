@@ -15,8 +15,7 @@ use walkdir::WalkDir;
 use crate::core::runtime::builder::BUILDER_VERSION;
 use crate::core::sandbox::{
     base_apt_opts, detect_container_backend, internal_apt_mirror_env_overrides,
-    internal_apt_mirror_setup_snippet, internal_keep_proxies,
-    internal_proxy_env_overrides,
+    internal_apt_mirror_setup_snippet, internal_keep_proxies, internal_proxy_env_overrides,
 };
 use crate::core::system_deps::{
     base_apt_packages, capability_apt_map, package_capability_rules, system_deps_from_names,

@@ -5,7 +5,7 @@ use crate::{
     project::{evaluate_project_state, MutationCommand},
     ExecutionOutcome,
 };
-use px_domain::{ProjectSnapshot, ProjectStateKind, ProjectStateReport};
+use px_domain::api::{ProjectSnapshot, ProjectStateKind, ProjectStateReport};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum StateViolation {
@@ -165,7 +165,7 @@ pub(crate) fn state_or_violation(
 mod tests {
     use super::*;
     use crate::CommandStatus;
-    use px_domain::{DependencyGroupSource, ProjectStateKind};
+    use px_domain::api::{DependencyGroupSource, ProjectStateKind};
 
     fn dummy_snapshot() -> ProjectSnapshot {
         ProjectSnapshot {
@@ -181,7 +181,7 @@ mod tests {
             group_dependencies: vec![],
             requirements: vec![],
             python_override: None,
-            px_options: px_domain::PxOptions::default(),
+            px_options: px_domain::api::PxOptions::default(),
             manifest_fingerprint: "mf".into(),
         }
     }

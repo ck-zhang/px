@@ -10,7 +10,7 @@ use crate::{
     install_snapshot, manifest_snapshot_at, refresh_project_site, relative_path_str,
     CommandContext, ExecutionOutcome, InstallUserError,
 };
-use px_domain::{
+use px_domain::api::{
     discover_project_root, infer_package_name, project_name_from_pyproject, ProjectInitializer,
 };
 

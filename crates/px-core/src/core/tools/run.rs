@@ -8,7 +8,7 @@ use crate::{
     build_pythonpath, ensure_project_environment_synced, load_project_state, outcome_from_output,
     CommandContext, ExecutionOutcome, InstallUserError,
 };
-use px_domain::ProjectSnapshot;
+use px_domain::api::ProjectSnapshot;
 
 use super::install::resolve_runtime;
 use super::metadata::read_metadata;
@@ -181,10 +181,7 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
             envs.push(("PYTHONPYCACHEPREFIX".into(), trimmed.to_string()));
         }
     } else if let Some(prefix) = pyc_cache_prefix.as_ref() {
-        envs.push((
-            "PYTHONPYCACHEPREFIX".into(),
-            prefix.display().to_string(),
-        ));
+        envs.push(("PYTHONPYCACHEPREFIX".into(), prefix.display().to_string()));
     }
     if let Some(alias) = snapshot.px_options.manage_command.as_ref() {
         let trimmed = alias.trim();

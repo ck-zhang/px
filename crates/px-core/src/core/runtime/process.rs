@@ -149,8 +149,10 @@ pub fn run_command_streaming(
         .ok_or_else(|| anyhow::anyhow!("stderr missing for {program}"))?;
 
     let limit = max_capture_bytes();
-    let stdout_handle = thread::spawn(move || tee_to_string_limited(&mut stdout, io::stdout(), limit));
-    let stderr_handle = thread::spawn(move || tee_to_string_limited(&mut stderr, io::stderr(), limit));
+    let stdout_handle =
+        thread::spawn(move || tee_to_string_limited(&mut stdout, io::stdout(), limit));
+    let stderr_handle =
+        thread::spawn(move || tee_to_string_limited(&mut stderr, io::stderr(), limit));
 
     let status = child
         .wait()

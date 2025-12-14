@@ -1,5 +1,6 @@
 use atty::Stream;
 use color_eyre::Result;
+use px_core::api as px_core;
 use px_core::{
     diag_commands, format_status_message, CommandGroup, CommandInfo, CommandStatus,
     ExecutionOutcome, StatusPayload,

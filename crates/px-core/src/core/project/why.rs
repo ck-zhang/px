@@ -8,7 +8,7 @@ use crate::{
     dependency_name, manifest_snapshot, marker_env_for_snapshot, python_context_with_mode,
     CommandContext, EnvGuard, ExecutionOutcome, ManifestSnapshot, PythonContext,
 };
-use px_domain::{collect_resolved_dependencies, detect_lock_drift, load_lockfile_optional};
+use px_domain::api::{collect_resolved_dependencies, detect_lock_drift, load_lockfile_optional};
 
 use super::{evaluate_project_state, issue_id_for};
 
@@ -162,7 +162,10 @@ pub fn project_why(ctx: &CommandContext, request: &ProjectWhyRequest) -> Result<
         let chain = chains
             .first()
             .map_or_else(|| entry.name.clone(), |path| path.join(" -> "));
-        (format!("{}=={} is required by {chain}", entry.name, version), None)
+        (
+            format!("{}=={} is required by {chain}", entry.name, version),
+            None,
+        )
     };
     let mut details = json!({
         "package": entry.name,

@@ -1,7 +1,7 @@
 use std::env;
 
 use color_eyre::owo_colors::OwoColorize;
-use px_core::CommandStatus;
+use px_core::api::CommandStatus;
 
 pub struct Style {
     enabled: bool,

@@ -14,8 +14,8 @@ use crate::core::runtime::process::{
     run_command, run_command_passthrough, run_command_streaming, run_command_with_stdin, RunOutput,
 };
 use crate::core::sandbox::pack::{
-    build_oci_image, export_output, load_layer_from_blobs, write_env_layer_tar,
-    write_base_os_layer, write_system_deps_layer,
+    build_oci_image, export_output, load_layer_from_blobs, write_base_os_layer,
+    write_env_layer_tar, write_system_deps_layer,
 };
 use crate::{InstallUserError, PX_VERSION};
 
@@ -174,16 +174,21 @@ pub(crate) fn ensure_image_layout(
             })?;
             let mut layers = Vec::new();
             if needs_base_layer {
-                let base_digest = artifacts.manifest.base_layer_digest.clone().ok_or_else(|| {
-                    sandbox_error(
-                        "PX903",
-                        "sandbox image metadata is incomplete",
-                        json!({
-                            "path": oci_dir.display().to_string(),
-                            "reason": "missing_base_layer",
-                        }),
-                    )
-                })?;
+                let base_digest =
+                    artifacts
+                        .manifest
+                        .base_layer_digest
+                        .clone()
+                        .ok_or_else(|| {
+                            sandbox_error(
+                                "PX903",
+                                "sandbox image metadata is incomplete",
+                                json!({
+                                    "path": oci_dir.display().to_string(),
+                                    "reason": "missing_base_layer",
+                                }),
+                            )
+                        })?;
                 let base_layer = load_layer_from_blobs(&blobs, &base_digest)?;
                 layers.push(base_layer);
             }

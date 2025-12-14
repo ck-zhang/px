@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use assert_cmd::cargo::cargo_bin_cmd;
-use px_domain::ProjectSnapshot;
+use px_domain::api::ProjectSnapshot;
 use serde_json::Value;
 
 mod common;
@@ -194,10 +194,7 @@ fn assert_envs_empty(context: &str) {
         entries.is_empty(),
         "expected no env materialization under {}, found {:?} ({context})",
         envs.display(),
-        entries
-            .iter()
-            .map(|e| e.path())
-            .collect::<Vec<_>>()
+        entries.iter().map(|e| e.path()).collect::<Vec<_>>()
     );
 }
 
@@ -551,10 +548,7 @@ fn cas_native_falls_back_on_duplicate_console_scripts() {
         project,
         "cas_native_dupe",
         ">=3.11",
-        &[
-            "dupe_a==0.1.0".to_string(),
-            "dupe_b==0.1.0".to_string(),
-        ],
+        &["dupe_a==0.1.0".to_string(), "dupe_b==0.1.0".to_string()],
     );
     write_lock(
         project,
@@ -663,10 +657,7 @@ fn cas_native_fallback_is_silent_without_verbose() {
         project,
         "cas_native_dupe_silent",
         ">=3.11",
-        &[
-            "dupe_a==0.1.0".to_string(),
-            "dupe_b==0.1.0".to_string(),
-        ],
+        &["dupe_a==0.1.0".to_string(), "dupe_b==0.1.0".to_string()],
     );
     write_lock(
         project,
@@ -804,7 +795,13 @@ fn sync_repairs_stale_cached_paths_and_run_succeeds() {
     cargo_bin_cmd!("px")
         .current_dir(project)
         .env("PX_RUNTIME_PYTHON", &python)
-        .args(["--json", "run", "python", "-c", "import hello_console; hello_console.main()"])
+        .args([
+            "--json",
+            "run",
+            "python",
+            "-c",
+            "import hello_console; hello_console.main()",
+        ])
         .assert()
         .success();
 }

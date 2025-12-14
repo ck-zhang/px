@@ -6,7 +6,7 @@ use tempfile::tempdir;
 
 use crate::core::runtime::run_plan::{plan_run_target, RunTargetPlan};
 use crate::core::runtime::PythonContext;
-use px_domain::PxOptions;
+use px_domain::api::PxOptions;
 
 #[test]
 fn prefers_console_script_from_site_bin() -> anyhow::Result<()> {
