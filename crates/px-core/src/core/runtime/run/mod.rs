@@ -62,7 +62,7 @@ use sandbox::{
     attach_sandbox_details, prepare_commit_sandbox, prepare_project_sandbox,
     prepare_workspace_sandbox, sandbox_workspace_env_inconsistent,
 };
-pub(crate) use sandbox::{sandbox_runner_for_context, SandboxCommandRunner, SandboxRunContext};
+pub(crate) use sandbox::{sandbox_runner_for_context, SandboxRunContext};
 
 pub use driver::{run_project, test_project};
 pub(crate) use ref_tree::{git_repo_root, materialize_ref_tree, validate_lock_for_ref};
