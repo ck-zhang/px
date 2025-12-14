@@ -1,22 +1,22 @@
+use super::foreign_tools::{detect_foreign_tool_conflicts, detect_foreign_tool_sections};
+use super::locked_versions::{
+    merge_pin_sets, pin_from_locked_versions, poetry_lock_versions, uv_lock_versions, LockPinChoice,
+};
+use super::MigrateRequest;
+
 use std::{
-    collections::{HashMap, HashSet},
     env, fs,
-    path::{Path, PathBuf},
-    str::FromStr,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
 use anyhow::{Context, Result};
-use pep440_rs::{Version, VersionSpecifiers};
-use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement};
 use serde_json::{json, Value};
-use toml_edit::{DocumentMut, Item};
 
 use px_domain::api::{
-    autopin_pin_key, collect_pyproject_packages, collect_requirement_packages,
-    collect_setup_cfg_packages, format_specifier, normalize_dist_name, plan_autopin,
-    prepare_pyproject_plan, resolve_onboard_path, AutopinEntry, AutopinPending, AutopinState,
-    BackupManager, InstallOverride, PinSpec,
+    collect_pyproject_packages, collect_requirement_packages, collect_setup_cfg_packages,
+    plan_autopin, prepare_pyproject_plan, resolve_onboard_path, AutopinEntry, AutopinPending,
+    AutopinState, BackupManager, InstallOverride, PinSpec,
 };
 
 use crate::runtime_manager;
@@ -26,73 +26,14 @@ use crate::{
     ExecutionOutcome, InstallState, InstallUserError, ManifestSnapshot,
 };
 
-use super::plan::{apply_precedence, apply_python_override};
-use super::runtime::fallback_runtime_by_channel;
+use super::super::plan::{apply_precedence, apply_python_override};
+use super::super::runtime::fallback_runtime_by_channel;
 
 fn test_migration_crash_hook() -> anyhow::Result<()> {
     if env::var("PX_TEST_MIGRATE_CRASH").ok().as_deref() == Some("1") {
         anyhow::bail!("test crash hook");
     }
     Ok(())
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum MigrationMode {
-    Preview,
-    Apply,
-}
-
-impl MigrationMode {
-    const fn is_apply(self) -> bool {
-        matches!(self, Self::Apply)
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum WorkspacePolicy {
-    CleanOnly,
-    AllowDirty,
-}
-
-impl WorkspacePolicy {
-    const fn allows_dirty(self) -> bool {
-        matches!(self, Self::AllowDirty)
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum LockBehavior {
-    Full,
-    LockOnly,
-}
-
-impl LockBehavior {
-    const fn is_lock_only(self) -> bool {
-        matches!(self, Self::LockOnly)
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum AutopinPreference {
-    Enabled,
-    Disabled,
-}
-
-impl AutopinPreference {
-    const fn autopin_enabled(self) -> bool {
-        matches!(self, Self::Enabled)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct MigrateRequest {
-    pub source: Option<String>,
-    pub dev_source: Option<String>,
-    pub mode: MigrationMode,
-    pub workspace: WorkspacePolicy,
-    pub lock_behavior: LockBehavior,
-    pub autopin: AutopinPreference,
-    pub python: Option<String>,
 }
 
 /// Migrates an existing Python project into px format.
@@ -750,83 +691,6 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     }
 }
 
-fn detect_foreign_tool_sections(path: &PathBuf) -> Result<Vec<String>> {
-    let contents = fs::read_to_string(path)?;
-    let doc: DocumentMut = contents.parse()?;
-    let tool_table = doc
-        .get("tool")
-        .and_then(toml_edit::Item::as_table)
-        .map(toml_edit::Table::iter)
-        .into_iter()
-        .flatten();
-
-    let known = ["poetry", "pdm", "hatch", "flit", "rye"];
-    let mut found = Vec::new();
-    for (key, _) in tool_table {
-        if known.contains(&key) {
-            found.push(key.to_string());
-        }
-    }
-    found.sort();
-    found.dedup();
-    Ok(found)
-}
-
-fn item_has_dependencies(item: &toml_edit::Item) -> bool {
-    if let Some(array) = item.as_array() {
-        return !array.is_empty();
-    }
-    if let Some(table) = item.as_table() {
-        return !table.is_empty();
-    }
-    false
-}
-
-fn table_declares_dependencies(table: &toml_edit::Table) -> bool {
-    for key in ["dependencies", "dev-dependencies"] {
-        if let Some(entry) = table.get(key) {
-            if item_has_dependencies(entry) {
-                return true;
-            }
-        }
-    }
-
-    if let Some(group_table) = table.get("group").and_then(toml_edit::Item::as_table) {
-        for (_, group_item) in group_table.iter() {
-            if let Some(group_entry) = group_item.as_table() {
-                if table_declares_dependencies(group_entry) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn detect_foreign_tool_conflicts(path: &PathBuf) -> Result<Vec<String>> {
-    let contents = fs::read_to_string(path)?;
-    let doc: DocumentMut = contents.parse()?;
-    let Some(tool_table) = doc.get("tool").and_then(toml_edit::Item::as_table) else {
-        return Ok(Vec::new());
-    };
-
-    let known = ["poetry", "pdm", "hatch", "flit", "rye"];
-    let mut owners = Vec::new();
-    for (key, value) in tool_table.iter() {
-        if !known.contains(&key) {
-            continue;
-        }
-        if let Some(table) = value.as_table() {
-            if table_declares_dependencies(table) {
-                owners.push(key.to_string());
-            }
-        }
-    }
-    owners.sort();
-    owners.dedup();
-    Ok(owners)
-}
-
 fn rollback_failed_migration(backups: &BackupManager, created_files: &[PathBuf]) -> Result<()> {
     backups.restore_all()?;
     for path in created_files {
@@ -835,179 +699,4 @@ fn rollback_failed_migration(backups: &BackupManager, created_files: &[PathBuf])
         }
     }
     Ok(())
-}
-
-fn marker_expression_matches(marker_env: &MarkerEnvironment, expression: &str) -> bool {
-    let requirement = format!("__px_marker_only__; {}", expression.trim());
-    PepRequirement::from_str(&requirement)
-        .map(|req| req.evaluate_markers(marker_env, &[]))
-        .unwrap_or(false)
-}
-
-fn uv_lock_versions(
-    root: &Path,
-    marker_env: &MarkerEnvironment,
-) -> Result<Option<HashMap<String, String>>> {
-    let path = root.join("uv.lock");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let contents = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read uv.lock at {}", path.display()))?;
-    let doc: DocumentMut = contents
-        .parse()
-        .with_context(|| format!("failed to parse uv.lock at {}", path.display()))?;
-    let Some(packages) = doc.get("package").and_then(Item::as_array_of_tables) else {
-        return Ok(None);
-    };
-    let mut versions: HashMap<String, (String, usize)> = HashMap::new();
-    for package in packages.iter() {
-        let Some(name) = package.get("name").and_then(Item::as_str) else {
-            continue;
-        };
-        let Some(version) = package.get("version").and_then(Item::as_str) else {
-            continue;
-        };
-        let resolution_markers = package
-            .get("resolution-markers")
-            .and_then(Item::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|value| value.as_str().map(std::string::ToString::to_string))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        if !resolution_markers.is_empty()
-            && !resolution_markers
-                .iter()
-                .any(|expr| marker_expression_matches(marker_env, expr))
-        {
-            continue;
-        }
-        let normalized = normalize_dist_name(name);
-        let specificity = resolution_markers.len();
-        match versions.get(&normalized) {
-            Some((_, existing_specificity)) if *existing_specificity >= specificity => {}
-            _ => {
-                versions.insert(normalized, (version.to_string(), specificity));
-            }
-        }
-    }
-    if versions.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(
-        versions
-            .into_iter()
-            .map(|(name, (version, _))| (name, version))
-            .collect(),
-    ))
-}
-
-fn poetry_lock_versions(root: &Path) -> Result<Option<HashMap<String, String>>> {
-    let path = root.join("poetry.lock");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let contents = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read poetry.lock at {}", path.display()))?;
-    let doc: DocumentMut = contents
-        .parse()
-        .with_context(|| format!("failed to parse poetry.lock at {}", path.display()))?;
-    let Some(packages) = doc.get("package").and_then(Item::as_array_of_tables) else {
-        return Ok(None);
-    };
-    let mut versions = HashMap::new();
-    for package in packages.iter() {
-        let Some(name) = package.get("name").and_then(Item::as_str) else {
-            continue;
-        };
-        let Some(version) = package.get("version").and_then(Item::as_str) else {
-            continue;
-        };
-        versions
-            .entry(normalize_dist_name(name))
-            .or_insert_with(|| version.to_string());
-    }
-    Ok(Some(versions))
-}
-
-fn merge_pin_sets(existing: &mut Vec<PinSpec>, extra: Vec<PinSpec>) {
-    let mut seen: HashSet<String> = existing.iter().map(autopin_pin_key).collect();
-    for pin in extra {
-        let key = autopin_pin_key(&pin);
-        if seen.insert(key) {
-            existing.push(pin);
-        }
-    }
-}
-
-enum LockPinChoice {
-    Reuse { pin: PinSpec, source: String },
-    Skip(String),
-}
-
-fn pin_from_locked_versions(
-    spec: &str,
-    versions: &HashMap<String, String>,
-    marker_env: &MarkerEnvironment,
-    source_label: &str,
-) -> LockPinChoice {
-    let requirement = match PepRequirement::from_str(spec.trim()) {
-        Ok(req) => req,
-        Err(err) => return LockPinChoice::Skip(err.to_string()),
-    };
-    if !requirement.evaluate_markers(marker_env, &[]) {
-        return LockPinChoice::Skip("markers_do_not_apply".to_string());
-    }
-    let name = requirement.name.to_string();
-    let normalized = normalize_dist_name(&name);
-    let Some(version) = versions.get(&normalized) else {
-        return LockPinChoice::Skip(format!("not_in_{source_label}"));
-    };
-
-    // Ensure the locked version satisfies the current specifiers.
-    let satisfies = match &requirement.version_or_url {
-        Some(pep508_rs::VersionOrUrl::VersionSpecifier(specifiers)) => {
-            VersionSpecifiers::from_str(&specifiers.to_string())
-                .ok()
-                .and_then(|specs| {
-                    Version::from_str(version)
-                        .ok()
-                        .map(|ver| specs.contains(&ver))
-                })
-                .unwrap_or(false)
-        }
-        Some(pep508_rs::VersionOrUrl::Url(_)) => false,
-        None => false,
-    };
-    if !satisfies {
-        return LockPinChoice::Skip(format!(
-            "{source_label} has {version} which does not satisfy current spec"
-        ));
-    }
-
-    let extras = px_domain::api::canonical_extras(
-        &requirement
-            .extras
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>(),
-    );
-    let marker = requirement.marker.as_ref().map(ToString::to_string);
-    let specifier = format_specifier(&normalized, &extras, version, marker.as_deref());
-    let normalized_label = normalized.clone();
-    LockPinChoice::Reuse {
-        pin: PinSpec {
-            name,
-            specifier,
-            version: version.clone(),
-            normalized,
-            extras,
-            marker,
-            direct: true,
-            requires: Vec::new(),
-        },
-        source: format!("{normalized_label}=={version} ({source_label})"),
-    }
 }
