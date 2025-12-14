@@ -67,5 +67,10 @@ These rules keep local development and CI reproducible and make state drift visi
 ## Commit-scoped environments
 
 * `px run --at <git-ref>` / `px test --at <git-ref>` execute using the manifest + lock at that ref without checking it out.
+* **Commit pinning is the determinism boundary for Git sources**: any Git reference used for execution or caching must be resolved to a full commit SHA before it becomes part of CAS identity (branches/tags are not stable inputs).
+* Run-by-reference targets (`px run gh:…` / `px run git+…`) follow the same boundary: they cache a `repo-snapshot` object keyed by the canonical repo locator + full commit SHA, and execute from that immutable snapshot.
+  * Default: pinned commits only; floating refs require `--allow-floating`.
+  * Frozen/CI: floating refs are refused even with `--allow-floating`.
+  * Offline: if the `repo-snapshot` isn’t already in CAS, the command fails (no implicit network).
 * Env/profile identity is a function of the git ref, manifest/lock content, and runtime; environments are materialized/reused from the global CAS cache and never touch the working tree.
 * Frozen semantics: if the ref lacks a lock or it drifts from the manifest fingerprint at that ref, the command fails instead of re-resolving.

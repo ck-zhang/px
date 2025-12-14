@@ -23,6 +23,8 @@ use crate::{CommandContext, ExecutionOutcome, InstallUserError};
 use px_domain::project::manifest::manifest_fingerprint;
 use px_domain::{ProjectStateKind, ProjectStateReport, PxOptions};
 
+const DEFAULT_INLINE_REQUIRES_PYTHON: &str = ">=3.8";
+
 #[derive(Clone, Debug)]
 pub(crate) struct InlineScript {
     pub(crate) path: PathBuf,
@@ -42,6 +44,102 @@ struct RawInlineMetadata {
     #[serde(rename = "requires-python")]
     requires_python: Option<String>,
     dependencies: Option<Vec<String>>,
+}
+
+/// Load a Python script for execution with px's inline-script pipeline.
+///
+/// If the script contains a `# /// px` or PEP 723 `# /// script` block, that
+/// metadata is used. Otherwise, the script runs in an empty environment.
+pub(crate) fn load_inline_python_script(
+    script_path: &Path,
+    working_dir: &Path,
+) -> Result<InlineScript, ExecutionOutcome> {
+    let abs_path = if script_path.is_absolute() {
+        script_path.to_path_buf()
+    } else {
+        working_dir.join(script_path)
+    };
+    if !abs_path.is_file() {
+        return Err(ExecutionOutcome::user_error(
+            "script path does not exist in snapshot",
+            json!({
+                "reason": "script_not_found",
+                "script": script_path.to_string_lossy(),
+                "snapshot_root": working_dir.display().to_string(),
+                "resolved_path": abs_path.display().to_string(),
+                "hint": "check the path after ':' exists at the pinned commit",
+            }),
+        ));
+    }
+    let is_python = abs_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("py"))
+        .unwrap_or(false);
+    if !is_python {
+        return Err(ExecutionOutcome::user_error(
+            "run-by-reference currently supports Python scripts only",
+            json!({
+                "reason": "run_reference_non_python_script",
+                "script": abs_path.display().to_string(),
+                "hint": "point to a .py file (example: :path/to/script.py)",
+            }),
+        ));
+    }
+    let snapshot_root = fs::canonicalize(working_dir).map_err(|err| {
+        ExecutionOutcome::failure(
+            "unable to resolve repository snapshot root",
+            json!({
+                "snapshot_root": working_dir.display().to_string(),
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    let canonical_path = fs::canonicalize(&abs_path).map_err(|err| {
+        ExecutionOutcome::failure(
+            "unable to canonicalize script path",
+            json!({
+                "script": abs_path.display().to_string(),
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    if !canonical_path.starts_with(&snapshot_root) {
+        return Err(ExecutionOutcome::user_error(
+            "script path resolves outside the repository snapshot",
+            json!({
+                "reason": "run_reference_path_escape",
+                "script": script_path.to_string_lossy(),
+                "snapshot_root": snapshot_root.display().to_string(),
+                "resolved_path": canonical_path.display().to_string(),
+                "hint": "use a script path that stays within the repository snapshot (avoid symlinks that point outside)",
+            }),
+        ));
+    }
+
+    let contents = fs::read_to_string(&canonical_path).map_err(|err| {
+        ExecutionOutcome::failure(
+            "unable to read script",
+            json!({
+                "script": canonical_path.display().to_string(),
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    let metadata = if let Some(block) = extract_inline_block(&contents, &abs_path)? {
+        parse_inline_metadata(&block, &abs_path)?
+    } else {
+        InlineScriptMetadata {
+            requires_python: DEFAULT_INLINE_REQUIRES_PYTHON.to_string(),
+            dependencies: Vec::new(),
+        }
+    };
+    Ok(InlineScript {
+        path: abs_path,
+        canonical_path,
+        working_dir: working_dir.to_path_buf(),
+        metadata,
+    })
 }
 
 /// Attempt to locate and parse an inline `# /// px` metadata block near the
@@ -382,7 +480,7 @@ fn extract_inline_block(
             }
             if trimmed.starts_with('#') {
                 let after_hash = trimmed.trim_start_matches('#').trim_start();
-                if after_hash.starts_with("/// px") {
+                if after_hash.starts_with("/// px") || after_hash.starts_with("/// script") {
                     started = true;
                 }
                 continue;
@@ -427,13 +525,22 @@ fn parse_inline_metadata(
     script_path: &Path,
 ) -> Result<InlineScriptMetadata, ExecutionOutcome> {
     let raw: RawInlineMetadata = toml_edit::de::from_str(block).map_err(|err| {
+        let mut details = json!({
+            "script": script_path.display().to_string(),
+            "error": err.to_string(),
+            "reason": "invalid_inline_toml",
+            "hint": "fix the TOML inside the '# /// script' block (ensure each line is commented and the block is terminated with '# ///')",
+        });
+        if let Some(span) = err.span() {
+            let (line, column) = line_col_for_offset(block, span.start);
+            if let Some(map) = details.as_object_mut() {
+                map.insert("line".to_string(), json!(line));
+                map.insert("column".to_string(), json!(column));
+            }
+        }
         ExecutionOutcome::user_error(
-            "invalid inline px metadata",
-            json!({
-                "script": script_path.display().to_string(),
-                "error": err.to_string(),
-                "reason": "invalid_inline_toml",
-            }),
+            "invalid inline script metadata",
+            details,
         )
     })?;
 
@@ -443,30 +550,30 @@ fn parse_inline_metadata(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| {
-            ExecutionOutcome::user_error(
-                "inline px block missing requires-python",
-                json!({
-                    "script": script_path.display().to_string(),
-                    "reason": "missing_requires_python",
-                }),
-            )
-        })?;
+        .unwrap_or_else(|| DEFAULT_INLINE_REQUIRES_PYTHON.to_string());
 
-    let deps = raw.dependencies.ok_or_else(|| {
-        ExecutionOutcome::user_error(
-            "inline px block missing dependencies",
-            json!({
-                "script": script_path.display().to_string(),
-                "reason": "missing_dependencies",
-            }),
-        )
-    })?;
+    let deps = raw.dependencies.unwrap_or_default();
 
     Ok(InlineScriptMetadata {
         requires_python,
         dependencies: deps,
     })
+}
+
+fn line_col_for_offset(contents: &str, offset: usize) -> (u64, u64) {
+    let bytes = contents.as_bytes();
+    let offset = offset.min(bytes.len());
+    let mut line: u64 = 1;
+    let mut column: u64 = 1;
+    for &ch in &bytes[..offset] {
+        if ch == b'\n' {
+            line = line.saturating_add(1);
+            column = 1;
+        } else {
+            column = column.saturating_add(1);
+        }
+    }
+    (line, column)
 }
 
 fn sanitized_dependencies(deps: &[String]) -> Result<Vec<String>, ExecutionOutcome> {

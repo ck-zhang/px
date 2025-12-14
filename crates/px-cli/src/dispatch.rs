@@ -220,6 +220,7 @@ fn run_request_from_args(args: &RunArgs) -> RunRequest {
         target: args.target.clone(),
         args: forwarded_args,
         frozen: args.frozen,
+        allow_floating: args.allow_floating,
         interactive: if args.interactive {
             Some(true)
         } else if args.non_interactive {

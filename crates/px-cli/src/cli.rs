@@ -128,7 +128,7 @@ pub enum CommandGroupCli {
     )]
     Update(SpecArgs),
     #[command(
-        about = "Run scripts/tasks with auto-sync unless --frozen or CI=1.",
+        about = "Run scripts/tasks with auto-sync unless --frozen or CI=1. Also supports gh:/git+ run-by-reference targets.",
         override_usage = "px run <TARGET> [ARG...]"
     )]
     Run(RunArgs),
@@ -362,8 +362,17 @@ pub struct SyncArgs {
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
-    #[arg(long, add = ArgValueCompleter::new(run_target_completer))]
+    #[arg(
+        long,
+        help = "Target to run (same as positional TARGET; supports gh:/git+ run-by-reference forms)",
+        add = ArgValueCompleter::new(run_target_completer)
+    )]
     pub target: Option<String>,
+    #[arg(
+        long,
+        help = "Allow floating git refs in gh:/git+ run targets (resolved to a commit at runtime)"
+    )]
+    pub allow_floating: bool,
     #[arg(long, help = "Force interactive stdio (inherit stdin/stdout/stderr)")]
     pub interactive: bool,
     #[arg(
@@ -392,7 +401,7 @@ pub struct RunArgs {
         value_name = "TARGET",
         allow_hyphen_values = true,
         add = ArgValueCompleter::new(run_target_completer),
-        help = "Target to run"
+        help = "Target to run. Run-by-reference: gh:ORG/REPO@<sha>:path/to/script.py or git+file:///abs/path/to/repo@<sha>:path/to/script.py"
     )]
     pub target_value: Option<String>,
     #[arg(

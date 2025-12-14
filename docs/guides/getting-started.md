@@ -30,7 +30,7 @@ px currently supports Linux and macOS only; Windows is not supported yet. Use WS
 px understands inline metadata blocks at the top of a script (PEP 723 style):
 
 ```
-# /// px
+# /// script
 # requires-python = ">=3.11"
 # dependencies = ["httpx"]
 # ///
@@ -39,13 +39,20 @@ px understands inline metadata blocks at the top of a script (PEP 723 style):
 You can also pin more than one dependency:
 
 ```
-# /// px
+# /// script
 # requires-python = ">=3.10"
 # dependencies = ["rich==13.9.2", "requests<3"]
 # ///
 ```
 
 Run the file with `px run script.py`; px resolves the inline deps, builds an isolated env in its cache, and reuses it next time.
+
+You can also run a script from a repository reference (no local project required):
+
+* `px run gh:ORG/REPO@<sha>:path/to/script.py`
+* `px run git+file:///abs/path/to/repo@<sha>:path/to/script.py` (offline-testable)
+
+These forms are pinned-by-default; floating refs require `--allow-floating` and are refused under `--frozen` or `CI=1`. In `--offline` mode, the repo snapshot must already be cached in the CAS.
 
 ## Going further
 

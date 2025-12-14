@@ -70,7 +70,7 @@ The CAS introduces a few new nouns:
 
 * **Object (O)** – an immutable blob with type and metadata.
 
-  * `kind ∈ {source, pkg-build, runtime, profile, meta}`
+  * `kind ∈ {source, pkg-build, runtime, repo-snapshot, profile, meta}`
 
 * **Object ID (oid)** – hex digest (e.g. `sha256`) of canonical object bytes.
 
@@ -152,6 +152,7 @@ Filesystem trees in payloads are normalized:
 
 * paths are relative and use `/` separators,
 * no absolute machine‑local paths,
+* `.git/` is excluded,
 * entries are sorted lexicographically by path,
 * timestamps and other unstable metadata are stripped.
 
@@ -202,7 +203,39 @@ Digest is **authoritative**:
 * The CAS entry contains only the runtime header/metadata; the archive bytes are **not** stored in CAS.
 * Runtime bytes are assumed to come from the host path, so CAS immutability/replication guarantees do not apply in this mode.
 
-**4. `profile`**
+**4. `repo-snapshot`**
+
+* An immutable snapshot of a Git repository **pinned to a specific commit** (optionally rooted at a subdirectory).
+* Header:
+
+  ```text
+  {
+    locator: "git+file:///abs/path/to/repo" | "git+https://…",
+    commit: "<full_sha>",
+    subdir?: "relative/subdir"
+  }
+  ```
+
+* Payload:
+
+  * Canonical, normalized filesystem archive (gzip-compressed tar).
+  * Encodes only semantic content:
+
+    * file bytes
+    * relative path
+    * executable bit
+    * symlink target
+
+* Determinism rules:
+
+  * `.git/` excluded
+  * stable lexicographic ordering of paths
+  * normalized metadata: `mtime=0`, `uid=0`, `gid=0`, empty user/group names, no device ids
+  * no special files (device nodes, fifos, sockets)
+
+* Identity is commit-pinned: the `commit` value is part of the canonical header so the `oid` changes when the commit SHA changes, even if the tree contents are identical.
+
+**5. `profile`**
 
 * A *logical env description*.
 
@@ -230,7 +263,7 @@ A profile is essentially “L + runtime” rewritten into CAS IDs.
 
 `env_vars` in the profile are applied when the env runtime is launched; they override any parent process values so that the materialized env matches the CAS-described configuration.
 
-**5. `meta`**
+**6. `meta`**
 
 * Small co-located metadata blobs, e.g. per-env manifests, CAS indices snapshots, diagnostics.
 * Useful for debugging and internal invariants; not required for semantics.
@@ -255,6 +288,7 @@ On disk, the store looks like:
     ababcdef1234...partial   # in-progress writes
   runtimes/<oid>/            # materialized runtime tree + manifest.json (implementation detail)
   pkg-builds/<oid>/          # materialized pkg-build tree (implementation detail)
+  repo-snapshots/<oid>/      # materialized repo snapshot tree (implementation detail)
 ```
 
 * Objects are sharded by two hex prefix characters to avoid giant directories.

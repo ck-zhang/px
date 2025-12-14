@@ -109,8 +109,24 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 ### `px run <target> […args]`
 
 * **Intent**: run a command using the project env with deterministic state behavior and deterministic target resolution.
-* **Preconditions**: project root exists. Lock must exist and match manifest (otherwise suggest `px sync`). In CI/`--frozen`, px never re-resolves; if a materialized env is required (e.g. `--sandbox` or compatibility fallback), it must already be consistent.
+* **Preconditions**:
+  * **Project targets**: project root exists. Lock must exist and match manifest (otherwise suggest `px sync`). In CI/`--frozen`, px never re-resolves; if a materialized env is required (e.g. `--sandbox` or compatibility fallback), it must already be consistent.
+  * **Run-by-reference targets** (`gh:` / `git+`): no local project is required; px runs from a commit-pinned repository snapshot stored in the CAS and does not write `pyproject.toml`, `px.lock`, or `.px/` into the caller directory.
 * **Target resolution**:
+
+  0. **Run by reference** (explicit prefixes only):
+
+     * **GitHub shorthand**: `gh:ORG/REPO@<sha>:path/to/script.py`
+     * **Git URL**: `git+file:///abs/path/to/repo@<sha>:path/to/script.py` (also supports `git+https://…@<sha>:…`)
+
+     Semantics:
+     * **Pinned by default**: `@<sha>` must be a full commit SHA; floating refs (branch/tag/no `@`) are rejected unless `--allow-floating`.
+     * **Frozen/CI**: floating refs are refused even with `--allow-floating`.
+     * **Offline** (`--offline` / `PX_ONLINE=0`): the repo snapshot must already be in the CAS; otherwise the run fails (no implicit network or git fetch).
+     * **Locator hygiene**: `git+https://…` locators must not embed credentials, query strings, or fragments; use a git credential helper instead.
+     * **Dependencies**: if the target script contains PEP 723 `# /// script` (or `# /// px`) metadata, px uses it; otherwise the script runs in an empty env.
+     * **No project mutation**: the snapshot is materialized into px’s cache (read-only) and never touches the caller’s working directory.
+     * **Current limitations**: run-by-reference currently supports Python scripts only and does not support `--sandbox` or `--at`.
 
   1. If `<target>` is a file under the project root, run it as a script with the project runtime.
   2. If `<target>` is a Python alias (`python`, `python3`, `py`, etc.), run the project runtime directly.

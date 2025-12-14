@@ -60,6 +60,40 @@ Applies to all commands that show progress (resolver, env build, tool install, e
 * `pyc_cache_unwritable`: px could not create the Python bytecode cache directory; ensure `~/.px/cache` (or `PX_CACHE_PATH`) is writable and retry. If bytecode caches grow too large, it is always safe to delete `~/.px/cache/pyc`.
 * `ambiguous_console_script`: multiple dists provide the same `console_scripts` name; px typically falls back to a materialized env to pick a deterministic winner, but if fallback is unavailable, remove one of the conflicting deps (or run a specific module via `px run python -m <module>`).
 
+## Run by reference (`gh:` / `git+`)
+
+Run-by-reference targets fetch/cache a commit-pinned repo snapshot in the CAS and execute a Python script from it.
+
+* `run_reference_requires_pin`: the repo ref is floating (branch/tag/no `@`), but pinned commits are required by default.
+
+  * Fix: use `@<full_sha>` (recommended), e.g. `px run gh:ORG/REPO@<sha>:path/to/script.py`
+  * Fix: or allow floating refs explicitly: `px run --allow-floating <TARGET> …` (refused under `--frozen` or `CI=1`)
+
+* `run_reference_requires_full_sha`: the ref after `@` looks like a short commit SHA (or otherwise isn’t a full pinned SHA).
+
+  * Fix: use a full 40‑character commit SHA (recommended), e.g. `px run gh:ORG/REPO@<full_sha>:path/to/script.py`
+  * Fix: or resolve it explicitly: `px run --allow-floating <TARGET> …` (refused under `--frozen` or `CI=1`)
+
+* `run_reference_offline_missing_snapshot`: `--offline` / `PX_ONLINE=0` was set, but the snapshot is not cached yet.
+
+  * Fix: re-run once without `--offline` to populate the CAS, then retry with `--offline`
+
+* `run_reference_offline_floating`: floating refs require online mode (even if the repo is local).
+
+  * Fix: pin a full commit SHA, or re-run with `--online` / `PX_ONLINE=1`
+
+* `run_reference_floating_disallowed`: floating refs were requested under `--frozen` or `CI=1`.
+
+  * Fix: pin a full commit SHA and retry
+
+* `invalid_run_reference_target`: the target is malformed.
+
+  * Fix: use `gh:ORG/REPO@<sha>:path/to/script.py` or `git+file:///abs/path/to/repo@<sha>:path/to/script.py`
+
+* `invalid_repo_snapshot_locator` / `invalid_run_reference_locator`: the git locator is invalid (or contains credentials/query/fragment).
+
+  * Fix: use a plain locator like `git+https://host/org/repo.git` or `git+file:///abs/path/to/repo` (no embedded credentials; use a git credential helper instead)
+
 ## Sandbox errors
 
 Sandbox errors are prefixed `PX9xx` and do not change manifests/locks/envs.

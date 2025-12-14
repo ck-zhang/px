@@ -17,9 +17,11 @@ pub(crate) use crate::core::runtime::{
 };
 pub(crate) use crate::core::store;
 pub use crate::core::store::cas::{
-    archive_dir_canonical, global_store, pkg_build_lookup_key, source_lookup_key,
-    ContentAddressableStore, DoctorSummary, GcSummary, LoadedObject, ObjectInfo, ObjectKind,
-    ObjectPayload, OwnerId, OwnerType, StoreError, StoredObject,
+    archive_dir_canonical, ensure_repo_snapshot, global_store, lookup_repo_snapshot_oid,
+    materialize_repo_snapshot,
+    pkg_build_lookup_key, repo_snapshot_lookup_key, source_lookup_key, ContentAddressableStore,
+    DoctorSummary, GcSummary, LoadedObject, ObjectInfo, ObjectKind, ObjectPayload, OwnerId,
+    OwnerType, RepoSnapshotHeader, RepoSnapshotSpec, StoreError, StoredObject,
 };
 pub(crate) use crate::core::store::pypi;
 pub(crate) use crate::core::tooling;
