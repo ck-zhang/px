@@ -1,120 +1,18 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result as AnyhowResult;
 use serde_json::json;
 use toml_edit::DocumentMut;
 
-use super::execution_plan;
-use super::run::{
+use super::super::execution_plan;
+use super::super::run::{
     git_repo_root, install_error_outcome, materialize_ref_tree, parse_run_reference_target,
-    validate_lock_for_ref, RunRequest,
+    validate_lock_for_ref, RunReferenceTarget, RunRequest,
 };
+use super::render::render_plan_human;
 use crate::tooling::run_target_required_outcome;
 use crate::{marker_env_for_snapshot, CommandContext, ExecutionOutcome};
 use px_domain::api::ProjectSnapshot;
-
-fn sh_quote(raw: &str) -> String {
-    if raw.is_empty() {
-        return "''".to_string();
-    }
-    let safe = raw.chars().all(|ch| {
-        ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '@' | '+')
-    });
-    if safe {
-        raw.to_string()
-    } else {
-        let escaped = raw.replace('\'', "'\"'\"'");
-        format!("'{escaped}'")
-    }
-}
-
-fn render_plan_human(plan: &execution_plan::ExecutionPlan, verbose: u8) -> String {
-    let mut lines = Vec::new();
-    match &plan.provenance.source {
-        execution_plan::SourceProvenance::WorkingTree => {
-            lines.push("source: working_tree".to_string())
-        }
-        execution_plan::SourceProvenance::GitRef {
-            git_ref,
-            manifest_repo_path,
-            ..
-        } => lines.push(format!("source: git_ref {git_ref} ({manifest_repo_path})")),
-        execution_plan::SourceProvenance::RepoSnapshot {
-            locator,
-            git_ref,
-            commit,
-            repo_snapshot_oid,
-            script_repo_path,
-        } => {
-            let mut line = match (commit.as_deref(), git_ref.as_deref()) {
-                (Some(commit), _) => {
-                    format!("source: repo_snapshot {locator}@{commit}:{script_repo_path}")
-                }
-                (None, Some(git_ref)) => {
-                    format!("source: repo_snapshot {locator}@{git_ref}:{script_repo_path}")
-                }
-                (None, None) => format!("source: repo_snapshot {locator}:{script_repo_path}"),
-            };
-            if verbose > 0 {
-                if let Some(oid) = repo_snapshot_oid.as_deref() {
-                    line.push_str(&format!(" (oid={oid})"));
-                }
-            }
-            lines.push(line);
-        }
-    }
-    let mut engine = plan.engine.mode.to_string();
-    if verbose > 0 {
-        if let Some(code) = plan.engine.fallback_reason_code.as_deref() {
-            engine = format!("{engine} (fallback={code})");
-        }
-    }
-    lines.push(format!("engine: {engine}"));
-    if let Some(version) = plan.runtime.python_version.as_deref() {
-        if let Some(abi) = plan.runtime.python_abi.as_deref() {
-            lines.push(format!(
-                "runtime: {} (version={version} abi={abi})",
-                plan.runtime.executable
-            ));
-        } else {
-            lines.push(format!(
-                "runtime: {} (version={version})",
-                plan.runtime.executable
-            ));
-        }
-    } else {
-        lines.push(format!("runtime: {}", plan.runtime.executable));
-    }
-    if let Some(profile) = plan.lock_profile.profile_oid.as_deref() {
-        lines.push(format!("profile_oid: {profile}"));
-    }
-    if let Some(lock_id) = plan
-        .lock_profile
-        .l_id
-        .as_deref()
-        .or(plan.lock_profile.wl_id.as_deref())
-    {
-        lines.push(format!("lock_id: {lock_id}"));
-    }
-    lines.push(format!("workdir: {}", plan.working_dir));
-    lines.push(format!(
-        "argv: {}",
-        plan.target_resolution
-            .argv
-            .iter()
-            .map(|s| sh_quote(s))
-            .collect::<Vec<_>>()
-            .join(" ")
-    ));
-    if plan.sys_path.summary.count > 0 {
-        lines.push(format!("sys.path: {} entries", plan.sys_path.summary.count));
-    }
-    if plan.would_repair_env {
-        lines.push("would_repair_env: true (run `px sync`)".to_string());
-    }
-    lines.join("\n")
-}
 
 fn manifest_has_px(doc: &DocumentMut) -> bool {
     doc.get("tool")
@@ -245,7 +143,7 @@ fn normalize_pinned_commit(value: &str) -> Option<String> {
 fn plan_run_by_reference(
     ctx: &CommandContext,
     request: &RunRequest,
-    reference: &super::run::RunReferenceTarget,
+    reference: &RunReferenceTarget,
     strict: bool,
 ) -> std::result::Result<execution_plan::ExecutionPlan, ExecutionOutcome> {
     if request.at.is_some() {
@@ -567,7 +465,7 @@ fn plan_run_at_ref(
                     wl_id: Some(lock_id.clone()),
                     tool_lock_id: None,
                     profile_oid: None,
-                    env_id: super::cas_env::workspace_env_owner_id(
+                    env_id: super::super::cas_env::workspace_env_owner_id(
                         &workspace_root,
                         &lock_id,
                         &runtime.version,
@@ -637,17 +535,17 @@ fn plan_run_at_ref(
                     }),
                 )
             })?;
-            let manifest_doc: DocumentMut =
-                manifest_contents.parse::<DocumentMut>().map_err(|err| {
-                    ExecutionOutcome::failure(
-                        "failed to parse pyproject.toml from git ref",
-                        json!({
-                            "git_ref": git_ref,
-                            "path": manifest_rel.display().to_string(),
-                            "error": err.to_string(),
-                        }),
-                    )
-                })?;
+            let manifest_doc = manifest_contents.parse::<DocumentMut>().map_err(|err| {
+                ExecutionOutcome::failure(
+                    "failed to parse pyproject.toml from git ref",
+                    json!({
+                        "git_ref": git_ref,
+                        "path": manifest_rel.display().to_string(),
+                        "error": err.to_string(),
+                        "reason": "invalid_manifest_at_ref",
+                    }),
+                )
+            })?;
             if !manifest_has_px(&manifest_doc) {
                 return Err(ExecutionOutcome::user_error(
                     "px project not found at the requested git ref",
@@ -754,7 +652,7 @@ fn plan_run_at_ref(
                     wl_id: None,
                     tool_lock_id: None,
                     profile_oid: None,
-                    env_id: super::cas_env::project_env_owner_id(
+                    env_id: super::super::cas_env::project_env_owner_id(
                         &project_root,
                         &lock_id,
                         &runtime.version,
@@ -838,258 +736,5 @@ pub fn explain_run(ctx: &CommandContext, request: &RunRequest) -> AnyhowResult<E
     };
     let details = serde_json::to_value(&plan)?;
     let message = render_plan_human(&plan, ctx.global.verbose);
-    Ok(ExecutionOutcome::success(message, details))
-}
-
-pub fn explain_entrypoint(ctx: &CommandContext, name: &str) -> AnyhowResult<ExecutionOutcome> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Ok(ExecutionOutcome::user_error(
-            "entrypoint name is required",
-            json!({
-                "reason": "missing_entrypoint_name",
-                "hint": "provide a console script name (example: `px explain entrypoint ruff`)",
-            }),
-        ));
-    }
-
-    let strict = ctx.env_flag_enabled("CI");
-    let plan = match execution_plan::plan_run_execution(ctx, strict, false, "python", &[]) {
-        Ok(plan) => plan,
-        Err(outcome) => return Ok(outcome),
-    };
-    if plan.sys_path.entries.is_empty() {
-        let mut details = json!({
-            "reason": "missing_profile",
-            "entrypoint": name,
-        });
-        if plan.would_repair_env {
-            details["hint"] =
-                json!("run `px sync` to build the environment before resolving entrypoints");
-        }
-        return Ok(ExecutionOutcome::user_error(
-            "environment profile is not available",
-            details,
-        ));
-    }
-
-    #[derive(Clone, Debug)]
-    struct Candidate {
-        dist: String,
-        version: Option<String>,
-        entry_point: String,
-        pkg_build_oid: Option<String>,
-    }
-
-    fn pkg_build_oid_from_sys_path(path: &Path) -> Option<String> {
-        const PKG_BUILDS_DIR: &str = "pkg-builds";
-        let mut iter = path.components().peekable();
-        while let Some(comp) = iter.next() {
-            let part = comp.as_os_str().to_string_lossy();
-            if part == PKG_BUILDS_DIR {
-                if let Some(next) = iter.next() {
-                    let oid = next.as_os_str().to_string_lossy().to_string();
-                    if !oid.is_empty() {
-                        return Some(oid);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    fn parse_console_scripts(contents: &str) -> Vec<(String, String)> {
-        let mut in_console_scripts = false;
-        let mut scripts = Vec::new();
-        for line in contents.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
-                continue;
-            }
-            if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                let section = &trimmed[1..trimmed.len() - 1];
-                in_console_scripts = section.trim() == "console_scripts";
-                continue;
-            }
-            if !in_console_scripts {
-                continue;
-            }
-            let Some((key, value)) = trimmed.split_once('=') else {
-                continue;
-            };
-            let key = key.trim();
-            let value = value.trim();
-            if key.is_empty() || value.is_empty() {
-                continue;
-            }
-            scripts.push((key.to_string(), value.to_string()));
-        }
-        scripts
-    }
-
-    fn read_dist_metadata_name_version(dist_info: &Path) -> (String, Option<String>) {
-        let metadata = dist_info.join("METADATA");
-        let mut name = None;
-        let mut version = None;
-        if let Ok(contents) = fs::read_to_string(&metadata) {
-            for line in contents.lines() {
-                if name.is_none() {
-                    if let Some(value) = line.strip_prefix("Name:") {
-                        let trimmed = value.trim();
-                        if !trimmed.is_empty() {
-                            name = Some(trimmed.to_string());
-                        }
-                    }
-                }
-                if version.is_none() {
-                    if let Some(value) = line.strip_prefix("Version:") {
-                        let trimmed = value.trim();
-                        if !trimmed.is_empty() {
-                            version = Some(trimmed.to_string());
-                        }
-                    }
-                }
-                if name.is_some() && version.is_some() {
-                    break;
-                }
-            }
-        }
-        let fallback = dist_info
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_string();
-        (name.unwrap_or(fallback), version)
-    }
-
-    let mut candidates = Vec::<Candidate>::new();
-    for entry in &plan.sys_path.entries {
-        let sys_path = PathBuf::from(entry);
-        if !sys_path.is_dir() {
-            continue;
-        }
-        let pkg_build_oid = pkg_build_oid_from_sys_path(&sys_path);
-        let Ok(entries) = fs::read_dir(&sys_path) else {
-            continue;
-        };
-        let mut dist_infos = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("dist-info"))
-                && path.is_dir()
-            {
-                dist_infos.push(path);
-            }
-        }
-        dist_infos.sort();
-        for dist_info in dist_infos {
-            let entry_points = dist_info.join("entry_points.txt");
-            if !entry_points.exists() {
-                continue;
-            }
-            let contents = match fs::read_to_string(&entry_points) {
-                Ok(contents) => contents,
-                Err(_) => continue,
-            };
-            for (script, value) in parse_console_scripts(&contents) {
-                if script != name {
-                    continue;
-                }
-                let (dist, version) = read_dist_metadata_name_version(&dist_info);
-                candidates.push(Candidate {
-                    dist,
-                    version,
-                    entry_point: value,
-                    pkg_build_oid: pkg_build_oid.clone(),
-                });
-            }
-        }
-    }
-
-    candidates.sort_by(|a, b| {
-        a.dist
-            .cmp(&b.dist)
-            .then(a.version.cmp(&b.version))
-            .then(a.pkg_build_oid.cmp(&b.pkg_build_oid))
-            .then(a.entry_point.cmp(&b.entry_point))
-    });
-
-    if candidates.is_empty() {
-        return Ok(ExecutionOutcome::user_error(
-            format!("console script `{name}` not found in the current environment"),
-            json!({
-                "schema_version": 1,
-                "reason": "entrypoint_not_found",
-                "entrypoint": name,
-                "hint": "check the entrypoint name, or run `px sync` to ensure the environment is up to date",
-            }),
-        ));
-    }
-
-    if candidates.len() > 1 {
-        let rendered = candidates
-            .iter()
-            .map(|candidate| {
-                json!({
-                    "distribution": &candidate.dist,
-                    "version": candidate.version.as_deref(),
-                    "entry_point": &candidate.entry_point,
-                    "pkg_build_oid": candidate.pkg_build_oid.as_deref(),
-                })
-            })
-            .collect::<Vec<_>>();
-        return Ok(ExecutionOutcome::user_error(
-            format!("console script `{name}` is provided by multiple distributions"),
-            json!({
-                "schema_version": 1,
-                "reason": "ambiguous_console_script",
-                "entrypoint": name,
-                "candidates": rendered,
-                "hint": "Remove one of the distributions providing this script, or run a module directly via `px run python -m <module>`.",
-            }),
-        ));
-    }
-
-    let candidate = candidates.first().expect("single candidate").clone();
-    let details = json!({
-        "schema_version": 1,
-        "entrypoint": name,
-        "provider": {
-            "distribution": candidate.dist,
-            "version": candidate.version,
-            "pkg_build_oid": candidate.pkg_build_oid,
-        },
-        "target": {
-            "entry_point": candidate.entry_point,
-        }
-    });
-    let dist = details["provider"]["distribution"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    let version = details["provider"]["version"]
-        .as_str()
-        .map(|value| value.to_string());
-    let pkg_build_oid = details["provider"]["pkg_build_oid"]
-        .as_str()
-        .map(|value| value.to_string());
-    let entry_point = details["target"]["entry_point"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    let version_display = version
-        .as_deref()
-        .map(|version| format!(" {version}"))
-        .unwrap_or_default();
-    let oid_display = pkg_build_oid
-        .as_deref()
-        .map(|oid| format!(" (pkg_build_oid={oid})"))
-        .unwrap_or_default();
-    let message = format!(
-        "entrypoint: {name}\nprovider: {dist}{version_display}{oid_display}\ntarget: {entry_point}",
-    );
     Ok(ExecutionOutcome::success(message, details))
 }
