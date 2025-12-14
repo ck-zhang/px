@@ -141,7 +141,7 @@ pub fn discover_workspace_scope() -> Result<Option<WorkspaceScope>> {
     }
 }
 
-fn load_workspace_snapshot(root: &Path) -> Result<WorkspaceSnapshot> {
+pub(crate) fn load_workspace_snapshot(root: &Path) -> Result<WorkspaceSnapshot> {
     let config = read_workspace_config(root)?;
     let mut members = Vec::new();
     for rel in &config.members {
@@ -237,7 +237,10 @@ fn workspace_state_path(root: &Path) -> PathBuf {
     root.join(".px").join("workspace-state.json")
 }
 
-fn load_workspace_state(filesystem: &dyn FileSystem, root: &Path) -> Result<ProjectState> {
+pub(crate) fn load_workspace_state(
+    filesystem: &dyn FileSystem,
+    root: &Path,
+) -> Result<ProjectState> {
     let path = workspace_state_path(root);
     match filesystem.read_to_string(&path) {
         Ok(contents) => {
@@ -290,7 +293,7 @@ fn write_project_state(
     }
 }
 
-fn evaluate_workspace_state(
+pub(crate) fn evaluate_workspace_state(
     ctx: &CommandContext,
     workspace: &WorkspaceSnapshot,
 ) -> Result<WorkspaceStateReport> {
@@ -463,11 +466,11 @@ fn ensure_workspace_env_matches(
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-struct ProjectState {
+pub(crate) struct ProjectState {
     #[serde(default)]
-    current_env: Option<StoredEnvironment>,
+    pub(crate) current_env: Option<StoredEnvironment>,
     #[serde(default)]
-    runtime: Option<StoredRuntime>,
+    pub(crate) runtime: Option<StoredRuntime>,
 }
 
 fn validate_project_state(state: &ProjectState) -> Result<()> {
@@ -698,13 +701,13 @@ fn refresh_workspace_site(ctx: &CommandContext, workspace: &WorkspaceSnapshot) -
 }
 
 #[derive(Clone, Copy, Debug)]
-enum StateViolation {
+pub(crate) enum StateViolation {
     MissingLock,
     LockDrift,
     EnvDrift,
 }
 
-fn workspace_violation(
+pub(crate) fn workspace_violation(
     command: &str,
     snapshot: &WorkspaceSnapshot,
     state_report: &WorkspaceStateReport,

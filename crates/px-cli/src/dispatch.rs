@@ -1,17 +1,18 @@
 use color_eyre::{eyre::eyre, Result};
 use px_core::{
     self, is_missing_project_error, missing_project_outcome as core_missing_project_outcome,
-    AutopinPreference, BuildRequest, CommandContext, CommandGroup, CommandInfo, FmtRequest,
-    LockBehavior, MigrateRequest, MigrationMode, ProjectAddRequest, ProjectInitRequest,
-    ProjectRemoveRequest, ProjectSyncRequest, ProjectUpdateRequest, ProjectWhyRequest,
-    PublishRequest, RunRequest, TestRequest, ToolInstallRequest, ToolListRequest,
+    explain_entrypoint, explain_run, AutopinPreference, BuildRequest, CommandContext, CommandGroup,
+    CommandInfo, FmtRequest, LockBehavior, MigrateRequest, MigrationMode, ProjectAddRequest,
+    ProjectInitRequest, ProjectRemoveRequest, ProjectSyncRequest, ProjectUpdateRequest,
+    ProjectWhyRequest, PublishRequest, RunRequest, TestRequest, ToolInstallRequest, ToolListRequest,
     ToolRemoveRequest, ToolRunRequest, ToolUpgradeRequest, WorkspacePolicy,
 };
 
 use crate::{
-    BuildArgs, BuildFormat, CommandGroupCli, CompletionShell, CompletionsArgs, FmtArgs, InitArgs,
-    MigrateArgs, PackAppArgs, PackCommand, PackImageArgs, PublishArgs, RunArgs, SyncArgs, TestArgs,
-    ToolCommand, ToolInstallArgs, ToolRemoveArgs, ToolRunArgs, ToolUpgradeArgs, WhyArgs,
+    BuildArgs, BuildFormat, CommandGroupCli, CompletionShell, CompletionsArgs, ExplainCommand,
+    ExplainEntrypointArgs, FmtArgs, InitArgs, MigrateArgs, PackAppArgs, PackCommand, PackImageArgs,
+    PublishArgs, RunArgs, SyncArgs, TestArgs, ToolCommand, ToolInstallArgs, ToolRemoveArgs,
+    ToolRunArgs, ToolUpgradeArgs, WhyArgs,
 };
 use crate::{PythonCommand, PythonInstallArgs, PythonUseArgs};
 
@@ -73,6 +74,17 @@ pub fn dispatch_command(
             let info = CommandInfo::new(CommandGroup::Status, "status");
             core_call(info, || px_core::project_status(ctx))
         }
+        CommandGroupCli::Explain(cmd) => match cmd {
+            ExplainCommand::Run(args) => {
+                let info = CommandInfo::new(CommandGroup::Explain, "run");
+                let request = run_request_from_args(args);
+                core_call(info, || explain_run(ctx, &request))
+            }
+            ExplainCommand::Entrypoint(ExplainEntrypointArgs { name }) => {
+                let info = CommandInfo::new(CommandGroup::Explain, "entrypoint");
+                core_call(info, || explain_entrypoint(ctx, name.as_str()))
+            }
+        },
         CommandGroupCli::Build(args) => {
             let info = CommandInfo::new(CommandGroup::Build, "build");
             let request = build_request_from_args(args);

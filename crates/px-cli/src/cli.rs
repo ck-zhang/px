@@ -22,6 +22,7 @@ pub const PX_BEFORE_HELP: &str = concat!(
     "  test             Run tests with the same auto-sync rules as `px run`.\n\n",
     "\x1b[1;36mEssentials\x1b[0m\n",
     "  status           Check whether pyproject, px.lock, and the env still agree.\n",
+    "  explain          Inspect what px would execute (no execution).\n",
     "  why              Explain why a dependency is present.\n",
     "  fmt              Run formatters/linters/cleanup tools inside the px environment.\n",
     "  build            Produce sdists/wheels from the px-managed environment.\n",
@@ -144,6 +145,8 @@ pub enum CommandGroupCli {
     Fmt(FmtArgs),
     #[command(about = "Report whether pyproject, px.lock, and the env are in sync (read-only).")]
     Status(StatusArgs),
+    #[command(about = "Explain what px would execute (read-only).", subcommand)]
+    Explain(ExplainCommand),
     #[command(
         about = "Build sdists/wheels using the px env (prep for px publish).",
         override_usage = "px build [sdist|wheel|both] [--out DIR]"
@@ -183,6 +186,26 @@ pub enum CommandGroupCli {
         override_usage = "px completions <bash|zsh|fish|powershell>"
     )]
     Completions(CompletionsArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ExplainCommand {
+    #[command(
+        about = "Explain the execution plan for px run (no execution, no repairs).",
+        override_usage = "px explain run <TARGET> [ARG...]"
+    )]
+    Run(RunArgs),
+    #[command(
+        about = "Explain which distribution provides a console_script entrypoint.",
+        override_usage = "px explain entrypoint <NAME>"
+    )]
+    Entrypoint(ExplainEntrypointArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ExplainEntrypointArgs {
+    #[arg(value_name = "NAME")]
+    pub name: String,
 }
 
 #[derive(Subcommand, Debug)]

@@ -43,7 +43,12 @@ For a quick inventory of CLI flags and environment toggles, see [Env Vars and Fl
 
 ### Introspection
 
+* `px explain` – Execution introspection (what px would execute, and why), without executing or repairing.
+  * `px explain run [<same args as px run>]` – Show runtime/profile selection, engine path (`cas_native` vs `materialized_env`), argv/workdir/sys.path, and (when applicable) sandbox/source provenance.
+  * `px explain entrypoint <name>` – Show which distribution provides a `console_scripts` entrypoint and its resolved `module:function` target.
 * `px why` – Explain why a package or decision exists (`px why <package>` or `px why --issue <id>`).
+
+`px explain` answers “what will run and how”, while `px why` answers “why is this dependency here”.
 
 ### Workspace-aware routing (overview)
 

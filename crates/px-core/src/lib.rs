@@ -59,6 +59,7 @@ pub use crate::core::python::python_cli::{
     PythonListRequest, PythonUseRequest,
 };
 pub use crate::core::runtime::fmt_runner::{run_fmt, FmtRequest};
+pub use crate::core::runtime::explain::{explain_entrypoint, explain_run};
 pub use crate::core::runtime::run::{run_project, test_project, RunRequest, TestRequest};
 pub use crate::core::tools::{
     tool_install, tool_list, tool_remove, tool_run, tool_upgrade, ToolInstallRequest,

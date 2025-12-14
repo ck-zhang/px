@@ -13,6 +13,8 @@ px is the **front door for Python**. It owns **projects**, **tools**, and **runt
 Everything else – envs, lockfiles, caches – are implementation details.
 Inline `px`-annotated scripts are treated internally as tiny, cached px projects backed by the CAS; you don't need to think about them as a new noun.
 
+`px explain` is **execution introspection**: it prints what px *would* execute (runtime selection, profile/source, engine path like `cas_native` vs `materialized_env`, argv/workdir/sys.path) without doing repairs or running the target. Use it when you suspect “wrong Python”, “wrong entrypoint”, or an unexpected CAS-native fallback.
+
 ## Core loops
 
 ### Project lifecycle

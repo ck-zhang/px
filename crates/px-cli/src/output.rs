@@ -51,6 +51,10 @@ pub fn emit_output(
         let payload = px_core::to_json_response(info, outcome, code);
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else if !opts.quiet {
+        if info.group == CommandGroup::Explain && matches!(outcome.status, CommandStatus::Ok) {
+            println!("{}", outcome.message);
+            return Ok(code);
+        }
         if handle_run_output(opts, &style, info, outcome) {
             return Ok(code);
         }
@@ -863,6 +867,7 @@ fn error_code(info: CommandInfo) -> &'static str {
         CommandGroup::Update => diag_commands::UPDATE,
         CommandGroup::Status => diag_commands::STATUS,
         CommandGroup::Run => diag_commands::RUN,
+        CommandGroup::Explain => diag_commands::RUN,
         CommandGroup::Test => diag_commands::TEST,
         CommandGroup::Fmt => diag_commands::FMT,
         CommandGroup::Build => diag_commands::BUILD,

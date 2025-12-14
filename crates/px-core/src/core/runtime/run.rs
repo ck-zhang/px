@@ -131,7 +131,7 @@ struct CasNativeFallback {
     summary: String,
 }
 
-struct ExecutionPlan {
+struct ProcessPlan {
     runtime_path: PathBuf,
     sys_path_entries: Vec<PathBuf>,
     cwd: PathBuf,
@@ -239,10 +239,10 @@ fn map_workdir(invocation_root: Option<&Path>, context_root: &Path) -> PathBuf {
 }
 
 #[derive(Clone, Debug)]
-struct RunReferenceTarget {
-    locator: String,
-    git_ref: Option<String>,
-    script_path: PathBuf,
+pub(crate) struct RunReferenceTarget {
+    pub(crate) locator: String,
+    pub(crate) git_ref: Option<String>,
+    pub(crate) script_path: PathBuf,
 }
 
 fn timestamp_secs() -> u64 {
@@ -309,7 +309,9 @@ fn record_run_reference_provenance(
     Some(log_path)
 }
 
-fn parse_run_reference_target(target: &str) -> Result<Option<RunReferenceTarget>, ExecutionOutcome> {
+pub(crate) fn parse_run_reference_target(
+    target: &str,
+) -> Result<Option<RunReferenceTarget>, ExecutionOutcome> {
     let target = target.trim();
     if target.starts_with("gh:") {
         return Ok(Some(parse_run_reference_target_gh(target)?));
@@ -2344,7 +2346,9 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
                         }
                         let msg = err.to_string();
                         if msg.contains("pyproject.toml not found") {
-                            let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                            let root = ctx
+                                .project_root()
+                                .unwrap_or_else(|_| env::current_dir().unwrap_or(PathBuf::from(".")));
                             return Ok(missing_pyproject_outcome("run", &root));
                         }
                         return Err(err);
@@ -2392,8 +2396,62 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         }
     }
 
+    if target.trim().is_empty() {
+        match manifest_snapshot() {
+            Ok(_) => return Ok(run_target_required_outcome()),
+            Err(err) => {
+                if is_missing_project_error(&err) {
+                    return Ok(missing_project_outcome());
+                }
+                let msg = err.to_string();
+                if msg.contains("pyproject.toml not found") {
+                    let root = ctx
+                        .project_root()
+                        .unwrap_or_else(|_| env::current_dir().unwrap_or(PathBuf::from(".")));
+                    return Ok(missing_pyproject_outcome("run", &root));
+                }
+                return Err(err);
+            }
+        }
+    }
+    let plan = match super::execution_plan::plan_run_execution(
+        ctx,
+        strict,
+        request.sandbox,
+        &target,
+        &request.args,
+    ) {
+        Ok(plan) => plan,
+        Err(outcome) => return Ok(outcome),
+    };
+
     let mut workspace_cas_native_fallback: Option<CasNativeFallback> = None;
-    if !request.sandbox && !strict && !target.trim().is_empty() {
+    if matches!(
+        plan.context,
+        super::execution_plan::PlanContext::Workspace { .. }
+    ) && matches!(plan.engine.mode, super::execution_plan::EngineMode::MaterializedEnv)
+    {
+        if let Some(code) = plan.engine.fallback_reason_code.as_deref() {
+            if let Some(reason) = match code {
+                "missing_artifacts" => Some(CasNativeFallbackReason::MissingArtifacts),
+                _ => None,
+            } {
+                let summary = "cached artifacts missing".to_string();
+                debug!(
+                    CAS_NATIVE_FALLBACK = reason.as_str(),
+                    error = %summary,
+                    "CAS_NATIVE_FALLBACK={} falling back to env materialization",
+                    reason.as_str()
+                );
+                workspace_cas_native_fallback = Some(CasNativeFallback { reason, summary });
+            }
+        }
+    }
+    if matches!(
+        plan.context,
+        super::execution_plan::PlanContext::Workspace { .. }
+    ) && matches!(plan.engine.mode, super::execution_plan::EngineMode::CasNative)
+    {
         let scope = match discover_workspace_scope() {
             Ok(scope) => scope,
             Err(err) => {
@@ -2489,9 +2547,6 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),
     } {
-        if target.trim().is_empty() {
-            return Ok(run_target_required_outcome());
-        }
         if request.sandbox
             && strict
             && !matches!(
@@ -2584,12 +2639,34 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             return Err(err);
         }
     };
-    if target.trim().is_empty() {
-        return Ok(run_target_required_outcome());
-    }
 
     let mut cas_native_fallback: Option<CasNativeFallback> = None;
-    if !request.sandbox && !strict {
+    if matches!(
+        plan.context,
+        super::execution_plan::PlanContext::Project { .. }
+    ) && matches!(plan.engine.mode, super::execution_plan::EngineMode::MaterializedEnv)
+    {
+        if let Some(code) = plan.engine.fallback_reason_code.as_deref() {
+            if let Some(reason) = match code {
+                "missing_artifacts" => Some(CasNativeFallbackReason::MissingArtifacts),
+                _ => None,
+            } {
+                let summary = "cached artifacts missing".to_string();
+                debug!(
+                    CAS_NATIVE_FALLBACK = reason.as_str(),
+                    error = %summary,
+                    "CAS_NATIVE_FALLBACK={} falling back to env materialization",
+                    reason.as_str()
+                );
+                cas_native_fallback = Some(CasNativeFallback { reason, summary });
+            }
+        }
+    }
+    if matches!(
+        plan.context,
+        super::execution_plan::PlanContext::Project { .. }
+    ) && matches!(plan.engine.mode, super::execution_plan::EngineMode::CasNative)
+    {
         match prepare_cas_native_run_context(ctx, &snapshot) {
             Ok(native_ctx) => {
                 let manifest = native_ctx.py_ctx.project_root.join("pyproject.toml");
@@ -2703,9 +2780,6 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         None => &host_runner,
     };
 
-    if target.trim().is_empty() {
-        return Ok(run_target_required_outcome());
-    }
     let plan = plan_run_target(&py_ctx, &manifest, &target, &workdir)?;
     let mut outcome = match plan {
         RunTargetPlan::Script(path) => run_project_script(
@@ -3531,7 +3605,7 @@ fn commit_workspace_context(
     })
 }
 
-fn validate_lock_for_ref(
+pub(crate) fn validate_lock_for_ref(
     snapshot: &px_domain::ProjectSnapshot,
     lock: &px_domain::LockSnapshot,
     contents: &str,
@@ -3577,7 +3651,7 @@ fn validate_lock_for_ref(
         .unwrap_or_else(|| compute_lock_hash_bytes(contents.as_bytes())))
 }
 
-fn git_repo_root() -> Result<PathBuf, ExecutionOutcome> {
+pub(crate) fn git_repo_root() -> Result<PathBuf, ExecutionOutcome> {
     let output = Command::new("git")
         .arg("rev-parse")
         .arg("--show-toplevel")
@@ -3601,7 +3675,10 @@ fn git_repo_root() -> Result<PathBuf, ExecutionOutcome> {
     }
 }
 
-fn materialize_ref_tree(repo_root: &Path, git_ref: &str) -> Result<TempDir, ExecutionOutcome> {
+pub(crate) fn materialize_ref_tree(
+    repo_root: &Path,
+    git_ref: &str,
+) -> Result<TempDir, ExecutionOutcome> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_root)
@@ -3993,7 +4070,7 @@ fn store_error_code(err: &anyhow::Error) -> Option<&'static str> {
     })
 }
 
-fn install_error_outcome(err: anyhow::Error, context: &str) -> ExecutionOutcome {
+pub(crate) fn install_error_outcome(err: anyhow::Error, context: &str) -> ExecutionOutcome {
     match err.downcast::<crate::InstallUserError>() {
         Ok(user) => {
             ExecutionOutcome::user_error(user.message().to_string(), user.details().clone())
@@ -4350,7 +4427,7 @@ fn program_on_path(program: &str, envs: &EnvPairs) -> bool {
 
 fn execute_plan(
     runner: &dyn CommandRunner,
-    plan: &ExecutionPlan,
+    plan: &ProcessPlan,
     interactive: bool,
     inherit_stdin: bool,
 ) -> Result<crate::RunOutput> {
@@ -4384,7 +4461,7 @@ fn run_project_script_cas_native(
     argv.push(native.py_ctx.python.clone());
     argv.push(script.display().to_string());
     argv.extend(extra_args.iter().cloned());
-    let plan = ExecutionPlan {
+    let plan = ProcessPlan {
         runtime_path: native.runtime_path.clone(),
         sys_path_entries: native.sys_path_entries.clone(),
         cwd: workdir.to_path_buf(),
@@ -4485,7 +4562,7 @@ fn run_console_script_cas_native(
     argv.push(script.to_string());
     argv.push(candidate.dist.clone());
     argv.extend(extra_args.iter().cloned());
-    let plan = ExecutionPlan {
+    let plan = ProcessPlan {
         runtime_path: native.runtime_path.clone(),
         sys_path_entries: native.sys_path_entries.clone(),
         cwd: workdir.to_path_buf(),
@@ -4636,7 +4713,7 @@ fn run_executable_cas_native(
     let mut argv = Vec::with_capacity(extra_args.len() + 1);
     argv.push(exec_program.clone());
     argv.extend(extra_args.iter().cloned());
-    let plan = ExecutionPlan {
+    let plan = ProcessPlan {
         runtime_path: native.runtime_path.clone(),
         sys_path_entries: native.sys_path_entries.clone(),
         cwd: workdir.to_path_buf(),
@@ -4800,8 +4877,43 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
     let strict = request.frozen || ctx.env_flag_enabled("CI");
     let mut sandbox: Option<SandboxRunContext> = None;
 
+    let plan = match super::execution_plan::plan_test_execution(
+        ctx,
+        strict,
+        request.sandbox,
+        &request.args,
+    ) {
+        Ok(plan) => plan,
+        Err(outcome) => return Ok(outcome),
+    };
+
     let mut workspace_cas_native_fallback: Option<CasNativeFallback> = None;
-    if !request.sandbox && !strict {
+    if matches!(
+        plan.context,
+        super::execution_plan::PlanContext::Workspace { .. }
+    ) && matches!(plan.engine.mode, super::execution_plan::EngineMode::MaterializedEnv)
+    {
+        if let Some(code) = plan.engine.fallback_reason_code.as_deref() {
+            if let Some(reason) = match code {
+                "missing_artifacts" => Some(CasNativeFallbackReason::MissingArtifacts),
+                _ => None,
+            } {
+                let summary = "cached artifacts missing".to_string();
+                debug!(
+                    CAS_NATIVE_FALLBACK = reason.as_str(),
+                    error = %summary,
+                    "CAS_NATIVE_FALLBACK={} falling back to env materialization",
+                    reason.as_str()
+                );
+                workspace_cas_native_fallback = Some(CasNativeFallback { reason, summary });
+            }
+        }
+    }
+    if matches!(
+        plan.context,
+        super::execution_plan::PlanContext::Workspace { .. }
+    ) && matches!(plan.engine.mode, super::execution_plan::EngineMode::CasNative)
+    {
         let scope = match discover_workspace_scope() {
             Ok(scope) => scope,
             Err(err) => {
@@ -4921,7 +5033,32 @@ fn test_project_outcome(ctx: &CommandContext, request: &TestRequest) -> Result<E
         }
     };
     let mut cas_native_fallback: Option<CasNativeFallback> = None;
-    if !request.sandbox && !strict {
+    if matches!(
+        plan.context,
+        super::execution_plan::PlanContext::Project { .. }
+    ) && matches!(plan.engine.mode, super::execution_plan::EngineMode::MaterializedEnv)
+    {
+        if let Some(code) = plan.engine.fallback_reason_code.as_deref() {
+            if let Some(reason) = match code {
+                "missing_artifacts" => Some(CasNativeFallbackReason::MissingArtifacts),
+                _ => None,
+            } {
+                let summary = "cached artifacts missing".to_string();
+                debug!(
+                    CAS_NATIVE_FALLBACK = reason.as_str(),
+                    error = %summary,
+                    "CAS_NATIVE_FALLBACK={} falling back to env materialization",
+                    reason.as_str()
+                );
+                cas_native_fallback = Some(CasNativeFallback { reason, summary });
+            }
+        }
+    }
+    if matches!(
+        plan.context,
+        super::execution_plan::PlanContext::Project { .. }
+    ) && matches!(plan.engine.mode, super::execution_plan::EngineMode::CasNative)
+    {
         match prepare_cas_native_run_context(ctx, &snapshot) {
             Ok(native_ctx) => {
                 let workdir = invocation_workdir(&native_ctx.py_ctx.project_root);

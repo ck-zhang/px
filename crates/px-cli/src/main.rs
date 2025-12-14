@@ -80,20 +80,40 @@ fn main() -> Result<()> {
 }
 
 fn normalize_run_args(args: Vec<OsString>) -> Vec<OsString> {
-    let mut top_level = None;
+    let mut first_cmd = None;
     for (idx, arg) in args.iter().enumerate().skip(1) {
         let text = arg.to_string_lossy();
         if text.starts_with('-') {
             continue;
         }
-        top_level = Some(idx);
+        first_cmd = Some(idx);
         break;
     }
-    let Some(run_pos) = top_level.filter(|idx| {
-        args.get(*idx)
-            .map(|arg| arg.to_string_lossy() == "run")
-            .unwrap_or(false)
-    }) else {
+    let Some(first_pos) = first_cmd else {
+        return args;
+    };
+    let first = args[first_pos].to_string_lossy();
+    let run_pos = if first == "run" {
+        Some(first_pos)
+    } else if first == "explain" {
+        let mut idx = first_pos + 1;
+        let mut found = None;
+        while idx < args.len() {
+            let text = args[idx].to_string_lossy();
+            if text.starts_with('-') {
+                idx += 1;
+                continue;
+            }
+            if text == "run" {
+                found = Some(idx);
+            }
+            break;
+        }
+        found
+    } else {
+        None
+    };
+    let Some(run_pos) = run_pos else {
         return args;
     };
     if args.iter().skip(run_pos + 1).any(|arg| arg == "--") {
