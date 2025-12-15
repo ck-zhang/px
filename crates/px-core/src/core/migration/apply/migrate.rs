@@ -19,7 +19,7 @@ use px_domain::api::{
     AutopinState, BackupManager, InstallOverride, PinSpec,
 };
 
-use crate::runtime_manager;
+use crate::core::runtime::runtime_manager;
 use crate::{
     discover_project_root, install_snapshot, lock_is_fresh, manifest_snapshot_at,
     refresh_project_site, resolve_dependencies_with_effects, summarize_autopins, CommandContext,

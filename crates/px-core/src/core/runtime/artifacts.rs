@@ -16,12 +16,13 @@ use serde_json::json;
 
 use crate::context::CommandContext;
 use crate::core::runtime::builder::builder_identity_from_tags;
-use crate::effects;
 use crate::progress::{download_concurrency, ProgressReporter};
 use crate::pypi::{PypiFile, PypiReleaseResponse};
 use crate::python_sys::{detect_interpreter, detect_interpreter_tags, InterpreterTags};
 use crate::store::{wheel_build_options_hash, ArtifactRequest, CacheLocation, SdistRequest};
 use crate::{InstallUserError, PX_VERSION};
+
+use super::effects;
 
 pub(crate) fn resolve_pins(
     ctx: &CommandContext,

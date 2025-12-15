@@ -4,7 +4,7 @@ use std::fs;
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 
-use crate::core::runtime::cas_env::{ensure_profile_env, workspace_env_owner_id};
+use crate::core::runtime::{ensure_profile_env, workspace_env_owner_id};
 use crate::store::cas::{global_store, run_gc_with_env_policy, OwnerId, OwnerType};
 use crate::{
     compute_lock_hash, dependency_name, detect_runtime_metadata, prepare_project_runtime,

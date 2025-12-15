@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::env;
 use std::io::{self, Write};
 
-use crate::process::{run_command, run_command_passthrough};
+use crate::core::runtime::{run_command, run_command_passthrough};
 use crate::{
     build_pythonpath, ensure_project_environment_synced, load_project_state, outcome_from_output,
     CommandContext, ExecutionOutcome, InstallUserError,

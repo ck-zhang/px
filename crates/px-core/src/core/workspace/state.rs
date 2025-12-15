@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use serde_json::json;
 
 use crate::core::runtime::validate_cas_environment;
+use crate::core::runtime::FileSystem;
 use crate::core::tooling::diagnostics;
-use crate::effects::FileSystem;
 use crate::{
     compute_lock_hash, detect_runtime_metadata, CommandContext, ExecutionOutcome, InstallUserError,
     StoredEnvironment, StoredRuntime,

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::process::{
+use super::process::{
     run_command, run_command_passthrough, run_command_streaming, run_command_with_stdin, RunOutput,
 };
 use crate::python_sys::detect_interpreter;

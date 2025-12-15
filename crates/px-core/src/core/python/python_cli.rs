@@ -3,9 +3,10 @@ use pep440_rs::{Version, VersionSpecifiers};
 use serde_json::{json, Value};
 use std::str::FromStr;
 
+use crate::core::runtime::runtime_manager;
 use crate::{
-    is_missing_project_error, manifest_snapshot, progress::ProgressReporter, runtime_manager,
-    CommandContext, ExecutionOutcome, InstallUserError,
+    is_missing_project_error, manifest_snapshot, progress::ProgressReporter, CommandContext,
+    ExecutionOutcome, InstallUserError,
 };
 use px_domain::api::ManifestEditor;
 

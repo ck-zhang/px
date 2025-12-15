@@ -3,7 +3,7 @@ use std::env;
 
 use serde::{Deserialize, Serialize};
 
-use crate::effects;
+use crate::core::runtime::{CacheStore, Effects};
 use crate::store::CacheLocation;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -63,14 +63,14 @@ impl Config {
     ///
     /// # Errors
     /// Returns an error if cache paths cannot be resolved or inspected.
-    pub fn from_env(effects: &dyn effects::Effects) -> anyhow::Result<Self> {
+    pub fn from_env(effects: &dyn Effects) -> anyhow::Result<Self> {
         let snapshot = EnvSnapshot::capture();
         Self::from_snapshot(&snapshot, effects.cache())
     }
 
     pub(crate) fn from_snapshot(
         snapshot: &EnvSnapshot,
-        cache_store: &dyn effects::CacheStore,
+        cache_store: &dyn CacheStore,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             cache: CacheConfig {
@@ -153,19 +153,16 @@ pub struct PublishConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        effects,
-        store::{
-            ArtifactRequest, BuiltWheel, CacheLocation, CachePruneResult, CacheUsage, CacheWalk,
-            CachedArtifact, PrefetchOptions, PrefetchSpec, PrefetchSummary, SdistRequest,
-        },
+    use crate::store::{
+        ArtifactRequest, BuiltWheel, CacheLocation, CachePruneResult, CacheUsage, CacheWalk,
+        CachedArtifact, PrefetchOptions, PrefetchSpec, PrefetchSummary, SdistRequest,
     };
     use std::path::Path;
     use std::path::PathBuf;
 
     struct DummyCacheStore;
 
-    impl effects::CacheStore for DummyCacheStore {
+    impl CacheStore for DummyCacheStore {
         fn resolve_store_path(&self) -> anyhow::Result<CacheLocation> {
             Ok(CacheLocation {
                 path: PathBuf::from("/tmp/cache"),

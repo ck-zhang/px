@@ -6,7 +6,9 @@ use pep508_rs::MarkerEnvironment;
 use px_domain::api::current_project_root;
 
 use crate::config::{Config, EnvSnapshot, GlobalOptions};
-use crate::effects::{self, Effects, SharedEffects};
+use crate::core::runtime::{
+    CacheStore, Effects, FileSystem, GitClient, PypiClient, PythonRuntime, SharedEffects,
+};
 use crate::python_sys::detect_marker_environment;
 use crate::store::CacheLocation;
 use crate::CommandGroup;
@@ -74,23 +76,23 @@ impl<'a> CommandContext<'a> {
         self.config.network().online
     }
 
-    pub fn fs(&self) -> &dyn effects::FileSystem {
+    pub fn fs(&self) -> &dyn FileSystem {
         self.effects.fs()
     }
 
-    pub fn python_runtime(&self) -> &dyn effects::PythonRuntime {
+    pub fn python_runtime(&self) -> &dyn PythonRuntime {
         self.effects.python()
     }
 
-    pub fn git(&self) -> &dyn effects::GitClient {
+    pub fn git(&self) -> &dyn GitClient {
         self.effects.git()
     }
 
-    pub fn cache_store(&self) -> &dyn effects::CacheStore {
+    pub fn cache_store(&self) -> &dyn CacheStore {
         self.effects.cache()
     }
 
-    pub fn pypi(&self) -> &dyn effects::PypiClient {
+    pub fn pypi(&self) -> &dyn PypiClient {
         self.effects.pypi()
     }
 

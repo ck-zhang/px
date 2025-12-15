@@ -1,6 +1,6 @@
+use crate::core::runtime::traceback::{analyze_python_traceback, TracebackContext};
+use crate::core::runtime::RunOutput;
 use crate::outcome::ExecutionOutcome;
-use crate::process::RunOutput;
-use crate::traceback::{analyze_python_traceback, TracebackContext};
 use serde_json::{json, Value};
 
 pub(crate) fn outcome_from_output(

@@ -14,9 +14,6 @@ pub(crate) use crate::core::config;
 pub(crate) use crate::core::config::{context, state_guard};
 pub(crate) use crate::core::python::{python_build, python_sys};
 pub(crate) use crate::core::runtime::*;
-pub(crate) use crate::core::runtime::{
-    effects, fmt_plan, process, run_plan, runtime_manager, traceback,
-};
 pub(crate) use crate::core::store;
 pub(crate) use crate::core::store::cas::{
     ensure_repo_snapshot, lookup_repo_snapshot_oid, materialize_repo_snapshot, LoadedObject,
@@ -29,7 +26,7 @@ pub(crate) use crate::core::tooling::{diagnostics, outcome};
 pub(crate) use crate::core::{project, tools};
 
 pub(crate) use crate::core::config::context::CommandContext;
-pub(crate) use crate::core::runtime::process::RunOutput;
+pub(crate) use crate::core::runtime::RunOutput;
 pub(crate) use crate::core::status::{
     EnvHealth, EnvStatus, LockHealth, LockStatus, NextAction, NextActionKind, ProjectStatusPayload,
     RuntimeRole, RuntimeSource, RuntimeStatus, StatusContext, StatusContextKind, StatusPayload,

@@ -10,7 +10,7 @@ use super::{
     sandbox_error, sandbox_timestamp_string, system_deps_mode, SandboxArtifacts,
     SandboxImageManifest, SandboxStore, SystemDepsMode,
 };
-use crate::core::runtime::process::{
+use crate::core::runtime::{
     run_command, run_command_passthrough, run_command_streaming, run_command_with_stdin, RunOutput,
 };
 use crate::core::sandbox::pack::{

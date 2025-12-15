@@ -7,7 +7,7 @@ use hex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::core::runtime::builder::BUILDER_VERSION;
+use crate::core::runtime::BUILDER_VERSION;
 
 use super::BuildMethod;
 

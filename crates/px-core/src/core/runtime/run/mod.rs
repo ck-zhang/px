@@ -14,6 +14,7 @@ use super::cas_env::{
     ensure_profile_env, ensure_profile_manifest, materialize_pkg_archive, project_env_owner_id,
     workspace_env_owner_id,
 };
+use super::run_plan::{plan_run_target, RunTargetPlan};
 use super::script::{detect_inline_script, run_inline_script};
 use crate::core::runtime::artifacts::dependency_name;
 use crate::core::runtime::facade::{
@@ -22,7 +23,6 @@ use crate::core::runtime::facade::{
 };
 use crate::core::sandbox::{discover_site_packages, run_pxapp_bundle};
 use crate::project::evaluate_project_state;
-use crate::run_plan::{plan_run_target, RunTargetPlan};
 use crate::tooling::{missing_pyproject_outcome, run_target_required_outcome};
 use crate::workspace::{
     discover_workspace_scope, prepare_workspace_run_context, WorkspaceScope, WorkspaceStateKind,

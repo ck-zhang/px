@@ -32,7 +32,7 @@ fn default_roots_match_documented_layout() -> Result<()> {
         px_root.join("cache")
     );
     assert_eq!(
-        crate::core::runtime::cas_env::default_envs_root()?,
+        crate::core::runtime::default_envs_root()?,
         px_root.join("envs")
     );
 

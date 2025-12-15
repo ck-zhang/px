@@ -8,12 +8,12 @@ use crate::context::CommandContext;
 use crate::core::runtime::artifacts::{
     dependency_name, ensure_exact_pins, parse_exact_pin, resolve_pins,
 };
+use crate::core::runtime::Effects;
 use crate::core::sandbox::{
     ensure_system_deps_rootfs, pin_system_deps, system_deps_mode, SystemDepsMode,
 };
 use crate::core::system_deps::system_deps_from_names;
 use crate::diagnostics::commands as diag_commands;
-use crate::effects::Effects;
 use crate::outcome::InstallUserError;
 use crate::progress::ProgressReporter;
 use crate::python_sys::{detect_interpreter, detect_interpreter_tags, detect_marker_environment};

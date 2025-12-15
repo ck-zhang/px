@@ -1,7 +1,7 @@
 use anyhow::Result;
 use which::which;
 
-use crate::runtime_manager;
+use crate::core::runtime::runtime_manager;
 
 pub(crate) fn fallback_runtime_by_channel(
     channel: &str,

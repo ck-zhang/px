@@ -9,10 +9,11 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 
+use crate::core::runtime::runtime_manager;
 use crate::{
     compute_lock_hash, install_snapshot, manifest_snapshot_at, persist_resolved_dependencies,
-    refresh_project_site, resolve_dependencies_with_effects, runtime_manager, CommandContext,
-    ExecutionOutcome, InstallOverride, InstallUserError,
+    refresh_project_site, resolve_dependencies_with_effects, CommandContext, ExecutionOutcome,
+    InstallOverride, InstallUserError,
 };
 use px_domain::api::{load_lockfile_optional, merge_resolved_dependencies, ManifestEditor};
 
