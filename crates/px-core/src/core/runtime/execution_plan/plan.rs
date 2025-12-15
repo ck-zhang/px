@@ -1,14 +1,17 @@
 use std::env;
-use std::fmt;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
 use serde_json::json;
 
-use super::cas_env::{project_env_owner_id, workspace_env_owner_id};
+use super::super::cas_env::{project_env_owner_id, workspace_env_owner_id};
+use super::sandbox::sandbox_plan;
+use super::sys_path::{summarize_sys_path, sys_path_for_profile};
+use super::types::{
+    EngineMode, EnginePlan, ExecutionPlan, LockProfilePlan, PlanContext, ProvenancePlan,
+    RuntimePlan, SourceProvenance, SysPathPlan, TargetKind, TargetResolution,
+};
 use crate::core::config::state_guard;
-use crate::core::sandbox;
-use crate::core::store::cas::{global_store, MATERIALIZED_PKG_BUILDS_DIR};
+use crate::core::store::cas::global_store;
 use crate::python_sys::detect_interpreter_tags;
 use crate::tooling::missing_pyproject_outcome;
 use crate::workspace::{discover_workspace_scope, WorkspaceScope};
@@ -16,173 +19,7 @@ use crate::{
     detect_runtime_metadata, load_project_state, manifest_snapshot, prepare_project_runtime,
     CommandContext, ExecutionOutcome,
 };
-use px_domain::api::{
-    load_lockfile_optional, sandbox_config_from_manifest, verify_locked_artifacts,
-};
-
-const SYS_PATH_SUMMARY_PREFIX: usize = 5;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum EngineMode {
-    CasNative,
-    MaterializedEnv,
-}
-
-impl EngineMode {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::CasNative => "cas_native",
-            Self::MaterializedEnv => "materialized_env",
-        }
-    }
-}
-
-impl fmt::Display for EngineMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct EnginePlan {
-    pub(crate) mode: EngineMode,
-    pub(crate) fallback_reason_code: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum SourceProvenance {
-    WorkingTree,
-    GitRef {
-        git_ref: String,
-        repo_root: String,
-        manifest_repo_path: String,
-        lock_repo_path: String,
-    },
-    RepoSnapshot {
-        locator: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        git_ref: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        commit: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        repo_snapshot_oid: Option<String>,
-        script_repo_path: String,
-    },
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum PlanContext {
-    Project {
-        project_root: String,
-        manifest_path: String,
-        lock_path: String,
-        project_name: String,
-    },
-    Workspace {
-        workspace_root: String,
-        workspace_manifest: String,
-        workspace_lock_path: String,
-        member_root: String,
-        member_manifest: String,
-    },
-    #[allow(dead_code)]
-    Tool { tool_name: String },
-    UrlRun {
-        locator: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        git_ref: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        commit: Option<String>,
-        script_repo_path: String,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum TargetKind {
-    File,
-    Executable,
-    Python,
-    Module,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct TargetResolution {
-    pub(crate) kind: TargetKind,
-    pub(crate) resolved: String,
-    pub(crate) argv: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct RuntimePlan {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) python_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) python_abi: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) runtime_oid: Option<String>,
-    pub(crate) executable: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct LockProfilePlan {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) l_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) wl_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) tool_lock_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) profile_oid: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) env_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct SysPathSummary {
-    pub(crate) first: Vec<String>,
-    pub(crate) count: usize,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct SysPathPlan {
-    pub(crate) entries: Vec<String>,
-    pub(crate) summary: SysPathSummary,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct SandboxPlan {
-    pub(crate) enabled: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) sbx_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) base: Option<String>,
-    pub(crate) capabilities: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct ProvenancePlan {
-    pub(crate) sandbox: SandboxPlan,
-    pub(crate) source: SourceProvenance,
-}
-
-/// Shared internal planning payload used by `px run`/`px test` and `px explain`.
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct ExecutionPlan {
-    pub(crate) schema_version: u32,
-    pub(crate) context: PlanContext,
-    pub(crate) runtime: RuntimePlan,
-    pub(crate) lock_profile: LockProfilePlan,
-    pub(crate) engine: EnginePlan,
-    pub(crate) target_resolution: TargetResolution,
-    pub(crate) working_dir: String,
-    pub(crate) sys_path: SysPathPlan,
-    pub(crate) provenance: ProvenancePlan,
-    pub(crate) would_repair_env: bool,
-}
+use px_domain::api::{load_lockfile_optional, verify_locked_artifacts};
 
 fn map_workdir(invocation_root: Option<&Path>, context_root: &Path) -> PathBuf {
     let cwd = env::current_dir().unwrap_or_else(|_| context_root.to_path_buf());
@@ -224,112 +61,6 @@ fn detect_script_under_root(root: &Path, cwd: &Path, target: &str) -> Option<Pat
     resolve(root, root, target)
         .or_else(|| resolve(cwd, root, target))
         .filter(|path| path.starts_with(root))
-}
-
-fn sys_path_for_profile(profile_oid: &str) -> anyhow::Result<Vec<String>> {
-    let store = global_store();
-    let loaded = store.load(profile_oid)?;
-    let crate::LoadedObject::Profile { header, .. } = loaded else {
-        anyhow::bail!("CAS object {profile_oid} is not a profile");
-    };
-    let ordered: Vec<String> = if header.sys_path_order.is_empty() {
-        header
-            .packages
-            .iter()
-            .map(|pkg| pkg.pkg_build_oid.clone())
-            .collect()
-    } else {
-        header.sys_path_order.clone()
-    };
-    let mut entries = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for oid in ordered {
-        if seen.insert(oid.clone()) {
-            entries.push(
-                store
-                    .root()
-                    .join(MATERIALIZED_PKG_BUILDS_DIR)
-                    .join(&oid)
-                    .join("site-packages")
-                    .display()
-                    .to_string(),
-            );
-        }
-    }
-    for pkg in &header.packages {
-        if seen.insert(pkg.pkg_build_oid.clone()) {
-            entries.push(
-                store
-                    .root()
-                    .join(MATERIALIZED_PKG_BUILDS_DIR)
-                    .join(&pkg.pkg_build_oid)
-                    .join("site-packages")
-                    .display()
-                    .to_string(),
-            );
-        }
-    }
-    Ok(entries)
-}
-
-fn summarize_sys_path(entries: &[String]) -> SysPathSummary {
-    SysPathSummary {
-        first: entries
-            .iter()
-            .take(SYS_PATH_SUMMARY_PREFIX)
-            .cloned()
-            .collect(),
-        count: entries.len(),
-    }
-}
-
-pub(crate) fn sandbox_plan(
-    manifest_path: &Path,
-    want_sandbox: bool,
-    lock: Option<&px_domain::api::LockSnapshot>,
-    workspace_lock: Option<&px_domain::api::WorkspaceLock>,
-    profile_oid: Option<&str>,
-    site_packages: Option<&Path>,
-) -> Result<SandboxPlan, ExecutionOutcome> {
-    if !want_sandbox {
-        return Ok(SandboxPlan {
-            enabled: false,
-            sbx_id: None,
-            base: None,
-            capabilities: Vec::new(),
-        });
-    }
-    let config = sandbox_config_from_manifest(manifest_path).map_err(|err| {
-        ExecutionOutcome::failure(
-            "failed to parse sandbox config",
-            json!({ "error": err.to_string() }),
-        )
-    })?;
-    let profile_oid = profile_oid.unwrap_or_default().trim();
-    let definition_profile = if profile_oid.is_empty() {
-        "unknown"
-    } else {
-        profile_oid
-    };
-    let resolution = sandbox::resolve_sandbox_definition(
-        &config,
-        lock,
-        workspace_lock,
-        definition_profile,
-        site_packages,
-    )
-    .map_err(|err| ExecutionOutcome::user_error(err.message, err.details))?;
-    let sbx_id = if profile_oid.is_empty() {
-        None
-    } else {
-        Some(resolution.definition.sbx_id())
-    };
-    Ok(SandboxPlan {
-        enabled: true,
-        sbx_id,
-        base: Some(resolution.base.name),
-        capabilities: resolution.definition.capabilities.into_iter().collect(),
-    })
 }
 
 fn runtime_plan_for_executable(
