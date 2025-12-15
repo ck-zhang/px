@@ -376,6 +376,7 @@ fn commit_project_context(
     };
     Ok(CommitRunContext {
         py_ctx: PythonContext {
+            state_root: project_root_at_ref.clone(),
             project_root: project_root_at_ref,
             project_name: snapshot.name.clone(),
             python,
@@ -770,6 +771,7 @@ fn commit_workspace_context(
     Ok(CommitRunContext {
         py_ctx: PythonContext {
             project_root: member_root_at_ref.clone(),
+            state_root: member_root_at_ref.clone(),
             project_name,
             python,
             pythonpath,

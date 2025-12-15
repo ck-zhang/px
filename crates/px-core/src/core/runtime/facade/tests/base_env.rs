@@ -12,6 +12,7 @@ fn base_env_sets_pyc_cache_prefix() -> Result<()> {
     let prefix = temp.path().join("pyc-prefix");
     let ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".to_string(),
         python: "python".into(),
         pythonpath: temp.path().display().to_string(),

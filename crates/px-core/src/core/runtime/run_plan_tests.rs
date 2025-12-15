@@ -18,6 +18,7 @@ fn prefers_console_script_from_site_bin() -> anyhow::Result<()> {
 
     let ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".into(),
         python: "/usr/bin/python".into(),
         pythonpath: String::new(),
@@ -58,6 +59,7 @@ demo = "demo.cli:main"
 
     let ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".into(),
         python: "/usr/bin/python".into(),
         pythonpath: String::new(),
@@ -92,6 +94,7 @@ scripts = { demo = "demo.cli:main" }
 
     let ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".into(),
         python: "/usr/bin/python".into(),
         pythonpath: String::new(),
@@ -120,6 +123,7 @@ fn resolves_existing_project_script_under_root() -> anyhow::Result<()> {
 
     let ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".into(),
         python: "/usr/bin/python".into(),
         pythonpath: String::new(),
@@ -154,6 +158,7 @@ fn does_not_guess_missing_python_script_targets() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".into(),
         python: "/usr/bin/python".into(),
         pythonpath: String::new(),
@@ -187,6 +192,7 @@ fn python_alias_runs_as_plain_executable() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".into(),
         python: "/usr/bin/python".into(),
         pythonpath: String::new(),
@@ -220,6 +226,7 @@ fn resolves_script_relative_to_working_dir_within_project() -> anyhow::Result<()
 
     let ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".into(),
         python: "/usr/bin/python".into(),
         pythonpath: String::new(),

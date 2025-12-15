@@ -52,6 +52,11 @@ pub(in crate::core::runtime::run) fn build_pytest_invocation(
     reporter: TestReporter,
 ) -> Result<(EnvPairs, Vec<String>)> {
     let mut defaults = default_pytest_flags(reporter);
+    if py_ctx.project_root != py_ctx.state_root {
+        let cache_dir = py_ctx.state_root.join(".px").join("pytest-cache");
+        append_allowed_paths(&mut envs, &cache_dir);
+        defaults.extend_from_slice(&["--cache-dir".to_string(), cache_dir.display().to_string()]);
+    }
     if let TestReporter::Px = reporter {
         let plugin_path = ensure_px_pytest_plugin(ctx, py_ctx)?;
         let plugin_dir = plugin_path
@@ -91,7 +96,7 @@ fn test_reporter_from_env() -> TestReporter {
 }
 
 fn ensure_px_pytest_plugin(ctx: &CommandContext, py_ctx: &PythonContext) -> Result<PathBuf> {
-    let plugin_dir = py_ctx.project_root.join(".px").join("plugins");
+    let plugin_dir = py_ctx.state_root.join(".px").join("plugins");
     ctx.fs()
         .create_dir_all(&plugin_dir)
         .context("creating px plugin dir")?;

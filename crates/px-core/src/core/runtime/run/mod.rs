@@ -37,6 +37,7 @@ use px_domain::api::{detect_lock_drift, load_lockfile_optional, verify_locked_ar
 mod cas_native;
 mod commit;
 mod driver;
+mod ephemeral;
 mod errors;
 mod ref_tree;
 mod reference;

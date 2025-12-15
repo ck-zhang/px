@@ -223,6 +223,7 @@ fn test_request_from_args(args: &TestArgs) -> TestRequest {
     TestRequest {
         args: args.args.clone(),
         frozen: args.frozen,
+        ephemeral: args.ephemeral,
         sandbox: args.sandbox,
         at: args.at.clone(),
     }
@@ -235,6 +236,7 @@ fn run_request_from_args(args: &RunArgs) -> RunRequest {
         target: args.target.clone(),
         args: forwarded_args,
         frozen: args.frozen,
+        ephemeral: args.ephemeral,
         allow_floating: args.allow_floating,
         interactive: if args.interactive {
             Some(true)

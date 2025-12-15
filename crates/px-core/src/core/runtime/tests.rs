@@ -73,6 +73,7 @@ fn base_env_exports_manage_command_alias() -> Result<()> {
     fs::create_dir_all(&site_bin)?;
     let ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".to_string(),
         python,
         pythonpath: String::new(),

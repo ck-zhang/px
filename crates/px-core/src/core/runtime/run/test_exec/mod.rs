@@ -18,6 +18,7 @@ mod pytest;
 mod script;
 mod stdlib;
 
+pub(super) use driver::run_tests_for_context_cas_native;
 pub(super) use driver::{run_tests_for_context, test_project_outcome};
 
 #[cfg(test)]

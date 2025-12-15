@@ -75,6 +75,7 @@ impl PythonContext {
         );
         Ok((
             Self {
+                state_root: project_root.clone(),
                 project_root,
                 project_name: snapshot.name.clone(),
                 python,

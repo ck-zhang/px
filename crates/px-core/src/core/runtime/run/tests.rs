@@ -81,6 +81,7 @@ fn detects_mutating_pip_invocation_for_install() {
     let temp = tempdir().expect("tempdir");
     let py_ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".into(),
         python: "/usr/bin/python".into(),
         pythonpath: String::new(),
@@ -101,6 +102,7 @@ fn detects_mutating_python_dash_m_pip_invocation() {
     let temp = tempdir().expect("tempdir");
     let py_ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".into(),
         python: "/usr/bin/python".into(),
         pythonpath: String::new(),
@@ -126,6 +128,7 @@ fn read_only_pip_commands_are_allowed() {
     let temp = tempdir().expect("tempdir");
     let py_ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".into(),
         python: "/usr/bin/python".into(),
         pythonpath: String::new(),
@@ -256,6 +259,7 @@ fn run_executable_blocks_mutating_pip_commands() -> Result<()> {
     let temp = tempdir()?;
     let py_ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".into(),
         python: "/usr/bin/python".into(),
         pythonpath: String::new(),
@@ -312,6 +316,7 @@ fn run_executable_uses_workdir() -> Result<()> {
     fs::create_dir_all(&workdir)?;
     let py_ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".into(),
         python: "/usr/bin/python".into(),
         pythonpath: String::new(),
@@ -354,6 +359,7 @@ fn build_env_marks_available_plugins() -> Result<()> {
     let temp = tempdir()?;
     let py_ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".into(),
         python,
         pythonpath: String::new(),
@@ -389,6 +395,7 @@ fn build_env_marks_missing_plugins() -> Result<()> {
     let temp = tempdir()?;
     let py_ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".into(),
         python,
         pythonpath: String::new(),
@@ -421,6 +428,7 @@ fn pytest_plugin_path_is_on_env_vars() -> Result<()> {
     let temp = tempdir()?;
     let py_ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
+        state_root: temp.path().to_path_buf(),
         project_name: "demo".into(),
         python,
         pythonpath: temp.path().display().to_string(),

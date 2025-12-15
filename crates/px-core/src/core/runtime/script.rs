@@ -32,6 +32,16 @@ pub(crate) struct InlineScript {
     metadata: InlineScriptMetadata,
 }
 
+impl InlineScript {
+    pub(crate) fn requires_python(&self) -> &str {
+        &self.metadata.requires_python
+    }
+
+    pub(crate) fn dependencies(&self) -> &[String] {
+        &self.metadata.dependencies
+    }
+}
+
 #[derive(Clone, Debug)]
 struct InlineScriptMetadata {
     requires_python: String,
@@ -450,6 +460,7 @@ fn inline_python_context(
     };
     let py_ctx = PythonContext {
         project_root: script.working_dir.clone(),
+        state_root: snapshot.root.clone(),
         project_name: snapshot.name.clone(),
         python,
         pythonpath,

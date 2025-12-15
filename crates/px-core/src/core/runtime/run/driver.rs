@@ -71,6 +71,10 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         }
     }
 
+    if request.ephemeral {
+        return super::ephemeral::run_ephemeral_outcome(ctx, request, &target, interactive, strict);
+    }
+
     if let Some(at_ref) = &request.at {
         return run_project_at_ref(ctx, request, at_ref);
     }
@@ -424,7 +428,7 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         plan.engine.mode,
         super::super::execution_plan::EngineMode::CasNative
     ) {
-        match prepare_cas_native_run_context(ctx, &snapshot) {
+        match prepare_cas_native_run_context(ctx, &snapshot, &snapshot.root) {
             Ok(native_ctx) => {
                 let manifest = native_ctx.py_ctx.project_root.join("pyproject.toml");
                 let deps = DependencyContext::from_sources(

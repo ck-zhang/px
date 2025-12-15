@@ -97,6 +97,7 @@ pub(super) fn is_python_alias_target(entry: &str) -> bool {
 pub(super) fn prepare_cas_native_run_context(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
+    project_root: &Path,
 ) -> Result<CasNativeRunContext, ExecutionOutcome> {
     let Some(lock) = load_lockfile_optional(&snapshot.lock_path).map_err(|err| {
         ExecutionOutcome::failure(
@@ -206,7 +207,7 @@ pub(super) fn prepare_cas_native_run_context(
             }),
         )
     })?;
-    let paths = build_pythonpath(ctx.fs(), &snapshot.root, Some(site_dir)).map_err(|err| {
+    let paths = build_pythonpath(ctx.fs(), project_root, Some(site_dir)).map_err(|err| {
         ExecutionOutcome::failure(
             "failed to assemble PYTHONPATH for native CAS execution",
             json!({ "error": err.to_string() }),
@@ -235,7 +236,8 @@ pub(super) fn prepare_cas_native_run_context(
     };
 
     let py_ctx = PythonContext {
-        project_root: snapshot.root.clone(),
+        project_root: project_root.to_path_buf(),
+        state_root: snapshot.root.clone(),
         project_name: snapshot.name.clone(),
         python: cas_profile.runtime_path.display().to_string(),
         pythonpath: paths.pythonpath,
@@ -455,6 +457,7 @@ pub(super) fn prepare_cas_native_workspace_run_context(
 
     let py_ctx = PythonContext {
         project_root: member_root.to_path_buf(),
+        state_root: member_root.to_path_buf(),
         project_name,
         python: cas_profile.runtime_path.display().to_string(),
         pythonpath,

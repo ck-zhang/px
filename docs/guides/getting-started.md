@@ -54,6 +54,15 @@ You can also run a script from a repository reference (no local project required
 
 These forms are pinned-by-default; floating refs require `--allow-floating` and are refused under `--frozen` or `CI=1`. In `--offline` mode, the repo snapshot must already be cached in the CAS.
 
+## Trying px without adopting
+
+If you want to run in a non-px directory (no `.px/` or `px.lock` writes), use `--ephemeral` (alias `--try`):
+
+* `px run --ephemeral <target> [...args]`
+* `px test --ephemeral`
+
+px reads dependency inputs from the current directory (`pyproject.toml` or `requirements.txt`; scripts with a PEP 723 block use that instead) and stores all state in the global cache. To adopt the directory and commit a real `px.lock`, run `px migrate --apply`.
+
 ## Going further
 
 - Multi-project repo? See [Workspaces](./workspaces.md).

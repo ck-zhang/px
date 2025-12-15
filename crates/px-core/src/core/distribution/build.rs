@@ -104,6 +104,7 @@ fn build_project_outcome(ctx: &CommandContext, request: &BuildRequest) -> Result
 
 fn dry_run_context(snapshot: &ManifestSnapshot) -> PythonContext {
     PythonContext {
+        state_root: snapshot.root.clone(),
         project_root: snapshot.root.clone(),
         project_name: snapshot.name.clone(),
         python: String::new(),

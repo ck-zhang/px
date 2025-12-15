@@ -16,10 +16,15 @@ pub(in crate::core::runtime::run) fn test_project_outcome(
     ctx: &CommandContext,
     request: &TestRequest,
 ) -> Result<ExecutionOutcome> {
+    let strict = request.frozen || ctx.env_flag_enabled("CI");
+
+    if request.ephemeral {
+        return super::super::ephemeral::test_ephemeral_outcome(ctx, request, strict);
+    }
+
     if let Some(at_ref) = &request.at {
         return run_tests_at_ref(ctx, request, at_ref);
     }
-    let strict = request.frozen || ctx.env_flag_enabled("CI");
     let mut sandbox: Option<SandboxRunContext> = None;
 
     let plan =
@@ -198,7 +203,7 @@ pub(in crate::core::runtime::run) fn test_project_outcome(
     if matches!(plan.context, execution_plan::PlanContext::Project { .. })
         && matches!(plan.engine.mode, execution_plan::EngineMode::CasNative)
     {
-        match prepare_cas_native_run_context(ctx, &snapshot) {
+        match prepare_cas_native_run_context(ctx, &snapshot, &snapshot.root) {
             Ok(native_ctx) => {
                 let workdir = invocation_workdir(&native_ctx.py_ctx.project_root);
                 let host_runner = HostCommandRunner::new(ctx);
@@ -339,7 +344,7 @@ pub(in crate::core::runtime::run) fn run_tests_for_context(
     Ok(outcome)
 }
 
-fn run_tests_for_context_cas_native(
+pub(in crate::core::runtime::run) fn run_tests_for_context_cas_native(
     ctx: &CommandContext,
     runner: &dyn CommandRunner,
     native: &CasNativeRunContext,

@@ -57,6 +57,7 @@ impl fmt::Display for CommandGroup {
 
 pub(crate) struct PythonContext {
     pub(crate) project_root: PathBuf,
+    pub(crate) state_root: PathBuf,
     pub(crate) project_name: String,
     pub(crate) python: String,
     pub(crate) pythonpath: String,

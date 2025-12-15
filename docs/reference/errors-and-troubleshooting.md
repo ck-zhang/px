@@ -40,6 +40,7 @@ Under `CI=1` or explicit `--frozen`:
 * No prompts.
 * No auto-resolution.
 * `px run` / `px test` / `px fmt` do not rebuild project/workspace envs; they just check consistency and fail if broken (for `run`/`test`) or run tools in isolation (`fmt`).
+* `px run --ephemeral` / `px test --ephemeral` refuse unless all detected dependencies are fully pinned (`==` / `===`). Fix by pinning specs (e.g. `requests==2.32.3`) or adopt the directory with `px migrate --apply`.
 
 ## Non-TTY and structured output
 

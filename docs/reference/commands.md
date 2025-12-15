@@ -123,6 +123,10 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
   * **`.pxapp` bundle targets**: no local project is required; px executes the bundle in a sandbox and does not read or write `pyproject.toml`, lockfiles, or `.px/` from the current directory.
   * **Project targets**: project root exists. Lock must exist and match manifest (otherwise suggest `px sync`). In CI/`--frozen`, px never re-resolves; if a materialized env is required (e.g. `--sandbox` or compatibility fallback), it must already be consistent.
   * **Run-by-reference targets** (`gh:` / `git+`): no local project is required; px runs from a commit-pinned repository snapshot stored in the CAS and does not write `pyproject.toml`, `px.lock`, or `.px/` into the caller directory.
+  * **Ephemeral / try mode** (`--ephemeral` / `--try`): no local px project is required; px derives a cached env profile from read-only inputs in the current directory and **never** writes `.px/` or `px.lock` into that directory.
+    * Inputs (in order): PEP 723 `# /// script` metadata on the target script, otherwise `pyproject.toml`, otherwise `requirements.txt`, otherwise an empty env.
+    * Workdir: the user’s current directory.
+    * `CI=1` or `--frozen`: refuses unless all dependencies are fully pinned (must contain `==` / `===`), with a hint to adopt via `px migrate --apply`.
 * **Target resolution**:
 
   0. **Execute a `.pxapp` bundle**:
@@ -175,6 +179,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 * Same consistency semantics as `px run`. Prefers CAS-native execution and falls back to a materialized env when needed. Prefers project-provided runners like `tests/runtests.py` (or `runtests.py`) and otherwise runs `pytest` inside the project env.
 * Supports `--sandbox` with the same sandbox definition/resolution rules as `px run`; working tree is bind-mounted for live code.
 * `--at <git-ref>` mirrors `px run --at …`, using the manifest + lock at that ref with frozen semantics (no re-resolution; fail if lock is missing or drifted).
+* `--ephemeral` / `--try` mirrors `px run --ephemeral`: derive a cached env from `pyproject.toml` / `requirements.txt` without adopting the directory (no `.px/` or `px.lock` writes). In `CI=1` or `--frozen`, dependencies must be fully pinned.
 * Output style (default): px streams the runner stdout/stderr live and renders a compact report:
 
   ```

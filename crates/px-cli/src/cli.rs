@@ -411,6 +411,13 @@ pub struct RunArgs {
     pub frozen: bool,
     #[arg(
         long,
+        alias = "try",
+        help = "Run without adopting the directory (no .px/ or px.lock writes)",
+        conflicts_with = "at"
+    )]
+    pub ephemeral: bool,
+    #[arg(
+        long,
         help = "Execute inside the sandbox derived from [tool.px.sandbox]"
     )]
     pub sandbox: bool,
@@ -444,6 +451,13 @@ pub struct TestArgs {
         help = "Fail if px.lock is missing or the environment is out of sync"
     )]
     pub frozen: bool,
+    #[arg(
+        long,
+        alias = "try",
+        help = "Run without adopting the directory (no .px/ or px.lock writes)",
+        conflicts_with = "at"
+    )]
+    pub ephemeral: bool,
     #[arg(
         long,
         help = "Execute tests inside the sandbox derived from [tool.px.sandbox]"

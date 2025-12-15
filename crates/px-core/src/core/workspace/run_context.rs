@@ -210,6 +210,7 @@ pub fn prepare_workspace_run_context(
     };
     let py_ctx = PythonContext {
         project_root: member_root.clone(),
+        state_root: member_root.clone(),
         project_name,
         python: python_path,
         pythonpath,

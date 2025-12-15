@@ -2,6 +2,7 @@
 pub struct TestRequest {
     pub args: Vec<String>,
     pub frozen: bool,
+    pub ephemeral: bool,
     pub sandbox: bool,
     pub at: Option<String>,
 }
@@ -12,6 +13,7 @@ pub struct RunRequest {
     pub target: Option<String>,
     pub args: Vec<String>,
     pub frozen: bool,
+    pub ephemeral: bool,
     pub allow_floating: bool,
     pub interactive: Option<bool>,
     pub sandbox: bool,

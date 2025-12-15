@@ -48,7 +48,7 @@ pub(super) fn ensure_stdlib_tests_available(py_ctx: &PythonContext) -> Result<Op
     // Avoid mutating the system stdlib; stage tests under the project .px directory.
     let staging_base = env::var_os("PX_STDLIB_STAGING_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| py_ctx.project_root.join(".px").join("stdlib-tests"));
+        .unwrap_or_else(|| py_ctx.state_root.join(".px").join("stdlib-tests"));
     let staged_root = staging_base.join(format!("{major}.{minor}"));
     let staged_tests = staged_root.join("test");
     if staged_tests.exists() {
