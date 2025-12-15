@@ -440,3 +440,83 @@ impl ContentAddressableStore {
         Ok(())
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum StateFileKind {
+    Project,
+    Workspace,
+}
+
+#[derive(Debug, Deserialize)]
+struct RebuildState {
+    #[serde(default)]
+    current_env: Option<RebuildStoredEnv>,
+    #[serde(default)]
+    runtime: Option<RebuildStoredRuntime>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RebuildStoredEnv {
+    #[serde(default, alias = "lock_hash")]
+    lock_id: String,
+    #[serde(default)]
+    profile_oid: Option<String>,
+    #[serde(default)]
+    python: Option<RebuildStoredPython>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RebuildStoredRuntime {
+    #[serde(default)]
+    version: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RebuildStoredPython {
+    #[serde(default)]
+    version: String,
+}
+
+fn state_files_to_scan() -> Result<Vec<(StateFileKind, PathBuf)>> {
+    let mut results = Vec::new();
+    let Ok(cwd) = env::current_dir() else {
+        return Ok(results);
+    };
+    for ancestor in cwd.ancestors() {
+        let px_dir = ancestor.join(".px");
+        let project = px_dir.join("state.json");
+        if project.is_file() {
+            results.push((StateFileKind::Project, project));
+        }
+        let workspace = px_dir.join("workspace-state.json");
+        if workspace.is_file() {
+            results.push((StateFileKind::Workspace, workspace));
+        }
+    }
+    Ok(results)
+}
+
+fn owner_id_from_state(
+    kind: StateFileKind,
+    root: &Path,
+    lock_id: &str,
+    runtime_version: &str,
+) -> Result<String> {
+    let fingerprint = root_fingerprint(root)?;
+    let prefix = match kind {
+        StateFileKind::Project => "project-env",
+        StateFileKind::Workspace => "workspace-env",
+    };
+    Ok(format!(
+        "{prefix}:{fingerprint}:{lock_id}:{runtime_version}"
+    ))
+}
+
+fn tool_owner_id(tool: &str, lock_id: &str, runtime: &str) -> Result<String> {
+    Ok(format!(
+        "tool-env:{}:{}:{}",
+        tool.to_ascii_lowercase(),
+        lock_id,
+        runtime
+    ))
+}

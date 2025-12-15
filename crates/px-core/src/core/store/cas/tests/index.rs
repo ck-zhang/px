@@ -50,8 +50,10 @@ fn rebuild_restores_env_owner_refs_from_state() -> Result<()> {
     env::set_current_dir(cwd)?;
 
     let refs = store.refs_for(&profile_oid)?;
-    let expected_owner =
-        owner_id_from_state(StateFileKind::Project, &project_root, "lock-123", "3.11.0")?;
+    let expected_owner = format!(
+        "project-env:{}:lock-123:3.11.0",
+        root_fingerprint(&project_root)?
+    );
     assert!(
         refs.iter()
             .any(|owner| owner.owner_type == OwnerType::ProjectEnv
@@ -104,7 +106,10 @@ fn rebuild_restores_tool_owner_refs_from_state() -> Result<()> {
 
     let _ = store.list(None, None)?;
     let refs = store.refs_for(&profile_oid)?;
-    let expected_owner = tool_owner_id("demo-tool", "lock-abc", "3.11.0")?;
+    let expected_owner = format!(
+        "tool-env:{}:lock-abc:3.11.0",
+        "demo-tool".to_ascii_lowercase()
+    );
     assert!(
         refs.iter()
             .any(|owner| owner.owner_type == OwnerType::ToolEnv
