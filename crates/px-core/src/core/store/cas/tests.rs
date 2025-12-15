@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use tempfile::tempdir;
+use url::Url;
 
 static CURRENT_DIR_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 

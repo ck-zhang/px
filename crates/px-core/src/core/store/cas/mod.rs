@@ -27,8 +27,6 @@ use std::sync::OnceLock;
 use tar::{Archive, Header};
 use tempfile::tempdir;
 use tracing::{debug, warn};
-use url::Url;
-
 const OBJECTS_DIR: &str = "objects";
 const LOCKS_DIR: &str = "locks";
 const TMP_DIR: &str = "tmp";
