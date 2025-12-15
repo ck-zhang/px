@@ -5,9 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::context::CommandContext;
-use crate::core::runtime::artifacts::{
-    dependency_name, ensure_exact_pins, parse_exact_pin, resolve_pins,
-};
+use crate::core::runtime::artifacts::{dependency_name, ensure_exact_pins, resolve_pins};
 use crate::core::runtime::Effects;
 use crate::core::sandbox::{
     ensure_system_deps_rootfs, pin_system_deps, system_deps_mode, SystemDepsMode,
@@ -20,10 +18,11 @@ use crate::python_sys::{detect_interpreter, detect_interpreter_tags, detect_mark
 use anyhow::{anyhow, Result};
 use pep508_rs::MarkerEnvironment;
 use px_domain::api::{
-    analyze_lock_diff, autopin_pin_key, autopin_spec_key, canonicalize_spec, detect_lock_drift,
-    format_specifier, load_lockfile_optional, marker_applies, merge_resolved_dependencies,
-    render_lockfile, resolve, spec_requires_pin, verify_locked_artifacts, AutopinEntry,
-    InstallOverride, PinSpec, ProjectSnapshot, ResolverRequest, ResolverTags,
+    analyze_lock_diff, autopin_pin_key, autopin_spec_key, canonicalize_package_name,
+    canonicalize_spec, detect_lock_drift, format_specifier, load_lockfile_optional, marker_applies,
+    merge_resolved_dependencies, render_lockfile, resolve, spec_requires_pin,
+    verify_locked_artifacts, AutopinEntry, InstallOverride, PinSpec, ProjectSnapshot,
+    ResolverRequest, ResolverTags,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -133,11 +132,27 @@ pub(crate) fn install_snapshot(
         } else {
             snapshot.dependencies.clone()
         };
-        let mut requirements =
-            merge_requirements(&manifest_dependencies, &snapshot.group_dependencies);
+        let requirements = merge_requirements(&manifest_dependencies, &snapshot.group_dependencies);
         let marker_env = ctx.marker_environment()?;
-        let mut resolved_override = None;
-        if override_pins.is_none() {
+        let pins = if let Some(override_data) = override_pins {
+            let filtered_pins: Vec<PinSpec> = override_data
+                .pins
+                .iter()
+                .filter(|pin| marker_applies(&pin.specifier, &marker_env))
+                .cloned()
+                .collect();
+            if filtered_pins.is_empty() {
+                ensure_exact_pins(&marker_env, &requirements)?
+            } else if pins_cover_requirements(&filtered_pins, &requirements, &marker_env) {
+                filtered_pins
+            } else {
+                let mut resolution_snapshot = snapshot.clone();
+                resolution_snapshot.dependencies = manifest_dependencies.clone();
+                resolution_snapshot.requirements = requirements.clone();
+                let resolved = resolve_dependencies(ctx, &resolution_snapshot)?;
+                resolved.pins
+            }
+        } else {
             let resolved = resolve_dependencies(ctx, &snapshot)?;
             if !resolved.specs.is_empty() && !inline && !has_foreign_lock {
                 manifest_dependencies = merge_resolved_dependencies(
@@ -147,32 +162,8 @@ pub(crate) fn install_snapshot(
                 );
                 persist_resolved_dependencies(&snapshot, &manifest_dependencies)?;
                 manifest_updated = true;
-                requirements =
-                    merge_requirements(&manifest_dependencies, &snapshot.group_dependencies);
             }
-            resolved_override = Some(resolved.pins);
-        }
-        let pins = if let Some(override_data) = override_pins {
-            let mut pins: Vec<PinSpec> = override_data
-                .pins
-                .iter()
-                .filter(|pin| marker_applies(&pin.specifier, &marker_env))
-                .cloned()
-                .collect();
-            if pins.is_empty() {
-                for spec in &requirements {
-                    if !marker_applies(spec, &marker_env) {
-                        continue;
-                    }
-                    pins.push(parse_exact_pin(spec)?);
-                }
-            }
-            pins
-        } else {
-            match resolved_override {
-                Some(pins) => pins,
-                None => ensure_exact_pins(&marker_env, &requirements)?,
-            }
+            resolved.pins
         };
         if manifest_updated {
             snapshot = manifest_snapshot_at(&snapshot.root).map_err(|err| {
@@ -200,6 +191,52 @@ fn merge_requirements(base: &[String], groups: &[String]) -> Vec<String> {
     merged.sort();
     merged.dedup();
     merged
+}
+
+fn normalize_pin_key(key: &str) -> String {
+    match key.split_once('|') {
+        Some((name, extras)) => format!("{}|{}", canonicalize_package_name(name), extras),
+        None => canonicalize_package_name(key),
+    }
+}
+
+fn pins_cover_requirements(
+    pins: &[PinSpec],
+    requirements: &[String],
+    marker_env: &MarkerEnvironment,
+) -> bool {
+    if pins.is_empty() {
+        return false;
+    }
+
+    let mut pin_keys = HashSet::with_capacity(pins.len());
+    for pin in pins {
+        pin_keys.insert(normalize_pin_key(&autopin_pin_key(pin)));
+    }
+
+    for spec in requirements {
+        if !marker_applies(spec, marker_env) {
+            continue;
+        }
+        let key = normalize_pin_key(&autopin_spec_key(spec));
+        if !pin_keys.contains(&key) {
+            return false;
+        }
+    }
+
+    for pin in pins {
+        for req in &pin.requires {
+            if !marker_applies(req, marker_env) {
+                continue;
+            }
+            let key = normalize_pin_key(&autopin_spec_key(req));
+            if !pin_keys.contains(&key) {
+                return false;
+            }
+        }
+    }
+
+    true
 }
 pub(crate) fn compute_lock_hash(lock_path: &Path) -> Result<String> {
     let contents = fs::read(lock_path)?;

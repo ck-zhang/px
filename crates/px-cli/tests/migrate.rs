@@ -850,6 +850,53 @@ fn migrate_lock_only_requires_pyproject() {
 }
 
 #[test]
+fn migrate_lock_only_keeps_lock_fresh_with_dependency_groups() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(
+        &temp,
+        "pyproject.toml",
+        r#"[project]
+name = "lock-only-groups"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "requests>=2.32.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest==8.4.1",
+]
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#,
+    );
+
+    run_migrate_json(&temp, &["--apply", "--lock-only", "--allow-dirty"]);
+
+    let pyproject = fs::read_to_string(temp.path().join("pyproject.toml")).expect("pyproject");
+    assert!(
+        pyproject.contains("requests>=2.32.0"),
+        "lock-only migrate should not pin manifest dependencies"
+    );
+
+    px_command(&temp)
+        .args([
+            "run",
+            "python",
+            "-c",
+            "import pytest, requests; print(requests.__version__)",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
 fn migrate_autopins_dev_specs_without_clobbering_existing() {
     if !require_online() {
         return;
