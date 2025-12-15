@@ -219,7 +219,9 @@ fn legacy_tool_env_is_ready(ctx: &CommandContext, snapshot: &ProjectSnapshot) ->
     };
     let lock_id = match lock.lock_id {
         Some(value) => value,
-        None => crate::compute_lock_hash(&snapshot.lock_path).ok().unwrap_or_default(),
+        None => crate::compute_lock_hash(&snapshot.lock_path)
+            .ok()
+            .unwrap_or_default(),
     };
     if lock_id.is_empty() {
         return false;

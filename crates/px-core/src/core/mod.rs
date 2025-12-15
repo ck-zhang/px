@@ -1,3 +1,8 @@
+//! Internal implementation modules for `px-core`.
+//!
+//! Most callers should go through `px_core::api` rather than importing these
+//! modules directly.
+
 pub mod config;
 pub mod distribution;
 pub mod migration;

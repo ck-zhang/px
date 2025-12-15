@@ -1,3 +1,7 @@
+//! Runtime and execution engine (`px run`, `px test`, `px explain`).
+//!
+//! Most higher-level flows go through the `facade` re-exports.
+
 pub(crate) mod artifacts;
 pub(crate) mod builder;
 pub(crate) mod cas_env;

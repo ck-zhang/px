@@ -1,3 +1,5 @@
+//! Build and publish workflows for Python distributions.
+
 mod artifacts;
 mod build;
 mod plan;

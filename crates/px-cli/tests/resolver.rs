@@ -51,7 +51,10 @@ fn resolver_pins_range_when_enabled() {
         "expected packaging to be pinned, got {pinned}"
     );
 
-    px_cmd(&project).args(["sync", "--frozen"]).assert().success();
+    px_cmd(&project)
+        .args(["sync", "--frozen"])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -88,7 +91,10 @@ fn resolver_handles_extras_and_markers() {
         "specifier missing marker: {specifier}"
     );
 
-    px_cmd(&project).args(["sync", "--frozen"]).assert().success();
+    px_cmd(&project)
+        .args(["sync", "--frozen"])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -141,10 +147,7 @@ fn resolver_reports_conflicts_with_backtracking() {
     deps.push("botocore==1.31.0"); // botocore pins urllib3<1.27
     fs::write(&pyproject, doc.to_string()).expect("write pyproject");
 
-    let assert = px_cmd(&project)
-        .args(["--json", "sync"])
-        .assert()
-        .failure();
+    let assert = px_cmd(&project).args(["--json", "sync"]).assert().failure();
     let payload: Value = serde_json::from_slice(&assert.get_output().stdout).expect("json payload");
     assert_eq!(payload["status"], "user-error");
     let message = payload["message"]
@@ -152,7 +155,9 @@ fn resolver_reports_conflicts_with_backtracking() {
         .unwrap_or_default()
         .to_ascii_lowercase();
     assert!(
-        message.contains("resolve") || message.contains("resolution") || message.contains("conflict"),
+        message.contains("resolve")
+            || message.contains("resolution")
+            || message.contains("conflict"),
         "should report resolver conflict, got {message:?}"
     );
 }

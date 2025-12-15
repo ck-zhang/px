@@ -114,10 +114,7 @@ fn migrate_reports_pyproject_dependencies() {
         .assert()
         .success();
 
-    let assert = px_command(&temp)
-        .args(["migrate"])
-        .assert()
-        .success();
+    let assert = px_command(&temp).args(["migrate"]).assert().success();
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("px migrate: plan ready"));
@@ -361,7 +358,13 @@ fn migrate_write_creates_lock_from_requirements() {
     fs::write(&requirements, "rich==13.7.1\n").expect("write requirements");
 
     let assert = px_command(&temp)
-        .args(["--json", "migrate", "--apply", "--source", "requirements.txt"])
+        .args([
+            "--json",
+            "migrate",
+            "--apply",
+            "--source",
+            "requirements.txt",
+        ])
         .assert()
         .success();
 
@@ -385,7 +388,13 @@ fn migrate_write_backs_up_pyproject() {
     fs::write(&requirements, "click==8.1.7\n").expect("write requirements");
 
     let assert = px_command(&temp)
-        .args(["--json", "migrate", "--apply", "--source", "requirements.txt"])
+        .args([
+            "--json",
+            "migrate",
+            "--apply",
+            "--source",
+            "requirements.txt",
+        ])
         .assert()
         .success();
 

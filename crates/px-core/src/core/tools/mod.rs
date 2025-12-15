@@ -1,3 +1,5 @@
+//! Tool installation and execution (`px tool …`).
+
 mod install;
 mod list_remove;
 mod metadata;

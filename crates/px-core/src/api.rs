@@ -1,8 +1,8 @@
-// Intended public API surface for `px-core`.
-//
-// This module exists to keep the crate root small and make it explicit which
-// types/functions are part of the stable interface used by the CLI and other
-// crates.
+//! Intended public API surface for `px-core`.
+//!
+//! This module exists to keep the crate root small and make it explicit which
+//! types/functions are part of the stable interface used by the CLI and other
+//! crates.
 
 pub use crate::core::config::context::{CommandContext, CommandHandler, CommandInfo};
 pub use crate::core::config::{
