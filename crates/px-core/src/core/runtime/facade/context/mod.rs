@@ -1,9 +1,4 @@
-// Mapping note: `context.rs` was split for navigability:
-// - `types.rs`: CommandGroup, PythonContext, EnvGuard, autosync types
-// - `version_file.rs`: version-file stubs + VCS-derived version helpers
-// - `pythonpath.rs`: PYTHONPATH/allowed-path wiring
-// - `env_sync.rs`: autosync/guard + outcome detail attachment
-// - `python_context.rs`: python context assembly entrypoints
+//! Runtime context assembly for run/test/explain.
 
 mod env_sync;
 mod python_context;

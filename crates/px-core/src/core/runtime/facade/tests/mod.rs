@@ -1,8 +1,4 @@
 //! Facade unit tests.
-//!
-//! Mapping note (for reviewers):
-//! - Old: `core/runtime/facade/tests.rs`
-//! - New: `core/runtime/facade/tests/` (split by topic)
 
 mod base_env;
 mod editable_stub;

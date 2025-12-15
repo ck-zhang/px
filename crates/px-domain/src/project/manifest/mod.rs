@@ -14,13 +14,6 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 use super::snapshot::ensure_pyproject_exists;
 
 pub(crate) const TOMLI_W_REQUIREMENT: &str = "tomli-w>=1.0.0";
-
-// Mapping note (refactor-only; no behavior changes):
-// - Spec/name normalization -> normalize.rs
-// - Tool options / sandbox config -> options.rs
-// - Onboarding package collection + requirements parsing -> packages.rs
-// - Dependency group selection/resolution -> dependency_groups.rs
-// - Manifest fingerprinting -> fingerprint.rs
 mod dependency_groups;
 mod fingerprint;
 mod normalize;

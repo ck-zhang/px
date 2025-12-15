@@ -1,12 +1,4 @@
-// Test execution + runners (pytest/builtin/script).
-// Mapping note: the former `run/test_exec.rs` mega-module was split into focused files:
-// - `driver.rs`: test execution orchestration + CAS-native integration
-// - `pytest.rs`: pytest runner + plugin wiring
-// - `builtin.rs`: fallback builtin runner
-// - `script.rs`: project-provided `runtests.py` runner
-// - `env.rs`: environment variable helpers for runners
-// - `stdlib.rs`: staging stdlib tests for minimal environments
-// - `outcome.rs`: `ExecutionOutcome` shaping helpers
+//! Test execution + runners (pytest/builtin/script).
 
 use super::*;
 

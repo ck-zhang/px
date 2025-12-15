@@ -1,6 +1,4 @@
-// Mapping note: `sandbox.rs` was split for navigability:
-// - `runner.rs`: container runner + argv/env path rewriting
-// - `prepare.rs`: sandbox image/store preparation + outcome detail helpers
+//! Sandbox runner glue for `px run` / `px test`.
 
 mod prepare;
 mod runner;

@@ -72,7 +72,6 @@ use workdir::{invocation_workdir, map_workdir};
 
 type EnvPairs = Vec<(String, String)>;
 
-// Mapping note: `run/mod.rs` was split for reviewability; see `commit.rs`, `driver.rs`, `errors.rs`, `ref_tree.rs`, `test_exec/`.
 pub(crate) use errors::install_error_outcome;
 use errors::{
     attach_cas_native_fallback, cas_native_fallback_reason, cas_native_fallback_summary,

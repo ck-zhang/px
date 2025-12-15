@@ -1,11 +1,4 @@
-// Mapping note: the former `cas_env.rs` mega-module was split into focused files:
-// - `owners.rs`: env root + owner id helpers
-// - `fs_tree.rs`: filesystem tree copy + permission helpers
-// - `scripts.rs`: python shim + entrypoint script helpers
-// - `runtime.rs`: runtime header/archive helpers
-// - `materialize.rs`: CAS materialization (runtime/pkg-build/profile env)
-// - `profile.rs`: CAS profile assembly + dependency staging
-// - `tests.rs`: unit tests previously inline in `cas_env.rs`
+//! CAS-backed environment materialization helpers.
 
 mod fs_tree;
 mod materialize;

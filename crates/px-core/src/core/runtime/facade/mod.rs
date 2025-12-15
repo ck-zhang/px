@@ -1,12 +1,4 @@
-// Mapping note: the former `facade.rs` mega-module was split into focused files:
-// - `context/`: command/runtime context wiring, PYTHONPATH assembly, version-file logic
-// - `plan.rs`: lock/manifest resolution + dependency planning helpers
-// - `env_materialize.rs`: env materialization, site layout, state.json helpers
-// - `cas_native.rs`: CAS/native environment validation + consistency checks
-// - `sandbox.rs`: system-deps/sysroot compatibility helpers for resolution
-// - `execute.rs`: process/output -> `ExecutionOutcome` mapping helpers
-// - `errors.rs`: user-facing error/outcome shaping + JSON response helpers
-// - `tests/`: unit tests previously inline in `facade.rs`
+//! Runtime facade shared by `px run`, `px test`, and `px explain`.
 
 mod cas_native;
 mod context;

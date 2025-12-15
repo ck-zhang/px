@@ -48,16 +48,6 @@ use super::{build_pythonpath, compute_lock_hash, ManifestSnapshot};
 #[cfg(test)]
 use px_domain::api::LockSnapshot;
 
-// Mapping note: the former `env_materialize.rs` mega-module was split into focused files:
-// - `refresh.rs`: refresh_project_site + pip/setuptools/uv seeding
-// - `wheel.rs`: wheel caching/build + CAS storage helpers
-// - `editable.rs`: editable metadata stub + entrypoint/script helpers
-// - `markers.rs`: marker shim generation for materialized envs
-// - `site.rs`: site layout helpers (site-packages/python selection)
-// - `state.rs`: state.json persistence + resolve_project_site
-// - `runtime.rs`: runtime probing + metadata helpers
-// - `test_support.rs`: test-only helpers (materialize_project_site)
-
 mod editable;
 mod markers;
 mod refresh;

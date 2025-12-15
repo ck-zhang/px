@@ -41,14 +41,6 @@ const PX_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const MATERIALIZED_PKG_BUILDS_DIR: &str = "pkg-builds";
 pub(crate) const MATERIALIZED_RUNTIMES_DIR: &str = "runtimes";
 pub(crate) const MATERIALIZED_REPO_SNAPSHOTS_DIR: &str = "repo-snapshots";
-
-// Mapping note: the former `cas.rs` mega-module was split into focused files:
-// - `archive.rs`: deterministic filesystem archiving helpers
-// - `doctor.rs`: self-healing + integrity verification
-// - `gc.rs`: garbage collection + env-driven policy glue
-// - `keys.rs`: deterministic lookup-key helpers
-// - `repo_snapshot.rs`: repo-snapshot object + materialization
-// - `store_impl/`: core CAS store operations
 mod archive;
 mod doctor;
 mod gc;

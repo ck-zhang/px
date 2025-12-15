@@ -1,8 +1,4 @@
-// Mapping note: `apply.rs` was split for reviewability:
-// - `types.rs`: request/config enums + request struct
-// - `migrate.rs`: migrate entrypoint + main flow
-// - `foreign_tools.rs`: foreign tool detection helpers
-// - `locked_versions.rs`: uv/poetry lock pin reuse helpers
+//! Apply-mode migration implementation.
 
 mod foreign_tools;
 mod locked_versions;

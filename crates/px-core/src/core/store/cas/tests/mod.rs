@@ -1,8 +1,4 @@
 //! CAS unit tests.
-//!
-//! Mapping note (for reviewers):
-//! - Old: `core/store/cas/tests.rs`
-//! - New: `core/store/cas/tests/` (split by topic)
 
 use super::*;
 use anyhow::bail;

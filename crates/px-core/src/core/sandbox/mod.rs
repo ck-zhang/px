@@ -1,13 +1,4 @@
-// Mapping note: the former `sandbox/mod.rs` mega-module was split into focused files:
-// - `types.rs`: core types + version constants
-// - `store.rs`: sandbox store layout + manifest persistence
-// - `resolve.rs`: capability inference + definition assembly
-// - `image.rs`: sandbox image ensure/validation
-// - `system_deps.rs`: system dependency pinning + rootfs materialization
-// - `paths.rs`: env/site/store path helpers
-// - `time.rs`: deterministic timestamps (SOURCE_DATE_EPOCH)
-// - `errors.rs`: sandbox error shaping
-// - `tests.rs`: module tests previously inline
+//! Sandbox integration and `px pack` implementation.
 
 mod app_bundle;
 mod pack;

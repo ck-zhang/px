@@ -1,13 +1,4 @@
 //! OCI layer tar creation helpers for `px pack`.
-//!
-//! Mapping note (for reviewers):
-//! - Old: `core/sandbox/pack/layers.rs`
-//! - New:
-//!   - env layer + path rewriting: `layers/env.rs`
-//!   - app layer (source tree): `layers/app.rs`
-//!   - system-deps rootfs layer: `layers/system_deps.rs`
-//!   - base OS export layer: `layers/base_os.rs`
-//!   - deterministic tar writing helpers: `layers/tar.rs`
 
 mod app;
 mod base_os;

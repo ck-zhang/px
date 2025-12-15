@@ -1,9 +1,5 @@
 use super::*;
 
-// Mapping note: `ephemeral.rs` implements `px run/test --ephemeral` by building a
-// cache-rooted snapshot and running from the user's directory without writing
-// `.px/` or `px.lock` into the working tree.
-
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};

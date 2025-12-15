@@ -1,15 +1,4 @@
 //! Build and cache wheels from sdists.
-//!
-//! Mapping note (for reviewers):
-//! - Old: `core/store/sdist.rs`
-//! - New:
-//!   - entrypoint + `BuildMethod`: `sdist/mod.rs`
-//!   - build orchestration + cache match: `sdist/ensure.rs`
-//!   - container builder glue: `sdist/builder.rs`
-//!   - downloads + cross-device persistence: `sdist/download.rs`
-//!   - native library scanning/copy: `sdist/native_libs.rs`
-//!   - build options hashing: `sdist/hash.rs`
-//!   - wheel discovery: `sdist/wheel.rs`
 
 mod builder;
 mod download;

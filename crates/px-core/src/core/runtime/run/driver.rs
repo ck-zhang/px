@@ -1,4 +1,4 @@
-// Mapping note: `run/mod.rs` keeps the low-level execution helpers; higher-level entrypoints live in `driver.rs`.
+//! High-level `px run` / `px test` entrypoints built on helpers in `run/mod.rs`.
 
 use super::*;
 
