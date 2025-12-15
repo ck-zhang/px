@@ -6,7 +6,7 @@
 // - `sandbox.rs`: system-deps/sysroot compatibility helpers for resolution
 // - `execute.rs`: process/output -> `ExecutionOutcome` mapping helpers
 // - `errors.rs`: user-facing error/outcome shaping + JSON response helpers
-// - `tests.rs`: unit tests previously inline in `facade.rs`
+// - `tests/`: unit tests previously inline in `facade.rs`
 
 mod cas_native;
 mod context;
