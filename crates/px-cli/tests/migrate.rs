@@ -147,6 +147,44 @@ fn migrate_reads_requirements_with_json() {
 }
 
 #[test]
+fn migrate_ignores_prod_requirements_when_pyproject_present() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(
+        &temp,
+        "pyproject.toml",
+        r#"[project]
+name = "pyproject-precedence"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["requests==2.32.3"]
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#,
+    );
+    write_file(&temp, "requirements.txt", "requests==2.31.0\n");
+
+    let output = run_migrate_json(&temp, &[]);
+    assert_eq!(output["status"], "ok");
+    let packages = output["details"]["packages"]
+        .as_array()
+        .expect("packages array");
+    assert_eq!(packages.len(), 1);
+    assert_eq!(packages[0]["name"], "requests");
+    assert_eq!(packages[0]["requested"], "requests==2.32.3");
+    assert!(
+        !packages
+            .iter()
+            .any(|pkg| pkg["source"].as_str().unwrap_or_default() == "requirements.txt"),
+        "requirements.txt should not be used as a prod dependency source when pyproject.toml provides dependencies"
+    );
+}
+
+#[test]
 fn migrate_apply_works_without_tool_section() {
     if !require_online() {
         return;
@@ -911,7 +949,14 @@ build-backend = "setuptools.build_meta"
     write_file(&temp, "requirements.txt", "click==7.1.0\n");
 
     let assert = px_command(&temp)
-        .args(["--json", "migrate", "--apply", "--allow-dirty"])
+        .args([
+            "--json",
+            "migrate",
+            "--source",
+            "requirements.txt",
+            "--apply",
+            "--allow-dirty",
+        ])
         .assert()
         .failure();
     let output = command_output(&assert);

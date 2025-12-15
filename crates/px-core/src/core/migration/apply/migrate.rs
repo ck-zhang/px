@@ -141,6 +141,7 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
 
     let mut packages = Vec::new();
     let mut source_summaries = Vec::new();
+    let mut pyproject_dep_count = 0usize;
 
     let requirements_rel = requirements_path
         .as_ref()
@@ -153,23 +154,31 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
 
     if pyproject_exists {
         let (summary, mut rows) = collect_pyproject_packages(&root, &pyproject_path)?;
+        pyproject_dep_count = rows.len();
         source_summaries.push(summary);
         packages.append(&mut rows);
         foreign_tools = detect_foreign_tool_sections(&pyproject_path)?;
         foreign_owners = detect_foreign_tool_conflicts(&pyproject_path)?;
     }
 
+    let should_skip_prod_sources =
+        pyproject_exists && pyproject_dep_count > 0 && source_override.is_none();
+
     if let Some(path) = setup_cfg_path.as_ref() {
-        let (summary, mut rows) = collect_setup_cfg_packages(&root, path)?;
-        source_summaries.push(summary);
-        packages.append(&mut rows);
+        if !should_skip_prod_sources {
+            let (summary, mut rows) = collect_setup_cfg_packages(&root, path)?;
+            source_summaries.push(summary);
+            packages.append(&mut rows);
+        }
     }
 
     if let Some(path) = requirements_path.as_ref() {
-        let (summary, mut rows) =
-            collect_requirement_packages(&root, path, "requirements", "prod")?;
-        source_summaries.push(summary);
-        packages.append(&mut rows);
+        if !should_skip_prod_sources {
+            let (summary, mut rows) =
+                collect_requirement_packages(&root, path, "requirements", "prod")?;
+            source_summaries.push(summary);
+            packages.append(&mut rows);
+        }
     }
 
     if let Some(path) = dev_path.as_ref() {
@@ -183,10 +192,10 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     if pyproject_exists {
         project_parts.push("pyproject");
     }
-    if setup_cfg_path.is_some() {
+    if setup_cfg_path.is_some() && !should_skip_prod_sources {
         project_parts.push("setup.cfg");
     }
-    if requirements_path.is_some() {
+    if requirements_path.is_some() && !should_skip_prod_sources {
         project_parts.push("requirements");
     }
     if dev_path.is_some() {

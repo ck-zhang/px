@@ -124,43 +124,25 @@ fn download_artifact(
     } else {
         match select_wheel(&release.urls, tags, &pin.specifier) {
             Ok(wheel) => {
-                let native = !wheel.platform_tag.eq_ignore_ascii_case("any")
-                    || !wheel.abi_tag.eq_ignore_ascii_case("none")
-                    || wheel.filename.contains("manylinux")
-                    || wheel.filename.contains("win")
-                    || wheel.filename.contains("macosx");
-                if native {
-                    build_wheel_via_sdist(
-                        cache_store,
-                        cache,
-                        &release,
-                        &pin,
-                        python,
-                        &default_build_hash,
-                        &builder.builder_id,
-                        &cache.path,
-                    )?
-                } else {
-                    let request = ArtifactRequest {
-                        name: &pin.normalized,
-                        version: &pin.version,
-                        filename: &wheel.filename,
-                        url: &wheel.url,
-                        sha256: &wheel.sha256,
-                    };
-                    let cached = cache_store.cache_wheel(&cache.path, &request)?;
-                    LockedArtifact {
-                        filename: wheel.filename.clone(),
-                        url: wheel.url.clone(),
-                        sha256: wheel.sha256.clone(),
-                        size: cached.size,
-                        cached_path: cached.wheel_path.display().to_string(),
-                        python_tag: wheel.python_tag.clone(),
-                        abi_tag: wheel.abi_tag.clone(),
-                        platform_tag: wheel.platform_tag.clone(),
-                        build_options_hash: default_build_hash.clone(),
-                        is_direct_url: false,
-                    }
+                let request = ArtifactRequest {
+                    name: &pin.normalized,
+                    version: &pin.version,
+                    filename: &wheel.filename,
+                    url: &wheel.url,
+                    sha256: &wheel.sha256,
+                };
+                let cached = cache_store.cache_wheel(&cache.path, &request)?;
+                LockedArtifact {
+                    filename: wheel.filename.clone(),
+                    url: wheel.url.clone(),
+                    sha256: wheel.sha256.clone(),
+                    size: cached.size,
+                    cached_path: cached.wheel_path.display().to_string(),
+                    python_tag: wheel.python_tag.clone(),
+                    abi_tag: wheel.abi_tag.clone(),
+                    platform_tag: wheel.platform_tag.clone(),
+                    build_options_hash: default_build_hash.clone(),
+                    is_direct_url: false,
                 }
             }
             Err(_) => build_wheel_via_sdist(
@@ -676,3 +658,182 @@ pub(crate) fn strip_wrapping_quotes(input: &str) -> &str {
 }
 
 const PYPI_BASE_URL: &str = "https://pypi.org/pypi";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::{
+        path::{Path, PathBuf},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
+
+    use crate::pypi::PypiDigests;
+    use crate::store::{
+        BuiltWheel, CachePruneResult, CacheUsage, CacheWalk, CachedArtifact, PrefetchOptions,
+        PrefetchSpec, PrefetchSummary,
+    };
+
+    struct TestPypiClient {
+        urls: Vec<PypiFile>,
+    }
+
+    impl effects::PypiClient for TestPypiClient {
+        fn fetch_release(
+            &self,
+            _normalized: &str,
+            _version: &str,
+            _specifier: &str,
+        ) -> Result<PypiReleaseResponse> {
+            Ok(PypiReleaseResponse {
+                urls: self.urls.clone(),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestCacheStore {
+        wheel_calls: Arc<AtomicUsize>,
+        cache_root: PathBuf,
+    }
+
+    impl effects::CacheStore for TestCacheStore {
+        fn resolve_store_path(&self) -> Result<CacheLocation> {
+            Ok(CacheLocation {
+                path: self.cache_root.clone(),
+                source: "test",
+            })
+        }
+
+        fn compute_usage(&self, _path: &Path) -> Result<CacheUsage> {
+            Ok(CacheUsage {
+                exists: true,
+                total_entries: 0,
+                total_size_bytes: 0,
+            })
+        }
+
+        fn collect_walk(&self, _path: &Path) -> Result<CacheWalk> {
+            Ok(CacheWalk::default())
+        }
+
+        fn prune(&self, _walk: &CacheWalk) -> CachePruneResult {
+            CachePruneResult::default()
+        }
+
+        fn prefetch(
+            &self,
+            _cache: &Path,
+            _specs: &[PrefetchSpec<'_>],
+            _options: PrefetchOptions,
+        ) -> Result<PrefetchSummary> {
+            Ok(PrefetchSummary::default())
+        }
+
+        fn cache_wheel(&self, cache: &Path, request: &ArtifactRequest) -> Result<CachedArtifact> {
+            self.wheel_calls.fetch_add(1, Ordering::SeqCst);
+
+            std::fs::create_dir_all(cache)?;
+            let wheel_path = cache.join(request.filename);
+            std::fs::write(&wheel_path, b"test wheel")?;
+            Ok(CachedArtifact {
+                wheel_path,
+                dist_path: cache.join("dist"),
+                size: 9,
+            })
+        }
+
+        fn ensure_sdist_build(&self, _cache: &Path, _request: &SdistRequest) -> Result<BuiltWheel> {
+            panic!("unexpected sdist build: compatible wheel should be used instead")
+        }
+    }
+
+    #[test]
+    fn download_artifact_prefers_wheel_over_sdist_for_native_wheels() -> Result<()> {
+        let python = detect_interpreter().unwrap_or_else(|_| "/usr/bin/python3".to_string());
+        let tags = detect_interpreter_tags(&python)?;
+
+        let python_tag = tags
+            .python
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "py3".to_string());
+        let abi_tag = tags
+            .abi
+            .iter()
+            .find(|tag| !tag.eq_ignore_ascii_case("none"))
+            .cloned()
+            .or_else(|| {
+                eprintln!("skipping test: unable to determine a native ABI tag");
+                None
+            });
+        let platform_tag = tags
+            .platform
+            .iter()
+            .find(|tag| !tag.eq_ignore_ascii_case("any"))
+            .cloned()
+            .or_else(|| {
+                eprintln!("skipping test: unable to determine a native platform tag");
+                None
+            });
+
+        let (Some(abi_tag), Some(platform_tag)) = (abi_tag, platform_tag) else {
+            return Ok(());
+        };
+
+        let wheel_filename = format!("demo-1.0.0-{python_tag}-{abi_tag}-{platform_tag}.whl");
+        let sha256 = "0000000000000000000000000000000000000000000000000000000000000000";
+
+        let pypi = TestPypiClient {
+            urls: vec![
+                PypiFile {
+                    filename: wheel_filename.clone(),
+                    url: "https://example.invalid/demo.whl".to_string(),
+                    packagetype: "bdist_wheel".to_string(),
+                    yanked: None,
+                    digests: PypiDigests {
+                        sha256: sha256.to_string(),
+                    },
+                },
+                PypiFile {
+                    filename: "demo-1.0.0.tar.gz".to_string(),
+                    url: "https://example.invalid/demo.tar.gz".to_string(),
+                    packagetype: "sdist".to_string(),
+                    yanked: None,
+                    digests: PypiDigests {
+                        sha256: sha256.to_string(),
+                    },
+                },
+            ],
+        };
+
+        let wheel_calls = Arc::new(AtomicUsize::new(0));
+        let cache_root = tempfile::tempdir()?;
+        let cache_dir = tempfile::tempdir()?;
+        let cache_store = TestCacheStore {
+            wheel_calls: Arc::clone(&wheel_calls),
+            cache_root: cache_root.path().to_path_buf(),
+        };
+
+        let cache = CacheLocation {
+            path: cache_dir.path().to_path_buf(),
+            source: "test",
+        };
+
+        let pin = parse_exact_pin("demo==1.0.0")?;
+        let resolved = download_artifact(&pypi, &cache_store, &cache, &python, &tags, pin, false)?;
+
+        assert_eq!(wheel_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(resolved.artifact.filename, wheel_filename);
+        assert!(
+            PathBuf::from(&resolved.artifact.cached_path).exists(),
+            "expected cached wheel to exist at {}",
+            resolved.artifact.cached_path
+        );
+
+        Ok(())
+    }
+}
