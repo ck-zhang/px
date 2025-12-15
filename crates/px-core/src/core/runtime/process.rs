@@ -247,6 +247,7 @@ fn tee_to_string_limited(
             break;
         }
         writer.write_all(&chunk[..read])?;
+        writer.flush().ok();
         append_limited(&mut buffer, &chunk[..read], limit, &mut truncated);
     }
     writer.flush().ok();

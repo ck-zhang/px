@@ -55,7 +55,7 @@ pub(crate) fn package_capability_rules() -> &'static [(&'static str, &'static [&
         ("xml", &["lxml", "libxml2", "libxslt", "xmlsec"]),
         ("ldap", &["ldap", "python-ldap", "pyldap", "libldap"]),
         ("ffi", &["cffi", "libffi"]),
-        ("curl", &["curl", "libcurl", "openssl", "httpx", "requests"]),
+        ("curl", &["curl", "libcurl", "openssl", "pycurl"]),
         (
             "gdal",
             &[
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn infers_capabilities_from_dependency_names() {
-        let deps = ["libpq", "jpeg", "Requests", "unknown"];
+        let deps = ["libpq", "jpeg", "pycurl", "unknown"];
         let caps = capabilities_from_names(deps);
         assert!(caps.contains("postgres"));
         assert!(caps.contains("imagecodecs"));

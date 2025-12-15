@@ -259,12 +259,17 @@ pub(crate) fn fetch_release(
     specifier: &str,
 ) -> Result<PypiReleaseResponse> {
     let url = format!("{PYPI_BASE_URL}/{normalized}/{version}/json");
-    let mut last_error = None;
+    let mut last_json_error = None;
+    let mut last_send_error = None;
     for attempt in 1..=3 {
-        let response = client
-            .get(&url)
-            .send()
-            .map_err(|err| anyhow!("failed to query PyPI for {specifier}: {err}"))?;
+        let response = match client.get(&url).send() {
+            Ok(response) => response,
+            Err(err) => {
+                last_send_error = Some(err);
+                thread::sleep(Duration::from_millis(150 * attempt));
+                continue;
+            }
+        };
         if response.status() == StatusCode::NOT_FOUND {
             return Err(InstallUserError::new(
                 format!("PyPI does not provide {specifier}"),
@@ -278,14 +283,17 @@ pub(crate) fn fetch_release(
         match response.json::<PypiReleaseResponse>() {
             Ok(result) => return Ok(result),
             Err(err) => {
-                last_error = Some(err);
+                last_json_error = Some(err);
                 thread::sleep(Duration::from_millis(150 * attempt));
             }
         }
     }
+    if let Some(err) = last_send_error {
+        return Err(anyhow!("failed to query PyPI for {specifier}: {err}"));
+    }
     Err(anyhow!(
         "invalid JSON for {specifier}: {}",
-        last_error
+        last_json_error
             .map(|err| err.to_string())
             .unwrap_or_else(|| "unknown error".to_string())
     ))

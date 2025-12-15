@@ -439,14 +439,6 @@ fn plan_execution(
                 crate::workspace::StateViolation::EnvDrift,
             ));
         }
-        if sandbox && !strict && !state.env_clean {
-            return Err(crate::workspace::workspace_violation(
-                command,
-                &workspace,
-                &state,
-                crate::workspace::StateViolation::EnvDrift,
-            ));
-        }
 
         let snapshot = workspace.lock_snapshot();
         let _ = prepare_project_runtime(&snapshot).map_err(|err| {
@@ -515,7 +507,7 @@ fn plan_execution(
                 }
             }
         }
-        let would_repair_env = !strict && !sandbox && !state.env_clean;
+        let would_repair_env = !strict && !state.env_clean;
 
         let env_id = if matches!(engine.mode, EngineMode::MaterializedEnv) {
             state.lock_id.as_deref().and_then(|lock_id| {

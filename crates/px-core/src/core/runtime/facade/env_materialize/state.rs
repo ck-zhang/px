@@ -95,23 +95,37 @@ pub(in super::super) fn resolve_project_site(
             }),
         )
     })?;
-    let env_root = env.env_path.ok_or_else(|| {
-        InstallUserError::new(
-            "project environment missing",
-            json!({
-                "project_root": project_root.display().to_string(),
-                "reason": "missing_env",
-                "hint": "run `px sync` to rebuild the environment",
-            }),
-        )
-    })?;
-    let root = PathBuf::from(env_root);
+    let root = env
+        .env_path
+        .as_ref()
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let trimmed = env.site_packages.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(trimmed))
+            }
+        })
+        .ok_or_else(|| {
+            InstallUserError::new(
+                "project environment missing",
+                json!({
+                    "project_root": project_root.display().to_string(),
+                    "reason": "missing_env",
+                    "hint": "run `px sync` to rebuild the environment",
+                }),
+            )
+        })?;
     if !root.exists() {
         return Err(InstallUserError::new(
             "project environment missing",
             json!({
                 "project_root": project_root.display().to_string(),
-                "env_path": root.display().to_string(),
+                "env_path": env.env_path.as_ref().map(|path| path.to_string()),
+                "site_packages": env.site_packages,
+                "resolved_site": root.display().to_string(),
                 "reason": "missing_env",
                 "hint": "run `px sync` to rebuild the environment",
             }),

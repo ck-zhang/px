@@ -71,6 +71,12 @@ print(json.dumps(data))
 /// path is not valid UTF-8.
 pub fn detect_interpreter() -> Result<String> {
     if let Ok(explicit) = std::env::var("PX_RUNTIME_PYTHON") {
+        if let Ok(path) = which(&explicit) {
+            return path
+                .into_os_string()
+                .into_string()
+                .map_err(|_| anyhow!("non-utf8 path"));
+        }
         return Ok(explicit);
     }
 

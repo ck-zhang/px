@@ -15,7 +15,7 @@ pub fn prepare_workspace_run_context(
     ctx: &CommandContext,
     strict: bool,
     command: &str,
-    sandbox: bool,
+    _sandbox: bool,
 ) -> Result<Option<WorkspaceRunContext>, ExecutionOutcome> {
     let scope = discover_workspace_scope().map_err(|err| {
         ExecutionOutcome::failure(
@@ -71,14 +71,6 @@ pub fn prepare_workspace_run_context(
 
     let mut sync_report = None;
     if !strict && !state.env_clean {
-        if sandbox {
-            return Err(workspace_violation(
-                command,
-                &workspace,
-                &state,
-                StateViolation::EnvDrift,
-            ));
-        }
         eprintln!("px ▸ Syncing workspace environment…");
         refresh_workspace_site(ctx, &workspace).map_err(|err| {
             ExecutionOutcome::failure(

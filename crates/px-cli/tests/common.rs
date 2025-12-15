@@ -94,6 +94,11 @@ pub fn ensure_test_store_env() {
         env::set_var("PX_TOOLS_DIR", tools);
         env::set_var("PX_NO_ENSUREPIP", "1");
         env::set_var("PX_RUNTIME_HOST_ONLY", "1");
+        if env::var_os("PX_RUNTIME_PYTHON").is_none() {
+            if let Some(python) = find_python() {
+                env::set_var("PX_RUNTIME_PYTHON", python);
+            }
+        }
         env::set_var("PX_SYSTEM_DEPS_MODE", "offline");
     });
 }

@@ -115,8 +115,8 @@ fn px_test_streams_and_summarizes_runner_output() {
         panic!("expected runner stdout to be streamed, saw lines: {stdout_lines:?}")
     });
     assert!(
-        elapsed.as_millis() < 650,
-        "expected streamed output before runner completed, waited {elapsed:?}"
+        child.try_wait().expect("poll px test process").is_none(),
+        "expected streamed output before runner completed; process already exited after {elapsed:?}"
     );
     let mut stderr_lines = Vec::new();
     let mut first_stderr_time = None;
@@ -136,6 +136,10 @@ fn px_test_streams_and_summarizes_runner_output() {
     assert!(
         first_stderr_time.is_some(),
         "expected runner stderr to be streamed, saw {stderr_lines:?}"
+    );
+    assert!(
+        child.try_wait().expect("poll px test process").is_none(),
+        "expected streamed stderr before runner completed; process already exited after {elapsed:?}"
     );
 
     let status = child.wait().expect("wait for px test");

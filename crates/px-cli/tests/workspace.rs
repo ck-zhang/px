@@ -5,7 +5,10 @@ use toml_edit::{DocumentMut, Item};
 
 mod common;
 
-use common::{find_python, parse_json, prepare_named_fixture, require_online, test_env_guard};
+use common::{
+    fake_sandbox_backend, find_python, parse_json, prepare_named_fixture, require_online,
+    test_env_guard,
+};
 
 #[test]
 fn workspace_sync_writes_workspace_metadata() {
@@ -240,7 +243,9 @@ fn sandbox_workspace_requires_consistent_env() {
         eprintln!("skipping workspace sandbox env repair test (python not found)");
         return;
     };
-    let (_temp, root) = prepare_named_fixture("workspace_basic", "workspace_sandbox_env");
+    let (tmp, root) = prepare_named_fixture("workspace_basic", "workspace_sandbox_env");
+    let (backend, log) = fake_sandbox_backend(tmp.path()).expect("backend script");
+    let store = tmp.path().join("sandbox-store");
     let member = root.join("apps").join("a");
     fs::create_dir_all(&member).expect("create member root");
     fs::write(
@@ -255,6 +260,13 @@ dependencies = []
 "#,
     )
     .expect("write member manifest");
+    let tests_dir = member.join("tests");
+    fs::create_dir_all(&tests_dir).expect("create tests dir");
+    fs::write(
+        tests_dir.join("runtests.py"),
+        "print('sandbox workspace tests'); import sys; sys.exit(0)\n",
+    )
+    .expect("write runtests script");
     let lib_root = root.join("libs").join("b");
     fs::create_dir_all(lib_root.join("src").join("b")).expect("create lib package");
     fs::write(
@@ -280,6 +292,11 @@ dependencies = []
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&member)
+        .env("PX_SANDBOX_STORE", &store)
+        .env("PX_SANDBOX_BACKEND", &backend)
+        .env("PX_FAKE_SANDBOX_LOG", &log)
+        .env("PX_FAKE_SANDBOX_PROJECT_ROOT", &member)
+        .env("PX_FAKE_SANDBOX_INSPECT_EXIT", "1")
         .env("PX_RUNTIME_PYTHON", &python)
         .args(["--json", "test", "--sandbox"])
         .assert()

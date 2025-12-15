@@ -184,6 +184,7 @@ fn project_init_cleans_up_when_runtime_missing() {
     let assert = px_cmd()
         .current_dir(&project_dir)
         .env("PX_RUNTIME_REGISTRY", &registry)
+        .env_remove("PX_RUNTIME_PYTHON")
         .args(["init"])
         .assert()
         .failure();

@@ -8,6 +8,8 @@ use serde_json::Value;
 use tempfile::TempDir;
 use toml_edit::DocumentMut;
 
+mod common;
+
 fn require_online() -> bool {
     if let Some("1") = std::env::var("PX_ONLINE").ok().as_deref() {
         true
@@ -27,13 +29,7 @@ fn resolver_pins_range_when_enabled() {
     let project = init_project(&temp, "resolver_demo");
     add_dependency(&project, "packaging>=24,<25");
 
-    cargo_bin_cmd!("px")
-        .current_dir(&project)
-        .env("PX_ONLINE", "1")
-        .env("PX_CACHE_PATH", project.join(".px-cache"))
-        .args(["sync"])
-        .assert()
-        .success();
+    px_cmd(&project).args(["sync"]).assert().success();
 
     let lock = project.join("px.lock");
     assert!(lock.exists(), "px.lock should be created");
@@ -55,13 +51,7 @@ fn resolver_pins_range_when_enabled() {
         "expected packaging to be pinned, got {pinned}"
     );
 
-    cargo_bin_cmd!("px")
-        .current_dir(&project)
-        .env("PX_ONLINE", "1")
-        .env("PX_CACHE_PATH", project.join(".px-cache"))
-        .args(["sync", "--frozen"])
-        .assert()
-        .success();
+    px_cmd(&project).args(["sync", "--frozen"]).assert().success();
 }
 
 #[test]
@@ -74,15 +64,7 @@ fn resolver_handles_extras_and_markers() {
     let project = init_project(&temp, "resolver_extras_markers");
     let spec = r#"requests[socks]>=2.32 ; python_version >= "3.10""#;
     add_dependency(&project, spec);
-    let cache = project.join(".px-cache");
-
-    cargo_bin_cmd!("px")
-        .current_dir(&project)
-        .env("PX_ONLINE", "1")
-        .env("PX_CACHE_PATH", &cache)
-        .args(["sync"])
-        .assert()
-        .success();
+    px_cmd(&project).args(["sync"]).assert().success();
 
     let lock = project.join("px.lock");
     let doc: DocumentMut = fs::read_to_string(&lock)
@@ -102,17 +84,11 @@ fn resolver_handles_extras_and_markers() {
         "specifier missing extras: {specifier}"
     );
     assert!(
-        specifier.contains("python_version"),
+        specifier.contains("python_full_version") || specifier.contains("python_version"),
         "specifier missing marker: {specifier}"
     );
 
-    cargo_bin_cmd!("px")
-        .current_dir(&project)
-        .env("PX_ONLINE", "1")
-        .env("PX_CACHE_PATH", &cache)
-        .args(["sync", "--frozen"])
-        .assert()
-        .success();
+    px_cmd(&project).args(["sync", "--frozen"]).assert().success();
 }
 
 #[test]
@@ -123,16 +99,8 @@ fn resolver_pins_unversioned_spec() {
 
     let temp = tempfile::tempdir().expect("tempdir");
     let project = init_project(&temp, "resolver_unversioned");
-    add_dependency(&project, "numpy");
-    let cache = project.join(".px-cache");
-
-    cargo_bin_cmd!("px")
-        .current_dir(&project)
-        .env("PX_ONLINE", "1")
-        .env("PX_CACHE_PATH", &cache)
-        .args(["sync"])
-        .assert()
-        .success();
+    add_dependency(&project, "packaging");
+    px_cmd(&project).args(["sync"]).assert().success();
 
     let pyproject = project.join("pyproject.toml");
     let doc: DocumentMut = fs::read_to_string(&pyproject)
@@ -147,8 +115,8 @@ fn resolver_pins_unversioned_spec() {
         .find_map(|item| item.as_str())
         .expect("dependency entry");
     assert!(
-        pinned.starts_with("numpy=="),
-        "expected numpy to be pinned, got {pinned}"
+        pinned.starts_with("packaging=="),
+        "expected packaging to be pinned, got {pinned}"
     );
 }
 
@@ -159,12 +127,21 @@ fn resolver_reports_conflicts_with_backtracking() {
     }
     let temp = tempfile::tempdir().expect("tempdir");
     let project = init_project(&temp, "resolver_conflict");
-    add_dependency(&project, "urllib3>=2.2");
-    add_dependency(&project, "botocore==1.31.0"); // pins urllib3<1.27
+    // Inject a known conflict directly to exercise `px sync`'s backtracking error
+    // reporting without depending on `px add` behavior.
+    let pyproject = project.join("pyproject.toml");
+    let mut doc: DocumentMut = fs::read_to_string(&pyproject)
+        .expect("read pyproject")
+        .parse()
+        .expect("pyproject toml");
+    let deps = doc["project"]["dependencies"]
+        .as_array_mut()
+        .expect("dependencies array");
+    deps.push("urllib3>=2.2");
+    deps.push("botocore==1.31.0"); // botocore pins urllib3<1.27
+    fs::write(&pyproject, doc.to_string()).expect("write pyproject");
 
-    let assert = cargo_bin_cmd!("px")
-        .current_dir(&project)
-        .env("PX_ONLINE", "1")
+    let assert = px_cmd(&project)
         .args(["--json", "sync"])
         .assert()
         .failure();
@@ -175,7 +152,7 @@ fn resolver_reports_conflicts_with_backtracking() {
         .unwrap_or_default()
         .to_ascii_lowercase();
     assert!(
-        message.contains("resolve") || message.contains("conflict"),
+        message.contains("resolve") || message.contains("resolution") || message.contains("conflict"),
         "should report resolver conflict, got {message:?}"
     );
 }
@@ -190,12 +167,7 @@ fn resolver_supports_direct_url_wheels() {
     let url = "packaging @ https://files.pythonhosted.org/packages/08/aa/cc0199a5f0ad350994d660967a8efb233fe0416e4639146c089643407ce6/packaging-24.1-py3-none-any.whl";
     add_dependency(&project, url);
 
-    cargo_bin_cmd!("px")
-        .current_dir(&project)
-        .env("PX_ONLINE", "1")
-        .args(["--json", "sync"])
-        .assert()
-        .success();
+    px_cmd(&project).args(["--json", "sync"]).assert().success();
 
     let lock = project.join("px.lock");
     let doc: DocumentMut = fs::read_to_string(&lock)
@@ -225,19 +197,15 @@ fn resolver_respects_primary_index_env() {
     let project = init_project(&temp, "resolver_custom_index");
     add_dependency(&project, "packaging");
 
-    cargo_bin_cmd!("px")
-        .current_dir(&project)
-        .env("PX_ONLINE", "1")
+    px_cmd(&project)
         .env("PIP_INDEX_URL", "https://pypi.org/pypi")
-        .env("PX_CACHE_PATH", project.join(".px-cache"))
         .args(["sync"])
         .assert()
         .success();
 }
 
 fn init_project(temp: &TempDir, name: &str) -> PathBuf {
-    cargo_bin_cmd!("px")
-        .current_dir(temp.path())
+    px_cmd(temp.path())
         .args(["init", "--package", name])
         .assert()
         .success();
@@ -245,9 +213,19 @@ fn init_project(temp: &TempDir, name: &str) -> PathBuf {
 }
 
 fn add_dependency(project: &Path, spec: &str) {
-    cargo_bin_cmd!("px")
-        .current_dir(project)
-        .args(["add", spec])
-        .assert()
-        .success();
+    px_cmd(project).args(["add", spec]).assert().success();
+}
+
+fn px_cmd(project: &Path) -> assert_cmd::Command {
+    let python = common::find_python().unwrap_or_else(|| "python3".to_string());
+    let cache = project.join(".px-cache");
+    let mut cmd = cargo_bin_cmd!("px");
+    cmd.current_dir(project)
+        .env("PX_ONLINE", "1")
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_NO_ENSUREPIP", "1")
+        .env("PX_RUNTIME_HOST_ONLY", "1")
+        .env("PX_RUNTIME_PYTHON", python)
+        .env("PX_SYSTEM_DEPS_MODE", "offline");
+    cmd
 }

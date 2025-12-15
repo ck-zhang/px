@@ -1,6 +1,8 @@
 use std::fs;
+use std::process::Command;
 
 use assert_cmd::cargo::cargo_bin_cmd;
+use serde_json::Value;
 
 mod common;
 
@@ -26,30 +28,60 @@ fn fmt_bypasses_project_lock_env_gating() {
         eprintln!("skipping fmt bypass test (python binary not found)");
         return;
     };
+    let Some((python_path, channel)) = detect_host_python(&python) else {
+        eprintln!("skipping fmt bypass test (unable to inspect python interpreter)");
+        return;
+    };
     let lock = project.join("px.lock");
     fs::remove_file(&lock).expect("remove px.lock");
     fs::remove_dir_all(project.join(".px")).ok();
+    let pyproject = project.join("pyproject.toml");
+    let mut pyproject_contents = fs::read_to_string(&pyproject).expect("read pyproject");
+    pyproject_contents.push_str(
+        r#"
+[tool.px.fmt]
+module = "black"
+args = ["sample_px_app"]
+"#,
+    );
+    fs::write(&pyproject, pyproject_contents).expect("write pyproject");
+
+    // Tools require a px-registered runtime (not just PX_RUNTIME_PYTHON). Register the
+    // host interpreter into the per-test runtime registry so tool installation is hermetic.
+    let registry = cache.join("runtimes.json");
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .args(["python", "install", &channel, "--path", &python_path])
+        .assert()
+        .success();
 
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_RUNTIME_REGISTRY", &registry)
         .env("PX_CACHE_PATH", &cache)
         .env("PX_STORE_PATH", &store)
         .env("PX_ENVS_PATH", &envs)
         .env("PX_TOOLS_DIR", &tools)
         .env("PX_RUNTIME_HOST_ONLY", "1")
-        .args(["tool", "install", "ruff", "ruff==0.14.6"])
+        .env("PX_NO_ENSUREPIP", "1")
+        .env("PX_SYSTEM_DEPS_MODE", "offline")
+        .args(["tool", "install", "black", "black==25.12.0"])
         .assert()
         .success();
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_RUNTIME_REGISTRY", &registry)
         .env("PX_CACHE_PATH", &cache)
         .env("PX_STORE_PATH", &store)
         .env("PX_ENVS_PATH", &envs)
         .env("PX_TOOLS_DIR", &tools)
         .env("PX_RUNTIME_HOST_ONLY", "1")
+        .env("PX_NO_ENSUREPIP", "1")
+        .env("PX_SYSTEM_DEPS_MODE", "offline")
         .args(["--json", "fmt"])
         .assert()
         .success();
@@ -59,6 +91,28 @@ fn fmt_bypasses_project_lock_env_gating() {
         payload["status"], "ok",
         "fmt should succeed without px.lock"
     );
+}
+
+const INSPECT_SCRIPT: &str =
+    "import json, platform, sys; print(json.dumps({'version': platform.python_version(), 'executable': sys.executable}))";
+
+fn detect_host_python(python: &str) -> Option<(String, String)> {
+    let output = Command::new(python)
+        .arg("-c")
+        .arg(INSPECT_SCRIPT)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let payload: Value = serde_json::from_slice(&output.stdout).ok()?;
+    let executable = payload.get("executable")?.as_str()?.to_string();
+    let version = payload.get("version")?.as_str()?.to_string();
+    let parts: Vec<_> = version.split('.').collect();
+    let major = parts.first().copied().unwrap_or("0");
+    let minor = parts.get(1).copied().unwrap_or("0");
+    let channel = format!("{major}.{minor}");
+    Some((executable, channel))
 }
 
 #[test]

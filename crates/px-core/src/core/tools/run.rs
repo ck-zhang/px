@@ -8,7 +8,7 @@ use crate::{
     build_pythonpath, ensure_project_environment_synced, load_project_state, outcome_from_output,
     CommandContext, ExecutionOutcome, InstallUserError,
 };
-use px_domain::api::ProjectSnapshot;
+use px_domain::api::{load_lockfile_optional, ProjectSnapshot};
 
 use super::install::resolve_runtime;
 use super::metadata::read_metadata;
@@ -61,34 +61,36 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
     let runtime_selection = resolve_runtime(Some(&metadata.runtime_version))?;
     env::set_var("PX_RUNTIME_PYTHON", &runtime_selection.record.path);
     if let Err(err) = ensure_project_environment_synced(ctx, &snapshot) {
-        return match err.downcast::<InstallUserError>() {
+        match err.downcast::<InstallUserError>() {
             Ok(user) => {
-                let mut details = match user.details {
-                    Value::Object(map) => map,
-                    other => {
-                        let mut map = serde_json::Map::new();
-                        map.insert(
-                            "reason".into(),
-                            Value::String("tool_env_unavailable".into()),
-                        );
-                        map.insert("details".into(), other);
-                        map
-                    }
-                };
-                details.insert("tool".into(), Value::String(normalized.clone()));
-                details.insert(
-                    "hint".into(),
-                    Value::String(format!(
-                        "run `px tool install {normalized}` to rebuild the tool environment"
-                    )),
-                );
-                Ok(ExecutionOutcome::user_error(
-                    format!("tool '{normalized}' is not ready"),
-                    Value::Object(details),
-                ))
+                if !legacy_tool_env_is_ready(ctx, &snapshot) {
+                    let mut details = match user.details {
+                        Value::Object(map) => map,
+                        other => {
+                            let mut map = serde_json::Map::new();
+                            map.insert(
+                                "reason".into(),
+                                Value::String("tool_env_unavailable".into()),
+                            );
+                            map.insert("details".into(), other);
+                            map
+                        }
+                    };
+                    details.insert("tool".into(), Value::String(normalized.clone()));
+                    details.insert(
+                        "hint".into(),
+                        Value::String(format!(
+                            "run `px tool install {normalized}` to rebuild the tool environment"
+                        )),
+                    );
+                    return Ok(ExecutionOutcome::user_error(
+                        format!("tool '{normalized}' is not ready"),
+                        Value::Object(details),
+                    ));
+                }
             }
-            Err(other) => Err(other),
-        };
+            Err(other) => return Err(other),
+        }
     }
     let state = load_project_state(ctx.fs(), &tool_root)?;
     let profile_oid = state
@@ -209,6 +211,40 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
         "px tool",
         Some(details),
     ))
+}
+
+fn legacy_tool_env_is_ready(ctx: &CommandContext, snapshot: &ProjectSnapshot) -> bool {
+    let Ok(Some(lock)) = load_lockfile_optional(&snapshot.lock_path) else {
+        return false;
+    };
+    let lock_id = match lock.lock_id {
+        Some(value) => value,
+        None => crate::compute_lock_hash(&snapshot.lock_path).ok().unwrap_or_default(),
+    };
+    if lock_id.is_empty() {
+        return false;
+    }
+    let state = match load_project_state(ctx.fs(), &snapshot.root) {
+        Ok(state) => state,
+        Err(_) => return false,
+    };
+    let Some(env) = state.current_env else {
+        return false;
+    };
+    if env.profile_oid.is_some() {
+        return false;
+    }
+    if env.lock_id != lock_id {
+        return false;
+    }
+    if !std::path::Path::new(&env.site_packages).exists() {
+        return false;
+    }
+    let runtime = match crate::detect_runtime_metadata(ctx, snapshot) {
+        Ok(runtime) => runtime,
+        Err(_) => return false,
+    };
+    runtime.version == env.python.version && runtime.platform == env.platform
 }
 
 fn console_entry_invoke(script: &str, entry: &str) -> Result<String> {

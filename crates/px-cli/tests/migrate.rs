@@ -1,4 +1,4 @@
-use std::{env, fs, process::Command};
+use std::{cell::RefCell, env, fs, path::PathBuf, process::Command};
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::Value;
@@ -6,6 +6,25 @@ use tempfile::TempDir;
 use toml_edit::DocumentMut;
 
 mod common;
+
+thread_local! {
+    static SHARED_CACHE: RefCell<Option<TempDir>> = const { RefCell::new(None) };
+}
+
+fn shared_cache_base() -> PathBuf {
+    SHARED_CACHE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(
+                tempfile::Builder::new()
+                    .prefix("px-migrate-cache")
+                    .tempdir()
+                    .expect("tempdir"),
+            );
+        }
+        slot.as_ref().expect("cache dir").path().to_path_buf()
+    })
+}
 
 fn require_online() -> bool {
     if let Some("1") = env::var("PX_ONLINE").ok().as_deref() {
@@ -17,28 +36,32 @@ fn require_online() -> bool {
 }
 
 fn px_command(temp: &TempDir) -> assert_cmd::Command {
-    let cache_path = temp.path().join(".px-cache");
-    let _ = std::fs::remove_dir_all(&cache_path);
-    let store_path = cache_path.join("store");
-    let _ = std::fs::remove_dir_all(&store_path);
+    let base = shared_cache_base();
+    let cache_path = base.join("cache");
+    let store_path = base.join("store");
+    let python = common::find_python().unwrap_or_else(|| "python3".to_string());
     let mut cmd = cargo_bin_cmd!("px");
     cmd.current_dir(temp.path())
         .env("PX_ONLINE", "1")
         .env("PX_CACHE_PATH", &cache_path)
-        .env("PX_STORE_PATH", &store_path);
+        .env("PX_STORE_PATH", &store_path)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
+        .env("PX_RUNTIME_PYTHON", python);
     cmd
 }
 
 fn px_command_offline(temp: &TempDir) -> assert_cmd::Command {
-    let cache_path = temp.path().join(".px-cache");
-    let _ = std::fs::remove_dir_all(&cache_path);
-    let store_path = cache_path.join("store");
-    let _ = std::fs::remove_dir_all(&store_path);
+    let base = shared_cache_base();
+    let cache_path = base.join("cache");
+    let store_path = base.join("store");
+    let python = common::find_python().unwrap_or_else(|| "python3".to_string());
     let mut cmd = cargo_bin_cmd!("px");
     cmd.current_dir(temp.path())
         .env("PX_ONLINE", "0")
         .env("PX_CACHE_PATH", &cache_path)
-        .env("PX_STORE_PATH", &store_path);
+        .env("PX_STORE_PATH", &store_path)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
+        .env("PX_RUNTIME_PYTHON", python);
     cmd
 }
 
@@ -86,14 +109,12 @@ fn migrate_reports_pyproject_dependencies() {
     let temp = tempfile::tempdir().expect("tempdir");
     scaffold_demo(&temp, "demo_onboard");
 
-    cargo_bin_cmd!("px")
-        .current_dir(temp.path())
+    px_command(&temp)
         .args(["add", "requests==2.32.3"])
         .assert()
         .success();
 
-    let assert = cargo_bin_cmd!("px")
-        .current_dir(temp.path())
+    let assert = px_command(&temp)
         .args(["migrate"])
         .assert()
         .success();
@@ -150,8 +171,7 @@ build-backend = "setuptools.build_meta"
     )
     .expect("write pyproject");
 
-    let assert = cargo_bin_cmd!("px")
-        .current_dir(temp.path())
+    let assert = px_command(&temp)
         .args(["--json", "migrate", "--apply", "--allow-dirty"])
         .assert()
         .success();
@@ -340,15 +360,8 @@ fn migrate_write_creates_lock_from_requirements() {
     let requirements = temp.path().join("requirements.txt");
     fs::write(&requirements, "rich==13.7.1\n").expect("write requirements");
 
-    let assert = cargo_bin_cmd!("px")
-        .current_dir(temp.path())
-        .args([
-            "--json",
-            "migrate",
-            "--apply",
-            "--source",
-            "requirements.txt",
-        ])
+    let assert = px_command(&temp)
+        .args(["--json", "migrate", "--apply", "--source", "requirements.txt"])
         .assert()
         .success();
 
@@ -371,15 +384,8 @@ fn migrate_write_backs_up_pyproject() {
     let requirements = temp.path().join("requirements.txt");
     fs::write(&requirements, "click==8.1.7\n").expect("write requirements");
 
-    let assert = cargo_bin_cmd!("px")
-        .current_dir(temp.path())
-        .args([
-            "--json",
-            "migrate",
-            "--apply",
-            "--source",
-            "requirements.txt",
-        ])
+    let assert = px_command(&temp)
+        .args(["--json", "migrate", "--apply", "--source", "requirements.txt"])
         .assert()
         .success();
 
@@ -740,7 +746,6 @@ fn migrate_respects_source_overrides() {
 #[test]
 fn migrate_blocks_dirty_worktree_without_flag() {
     let _guard = common::test_env_guard();
-    common::ensure_test_store_env();
     if !require_online() {
         return;
     }
@@ -1112,8 +1117,7 @@ build-backend = "setuptools.build_meta"
 }
 
 fn scaffold_demo(temp: &TempDir, package: &str) {
-    cargo_bin_cmd!("px")
-        .current_dir(temp.path())
+    px_command(temp)
         .args(["init", "--package", package])
         .assert()
         .success();

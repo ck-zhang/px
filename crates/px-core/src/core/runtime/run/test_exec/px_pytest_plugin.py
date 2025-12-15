@@ -271,4 +271,4 @@ def pytest_sessionstart(session):
             pm.unregister(default)
         pm.register(reporter, "terminalreporter")
         config._px_reporter_registered = True
-reporter.pytest_sessionstart(session)
+    reporter.pytest_sessionstart(session)
