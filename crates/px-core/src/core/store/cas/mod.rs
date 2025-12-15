@@ -48,7 +48,7 @@ pub(crate) const MATERIALIZED_REPO_SNAPSHOTS_DIR: &str = "repo-snapshots";
 // - `gc.rs`: garbage collection + env-driven policy glue
 // - `keys.rs`: deterministic lookup-key helpers
 // - `repo_snapshot.rs`: repo-snapshot object + materialization
-// - `store_impl.rs`: core CAS store operations
+// - `store_impl/`: core CAS store operations
 mod archive;
 mod doctor;
 mod gc;
