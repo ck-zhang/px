@@ -160,6 +160,18 @@ pub(super) fn prepare_cas_native_run_context(
         ));
     }
 
+    if let Err(err) = crate::core::runtime::facade::ensure_version_file(&snapshot.manifest_path) {
+        return Err(ExecutionOutcome::failure(
+            "failed to prepare dynamic version module",
+            json!({
+                "reason": "version_file_generation_failed",
+                "pyproject": snapshot.manifest_path.display().to_string(),
+                "error": err.to_string(),
+                "hint": "Ensure the working tree is writable and git metadata is available (or commit a generated version file).",
+            }),
+        ));
+    }
+
     let _ = prepare_project_runtime(snapshot).map_err(|err| {
         install_error_outcome(err, "python runtime unavailable for native CAS execution")
     })?;
@@ -319,6 +331,24 @@ pub(super) fn prepare_cas_native_workspace_run_context(
                 "lockfile": snapshot.lock_path.display().to_string(),
                 "missing": missing,
                 "hint": "Run `px sync` to rehydrate cached artifacts before running commands.",
+            }),
+        ));
+    }
+
+    let member_manifest = workspace
+        .members
+        .iter()
+        .find(|member| member.root == member_root)
+        .map(|member| member.snapshot.manifest_path.clone())
+        .unwrap_or_else(|| member_root.join("pyproject.toml"));
+    if let Err(err) = crate::core::runtime::facade::ensure_version_file(&member_manifest) {
+        return Err(ExecutionOutcome::failure(
+            "failed to prepare dynamic version module",
+            json!({
+                "reason": "version_file_generation_failed",
+                "pyproject": member_manifest.display().to_string(),
+                "error": err.to_string(),
+                "hint": "Ensure the working tree is writable and git metadata is available (or commit a generated version file).",
             }),
         ));
     }

@@ -91,6 +91,29 @@ fn write_pyproject(root: &Path, name: &str, python_req: &str, deps: &[String]) {
     fs::write(root.join("pyproject.toml"), buf).expect("write pyproject.toml");
 }
 
+fn write_pyproject_setuptools_scm(
+    root: &Path,
+    name: &str,
+    python_req: &str,
+    deps: &[String],
+    write_to: &str,
+) {
+    let mut buf = String::new();
+    buf.push_str("[project]\n");
+    buf.push_str(&format!("name = \"{name}\"\n"));
+    buf.push_str("dynamic = [\"version\"]\n");
+    buf.push_str(&format!("requires-python = \"{python_req}\"\n"));
+    buf.push_str("dependencies = [\n");
+    for dep in deps {
+        buf.push_str(&format!("    {dep:?},\n"));
+    }
+    buf.push_str("]\n\n[tool.px]\n\n[tool.setuptools_scm]\n");
+    buf.push_str(&format!("write_to = \"{write_to}\"\n\n[build-system]\n"));
+    buf.push_str("requires = [\"setuptools>=70\", \"wheel\"]\n");
+    buf.push_str("build-backend = \"setuptools.build_meta\"\n");
+    fs::write(root.join("pyproject.toml"), buf).expect("write pyproject.toml");
+}
+
 struct LockEntry {
     name: String,
     version: String,
@@ -361,6 +384,114 @@ fn cas_native_python_minus_s_can_import_profile_deps() {
     assert!(
         stdout.contains("hello from console"),
         "expected import output, got {stdout:?}"
+    );
+}
+
+#[test]
+fn cas_native_generates_setuptools_scm_version_file_before_run() {
+    let _guard = test_env_guard();
+    reset_test_store_env();
+    ensure_test_store_env();
+    let Some(python) = find_python() else {
+        eprintln!("skipping cas-native version file test (python binary not found)");
+        return;
+    };
+    let temp = tempfile::Builder::new()
+        .prefix("px-cas-native-version-file")
+        .tempdir()
+        .expect("tempdir");
+    let project = temp.path();
+    let artifacts = project.join("artifacts");
+    fs::create_dir_all(&artifacts).expect("artifacts dir");
+
+    let wheel = artifacts.join("packaging-99.0.0-py3-none-any.whl");
+    let (sha256, size) = build_wheel(
+        &python,
+        &wheel,
+        "packaging",
+        "99.0.0",
+        vec![
+            serde_json::json!({
+                "kind": "text",
+                "path": "packaging/__init__.py",
+                "contents": "",
+            }),
+            serde_json::json!({
+                "kind": "text",
+                "path": "packaging/version.py",
+                "contents": "class Version:\n    def __init__(self, v: str):\n        self._v = v\n        nums = []\n        for part in v.split('+', 1)[0].split('.'):\n            if part.isdigit():\n                nums.append(int(part))\n        if not nums:\n            nums = [0]\n        self.release = tuple(nums)\n",
+            }),
+        ],
+        vec![],
+    );
+
+    let pkg_dir = project.join("src").join("versioned_demo");
+    fs::create_dir_all(&pkg_dir).expect("src package dir");
+    fs::write(
+        pkg_dir.join("__init__.py"),
+        "from ._version import __version__\n",
+    )
+    .expect("write __init__.py");
+
+    write_pyproject_setuptools_scm(
+        project,
+        "versioned_demo",
+        ">=3.11",
+        &["packaging==99.0.0".to_string()],
+        "src/versioned_demo/_version.py",
+    );
+    write_lock(
+        project,
+        "versioned_demo",
+        ">=3.11",
+        &[LockEntry {
+            name: "packaging".to_string(),
+            version: "99.0.0".to_string(),
+            filename: wheel
+                .file_name()
+                .expect("wheel filename")
+                .to_string_lossy()
+                .to_string(),
+            cached_path: "artifacts/packaging-99.0.0-py3-none-any.whl".to_string(),
+            sha256,
+            size,
+        }],
+    );
+
+    let version_file = pkg_dir.join("_version.py");
+    assert!(
+        !version_file.exists(),
+        "expected version file to start missing at {}",
+        version_file.display()
+    );
+
+    assert_envs_empty("before run");
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args([
+            "--json",
+            "run",
+            "python",
+            "-c",
+            "import versioned_demo; print(versioned_demo.__version__)",
+        ])
+        .assert()
+        .success();
+    assert_envs_empty("after run");
+
+    assert!(
+        version_file.exists(),
+        "expected version file to be generated at {}",
+        version_file.display()
+    );
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    let stdout = payload["details"]["stdout"].as_str().unwrap_or_default();
+    assert!(
+        stdout.contains("0.0.0"),
+        "expected fallback version output, got {stdout:?}"
     );
 }
 
