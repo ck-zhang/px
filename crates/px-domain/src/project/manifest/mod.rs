@@ -620,6 +620,28 @@ all = ["pytest>=8.3.2", "ruff>=0.6.2"]
     }
 
     #[test]
+    fn optional_all_group_with_non_dev_deps_is_not_declared() -> Result<()> {
+        let mut doc: DocumentMut = r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+all = ["pytest>=8.3.2", "requests>=2.0"]
+	"#
+        .parse()?;
+
+        let selection = select_dependency_groups(&doc);
+        assert!(selection.declared.is_empty());
+        assert!(
+            !ensure_dependency_group_config(&mut doc),
+            "include-groups should not be written when only non-dev extras are detected"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn dependency_group_config_handles_poetry_groups() -> Result<()> {
         let mut doc: DocumentMut = r#"[project]
 name = "demo"

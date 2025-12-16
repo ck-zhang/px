@@ -67,12 +67,21 @@ fn declared_dependency_groups(doc: &DocumentMut) -> Vec<String> {
             let Some(array) = entry.as_array() else {
                 continue;
             };
-            if is_common_dev_group(name)
-                || array
+            let has_dev_tools = array
+                .iter()
+                .filter_map(|val| val.as_str())
+                .any(is_dev_tool_spec);
+            let include = if is_common_dev_group(name) {
+                true
+            } else if name.eq_ignore_ascii_case("all") && has_dev_tools {
+                array
                     .iter()
                     .filter_map(|val| val.as_str())
-                    .any(is_dev_tool_spec)
-            {
+                    .all(is_dev_tool_spec)
+            } else {
+                has_dev_tools
+            };
+            if include {
                 groups.push(name.to_string());
             }
         }

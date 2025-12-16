@@ -35,16 +35,7 @@ pub(crate) fn package_capability_rules() -> &'static [(&'static str, &'static [&
         ),
         (
             "mysql",
-            &[
-                "mysqlclient",
-                "pymysql",
-                "aiomysql",
-                "mysql-connector",
-                "mysql-connector-python",
-                "mariadb",
-                "libmysqlclient",
-                "libmariadb",
-            ],
+            &["mysqlclient", "mariadb", "libmysqlclient", "libmariadb"],
         ),
         (
             "imagecodecs",
@@ -385,6 +376,18 @@ mod tests {
         assert!(deps.capabilities.contains("postgres"));
         assert!(deps.apt_packages.contains("libgdal-dev"));
         assert!(deps.apt_packages.contains("libpq-dev"));
+    }
+
+    #[test]
+    fn pure_python_mysql_drivers_do_not_trigger_mysql_capability() {
+        let caps = capabilities_from_names(["pymysql", "aiomysql", "mysql-connector-python"]);
+        assert!(
+            !caps.contains("mysql"),
+            "pure-python drivers should not require mysql system deps"
+        );
+
+        let caps = capabilities_from_names(["mysqlclient"]);
+        assert!(caps.contains("mysql"));
     }
 
     #[test]
