@@ -119,6 +119,10 @@ pub(crate) fn build_pythonpath(
     if src.exists() {
         project_paths.push(src);
     }
+    let lib = project_root.join("lib");
+    if lib.exists() && looks_like_python_source_root(fs, &lib) {
+        project_paths.push(lib);
+    }
     let python_dir = project_root.join("python");
     if python_dir.exists() {
         project_paths.push(python_dir);
@@ -214,4 +218,26 @@ pub(crate) fn build_pythonpath(
         site_bin,
         pep582_bin: pep582_bins,
     })
+}
+
+fn looks_like_python_source_root(fs: &dyn effects::FileSystem, root: &Path) -> bool {
+    let Ok(entries) = fs.read_dir(root) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if fs.metadata(&path.join("__init__.py")).is_ok() {
+                return true;
+            }
+            continue;
+        }
+        if path
+            .extension()
+            .is_some_and(|ext| matches!(ext.to_str(), Some("py" | "pyi")))
+        {
+            return true;
+        }
+    }
+    false
 }

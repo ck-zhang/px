@@ -199,3 +199,59 @@ fn project_paths_precede_local_site_packages() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn lib_layout_is_included_in_sys_path() -> Result<()> {
+    let temp = tempdir()?;
+    let project_root = temp.path();
+    let site_dir = project_root.join("site");
+    fs::create_dir_all(&site_dir)?;
+    fs::write(site_dir.join("sitecustomize.py"), SITE_CUSTOMIZE)?;
+
+    let lib_dir = project_root.join("lib");
+    let package_dir = lib_dir.join("pxlibdemo");
+    fs::create_dir_all(&package_dir)?;
+    fs::write(package_dir.join("__init__.py"), "VALUE = 'lib'\n")?;
+
+    let effects = SystemEffects::new();
+    let paths = build_pythonpath(effects.fs(), project_root, Some(site_dir.clone()))?;
+    let allowed_env = env::join_paths(&paths.allowed_paths)?
+        .into_string()
+        .expect("allowed paths");
+    let python = match effects.python().detect_interpreter() {
+        Ok(path) => path,
+        Err(_) => return Ok(()),
+    };
+
+    let mut cmd = Command::new(&python);
+    cmd.current_dir(project_root);
+    cmd.env("PYTHONPATH", paths.pythonpath.clone());
+    cmd.env("PX_ALLOWED_PATHS", allowed_env);
+    cmd.env("PYTHONSAFEPATH", "1");
+    cmd.arg("-c").arg(
+        "import importlib, json; mod = importlib.import_module('pxlibdemo'); \
+         print(json.dumps({'value': getattr(mod, 'VALUE', ''), 'file': getattr(mod, '__file__', '')}))",
+    );
+    let output = cmd.output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "python exited with {}: {}\n{}",
+        output.status,
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload: Value = serde_json::from_str(stdout.trim())?;
+    let value = payload
+        .get("value")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert_eq!(value, "lib");
+    let file = payload.get("file").and_then(Value::as_str).unwrap_or("");
+    assert!(
+        file.contains(package_dir.to_string_lossy().as_ref()),
+        "expected module to load from lib layout, got {file}"
+    );
+    Ok(())
+}
