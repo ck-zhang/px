@@ -53,6 +53,10 @@ pub(crate) fn package_capability_rules() -> &'static [(&'static str, &'static [&
                 "gdal", "osgeo", "rasterio", "fiona", "pyproj", "shapely", "geos", "proj",
             ],
         ),
+        (
+            "suitesparse",
+            &["scikit-umfpack", "scikit_umfpack", "suitesparse"],
+        ),
     ]
 }
 
@@ -119,6 +123,7 @@ pub(crate) fn capability_apt_map() -> &'static [(&'static str, &'static [&'stati
                 "libgeos-c1v5",
             ],
         ),
+        ("suitesparse", &["libsuitesparse-dev"]),
     ]
 }
 
@@ -377,6 +382,13 @@ mod tests {
         assert!(deps.capabilities.contains("postgres"));
         assert!(deps.apt_packages.contains("libgdal-dev"));
         assert!(deps.apt_packages.contains("libpq-dev"));
+    }
+
+    #[test]
+    fn suitesparse_packages_map_to_apt_packages() {
+        let deps = system_deps_from_names(["scikit-umfpack"]);
+        assert!(deps.capabilities.contains("suitesparse"));
+        assert!(deps.apt_packages.contains("libsuitesparse-dev"));
     }
 
     #[test]
