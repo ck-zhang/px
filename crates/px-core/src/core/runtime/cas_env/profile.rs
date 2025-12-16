@@ -240,21 +240,23 @@ pub(crate) fn ensure_profile_manifest(
                 stored.oid
             }
         };
-        for dir in [
-            "lib",
-            "lib64",
-            "site-packages",
-            "site-packages/lib",
-            "site-packages/lib64",
-            "site-packages/sys-libs",
-            "sys-libs",
-        ] {
-            let path = store
-                .root()
-                .join(MATERIALIZED_PKG_BUILDS_DIR)
-                .join(&pkg_oid)
-                .join(dir);
-            native_lib_paths.push(path);
+        if builder_needed {
+            for dir in [
+                "lib",
+                "lib64",
+                "site-packages",
+                "site-packages/lib",
+                "site-packages/lib64",
+                "site-packages/sys-libs",
+                "sys-libs",
+            ] {
+                let path = store
+                    .root()
+                    .join(MATERIALIZED_PKG_BUILDS_DIR)
+                    .join(&pkg_oid)
+                    .join(dir);
+                native_lib_paths.push(path);
+            }
         }
         let pkg = ProfilePackage {
             name: dep.name.clone(),
