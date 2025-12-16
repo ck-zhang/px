@@ -117,7 +117,10 @@ fn is_shared_lib(path: &Path) -> bool {
         .and_then(|name| name.to_str())
         .map(|name| {
             let lower = name.to_ascii_lowercase();
-            lower.contains(".so") || lower.ends_with(".dylib") || lower.ends_with(".dll")
+            lower.ends_with(".so")
+                || lower.contains(".so.")
+                || lower.ends_with(".dylib")
+                || lower.ends_with(".dll")
         })
         .unwrap_or(false)
 }
@@ -187,4 +190,20 @@ fn ldd_dependencies(target: &Path, env_root: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(deps)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_shared_lib;
+    use std::path::Path;
+
+    #[test]
+    fn shared_lib_detection_avoids_false_positives() {
+        assert!(is_shared_lib(Path::new("libexample.so")));
+        assert!(is_shared_lib(Path::new("libexample.so.1")));
+        assert!(
+            !is_shared_lib(Path::new("v0.7.1.some-named-index.parquet")),
+            "non-native data files should not be scanned as shared libraries"
+        );
+    }
 }
