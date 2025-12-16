@@ -246,6 +246,20 @@ fn ensure_project_pip(
     runtime: &RuntimeMetadata,
     env_python: &Path,
 ) -> Result<()> {
+    fn pip_bootstrap_env(envs: &[(String, String)]) -> Vec<(String, String)> {
+        let mut sanitized = Vec::with_capacity(envs.len() + 1);
+        for (key, value) in envs {
+            if key == "PYTHONPATH" {
+                continue;
+            }
+            sanitized.push((key.clone(), value.clone()));
+        }
+        if !sanitized.iter().any(|(key, _)| key == "PYTHONSAFEPATH") {
+            sanitized.push(("PYTHONSAFEPATH".into(), "1".into()));
+        }
+        sanitized
+    }
+
     let debug_pip = std::env::var("PX_DEBUG_PIP").is_ok();
     let skip_ensurepip = std::env::var("PX_NO_ENSUREPIP")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -272,7 +286,7 @@ fn ensure_project_pip(
         module_available(ctx, snapshot, env_python, &envs, "pip.__main__")?;
 
     if skip_ensurepip {
-        if !(pip_installed || pip_editable) || !pip_entrypoints || !pip_main_available {
+        if !pip_entrypoints || !pip_main_available {
             link_runtime_pip(
                 &site_packages,
                 &site_dir.join("bin"),
@@ -299,66 +313,66 @@ fn ensure_project_pip(
         return Ok(());
     }
 
-    if !(pip_installed || pip_editable) || !pip_entrypoints || !pip_main_available {
-        let output = ctx.python_runtime().run_command(
-            env_python
-                .to_str()
-                .ok_or_else(|| anyhow!("invalid python path"))?,
-            &[
-                "-m".to_string(),
-                "ensurepip".to_string(),
-                "--default-pip".to_string(),
-                "--upgrade".to_string(),
-                "--user".to_string(),
-            ],
-            &envs,
-            &snapshot.root,
-        )?;
-        if output.code != 0 {
-            let mut message = String::from("failed to bootstrap pip in the px environment");
-            if !output.stderr.trim().is_empty() {
-                message.push_str(": ");
-                message.push_str(output.stderr.trim());
-            }
-            if output.stderr.trim().is_empty() && !output.stdout.trim().is_empty() {
-                message.push_str(": ");
-                message.push_str(output.stdout.trim());
+    if !pip_entrypoints || !pip_main_available {
+        if !pip_main_available {
+            let bootstrap_envs = pip_bootstrap_env(&envs);
+            let output = ctx.python_runtime().run_command(
+                env_python
+                    .to_str()
+                    .ok_or_else(|| anyhow!("invalid python path"))?,
+                &[
+                    "-m".to_string(),
+                    "ensurepip".to_string(),
+                    "--default-pip".to_string(),
+                    "--upgrade".to_string(),
+                    "--user".to_string(),
+                ],
+                &bootstrap_envs,
+                &snapshot.root,
+            )?;
+            if output.code != 0 {
+                let mut message = String::from("failed to bootstrap pip in the px environment");
+                if !output.stderr.trim().is_empty() {
+                    message.push_str(": ");
+                    message.push_str(output.stderr.trim());
+                }
+                if output.stderr.trim().is_empty() && !output.stdout.trim().is_empty() {
+                    message.push_str(": ");
+                    message.push_str(output.stdout.trim());
+                }
+                if debug_pip {
+                    eprintln!(
+                        "ensurepip failed stdout={}, stderr={}",
+                        output.stdout, output.stderr
+                    );
+                }
+                bail!(message);
             }
             if debug_pip {
                 eprintln!(
-                    "ensurepip failed stdout={}, stderr={}",
-                    output.stdout, output.stderr
+                    "ensurepip ok stdout={}, stderr={}",
+                    output.stdout.trim(),
+                    output.stderr.trim()
                 );
             }
-            bail!(message);
         }
-        if debug_pip {
-            eprintln!(
-                "ensurepip ok stdout={}, stderr={}",
-                output.stdout.trim(),
-                output.stderr.trim()
-            );
-        }
+
         link_runtime_pip(
             &site_packages,
             &site_dir.join("bin"),
             Path::new(&runtime.path),
             &runtime.version,
         )?;
+        pip_main_available = module_available(ctx, snapshot, env_python, &envs, "pip.__main__")?;
         if debug_pip {
             let after_link = has_pip_in_site(&site_packages);
             eprintln!(
-                "post-ensurepip pip_present={} entries={:?}",
-                after_link,
-                fs::read_dir(&site_packages).ok().map(|iter| {
-                    iter.flatten()
-                        .map(|e| e.file_name().to_string_lossy().to_string())
-                        .collect::<Vec<_>>()
-                })
+                "post-pip-bootstrap pip_present={} entrypoints={} main_available={}",
+                after_link, pip_entrypoints, pip_main_available
             );
         }
-        if !has_pip_in_site(&site_packages) {
-            bail!("failed to bootstrap pip in the px environment: pip not installed");
+        if !module_available(ctx, snapshot, env_python, &envs, "pip")? || !pip_main_available {
+            bail!("failed to bootstrap pip in the px environment: pip not available");
         }
     }
     ensure_setuptools_seed(ctx, snapshot, &site_packages, env_python, &envs)?;
@@ -765,4 +779,105 @@ fn symlink_or_copy_dir(src: &Path, dest: &Path) -> Result<()> {
         }
     }
     copy_tree(src, dest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{GlobalOptions, SystemEffects};
+    use std::sync::Arc;
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_project_pip_skips_ensurepip_when_pip_is_already_available() -> Result<()> {
+        let saved_env = vec![
+            ("PX_CACHE_PATH", env::var("PX_CACHE_PATH").ok()),
+            ("PX_STORE_PATH", env::var("PX_STORE_PATH").ok()),
+            ("PX_ENVS_PATH", env::var("PX_ENVS_PATH").ok()),
+            ("PX_NO_ENSUREPIP", env::var("PX_NO_ENSUREPIP").ok()),
+        ];
+
+        env::remove_var("PX_NO_ENSUREPIP");
+        let temp_env = tempfile::tempdir()?;
+        env::set_var("PX_CACHE_PATH", temp_env.path().join("cache"));
+        env::set_var("PX_STORE_PATH", temp_env.path().join("store"));
+        env::set_var("PX_ENVS_PATH", temp_env.path().join("envs"));
+
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path();
+        fs::write(
+            project_root.join("pyproject.toml"),
+            r#"[project]
+name = "pip-skip-ensurepip"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+"#,
+        )?;
+        let snapshot = ManifestSnapshot::read_from(project_root)?;
+
+        let site_temp = tempfile::tempdir()?;
+        let site_dir = site_temp.path();
+        fs::create_dir_all(site_dir.join("bin"))?;
+        fs::write(site_dir.join("bin").join("pip"), "")?;
+
+        let runtime = RuntimeMetadata {
+            path: "/usr/bin/python3.11".to_string(),
+            version: "3.11.14".to_string(),
+            platform: "any".to_string(),
+        };
+        let site_packages = site_packages_dir(site_dir, &runtime.version);
+        fs::create_dir_all(&site_packages)?;
+
+        let tooling_root = project_root.join("tooling");
+        fs::create_dir_all(tooling_root.join("pip"))?;
+        fs::write(tooling_root.join("pip").join("__init__.py"), "")?;
+        fs::write(tooling_root.join("pip").join("__main__.py"), "")?;
+        fs::create_dir_all(tooling_root.join("setuptools"))?;
+        fs::write(
+            tooling_root.join("setuptools").join("__init__.py"),
+            "__version__ = \"0.0.0\"\n",
+        )?;
+        fs::write(
+            site_dir.join("px.pth"),
+            format!("{}\n", tooling_root.display()),
+        )?;
+
+        let log_path = project_root.join("ensurepip.log");
+        let wrapper = project_root.join("python-wrapper.sh");
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"-m\" ] && [ \"$2\" = \"ensurepip\" ]; then echo ensurepip >> \"{}\"; exit 17; fi\nexec /usr/bin/python3.11 \"$@\"\n",
+                log_path.display()
+            ),
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&wrapper)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&wrapper, perms)?;
+        }
+
+        let global = GlobalOptions::default();
+        let ctx = CommandContext::new(&global, Arc::new(SystemEffects::new()))?;
+        ensure_project_pip(&ctx, &snapshot, site_dir, &runtime, &wrapper)?;
+        assert!(
+            !log_path.exists(),
+            "ensurepip should not be invoked when pip.__main__ is already importable"
+        );
+
+        for (key, value) in saved_env {
+            match value {
+                Some(prev) => env::set_var(key, prev),
+                None => env::remove_var(key),
+            }
+        }
+
+        Ok(())
+    }
 }
