@@ -241,7 +241,30 @@ if _FILTER_PATHS:
             pass
         try:
             current = os.environ.get("PATH", "")
-            entries = [str(_SITE_BIN)] + [p for p in current.split(os.pathsep) if p]
+            entries = []
+            seen = set()
+            def _push_path(value):
+                if not value:
+                    return
+                if value in seen:
+                    return
+                seen.add(value)
+                entries.append(value)
+
+            _push_path(str(_SITE_BIN))
+            for allowed in _ALLOWED:
+                try:
+                    p = Path(allowed)
+                    if p.name in ("site-packages", "dist-packages"):
+                        candidate = p.parent / "bin"
+                        if candidate.exists():
+                            _push_path(str(candidate))
+                except Exception:
+                    pass
+
+            for p in current.split(os.pathsep):
+                _push_path(p)
+
             os.environ["PATH"] = os.pathsep.join(entries)
         except Exception:
             pass
@@ -278,6 +301,10 @@ except Exception:
 "#;
 pub(super) const SETUPTOOLS_SEED_VERSION: &str = "80.9.0";
 pub(super) const UV_SEED_VERSION: &str = "0.9.15";
+pub(super) const PACKAGING_SEED_VERSION: &str = "24.1";
+pub(super) const PYPROJECT_HOOKS_SEED_VERSION: &str = "1.2.0";
+pub(super) const BUILD_SEED_VERSION: &str = "1.2.2.post1";
+pub(super) const TOMLI_SEED_VERSION: &str = "2.0.1";
 #[cfg(unix)]
 fn set_exec_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;

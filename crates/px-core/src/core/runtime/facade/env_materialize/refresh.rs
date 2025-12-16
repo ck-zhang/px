@@ -310,6 +310,7 @@ fn ensure_project_pip(
         }
         ensure_setuptools_seed(ctx, snapshot, &site_packages, env_python, &envs)?;
         ensure_uv_seed(ctx, snapshot, site_dir, env_python, &envs)?;
+        ensure_build_tooling_seed(ctx, snapshot, &site_packages, env_python, &envs, runtime)?;
         return Ok(());
     }
 
@@ -377,6 +378,7 @@ fn ensure_project_pip(
     }
     ensure_setuptools_seed(ctx, snapshot, &site_packages, env_python, &envs)?;
     ensure_uv_seed(ctx, snapshot, site_dir, env_python, &envs)?;
+    ensure_build_tooling_seed(ctx, snapshot, &site_packages, env_python, &envs, runtime)?;
 
     Ok(())
 }
@@ -528,6 +530,193 @@ fn ensure_setuptools_seed(
             json!({
                 "package": "setuptools",
                 "version": SETUPTOOLS_SEED_VERSION,
+                "reason": "missing_artifacts",
+                "hint": "rerun `px sync` to refresh the environment",
+            }),
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+fn ensure_build_tooling_seed(
+    ctx: &CommandContext,
+    snapshot: &ManifestSnapshot,
+    site_packages: &Path,
+    env_python: &Path,
+    envs: &[(String, String)],
+    runtime: &RuntimeMetadata,
+) -> Result<()> {
+    if !uses_maturin_backend(&snapshot.manifest_path)? {
+        return Ok(());
+    }
+
+    let seed = SeedContext {
+        ctx,
+        snapshot,
+        site_packages,
+        env_python,
+        envs,
+    };
+    ensure_seeded_tool(&seed, "packaging", PACKAGING_SEED_VERSION, "packaging")?;
+    ensure_seeded_tool(
+        &seed,
+        "pyproject-hooks",
+        PYPROJECT_HOOKS_SEED_VERSION,
+        "pyproject_hooks",
+    )?;
+    if parse_python_version(&runtime.version)
+        .and_then(|(_, minor)| minor.parse::<u32>().ok())
+        .is_some_and(|minor| minor < 11)
+    {
+        ensure_seeded_tool(&seed, "tomli", TOMLI_SEED_VERSION, "tomli")?;
+    }
+    ensure_seeded_tool(&seed, "build", BUILD_SEED_VERSION, "build.__main__")?;
+    Ok(())
+}
+
+struct SeedContext<'ctx, 'global> {
+    ctx: &'ctx CommandContext<'global>,
+    snapshot: &'ctx ManifestSnapshot,
+    site_packages: &'ctx Path,
+    env_python: &'ctx Path,
+    envs: &'ctx [(String, String)],
+}
+
+fn ensure_seeded_tool(
+    seed: &SeedContext<'_, '_>,
+    package: &str,
+    version: &str,
+    module: &str,
+) -> Result<()> {
+    if module_available(
+        seed.ctx,
+        seed.snapshot,
+        seed.env_python,
+        seed.envs,
+        module,
+    )? {
+        return Ok(());
+    }
+
+    let release = seed
+        .ctx
+        .pypi()
+        .fetch_release(package, version, &format!("{package}=={version}"))
+        .map_err(|err| {
+            InstallUserError::new(
+                format!("failed to locate {package} for the px environment"),
+                json!({
+                    "package": package,
+                    "version": version,
+                    "error": err.to_string(),
+                    "reason": "missing_artifacts",
+                    "hint": "ensure network access or prefetch artifacts, then rerun `px sync`",
+                }),
+            )
+        })?;
+    let wheel = release
+        .urls
+        .iter()
+        .filter(|file| file.packagetype == "bdist_wheel" && !file.yanked.unwrap_or(false))
+        .find(|file| file.filename.ends_with("py3-none-any.whl"))
+        .or_else(|| {
+            release
+                .urls
+                .iter()
+                .find(|file| file.packagetype == "bdist_wheel" && !file.yanked.unwrap_or(false))
+        })
+        .cloned()
+        .ok_or_else(|| {
+            InstallUserError::new(
+                format!("{package} wheel unavailable for the px environment"),
+                json!({
+                    "package": package,
+                    "version": version,
+                    "reason": "missing_artifacts",
+                    "hint": "rerun with network access to refresh the wheel cache",
+                }),
+            )
+        })?;
+
+    let request = ArtifactRequest {
+        name: package,
+        version,
+        filename: &wheel.filename,
+        url: &wheel.url,
+        sha256: &wheel.digests.sha256,
+    };
+    let cached = seed
+        .ctx
+        .cache_store()
+        .cache_wheel(&seed.ctx.cache().path, &request)
+        .map_err(|err| {
+            InstallUserError::new(
+                format!("failed to cache {package} for the px environment"),
+                json!({
+                    "package": package,
+                    "version": version,
+                    "error": err.to_string(),
+                    "reason": "missing_artifacts",
+                    "hint": "rerun with network access to refresh the cache",
+                }),
+            )
+        })?;
+
+    let output = seed.ctx.python_runtime().run_command(
+        seed.env_python
+            .to_str()
+            .ok_or_else(|| anyhow!("invalid python path"))?,
+        &[
+            "-m".to_string(),
+            "pip".to_string(),
+            "install".to_string(),
+            "--no-deps".to_string(),
+            "--no-index".to_string(),
+            "--disable-pip-version-check".to_string(),
+            "--no-compile".to_string(),
+            "--no-warn-script-location".to_string(),
+            "--target".to_string(),
+            seed.site_packages.display().to_string(),
+            cached.wheel_path.display().to_string(),
+        ],
+        seed.envs,
+        &seed.snapshot.root,
+    )?;
+    if output.code != 0 {
+        let mut message = format!("failed to seed {package} in the px environment");
+        if !output.stderr.trim().is_empty() {
+            message.push_str(": ");
+            message.push_str(output.stderr.trim());
+        }
+        if output.stderr.trim().is_empty() && !output.stdout.trim().is_empty() {
+            message.push_str(": ");
+            message.push_str(output.stdout.trim());
+        }
+        return Err(InstallUserError::new(
+            message,
+            json!({
+                "package": package,
+                "version": version,
+                "reason": "missing_artifacts",
+            }),
+        )
+        .into());
+    }
+
+    if !module_available(
+        seed.ctx,
+        seed.snapshot,
+        seed.env_python,
+        seed.envs,
+        module,
+    )? {
+        return Err(InstallUserError::new(
+            format!("{package} seed did not install correctly"),
+            json!({
+                "package": package,
+                "version": version,
                 "reason": "missing_artifacts",
                 "hint": "rerun `px sync` to refresh the environment",
             }),
@@ -785,7 +974,15 @@ fn symlink_or_copy_dir(src: &Path, dest: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::api::{GlobalOptions, SystemEffects};
+    use crate::pypi::{PypiDigests, PypiFile, PypiReleaseResponse};
+    use crate::store::{
+        BuiltWheel, CacheLocation, CachePruneResult, CacheUsage, CacheWalk, CachedArtifact,
+        PrefetchOptions, PrefetchSpec, PrefetchSummary,
+    };
+    use sha2::Sha256;
+    use std::io::Write as _;
     use std::sync::Arc;
+    use zip::write::FileOptions;
 
     #[cfg(unix)]
     #[test]
@@ -869,6 +1066,312 @@ build-backend = "setuptools.build_meta"
         assert!(
             !log_path.exists(),
             "ensurepip should not be invoked when pip.__main__ is already importable"
+        );
+
+        for (key, value) in saved_env {
+            match value {
+                Some(prev) => env::set_var(key, prev),
+                None => env::remove_var(key),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_project_pip_seeds_build_tools_for_maturin_projects() -> Result<()> {
+        fn wheel_sha256(path: &Path) -> Result<String> {
+            let data = fs::read(path)?;
+            Ok(hex::encode(Sha256::digest(&data)))
+        }
+
+        fn write_seed_wheel(
+            dir: &Path,
+            dist_name: &str,
+            version: &str,
+            files: &[(&str, &str)],
+        ) -> Result<PathBuf> {
+            let filename = format!(
+                "{}-{}-py3-none-any.whl",
+                dist_name.replace('-', "_"),
+                version
+            );
+            let wheel_path = dir.join(filename);
+            let file = fs::File::create(&wheel_path)?;
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = FileOptions::default();
+            let dist_info = format!("{}-{}.dist-info", dist_name.replace('-', "_"), version);
+
+            zip.start_file(format!("{dist_info}/METADATA"), opts)?;
+            zip.write_all(
+                format!(
+                    "Metadata-Version: 2.1\nName: {dist_name}\nVersion: {version}\n\n"
+                )
+                .as_bytes(),
+            )?;
+            zip.start_file(format!("{dist_info}/WHEEL"), opts)?;
+            zip.write_all(
+                b"Wheel-Version: 1.0\nGenerator: px-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n\n",
+            )?;
+
+            let mut record = Vec::new();
+            for (path, contents) in files {
+                zip.start_file(*path, opts)?;
+                zip.write_all(contents.as_bytes())?;
+                record.push(format!("{path},,"));
+            }
+            record.push(format!("{dist_info}/METADATA,,"));
+            record.push(format!("{dist_info}/WHEEL,,"));
+            record.push(format!("{dist_info}/RECORD,,"));
+            zip.start_file(format!("{dist_info}/RECORD"), opts)?;
+            zip.write_all(record.join("\n").as_bytes())?;
+            zip.finish()?;
+            Ok(wheel_path)
+        }
+
+        #[derive(Default)]
+        struct MapPypiClient {
+            releases: std::collections::HashMap<String, Vec<PypiFile>>,
+        }
+
+        impl effects::PypiClient for MapPypiClient {
+            fn fetch_release(
+                &self,
+                normalized: &str,
+                _version: &str,
+                _specifier: &str,
+            ) -> Result<PypiReleaseResponse> {
+                Ok(PypiReleaseResponse {
+                    urls: self
+                        .releases
+                        .get(normalized)
+                        .cloned()
+                        .unwrap_or_default(),
+                })
+            }
+        }
+
+        struct MapCacheStore {
+            cache_root: PathBuf,
+            wheels: std::collections::HashMap<String, PathBuf>,
+        }
+
+        impl effects::CacheStore for MapCacheStore {
+            fn resolve_store_path(&self) -> Result<CacheLocation> {
+                Ok(CacheLocation {
+                    path: self.cache_root.clone(),
+                    source: "test",
+                })
+            }
+
+            fn compute_usage(&self, _path: &Path) -> Result<CacheUsage> {
+                Ok(CacheUsage {
+                    exists: true,
+                    total_entries: 0,
+                    total_size_bytes: 0,
+                })
+            }
+
+            fn collect_walk(&self, _path: &Path) -> Result<CacheWalk> {
+                Ok(CacheWalk::default())
+            }
+
+            fn prune(&self, _walk: &CacheWalk) -> CachePruneResult {
+                CachePruneResult::default()
+            }
+
+            fn prefetch(
+                &self,
+                _cache: &Path,
+                _specs: &[PrefetchSpec<'_>],
+                _options: PrefetchOptions,
+            ) -> Result<PrefetchSummary> {
+                Ok(PrefetchSummary::default())
+            }
+
+            fn cache_wheel(&self, _cache: &Path, request: &ArtifactRequest) -> Result<CachedArtifact> {
+                let wheel_path = self
+                    .wheels
+                    .get(request.filename)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("unexpected wheel request: {}", request.filename))?;
+                Ok(CachedArtifact {
+                    size: fs::metadata(&wheel_path).map(|m| m.len()).unwrap_or(0),
+                    dist_path: wheel_path.with_extension("dist"),
+                    wheel_path,
+                })
+            }
+
+            fn ensure_sdist_build(&self, _cache: &Path, _request: &SdistRequest) -> Result<BuiltWheel> {
+                panic!("unexpected sdist build while seeding tooling wheels")
+            }
+        }
+
+        struct TestEffects {
+            system: SystemEffects,
+            cache: MapCacheStore,
+            pypi: MapPypiClient,
+        }
+
+        impl effects::Effects for TestEffects {
+            fn python(&self) -> &dyn effects::PythonRuntime {
+                self.system.python()
+            }
+
+            fn git(&self) -> &dyn effects::GitClient {
+                self.system.git()
+            }
+
+            fn fs(&self) -> &dyn effects::FileSystem {
+                self.system.fs()
+            }
+
+            fn cache(&self) -> &dyn effects::CacheStore {
+                &self.cache
+            }
+
+            fn pypi(&self) -> &dyn effects::PypiClient {
+                &self.pypi
+            }
+        }
+
+        let saved_env = vec![("PX_NO_ENSUREPIP", env::var("PX_NO_ENSUREPIP").ok())];
+        env::remove_var("PX_NO_ENSUREPIP");
+
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("maturin-seed");
+        fs::create_dir_all(&project_root)?;
+        fs::write(
+            project_root.join("pyproject.toml"),
+            r#"[project]
+name = "maturin-seed"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["maturin>=1.0"]
+build-backend = "maturin"
+"#,
+        )?;
+        let snapshot = ManifestSnapshot::read_from(&project_root)?;
+
+        let site_temp = tempfile::tempdir()?;
+        let site_dir = site_temp.path();
+        fs::create_dir_all(site_dir.join("bin"))?;
+
+        let runtime = RuntimeMetadata {
+            path: "/usr/bin/python3.11".to_string(),
+            version: "3.11.14".to_string(),
+            platform: "test".to_string(),
+        };
+        let site_packages = site_packages_dir(site_dir, &runtime.version);
+        fs::create_dir_all(&site_packages)?;
+        fs::create_dir_all(site_packages.join("setuptools"))?;
+        fs::write(
+            site_packages.join("setuptools").join("__init__.py"),
+            "__version__ = '0.0.0'\n",
+        )?;
+
+        let wheel_dir = temp.path().join("wheels");
+        fs::create_dir_all(&wheel_dir)?;
+
+        let packaging_wheel =
+            write_seed_wheel(&wheel_dir, "packaging", PACKAGING_SEED_VERSION, &[(
+                "packaging/__init__.py",
+                "__version__ = '0.0.0'\n",
+            )])?;
+        let pyproject_hooks_wheel = write_seed_wheel(
+            &wheel_dir,
+            "pyproject-hooks",
+            PYPROJECT_HOOKS_SEED_VERSION,
+            &[("pyproject_hooks/__init__.py", "__version__ = '0.0.0'\n")],
+        )?;
+        let build_wheel = write_seed_wheel(
+            &wheel_dir,
+            "build",
+            BUILD_SEED_VERSION,
+            &[
+                ("build/__init__.py", "__version__ = '0.0.0'\n"),
+                ("build/__main__.py", "def main():\n    return 0\n"),
+            ],
+        )?;
+
+        let packaging_filename = packaging_wheel
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap()
+            .to_string();
+        let pyproject_hooks_filename = pyproject_hooks_wheel
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap()
+            .to_string();
+        let build_filename = build_wheel
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap()
+            .to_string();
+
+        let mut releases = std::collections::HashMap::new();
+        releases.insert(
+            "packaging".to_string(),
+            vec![PypiFile {
+                filename: packaging_filename.clone(),
+                url: "https://example.invalid/packaging".to_string(),
+                packagetype: "bdist_wheel".to_string(),
+                yanked: None,
+                digests: PypiDigests {
+                    sha256: wheel_sha256(&packaging_wheel)?,
+                },
+            }],
+        );
+        releases.insert(
+            "pyproject-hooks".to_string(),
+            vec![PypiFile {
+                filename: pyproject_hooks_filename.clone(),
+                url: "https://example.invalid/pyproject-hooks".to_string(),
+                packagetype: "bdist_wheel".to_string(),
+                yanked: None,
+                digests: PypiDigests {
+                    sha256: wheel_sha256(&pyproject_hooks_wheel)?,
+                },
+            }],
+        );
+        releases.insert(
+            "build".to_string(),
+            vec![PypiFile {
+                filename: build_filename.clone(),
+                url: "https://example.invalid/build".to_string(),
+                packagetype: "bdist_wheel".to_string(),
+                yanked: None,
+                digests: PypiDigests {
+                    sha256: wheel_sha256(&build_wheel)?,
+                },
+            }],
+        );
+
+        let mut wheels = std::collections::HashMap::new();
+        wheels.insert(packaging_filename, packaging_wheel);
+        wheels.insert(pyproject_hooks_filename, pyproject_hooks_wheel);
+        wheels.insert(build_filename, build_wheel);
+
+        let global = GlobalOptions::default();
+        let effects = TestEffects {
+            system: SystemEffects::new(),
+            cache: MapCacheStore {
+                cache_root: temp.path().join("cache"),
+                wheels,
+            },
+            pypi: MapPypiClient { releases },
+        };
+        let ctx = CommandContext::new(&global, Arc::new(effects))?;
+        ensure_project_pip(&ctx, &snapshot, site_dir, &runtime, Path::new(&runtime.path))?;
+
+        let envs = project_site_env(&ctx, &snapshot, site_dir, Path::new(&runtime.path))?;
+        assert!(
+            module_available(&ctx, &snapshot, Path::new(&runtime.path), &envs, "build.__main__")?,
+            "expected build tooling to be seeded for maturin projects"
         );
 
         for (key, value) in saved_env {

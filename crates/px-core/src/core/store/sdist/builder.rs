@@ -134,7 +134,7 @@ rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 if [ ! -x "$PY_BIN" ]; then
   micromamba create -y -p "$ENV_ROOT" --override-channels -c conda-forge \
-    python==__PY_VERSION__ pip wheel setuptools numpy >/dev/null
+    python==__PY_VERSION__ pip wheel setuptools numpy rust >/dev/null
   HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= micromamba run -p "$ENV_ROOT" python -m pip install --upgrade pip build wheel pysocks >/dev/null
 fi
 micromamba repoquery depends --json --override-channels -c conda-forge "$CONDA_SPEC" > /work/repoquery.json || true
