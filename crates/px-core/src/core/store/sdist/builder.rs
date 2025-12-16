@@ -112,6 +112,17 @@ export GDAL_DATA="$ENV_ROOT/share/gdal"
 export PX_CAP_RULES='__CAP_RULES__'
 export PX_APT_RULES='__APT_RULES__'
 export PX_BASE_APT="__BASE_APT__"
+export PKG_CONFIG=/usr/bin/pkg-config
+unset PKG_CONFIG_LIBDIR
+SYS_PKG_CONFIG_PATH="/usr/share/pkgconfig:/usr/lib/pkgconfig"
+MULTIARCH="$(/usr/bin/gcc -print-multiarch 2>/dev/null || true)"
+if [ -n "$MULTIARCH" ] && [ -d "/usr/lib/$MULTIARCH/pkgconfig" ]; then
+  SYS_PKG_CONFIG_PATH="$SYS_PKG_CONFIG_PATH:/usr/lib/$MULTIARCH/pkgconfig"
+fi
+if [ -n "${PKG_CONFIG_PATH:-}" ]; then
+  SYS_PKG_CONFIG_PATH="$SYS_PKG_CONFIG_PATH:$PKG_CONFIG_PATH"
+fi
+export PKG_CONFIG_PATH="$SYS_PKG_CONFIG_PATH"
 export CONDA_SPEC="__CONDA_SPEC__"
 APT_OPTS="__APT_OPTS__"
 PY_BIN="$ENV_ROOT/bin/python"
@@ -123,7 +134,7 @@ rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 if [ ! -x "$PY_BIN" ]; then
   micromamba create -y -p "$ENV_ROOT" --override-channels -c conda-forge \
-    python==__PY_VERSION__ pip wheel setuptools pkg-config numpy >/dev/null
+    python==__PY_VERSION__ pip wheel setuptools numpy >/dev/null
   HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= micromamba run -p "$ENV_ROOT" python -m pip install --upgrade pip build wheel pysocks >/dev/null
 fi
 micromamba repoquery depends --json --override-channels -c conda-forge "$CONDA_SPEC" > /work/repoquery.json || true
@@ -209,7 +220,26 @@ PY
     DEBIAN_FRONTEND=noninteractive apt-get $APT_OPTS install -y --no-install-recommends $APT_INSTALL >/dev/null
   fi
 fi
-micromamba run -p "$ENV_ROOT" env CC=/usr/bin/gcc CXX=/usr/bin/g++ "$PY_BIN" -m pip wheel --no-deps --wheel-dir "$DIST_DIR" "$SDIST"
+# Suitesparse doesn't ship a stable pkg-config name on all distros, but some sdists
+# (e.g. scikit-umfpack) require `dependency('umfpack')` to succeed. Provide a minimal
+# fallback when SuiteSparse headers are present.
+if [ -f /work/system-deps.json ] && grep -q 'suitesparse' /work/system-deps.json; then
+  if ! /usr/bin/pkg-config --exists UMFPACK 2>/dev/null; then
+    mkdir -p /usr/share/pkgconfig
+    cat > /usr/share/pkgconfig/UMFPACK.pc <<'EOF'
+prefix=/usr
+exec_prefix=${prefix}
+includedir=${prefix}/include/suitesparse
+
+Name: umfpack
+Description: SuiteSparse UMFPACK
+Version: 0
+Libs: -lumfpack -lamd -lcholmod -lcolamd -lsuitesparseconfig
+Cflags: -I${includedir}
+EOF
+  fi
+fi
+micromamba run -p "$ENV_ROOT" env PKG_CONFIG=/usr/bin/pkg-config PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-}" PKG_CONFIG_LIBDIR= CC=/usr/bin/gcc CXX=/usr/bin/g++ "$PY_BIN" -m pip wheel --no-deps --wheel-dir "$DIST_DIR" "$SDIST"
 "#
     .to_string();
     script = script

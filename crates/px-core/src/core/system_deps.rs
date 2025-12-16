@@ -132,6 +132,7 @@ pub(crate) fn base_apt_packages() -> &'static [&'static str] {
         "build-essential",
         "pkg-config",
         "swig",
+        "cmake",
         "git",
         "curl",
         "ca-certificates",
