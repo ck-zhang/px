@@ -294,6 +294,7 @@ fn build_project_wheel(
             filename: &filename,
             url: &sdist_url,
             sha256: Some(&sdist_sha),
+            source_subdir: None,
             python_path: &python.display().to_string(),
             builder_id,
             builder_root: Some(cache_root.to_path_buf()),

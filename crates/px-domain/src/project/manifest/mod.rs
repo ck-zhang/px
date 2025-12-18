@@ -34,7 +34,7 @@ pub use options::{
 };
 pub use packages::{
     collect_pyproject_packages, collect_requirement_packages, collect_setup_cfg_packages,
-    read_setup_cfg_requires, OnboardPackagePlan,
+    collect_setup_py_packages, read_setup_cfg_requires, read_setup_py_requires, OnboardPackagePlan,
 };
 pub(crate) use packages::{normalize_onboard_path, relative_path, requirement_display_name};
 

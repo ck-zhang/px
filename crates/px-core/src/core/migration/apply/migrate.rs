@@ -12,11 +12,12 @@ use std::{
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
+use toml_edit::{DocumentMut, Item};
 
 use px_domain::api::{
     collect_pyproject_packages, collect_requirement_packages, collect_setup_cfg_packages,
-    plan_autopin, prepare_pyproject_plan, resolve_onboard_path, AutopinEntry, AutopinPending,
-    AutopinState, BackupManager, InstallOverride, PinSpec,
+    collect_setup_py_packages, plan_autopin, prepare_pyproject_plan, resolve_onboard_path,
+    AutopinEntry, AutopinPending, AutopinState, BackupManager, InstallOverride, PinSpec,
 };
 
 use crate::core::runtime::runtime_manager;
@@ -110,6 +111,10 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         let candidate = root.join("setup.cfg");
         candidate.exists().then_some(candidate)
     };
+    let setup_py_path = {
+        let candidate = root.join("setup.py");
+        candidate.exists().then_some(candidate)
+    };
 
     let lock_only = request.lock_behavior.is_lock_only();
     let project_lock_only =
@@ -128,6 +133,7 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         && requirements_path.is_none()
         && dev_path.is_none()
         && setup_cfg_path.is_none()
+        && setup_py_path.is_none()
     {
         return Ok(ExecutionOutcome::user_error(
             "px migrate: no project files found",
@@ -142,6 +148,7 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     let mut packages = Vec::new();
     let mut source_summaries = Vec::new();
     let mut pyproject_dep_count = 0usize;
+    let mut pyproject_dev_dep_count = 0usize;
 
     let requirements_rel = requirements_path
         .as_ref()
@@ -159,14 +166,38 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         packages.append(&mut rows);
         foreign_tools = detect_foreign_tool_sections(&pyproject_path)?;
         foreign_owners = detect_foreign_tool_conflicts(&pyproject_path)?;
+
+        if let Ok(contents) = fs::read_to_string(&pyproject_path) {
+            if let Ok(doc) = contents.parse::<DocumentMut>() {
+                pyproject_dev_dep_count = doc
+                    .get("project")
+                    .and_then(Item::as_table)
+                    .and_then(|project| project.get("optional-dependencies"))
+                    .and_then(Item::as_table)
+                    .and_then(|optional| optional.get("px-dev"))
+                    .and_then(Item::as_array)
+                    .map(|array| array.len())
+                    .unwrap_or(0);
+            }
+        }
     }
 
     let should_skip_prod_sources =
         pyproject_exists && pyproject_dep_count > 0 && source_override.is_none();
+    let should_skip_dev_sources =
+        pyproject_exists && pyproject_dev_dep_count > 0 && dev_override.is_none();
 
     if let Some(path) = setup_cfg_path.as_ref() {
         if !should_skip_prod_sources {
             let (summary, mut rows) = collect_setup_cfg_packages(&root, path)?;
+            source_summaries.push(summary);
+            packages.append(&mut rows);
+        }
+    }
+
+    if let Some(path) = setup_py_path.as_ref() {
+        if !should_skip_prod_sources {
+            let (summary, mut rows) = collect_setup_py_packages(&root, path)?;
             source_summaries.push(summary);
             packages.append(&mut rows);
         }
@@ -182,10 +213,12 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     }
 
     if let Some(path) = dev_path.as_ref() {
-        let (summary, mut rows) =
-            collect_requirement_packages(&root, path, "requirements-dev", "dev")?;
-        source_summaries.push(summary);
-        packages.append(&mut rows);
+        if !should_skip_dev_sources {
+            let (summary, mut rows) =
+                collect_requirement_packages(&root, path, "requirements-dev", "dev")?;
+            source_summaries.push(summary);
+            packages.append(&mut rows);
+        }
     }
 
     let mut project_parts = Vec::new();
@@ -195,10 +228,13 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     if setup_cfg_path.is_some() && !should_skip_prod_sources {
         project_parts.push("setup.cfg");
     }
+    if setup_py_path.is_some() && !should_skip_prod_sources {
+        project_parts.push("setup.py");
+    }
     if requirements_path.is_some() && !should_skip_prod_sources {
         project_parts.push("requirements");
     }
-    if dev_path.is_some() {
+    if dev_path.is_some() && !should_skip_dev_sources {
         project_parts.push("requirements-dev");
     }
     let project_type = if project_parts.is_empty() {
@@ -214,6 +250,28 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         &source_override,
         &dev_override,
     );
+    let mut conflicts = conflicts;
+    conflicts.retain(|conflict| {
+        fn looks_like_vcs_requirement(spec: &str) -> bool {
+            let lower = spec.to_ascii_lowercase();
+            lower.contains(" @ git+")
+                || lower.contains(" @ hg+")
+                || lower.contains(" @ svn+")
+                || lower.contains(" @ bzr+")
+        }
+
+        fn is_requirements_source(source: &str) -> bool {
+            source.ends_with("requirements.txt") || source.ends_with("requirements-dev.txt")
+        }
+
+        if !is_requirements_source(&conflict.dropped_source) {
+            return true;
+        }
+        if !looks_like_vcs_requirement(&conflict.dropped_spec) {
+            return true;
+        }
+        looks_like_vcs_requirement(&conflict.kept_spec)
+    });
 
     if !conflicts.is_empty() {
         let conflict_values: Vec<Value> = conflicts
@@ -454,7 +512,7 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
                                     if let Ok(mut reused) = reused_from_uv.lock() {
                                         reused.push(source);
                                     }
-                                    pinned = Some(pin);
+                                    pinned = Some(*pin);
                                 }
                                 LockPinChoice::Skip(reason) => {
                                     if let Ok(mut skipped) = skipped_uv.lock() {
@@ -478,7 +536,7 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
                                         if let Ok(mut reused) = reused_from_poetry.lock() {
                                             reused.push(source);
                                         }
-                                        pinned = Some(pin);
+                                        pinned = Some(*pin);
                                     }
                                     LockPinChoice::Skip(reason) => {
                                         if let Ok(mut skipped) = skipped_poetry.lock() {

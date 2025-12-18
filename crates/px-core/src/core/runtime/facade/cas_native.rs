@@ -6,7 +6,7 @@ use crate::context::CommandContext;
 use crate::core::runtime::cas_env::default_envs_root;
 use crate::core::tooling::diagnostics;
 use crate::outcome::InstallUserError;
-use crate::python_sys::detect_marker_environment;
+use crate::python_sys::{detect_interpreter_tags, detect_marker_environment};
 use crate::store::cas::{global_store, LoadedObject, ProfilePackage, MATERIALIZED_PKG_BUILDS_DIR};
 use anyhow::Result;
 use px_domain::api::{detect_lock_drift, load_lockfile_optional, verify_locked_artifacts};
@@ -25,6 +25,45 @@ pub(crate) fn ensure_project_environment_synced(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
 ) -> Result<()> {
+    fn artifact_supported_by_runtime(
+        tags: &crate::python_sys::InterpreterTags,
+        artifact: &px_domain::api::LockedArtifact,
+    ) -> bool {
+        if artifact.filename.is_empty() {
+            return true;
+        }
+        if !artifact.filename.to_ascii_lowercase().ends_with(".whl") {
+            return true;
+        }
+        if artifact.python_tag.is_empty() || artifact.abi_tag.is_empty() || artifact.platform_tag.is_empty() {
+            return true;
+        }
+        let supports = |py: &str, abi: &str, platform: &str| {
+            if !tags.supported.is_empty() {
+                tags.supports_triple(py, abi, platform)
+            } else {
+                tags.python.iter().any(|tag| tag == py)
+                    && tags.abi.iter().any(|tag| tag == abi)
+                    && tags.platform.iter().any(|tag| tag == platform)
+            }
+        };
+        for py in artifact.python_tag.split('.').map(str::trim).filter(|s| !s.is_empty()) {
+            for abi in artifact.abi_tag.split('.').map(str::trim).filter(|s| !s.is_empty()) {
+                for platform in artifact
+                    .platform_tag
+                    .split('.')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    if supports(py, abi, platform) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     if !snapshot.manifest_path.exists() {
         return Err(InstallUserError::new(
             format!("pyproject.toml not found in {}", snapshot.root.display()),
@@ -52,6 +91,7 @@ pub(crate) fn ensure_project_environment_synced(
 
     let runtime = prepare_project_runtime(snapshot)?;
     let marker_env = detect_marker_environment(&runtime.record.path)?.to_marker_environment()?;
+    let runtime_tags = detect_interpreter_tags(&runtime.record.path)?;
 
     let drift = detect_lock_drift(snapshot, &lock, Some(&marker_env));
     if !drift.is_empty() {
@@ -61,6 +101,37 @@ pub(crate) fn ensure_project_environment_synced(
                 "lockfile": lock_path.display().to_string(),
                 "drift": drift,
                 "hint": "run `px sync` to refresh px.lock",
+                "reason": "lock_drift",
+            }),
+        )
+        .into());
+    }
+
+    let mut incompatible = Vec::new();
+    for dep in &lock.resolved {
+        let Some(artifact) = dep.artifact.as_ref() else {
+            continue;
+        };
+        if artifact_supported_by_runtime(&runtime_tags, artifact) {
+            continue;
+        }
+        incompatible.push(format!(
+            "{}: {} ({}-{}-{}) is not compatible with Python {}",
+            dep.name,
+            artifact.filename,
+            artifact.python_tag,
+            artifact.abi_tag,
+            artifact.platform_tag,
+            runtime.record.full_version
+        ));
+    }
+    if !incompatible.is_empty() {
+        return Err(InstallUserError::new(
+            "px.lock is out of date for the active runtime",
+            json!({
+                "lockfile": lock_path.display().to_string(),
+                "drift": incompatible,
+                "hint": "run `px sync` to update px.lock for the current runtime",
                 "reason": "lock_drift",
             }),
         )

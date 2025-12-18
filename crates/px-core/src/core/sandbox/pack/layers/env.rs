@@ -2,7 +2,6 @@ use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::Result;
 use serde_json::json;
@@ -22,6 +21,16 @@ pub(crate) fn write_env_layer_tar(
 ) -> Result<LayerTar, InstallUserError> {
     let mut builder = layer_tar_builder(blobs)?;
     let runtime_root = runtime_root.and_then(|path| path.canonicalize().ok());
+    let runtime_version = read_pyvenv_cfg_version(env_root).and_then(|raw| {
+        let mut parts = raw.split('.');
+        let major = parts.next()?.trim();
+        let minor = parts.next()?.trim();
+        if major.is_empty() || minor.is_empty() {
+            None
+        } else {
+            Some(format!("{major}.{minor}"))
+        }
+    });
     let runtime_root_str = runtime_root
         .as_ref()
         .and_then(|p| p.to_str())
@@ -30,18 +39,6 @@ pub(crate) fn write_env_layer_tar(
         .canonicalize()
         .unwrap_or_else(|_| env_root.to_path_buf());
     let store_mapping = discover_store_mapping(&env_root_canon)?;
-    let mut extra_paths = Vec::new();
-    if let Some(runtime_root) = runtime_root.as_ref() {
-        let runtime_python = runtime_root.join("bin").join("python");
-        for lib in shared_libs(&runtime_python) {
-            if lib.starts_with(runtime_root) || lib.starts_with(&env_root_canon) {
-                extra_paths.push(lib);
-            }
-        }
-        extra_paths.push(runtime_python);
-        extra_paths.sort();
-        extra_paths.dedup();
-    }
     let mut seen = HashSet::new();
     let walker = WalkDir::new(env_root).sort_by(|a, b| a.path().cmp(b.path()));
     for entry in walker {
@@ -101,6 +98,14 @@ pub(crate) fn write_env_layer_tar(
             }
         }
     }
+    if let Some(runtime_root) = runtime_root.as_ref() {
+        stage_sandbox_runtime(
+            &mut builder,
+            runtime_root,
+            runtime_version.as_deref(),
+            &mut seen,
+        )?;
+    }
     if let Some(mapping) = store_mapping {
         for pkg_root in mapping.pkg_build_roots {
             let walker = WalkDir::new(&pkg_root).sort_by(|a, b| a.path().cmp(b.path()));
@@ -130,56 +135,102 @@ pub(crate) fn write_env_layer_tar(
             }
         }
     }
-    for host_path in extra_paths {
-        if !host_path.exists() {
-            continue;
-        }
-        let rel = host_path
-            .strip_prefix("/")
-            .unwrap_or(&host_path)
-            .to_path_buf();
-        if rel.as_os_str().is_empty() {
-            continue;
-        }
-        if rel.components().count() == 0 {
-            continue;
-        }
-        let archive_path = Path::new("").join(rel);
-        if seen.insert(archive_path.clone()) {
-            append_path(&mut builder, &archive_path, &host_path)?;
-        }
-    }
     finalize_layer(builder, blobs)
 }
 
-fn shared_libs(binary: &Path) -> Vec<PathBuf> {
-    let mut libs = Vec::new();
-    if !binary.exists() {
-        return libs;
-    }
-    let Ok(output) = Command::new("ldd").arg(binary).output() else {
-        return libs;
-    };
-    if !output.status.success() {
-        return libs;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
+fn read_pyvenv_cfg_version(env_root: &Path) -> Option<String> {
+    let contents = fs::read_to_string(env_root.join("pyvenv.cfg")).ok()?;
+    for line in contents.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("linux-vdso") {
-            continue;
-        }
-        let parts: Vec<_> = trimmed.split_whitespace().collect();
-        let path = if parts.len() >= 3 && parts[1] == "=>" {
-            parts[2]
-        } else {
-            parts.first().copied().unwrap_or_default()
-        };
-        if path.starts_with('/') && Path::new(path).exists() {
-            libs.push(PathBuf::from(path));
+        if let Some(rest) = trimmed.strip_prefix("version") {
+            if let Some((_, value)) = rest.split_once('=') {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
         }
     }
-    libs
+    None
+}
+
+fn stage_sandbox_runtime(
+    builder: &mut Builder<impl Write>,
+    runtime_root: &Path,
+    runtime_version: Option<&str>,
+    seen: &mut HashSet<PathBuf>,
+) -> Result<(), InstallUserError> {
+    let archive_root = Path::new("px").join("runtime");
+    let bin_dir = runtime_root.join("bin");
+    if bin_dir.exists() {
+        let archive_bin = archive_root.join("bin");
+        if seen.insert(archive_bin.clone()) {
+            append_path(builder, &archive_bin, &bin_dir)?;
+        }
+
+        let mut python_entries = Vec::new();
+        let entries = fs::read_dir(&bin_dir).map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to read runtime bin directory for sandbox image",
+                json!({ "path": bin_dir.display().to_string(), "error": err.to_string() }),
+            )
+        })?;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy().to_string();
+            if name_str.starts_with("python") {
+                python_entries.push((name_str, entry.path()));
+            }
+        }
+        python_entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, path) in python_entries {
+            let archive_path = archive_root.join("bin").join(&name);
+            if seen.insert(archive_path.clone()) {
+                append_path(builder, &archive_path, &path)?;
+            }
+        }
+    }
+
+    let Some(version) = runtime_version else {
+        return Ok(());
+    };
+    let mut roots = Vec::new();
+    for candidate in [
+        runtime_root.join("lib").join(format!("python{version}")),
+        runtime_root.join("lib64").join(format!("python{version}")),
+    ] {
+        if candidate.exists() {
+            roots.push(candidate);
+        }
+    }
+    roots.sort();
+    for root in roots {
+        let walker = WalkDir::new(&root).sort_by(|a, b| a.path().cmp(b.path()));
+        for entry in walker {
+            let entry = entry.map_err(|err| {
+                sandbox_error(
+                    "PX903",
+                    "failed to walk runtime tree for sandbox image",
+                    json!({ "error": err.to_string() }),
+                )
+            })?;
+            let path = entry.path();
+            let rel = match path.strip_prefix(runtime_root) {
+                Ok(rel) => rel,
+                Err(_) => continue,
+            };
+            if rel.as_os_str().is_empty() {
+                continue;
+            }
+            let archive_path = archive_root.join(rel);
+            if seen.insert(archive_path.clone()) {
+                append_path(builder, &archive_path, path)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Clone, Debug)]

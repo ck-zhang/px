@@ -5,7 +5,7 @@ use crate::python_sys::{detect_interpreter_tags, InterpreterTags};
 use super::facade::RuntimeMetadata;
 
 /// Versioned identifier for builder environments.
-pub(crate) const BUILDER_VERSION: u32 = 12;
+pub(crate) const BUILDER_VERSION: u32 = 13;
 
 #[derive(Clone, Debug)]
 pub(crate) struct BuilderIdentity {

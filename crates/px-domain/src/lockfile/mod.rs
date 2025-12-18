@@ -217,4 +217,51 @@ mod tests {
         assert!(parsed.graph.is_some());
         Ok(())
     }
+
+    #[test]
+    fn parse_lock_snapshot_backfills_wheel_tags_from_filename() {
+        let doc: DocumentMut = r#"version = 1
+
+[metadata]
+px_version = "0.1.0"
+created_at = "2025-01-01T00:00:00Z"
+mode = "p0-pinned"
+manifest_fingerprint = "demo-fingerprint"
+lock_id = "lock-demo"
+
+[project]
+name = "demo"
+
+[python]
+requirement = ">=3.11"
+
+[[dependencies]]
+name = "numpy"
+specifier = "numpy==2.3.5"
+direct = true
+
+[dependencies.artifact]
+filename = "numpy-2.3.5-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
+url = "https://example.invalid/numpy.whl"
+sha256 = "deadbeef"
+size = 1
+cached_path = "/tmp/numpy.whl"
+"#
+        .parse()
+        .expect("doc parses");
+
+        let lock = io::parse_lock_snapshot(&doc);
+        let dep = lock
+            .resolved
+            .iter()
+            .find(|entry| entry.name == "numpy")
+            .expect("numpy entry exists");
+        let artifact = dep.artifact.as_ref().expect("artifact exists");
+        assert_eq!(artifact.python_tag, "cp311");
+        assert_eq!(artifact.abi_tag, "cp311");
+        assert_eq!(
+            artifact.platform_tag,
+            "manylinux_2_27_x86_64.manylinux_2_28_x86_64"
+        );
+    }
 }

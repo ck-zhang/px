@@ -546,7 +546,8 @@ fn copy_dir(src: &Path, dest: &Path) -> Result<(), InstallUserError> {
 }
 
 pub(crate) fn base_apt_opts() -> String {
-    "-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30".to_string()
+    "-o Acquire::Retries=3 -o Acquire::By-Hash=yes -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+        .to_string()
 }
 
 pub(crate) fn should_disable_apt_proxy() -> bool {

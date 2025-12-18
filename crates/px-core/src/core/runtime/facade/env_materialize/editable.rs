@@ -14,7 +14,7 @@ pub(in super::super) struct EditableProjectMetadata {
     top_level: Vec<String>,
 }
 
-pub(in super::super) fn write_project_metadata_stub(
+pub(crate) fn write_project_metadata_stub(
     snapshot: &ManifestSnapshot,
     site_dir: &Path,
     fs_ops: &dyn effects::FileSystem,
@@ -603,6 +603,9 @@ fn write_entrypoint_script(
         "#!{python_shebang}\nimport importlib\nimport sys\n\ndef _load():\n    module = importlib.import_module({module:?})\n    target = module\n    for attr in {parts_repr}:\n        target = getattr(target, attr)\n    return target\n\nif __name__ == '__main__':\n    sys.exit(_load()())\n"
     );
     let script_path = bin_dir.join(name);
+    if script_path.exists() {
+        let _ = fs::remove_file(&script_path).or_else(|_| fs::remove_dir_all(&script_path));
+    }
     fs::write(&script_path, contents)?;
     set_exec_permissions(&script_path);
     Ok(script_path)
@@ -680,6 +683,9 @@ pub(in super::super) fn materialize_wheel_scripts(
                 let entry = entry?;
                 if entry.file_type()?.is_file() {
                     let dest = bin_dir.join(entry.file_name());
+                    if dest.exists() {
+                        let _ = fs::remove_file(&dest).or_else(|_| fs::remove_dir_all(&dest));
+                    }
                     fs::copy(entry.path(), &dest)?;
                     set_exec_permissions(&dest);
                 }
@@ -748,6 +754,9 @@ pub(in super::super) fn materialize_wheel_scripts(
             }
             if let Some((_, script_name)) = name.rsplit_once(".data/scripts/") {
                 let dest = bin_dir.join(script_name);
+                if dest.exists() {
+                    let _ = fs::remove_file(&dest).or_else(|_| fs::remove_dir_all(&dest));
+                }
                 let mut contents = Vec::new();
                 file.read_to_end(&mut contents)?;
                 fs::write(&dest, contents)?;

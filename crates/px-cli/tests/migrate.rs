@@ -72,6 +72,13 @@ fn run_migrate_json(temp: &TempDir, extra: &[&str]) -> Value {
     serde_json::from_slice(&assert.get_output().stdout).expect("json output")
 }
 
+fn run_migrate_json_offline(temp: &TempDir, extra: &[&str]) -> Value {
+    let mut args = vec!["--json", "migrate"];
+    args.extend_from_slice(extra);
+    let assert = px_command_offline(temp).args(&args).assert().success();
+    serde_json::from_slice(&assert.get_output().stdout).expect("json output")
+}
+
 fn write_file(temp: &TempDir, name: &str, contents: &str) {
     fs::write(temp.path().join(name), contents).expect("write file");
 }
@@ -181,6 +188,82 @@ build-backend = "setuptools.build_meta"
             .iter()
             .any(|pkg| pkg["source"].as_str().unwrap_or_default() == "requirements.txt"),
         "requirements.txt should not be used as a prod dependency source when pyproject.toml provides dependencies"
+    );
+}
+
+#[test]
+fn migrate_ignores_dev_requirements_when_px_dev_present() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(
+        &temp,
+        "pyproject.toml",
+        r#"[project]
+name = "dev-precedence"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+px-dev = ["pytest==8.1.1"]
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#,
+    );
+    write_file(&temp, "requirements-dev.txt", "requests==2.31.0\n");
+
+    let output = run_migrate_json_offline(&temp, &[]);
+    assert_eq!(output["status"], "ok");
+    let packages = output["details"]["packages"]
+        .as_array()
+        .expect("packages array");
+    assert!(
+        !packages
+            .iter()
+            .any(|pkg| pkg["source"].as_str().unwrap_or_default() == "requirements-dev.txt"),
+        "requirements-dev.txt should be ignored when px-dev optional dependencies are present"
+    );
+}
+
+#[test]
+fn migrate_ignores_editable_vcs_requirements_when_setup_cfg_conflicts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(
+        &temp,
+        "setup.cfg",
+        r#"[metadata]
+requires_dist =
+    botocore>=1.0.0,<2.0.0
+"#,
+    );
+    write_file(
+        &temp,
+        "requirements.txt",
+        "-e git+https://github.com/boto/botocore.git@develop#egg=botocore\n",
+    );
+
+    let output = run_migrate_json_offline(&temp, &[]);
+    assert_eq!(output["status"], "ok");
+    let packages = output["details"]["packages"]
+        .as_array()
+        .expect("packages array");
+    assert!(
+        packages.iter().any(|pkg| {
+            pkg["name"].as_str() == Some("botocore")
+                && pkg["source"].as_str() == Some("setup.cfg")
+                && pkg["requested"].as_str().unwrap_or_default().contains("botocore")
+        }),
+        "setup.cfg botocore requirement should be kept"
+    );
+    assert!(
+        !packages.iter().any(|pkg| {
+            pkg["requested"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("@ git+https://github.com/boto/botocore.git")
+        }),
+        "editable VCS requirement should be dropped when setup.cfg provides a spec"
     );
 }
 
@@ -602,6 +685,48 @@ install_requires =
     assert!(
         specs.iter().any(|spec| spec.starts_with("certifi==")),
         "install_requires entries should be imported from setup.cfg"
+    );
+}
+
+#[test]
+fn migrate_reads_setup_py_install_requires() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(
+        &temp,
+        "setup.py",
+        r#"_deps = [
+  "requests>=2.0",
+  "packaging>=20",
+]
+
+install_requires = [
+  deps["requests"],
+  deps["packaging"],
+]
+"#,
+    );
+
+    px_command(&temp)
+        .args(["--json", "migrate", "--apply", "--allow-dirty"])
+        .assert()
+        .success();
+
+    let pyproject = fs::read_to_string(temp.path().join("pyproject.toml")).expect("pyproject");
+    let doc: DocumentMut = pyproject.parse().expect("pyproject toml");
+    let deps = doc["project"]["dependencies"]
+        .as_array()
+        .expect("dependencies array");
+    let specs: Vec<_> = deps.iter().filter_map(|item| item.as_str()).collect();
+    assert!(
+        specs.iter().any(|spec| spec.starts_with("requests==")),
+        "setup.py install_requires should be pinned into prod requirements"
+    );
+    assert!(
+        specs.iter().any(|spec| spec.starts_with("packaging==")),
+        "setup.py install_requires should be pinned into prod requirements"
     );
 }
 

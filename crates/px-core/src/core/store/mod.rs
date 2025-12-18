@@ -102,6 +102,7 @@ pub struct SdistRequest<'a> {
     pub filename: &'a str,
     pub url: &'a str,
     pub sha256: Option<&'a str>,
+    pub source_subdir: Option<&'a str>,
     pub python_path: &'a str,
     pub builder_id: &'a str,
     pub builder_root: Option<PathBuf>,

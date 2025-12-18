@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::python_sys::detect_interpreter_tags;
+
 pub(super) const CONSOLE_SCRIPT_DISPATCH: &str = r#"
 import sys
 from importlib.metadata import distribution
@@ -172,12 +174,36 @@ pub(super) fn prepare_cas_native_run_context(
         ));
     }
 
-    let _ = prepare_project_runtime(snapshot).map_err(|err| {
+    let selection = prepare_project_runtime(snapshot).map_err(|err| {
         install_error_outcome(err, "python runtime unavailable for native CAS execution")
     })?;
-    let runtime = detect_runtime_metadata(ctx, snapshot).map_err(|err| {
+
+    let runtime_tags = detect_interpreter_tags(&selection.record.path).map_err(|err| {
         install_error_outcome(err, "python runtime unavailable for native CAS execution")
     })?;
+    let runtime = crate::core::runtime::facade::RuntimeMetadata {
+        path: selection.record.path.clone(),
+        version: selection.record.full_version.clone(),
+        platform: runtime_tags
+            .platform
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "any".to_string()),
+    };
+    let incompatible = incompatible_lock_artifacts(&lock, &runtime_tags, &runtime.version);
+    if !incompatible.is_empty() {
+        return Err(ExecutionOutcome::user_error(
+            "px.lock is out of date for the active runtime",
+            json!({
+                "code": "PX120",
+                "reason": "lock_drift",
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "drift": incompatible,
+                "hint": "Run `px sync` to update px.lock for the current runtime before running commands.",
+            }),
+        ));
+    }
+
     let lock_id = lock.lock_id.clone().unwrap_or_else(|| {
         compute_lock_hash_bytes(&fs::read(&snapshot.lock_path).unwrap_or_else(|_| Vec::new()))
     });
@@ -192,6 +218,7 @@ pub(super) fn prepare_cas_native_run_context(
             },
         )?,
     };
+    let site_key = compute_lock_hash_bytes(env_owner.owner_id.as_bytes());
     let cas_profile = ensure_profile_manifest(ctx, snapshot, &lock, &runtime, &env_owner)
         .map_err(|err| install_error_outcome(err, "failed to prepare CAS profile for execution"))?;
 
@@ -206,6 +233,7 @@ pub(super) fn prepare_cas_native_run_context(
     let site_dir = ensure_cas_native_site_dir(
         &ctx.cache().path,
         &cas_profile.profile_oid,
+        &site_key,
         &runtime.version,
         &sys_path_entries,
     )
@@ -219,6 +247,30 @@ pub(super) fn prepare_cas_native_run_context(
             }),
         )
     })?;
+    if let Err(err) =
+        install_python_link(&cas_profile.runtime_path, &site_dir.join("bin").join("python"))
+    {
+        return Err(ExecutionOutcome::failure(
+            "failed to prepare native execution site",
+            json!({
+                "reason": "cas_native_site_setup_failed",
+                "error": err.to_string(),
+                "profile_oid": cas_profile.profile_oid,
+            }),
+        ));
+    }
+    if let Err(err) =
+        crate::core::runtime::facade::write_project_metadata_stub(snapshot, &site_dir, ctx.fs())
+    {
+        return Err(ExecutionOutcome::failure(
+            "failed to prepare native execution site",
+            json!({
+                "reason": "cas_native_site_setup_failed",
+                "error": err.to_string(),
+                "profile_oid": cas_profile.profile_oid,
+            }),
+        ));
+    }
     let paths = build_pythonpath(ctx.fs(), project_root, Some(site_dir)).map_err(|err| {
         ExecutionOutcome::failure(
             "failed to assemble PYTHONPATH for native CAS execution",
@@ -353,12 +405,36 @@ pub(super) fn prepare_cas_native_workspace_run_context(
         ));
     }
 
-    let _ = prepare_project_runtime(&snapshot).map_err(|err| {
+    let selection = prepare_project_runtime(&snapshot).map_err(|err| {
         install_error_outcome(err, "python runtime unavailable for native CAS execution")
     })?;
-    let runtime = detect_runtime_metadata(ctx, &snapshot).map_err(|err| {
+
+    let runtime_tags = detect_interpreter_tags(&selection.record.path).map_err(|err| {
         install_error_outcome(err, "python runtime unavailable for native CAS execution")
     })?;
+    let runtime = crate::core::runtime::facade::RuntimeMetadata {
+        path: selection.record.path.clone(),
+        version: selection.record.full_version.clone(),
+        platform: runtime_tags
+            .platform
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "any".to_string()),
+    };
+    let incompatible = incompatible_lock_artifacts(&lock, &runtime_tags, &runtime.version);
+    if !incompatible.is_empty() {
+        return Err(ExecutionOutcome::user_error(
+            "workspace lockfile is out of date for the active runtime",
+            json!({
+                "code": "PX120",
+                "reason": "lock_drift",
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "drift": incompatible,
+                "hint": "Run `px sync` to update the workspace lock for the current runtime before running commands.",
+            }),
+        ));
+    }
+
     let lock_id = lock.lock_id.clone().unwrap_or_else(|| {
         compute_lock_hash_bytes(&fs::read(&snapshot.lock_path).unwrap_or_else(|_| Vec::new()))
     });
@@ -373,6 +449,9 @@ pub(super) fn prepare_cas_native_workspace_run_context(
             },
         )?,
     };
+    let site_key = project_env_owner_id(member_root, &lock_id, &runtime.version)
+        .map(|key| compute_lock_hash_bytes(key.as_bytes()))
+        .unwrap_or_else(|_| compute_lock_hash_bytes(member_root.display().to_string().as_bytes()));
     let cas_profile = ensure_profile_manifest(ctx, &snapshot, &lock, &runtime, &env_owner)
         .map_err(|err| install_error_outcome(err, "failed to prepare CAS profile for execution"))?;
 
@@ -387,6 +466,7 @@ pub(super) fn prepare_cas_native_workspace_run_context(
     let site_dir = ensure_cas_native_site_dir(
         &ctx.cache().path,
         &cas_profile.profile_oid,
+        &site_key,
         &runtime.version,
         &sys_path_entries,
     )
@@ -400,6 +480,39 @@ pub(super) fn prepare_cas_native_workspace_run_context(
             }),
         )
     })?;
+    if let Err(err) =
+        install_python_link(&cas_profile.runtime_path, &site_dir.join("bin").join("python"))
+    {
+        return Err(ExecutionOutcome::failure(
+            "failed to prepare native execution site",
+            json!({
+                "reason": "cas_native_site_setup_failed",
+                "error": err.to_string(),
+                "profile_oid": cas_profile.profile_oid,
+            }),
+        ));
+    }
+    if let Some(member_snapshot) = workspace
+        .members
+        .iter()
+        .find(|member| member.root == member_root)
+        .map(|member| &member.snapshot)
+    {
+        if let Err(err) = crate::core::runtime::facade::write_project_metadata_stub(
+            member_snapshot,
+            &site_dir,
+            ctx.fs(),
+        ) {
+            return Err(ExecutionOutcome::failure(
+                "failed to prepare native execution site",
+                json!({
+                    "reason": "cas_native_site_setup_failed",
+                    "error": err.to_string(),
+                    "profile_oid": cas_profile.profile_oid,
+                }),
+            ));
+        }
+    }
 
     let paths = build_pythonpath(ctx.fs(), member_root, Some(site_dir.clone())).map_err(|err| {
         ExecutionOutcome::failure(
@@ -506,6 +619,86 @@ pub(super) fn prepare_cas_native_workspace_run_context(
     })
 }
 
+fn artifact_supported_by_runtime(
+    tags: &crate::python_sys::InterpreterTags,
+    artifact: &px_domain::api::LockedArtifact,
+) -> bool {
+    if artifact.filename.is_empty() {
+        return true;
+    }
+    if !artifact.filename.to_ascii_lowercase().ends_with(".whl") {
+        return true;
+    }
+    if artifact.python_tag.is_empty() || artifact.abi_tag.is_empty() || artifact.platform_tag.is_empty() {
+        return true;
+    }
+
+    let supports = |py: &str, abi: &str, platform: &str| {
+        if !tags.supported.is_empty() {
+            tags.supports_triple(py, abi, platform)
+        } else {
+            tags.python.iter().any(|tag| tag == py)
+                && tags.abi.iter().any(|tag| tag == abi)
+                && tags.platform.iter().any(|tag| tag == platform)
+        }
+    };
+
+    for py in artifact
+        .python_tag
+        .split('.')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let py = py.to_ascii_lowercase();
+        for abi in artifact
+            .abi_tag
+            .split('.')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let abi = abi.to_ascii_lowercase();
+            for platform in artifact
+                .platform_tag
+                .split('.')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let platform = platform.to_ascii_lowercase();
+                if supports(&py, &abi, &platform) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn incompatible_lock_artifacts(
+    lock: &px_domain::api::LockSnapshot,
+    runtime_tags: &crate::python_sys::InterpreterTags,
+    runtime_version: &str,
+) -> Vec<String> {
+    let mut incompatible = Vec::new();
+    for dep in &lock.resolved {
+        let Some(artifact) = dep.artifact.as_ref() else {
+            continue;
+        };
+        if artifact_supported_by_runtime(runtime_tags, artifact) {
+            continue;
+        }
+        incompatible.push(format!(
+            "{}: {} ({}-{}-{}) is not compatible with Python {}",
+            dep.name,
+            artifact.filename,
+            artifact.python_tag,
+            artifact.abi_tag,
+            artifact.platform_tag,
+            runtime_version
+        ));
+    }
+    incompatible
+}
+
 fn materialize_profile_sys_path(header: &crate::store::cas::ProfileHeader) -> Result<Vec<PathBuf>> {
     let store = crate::store::cas::global_store();
     let ordered: Vec<String> = if header.sys_path_order.is_empty() {
@@ -551,6 +744,7 @@ fn materialize_profile_sys_path(header: &crate::store::cas::ProfileHeader) -> Re
 fn ensure_cas_native_site_dir(
     cache_root: &Path,
     profile_oid: &str,
+    site_key: &str,
     runtime_version: &str,
     sys_path_entries: &[PathBuf],
 ) -> Result<PathBuf> {
@@ -558,7 +752,8 @@ fn ensure_cas_native_site_dir(
         .join("native")
         .join("profiles")
         .join(profile_oid)
-        .join("site");
+        .join("sites")
+        .join(site_key);
     let temp_root = site_dir.with_extension("partial");
     if temp_root.exists() {
         let _ = fs::remove_dir_all(&temp_root);
@@ -607,6 +802,30 @@ fn ensure_cas_native_site_dir(
     let _ = fs::remove_dir_all(&backup_root);
 
     Ok(site_dir)
+}
+
+fn install_python_link(source: &Path, dest: &Path) -> Result<()> {
+    if dest.symlink_metadata().is_ok() {
+        let _ = fs::remove_file(dest);
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        if symlink(source, dest).is_ok() {
+            return Ok(());
+        }
+    }
+    fs::copy(source, dest).with_context(|| {
+        format!(
+            "failed to link python from {} to {}",
+            source.display(),
+            dest.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn console_script_index_path(cache_root: &Path, profile_oid: &str) -> PathBuf {

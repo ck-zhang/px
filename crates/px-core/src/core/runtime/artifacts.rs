@@ -9,8 +9,9 @@ use pep440_rs::{Operator, VersionSpecifiers};
 use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement, VersionOrUrl};
 use px_domain::api::{
     canonical_extras, canonicalize_package_name, format_specifier, marker_applies,
-    normalize_dist_name, LockedArtifact, PinSpec, ResolvedDependency,
+    normalize_dist_name, LockedArtifact, PinSpec, ResolvedDependency, ResolvedDistSource,
 };
+use sha2::{Digest, Sha256};
 use reqwest::{blocking::Client, StatusCode};
 use serde_json::json;
 
@@ -23,6 +24,240 @@ use crate::store::{wheel_build_options_hash, ArtifactRequest, CacheLocation, Sdi
 use crate::{InstallUserError, PX_VERSION};
 
 use super::effects;
+
+pub(crate) fn archive_source_dir_for_sdist(source_dir: &Path, prefix: &str) -> Result<Vec<u8>> {
+    use std::ffi::OsStr;
+    use std::fs::{self, File};
+    use std::io::ErrorKind;
+
+    use flate2::GzBuilder;
+    use flate2::Compression;
+
+    const MIN_ZIP_TIMESTAMP: u64 = 315_532_800; // 1980-01-01T00:00:00Z
+
+    fn should_skip_entry(entry: &walkdir::DirEntry) -> bool {
+        let name = entry.file_name();
+        matches!(
+            name.to_str().unwrap_or_default(),
+            ".git"
+                | ".px"
+                | "__pycache__"
+                | ".pytest_cache"
+                | ".mypy_cache"
+                | ".ruff_cache"
+                | ".cache"
+                | ".venv"
+                | ".tox"
+                | "target"
+                | "dist"
+                | "build"
+                | "node_modules"
+                | ".idea"
+                | ".vscode"
+        ) || name == OsStr::new("px.lock")
+            || name == OsStr::new("px.workspace.lock")
+    }
+
+    let prefix = prefix.trim().trim_end_matches('/');
+    if prefix.is_empty() {
+        return Err(anyhow!("sdist archive prefix must be non-empty"));
+    }
+
+    let encoder = GzBuilder::new()
+        .mtime(0)
+        .write(Vec::new(), Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+    builder.follow_symlinks(false);
+    for entry in walkdir::WalkDir::new(source_dir)
+        .sort_by(|a, b| a.path().cmp(b.path()))
+        .into_iter()
+        .filter_entry(|entry| !should_skip_entry(entry))
+    {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                tracing::debug!(%err, root=%source_dir.display(), "skipping path during archive walk");
+                continue;
+            }
+        };
+        let path = entry.path();
+        if path == source_dir {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(source_dir)
+            .with_context(|| format!("failed to relativize {}", path.display()))?;
+        let rel_path = rel.to_string_lossy().replace('\\', "/");
+        if rel_path.is_empty() {
+            continue;
+        }
+        let rel_path = format!("{prefix}/{rel_path}");
+
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                tracing::debug!(path=%path.display(), "skipping unreadable path during archive");
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        let file_type = metadata.file_type();
+        let mut header = tar::Header::new_gnu();
+        header.set_mtime(MIN_ZIP_TIMESTAMP);
+        header.set_uid(0);
+        header.set_gid(0);
+        let _ = header.set_username("");
+        let _ = header.set_groupname("");
+        if file_type.is_dir() {
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_mode(0o755);
+            header.set_size(0);
+            builder.append_data(&mut header, Path::new(&rel_path), std::io::empty())?;
+        } else if file_type.is_file() {
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_mode(0o644);
+            header.set_size(metadata.len());
+            let file = match File::open(path) {
+                Ok(file) => file,
+                Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                    tracing::debug!(path=%path.display(), "skipping unreadable file during archive");
+                    continue;
+                }
+                Err(err) => return Err(err.into()),
+            };
+            builder.append_data(&mut header, Path::new(&rel_path), file)?;
+        } else if file_type.is_symlink() {
+            let target = match fs::read_link(path) {
+                Ok(link) => link,
+                Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        "skipping unreadable symlink during archive"
+                    );
+                    continue;
+                }
+                Err(err) => return Err(err.into()),
+            };
+            let target = if target.is_absolute() {
+                target
+            } else {
+                path.parent()
+                    .unwrap_or(source_dir)
+                    .join(target)
+                    .to_path_buf()
+            };
+            let target = match fs::canonicalize(&target) {
+                Ok(path) => path,
+                Err(err) if err.kind() == ErrorKind::NotFound => {
+                    tracing::debug!(
+                        symlink = %path.display(),
+                        target = %target.display(),
+                        "skipping missing symlink target during archive"
+                    );
+                    continue;
+                }
+                Err(err) => return Err(err.into()),
+            };
+            let meta = match fs::symlink_metadata(&target) {
+                Ok(meta) => meta,
+                Err(err) => return Err(err.into()),
+            };
+            if meta.is_file() {
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_mode(0o644);
+                header.set_size(meta.len());
+                let file = File::open(&target)?;
+                builder.append_data(&mut header, Path::new(&rel_path), file)?;
+            } else if meta.is_dir() {
+                // Archive the linked directory contents at the symlink path.
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_mode(0o755);
+                header.set_size(0);
+                builder.append_data(&mut header, Path::new(&rel_path), std::io::empty())?;
+
+                for entry in walkdir::WalkDir::new(&target)
+                    .sort_by(|a, b| a.path().cmp(b.path()))
+                    .into_iter()
+                    .filter_entry(|entry| !should_skip_entry(entry))
+                {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(err) => {
+                            tracing::debug!(
+                                %err,
+                                target = %target.display(),
+                                "skipping path during symlink target archive walk"
+                            );
+                            continue;
+                        }
+                    };
+                    let nested = entry.path();
+                    if nested == target {
+                        continue;
+                    }
+                    let target_rel = match nested.strip_prefix(&target) {
+                        Ok(rel) => rel,
+                        Err(_) => continue,
+                    };
+                    let target_rel = target_rel.to_string_lossy().replace('\\', "/");
+                    if target_rel.is_empty() {
+                        continue;
+                    }
+                    let nested_archive_path = format!("{rel_path}/{target_rel}");
+
+                    let meta = match fs::symlink_metadata(nested) {
+                        Ok(meta) => meta,
+                        Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                            tracing::debug!(
+                                path = %nested.display(),
+                                "skipping unreadable symlink target path during archive"
+                            );
+                            continue;
+                        }
+                        Err(err) => return Err(err.into()),
+                    };
+                    let file_type = meta.file_type();
+                    let mut header = tar::Header::new_gnu();
+                    header.set_mtime(MIN_ZIP_TIMESTAMP);
+                    header.set_uid(0);
+                    header.set_gid(0);
+                    let _ = header.set_username("");
+                    let _ = header.set_groupname("");
+                    if file_type.is_dir() {
+                        header.set_entry_type(tar::EntryType::Directory);
+                        header.set_mode(0o755);
+                        header.set_size(0);
+                        builder.append_data(
+                            &mut header,
+                            Path::new(&nested_archive_path),
+                            std::io::empty(),
+                        )?;
+                    } else if file_type.is_file() {
+                        header.set_entry_type(tar::EntryType::Regular);
+                        header.set_mode(0o644);
+                        header.set_size(meta.len());
+                        let file = match File::open(nested) {
+                            Ok(file) => file,
+                            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                                tracing::debug!(
+                                    path = %nested.display(),
+                                    "skipping unreadable file during symlink target archive"
+                                );
+                                continue;
+                            }
+                            Err(err) => return Err(err.into()),
+                        };
+                        builder.append_data(&mut header, Path::new(&nested_archive_path), file)?;
+                    }
+                }
+            }
+        }
+    }
+    builder.finish()?;
+    let encoder = builder.into_inner()?;
+    Ok(encoder.finish()?)
+}
 
 pub(crate) fn resolve_pins(
     ctx: &CommandContext,
@@ -107,54 +342,79 @@ fn download_artifact(
     pin: PinSpec,
     force_sdist: bool,
 ) -> Result<ResolvedDependency> {
-    let release = pypi.fetch_release(&pin.normalized, &pin.version, &pin.specifier)?;
     let builder = builder_identity_from_tags(tags);
     let default_build_hash = wheel_build_options_hash(python)?;
-    let artifact = if force_sdist {
-        build_wheel_via_sdist(
+    let artifact = match pin.source.as_ref() {
+        Some(ResolvedDistSource::Directory { path }) => build_wheel_via_directory(
             cache_store,
             cache,
-            &release,
             &pin,
             python,
             &default_build_hash,
             &builder.builder_id,
             &cache.path,
-        )?
-    } else {
-        match select_wheel(&release.urls, tags, &pin.specifier) {
-            Ok(wheel) => {
-                let request = ArtifactRequest {
-                    name: &pin.normalized,
-                    version: &pin.version,
-                    filename: &wheel.filename,
-                    url: &wheel.url,
-                    sha256: &wheel.sha256,
-                };
-                let cached = cache_store.cache_wheel(&cache.path, &request)?;
-                LockedArtifact {
-                    filename: wheel.filename.clone(),
-                    url: wheel.url.clone(),
-                    sha256: wheel.sha256.clone(),
-                    size: cached.size,
-                    cached_path: cached.wheel_path.display().to_string(),
-                    python_tag: wheel.python_tag.clone(),
-                    abi_tag: wheel.abi_tag.clone(),
-                    platform_tag: wheel.platform_tag.clone(),
-                    build_options_hash: default_build_hash.clone(),
-                    is_direct_url: false,
+            path,
+        )?,
+        Some(other) => {
+            return Err(InstallUserError::new(
+                "unsupported dependency source",
+                json!({
+                    "specifier": pin.specifier,
+                    "source": format!("{other:?}"),
+                    "hint": "Use registry-based requirements or adopt the dependency into the workspace.",
+                }),
+            )
+            .into())
+        }
+        None => {
+            let release = pypi.fetch_release(&pin.normalized, &pin.version, &pin.specifier)?;
+            if force_sdist {
+                build_wheel_via_sdist(
+                    cache_store,
+                    cache,
+                    &release,
+                    &pin,
+                    python,
+                    &default_build_hash,
+                    &builder.builder_id,
+                    &cache.path,
+                )?
+            } else {
+                match select_wheel(&release.urls, tags, &pin.specifier) {
+                    Ok(wheel) => {
+                        let request = ArtifactRequest {
+                            name: &pin.normalized,
+                            version: &pin.version,
+                            filename: &wheel.filename,
+                            url: &wheel.url,
+                            sha256: &wheel.sha256,
+                        };
+                        let cached = cache_store.cache_wheel(&cache.path, &request)?;
+                        LockedArtifact {
+                            filename: wheel.filename.clone(),
+                            url: wheel.url.clone(),
+                            sha256: wheel.sha256.clone(),
+                            size: cached.size,
+                            cached_path: cached.wheel_path.display().to_string(),
+                            python_tag: wheel.python_tag.clone(),
+                            abi_tag: wheel.abi_tag.clone(),
+                            platform_tag: wheel.platform_tag.clone(),
+                            build_options_hash: default_build_hash.clone(),
+                            is_direct_url: false,
+                        }
+                    }
+                    Err(_) => build_wheel_via_sdist(
+                        cache_store,
+                        cache,
+                        &release,
+                        &pin,
+                        python,
+                        &default_build_hash,
+                        &builder.builder_id,
+                        &cache.path,
+                    )?,
                 }
             }
-            Err(_) => build_wheel_via_sdist(
-                cache_store,
-                cache,
-                &release,
-                &pin,
-                python,
-                &default_build_hash,
-                &builder.builder_id,
-                &cache.path,
-            )?,
         }
     };
 
@@ -167,6 +427,76 @@ fn download_artifact(
         direct: pin.direct,
         requires: pin.requires,
         source: None,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_wheel_via_directory(
+    cache_store: &dyn effects::CacheStore,
+    cache: &CacheLocation,
+    pin: &PinSpec,
+    python: &str,
+    default_build_hash: &str,
+    builder_id: &str,
+    builder_root: &Path,
+    source_dir: &Path,
+) -> Result<LockedArtifact> {
+    if !source_dir.exists() {
+        return Err(InstallUserError::new(
+            "dependency source directory not found",
+            json!({
+                "specifier": pin.specifier,
+                "path": source_dir.display().to_string(),
+            }),
+        )
+        .into());
+    }
+
+    let archive_prefix = format!("{}-{}", pin.normalized, pin.version);
+    let archive = archive_source_dir_for_sdist(source_dir, &archive_prefix)?;
+    let sha256 = hex::encode(Sha256::digest(&archive));
+    let archive_root = cache
+        .path
+        .join("workspace-sources")
+        .join(&pin.normalized)
+        .join(&pin.version);
+    std::fs::create_dir_all(&archive_root)?;
+    let archive_path = archive_root.join(format!("{sha256}.tar.gz"));
+    if !archive_path.exists() {
+        std::fs::write(&archive_path, &archive)?;
+    }
+    let archive_url = archive_path.display().to_string();
+    let filename = format!("{}-{}.tar.gz", pin.normalized, pin.version);
+    let built = cache_store.ensure_sdist_build(
+        &cache.path,
+        &SdistRequest {
+            normalized_name: &pin.normalized,
+            version: &pin.version,
+            filename: &filename,
+            url: &archive_url,
+            sha256: Some(&sha256),
+            source_subdir: None,
+            python_path: python,
+            builder_id,
+            builder_root: Some(builder_root.to_path_buf()),
+        },
+    )?;
+    let build_options_hash = if built.build_options_hash.is_empty() {
+        default_build_hash.to_string()
+    } else {
+        built.build_options_hash.clone()
+    };
+    Ok(LockedArtifact {
+        filename: built.filename,
+        url: source_dir.display().to_string(),
+        sha256: built.sha256,
+        size: built.size,
+        cached_path: built.cached_path.display().to_string(),
+        python_tag: built.python_tag,
+        abi_tag: built.abi_tag,
+        platform_tag: built.platform_tag,
+        build_options_hash,
+        is_direct_url: true,
     })
 }
 
@@ -190,6 +520,7 @@ fn build_wheel_via_sdist(
             filename: &sdist.filename,
             url: &sdist.url,
             sha256: Some(&sdist.digests.sha256),
+            source_subdir: None,
             python_path: python,
             builder_id,
             builder_root: Some(builder_root.to_path_buf()),
@@ -628,6 +959,7 @@ pub fn parse_exact_pin(spec: &str) -> Result<PinSpec> {
         marker,
         direct: true,
         requires: Vec::new(),
+        source: None,
     })
 }
 

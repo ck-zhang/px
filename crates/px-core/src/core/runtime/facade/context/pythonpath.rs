@@ -2,6 +2,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
+use toml_edit::{DocumentMut, Item};
 
 use crate::core::runtime as effects;
 
@@ -72,6 +73,111 @@ fn discover_code_generator_paths(
     extras
 }
 
+fn contains_native_sources(
+    fs: &dyn effects::FileSystem,
+    project_root: &Path,
+    max_depth: usize,
+) -> bool {
+    fn should_skip_dir(name: &str) -> bool {
+        matches!(
+            name,
+            ".git"
+                | ".px"
+                | "__pycache__"
+                | ".pytest_cache"
+                | ".mypy_cache"
+                | ".ruff_cache"
+                | "tests"
+                | "test"
+                | ".cache"
+                | ".venv"
+                | ".tox"
+                | "target"
+                | "dist"
+                | "build"
+                | "node_modules"
+                | ".idea"
+                | ".vscode"
+        )
+    }
+
+    let mut stack = vec![(project_root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(entries) = fs.read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if depth < max_depth {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if should_skip_dir(name) {
+                            continue;
+                        }
+                    }
+                    stack.push((path, depth + 1));
+                }
+                continue;
+            }
+            let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if matches!(
+                ext,
+                "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "pyx" | "pxd"
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn prefers_installed_project_wheel(fs: &dyn effects::FileSystem, project_root: &Path) -> bool {
+    let manifest = project_root.join("pyproject.toml");
+    let Ok(contents) = fs.read_to_string(&manifest) else {
+        return false;
+    };
+    let Ok(doc) = contents.parse::<DocumentMut>() else {
+        return false;
+    };
+    let build_system = doc.get("build-system").and_then(Item::as_table);
+    let build_backend = build_system
+        .and_then(|table| table.get("build-backend"))
+        .and_then(Item::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if build_backend == "mesonpy" || build_backend == "maturin" {
+        return true;
+    }
+    let requires = build_system
+        .and_then(|table| table.get("requires"))
+        .and_then(Item::as_array)
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(|value| value.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let is_setuptools = build_backend.starts_with("setuptools")
+        || (build_backend.is_empty() && requires.iter().any(|req| req.contains("setuptools")));
+    if is_setuptools
+        && requires.iter().any(|req| {
+            req.contains("cython") || req.contains("scikit-build-core") || req.contains("setuptools-rust")
+        })
+    {
+        return true;
+    }
+    if contains_native_sources(fs, project_root, 4) {
+        return true;
+    }
+    requires
+        .iter()
+        .any(|req| req.contains("meson-python") || req.contains("maturin"))
+}
+
 pub(crate) fn build_pythonpath(
     fs: &dyn effects::FileSystem,
     project_root: &Path,
@@ -95,21 +201,6 @@ pub(crate) fn build_pythonpath(
         if let Ok(canon) = fs.canonicalize(&site_packages) {
             if canon != site_packages {
                 site_paths.push(canon);
-            }
-        }
-    }
-    let pth = canonical.join("px.pth");
-    if pth.exists() {
-        if let Ok(contents) = fs.read_to_string(&pth) {
-            for line in contents.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let entry_path = PathBuf::from(trimmed);
-                if entry_path.exists() {
-                    site_paths.push(entry_path);
-                }
             }
         }
     }
@@ -148,6 +239,8 @@ pub(crate) fn build_pythonpath(
     }
     project_paths.push(project_root.to_path_buf());
 
+    let prefer_wheel = prefers_installed_project_wheel(fs, project_root);
+
     let mut pep582_libs = Vec::new();
     let mut pep582_bins = Vec::new();
     let pep582_root = project_root.join("__pypackages__");
@@ -176,28 +269,48 @@ pub(crate) fn build_pythonpath(
     if let Some(dir) = site_dir_used.as_ref() {
         paths.push(dir.clone());
     }
-    paths.extend(code_paths.clone());
-    paths.extend(project_paths.clone());
-    if let Some(pkgs) = site_packages_used.as_ref() {
-        paths.push(pkgs.clone());
-    }
-    for path in site_paths {
-        if Some(&path) == site_dir_used.as_ref() {
-            continue;
+    if prefer_wheel {
+        if let Some(pkgs) = site_packages_used.as_ref() {
+            paths.push(pkgs.clone());
         }
-        if site_packages_used
-            .as_ref()
-            .is_some_and(|pkgs| pkgs == &path)
-        {
-            continue;
+        for path in &site_paths {
+            if Some(path) == site_dir_used.as_ref() {
+                continue;
+            }
+            if site_packages_used
+                .as_ref()
+                .is_some_and(|pkgs| pkgs == path)
+            {
+                continue;
+            }
+            paths.push(path.clone());
         }
-        if project_paths.iter().any(|pkg| pkg == &path) {
-            continue;
+        paths.extend(code_paths.clone());
+        paths.extend(project_paths.clone());
+    } else {
+        paths.extend(code_paths.clone());
+        paths.extend(project_paths.clone());
+        if let Some(pkgs) = site_packages_used.as_ref() {
+            paths.push(pkgs.clone());
         }
-        if code_paths.iter().any(|extra| extra == &path) {
-            continue;
+        for path in &site_paths {
+            if Some(path) == site_dir_used.as_ref() {
+                continue;
+            }
+            if site_packages_used
+                .as_ref()
+                .is_some_and(|pkgs| pkgs == path)
+            {
+                continue;
+            }
+            if project_paths.iter().any(|pkg| pkg == path) {
+                continue;
+            }
+            if code_paths.iter().any(|extra| extra == path) {
+                continue;
+            }
+            paths.push(path.clone());
         }
-        paths.push(path);
     }
     paths.extend(pep582_libs);
     paths.retain(|p| p.exists());

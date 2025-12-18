@@ -71,8 +71,8 @@ pub(super) use editable::load_editable_project_metadata;
 pub(super) use editable::write_sitecustomize;
 pub(super) use editable::{
     materialize_wheel_scripts, normalize_project_name, uses_maturin_backend,
-    write_project_metadata_stub,
 };
+pub(crate) use editable::write_project_metadata_stub;
 #[cfg(test)]
 pub(super) use refresh::uv_cli_candidates;
 pub(super) use refresh::{
@@ -128,15 +128,13 @@ def _stdlib_prefixes():
     return prefixes
 
 _STD_PREFIXES = _stdlib_prefixes()
+_ORIG_PYTHONPATH = os.environ.get("PYTHONPATH", "")
 _PX_ALLOWED = os.environ.get("PX_ALLOWED_PATHS", "")
-_ALLOWED = [p for p in _PX_ALLOWED.split(os.pathsep) if p]
-if not _ALLOWED:
-    _ALLOWED = _collect_allowed_from_pythonpath()
-else:
-    for entry in _collect_allowed_from_pythonpath():
-        if entry not in _ALLOWED:
-            _ALLOWED.append(entry)
-_ALLOWED_ENV = os.pathsep.join(_ALLOWED)
+_ALLOWED = _collect_allowed_from_pythonpath()
+for entry in _PX_ALLOWED.split(os.pathsep):
+    if entry and entry not in _ALLOWED:
+        _ALLOWED.append(entry)
+_PARENT_PYTHONPATH = _PX_ALLOWED if _PX_ALLOWED else _ORIG_PYTHONPATH
 
 _FILTER_PATHS = True
 _target_exe = os.environ.get("PX_PYTHON")
@@ -215,8 +213,8 @@ if _FILTER_PATHS:
         _push(_cwd)
 
     sys.path[:] = _new_path
-    # Ensure child processes inherit the px path set instead of a mutated sys.path
-    os.environ["PYTHONPATH"] = _ALLOWED_ENV
+    # Ensure child processes inherit the base px path set without exploding argv/env size.
+    os.environ["PYTHONPATH"] = _PARENT_PYTHONPATH
 
     _SITE_BIN = Path(__file__).resolve().parent / "bin"
     if not _SITE_BIN.exists():

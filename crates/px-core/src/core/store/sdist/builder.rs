@@ -104,6 +104,7 @@ umask 022
 ENV_ROOT="__ENV_ROOT__"
 DIST_DIR="__DIST_DIR__"
 SDIST="__SDIST__"
+SOURCE_SUBDIR="__SOURCE_SUBDIR__"
 export MAMBA_PKGS_DIRS=/builder/pkgs
 export PIP_CACHE_DIR=/builder/pip-cache
 export PIP_NO_BUILD_ISOLATION=1
@@ -115,16 +116,12 @@ export PX_BASE_APT="__BASE_APT__"
 export PKG_CONFIG=/usr/bin/pkg-config
 unset PKG_CONFIG_LIBDIR
 SYS_PKG_CONFIG_PATH="/usr/share/pkgconfig:/usr/lib/pkgconfig"
-MULTIARCH="$(/usr/bin/gcc -print-multiarch 2>/dev/null || true)"
-if [ -n "$MULTIARCH" ] && [ -d "/usr/lib/$MULTIARCH/pkgconfig" ]; then
-  SYS_PKG_CONFIG_PATH="$SYS_PKG_CONFIG_PATH:/usr/lib/$MULTIARCH/pkgconfig"
-fi
 if [ -n "${PKG_CONFIG_PATH:-}" ]; then
   SYS_PKG_CONFIG_PATH="$SYS_PKG_CONFIG_PATH:$PKG_CONFIG_PATH"
 fi
-export PKG_CONFIG_PATH="$SYS_PKG_CONFIG_PATH"
 export CONDA_SPEC="__CONDA_SPEC__"
 APT_OPTS="__APT_OPTS__"
+APT_OPTS_NOPROXY="$APT_OPTS -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false"
 PY_BIN="$ENV_ROOT/bin/python"
 if [ ! -d "$ENV_ROOT/conda-meta" ]; then
   rm -rf "$ENV_ROOT"
@@ -133,11 +130,15 @@ mkdir -p "$MAMBA_PKGS_DIRS" "$DIST_DIR" "$PIP_CACHE_DIR"
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 if [ ! -x "$PY_BIN" ]; then
-  micromamba create -y -p "$ENV_ROOT" --override-channels -c conda-forge \
-    python==__PY_VERSION__ pip wheel setuptools numpy rust >/dev/null
+  if ! micromamba create -y -p "$ENV_ROOT" --override-channels -c conda-forge \
+    python==__PY_VERSION__ pip wheel setuptools numpy >/dev/null; then
+    HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= \
+      micromamba create -y -p "$ENV_ROOT" --override-channels -c conda-forge \
+        python==__PY_VERSION__ pip wheel setuptools numpy >/dev/null
+  fi
   HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= micromamba run -p "$ENV_ROOT" python -m pip install --upgrade pip build wheel pysocks >/dev/null
 fi
-micromamba repoquery depends --json --override-channels -c conda-forge "$CONDA_SPEC" > /work/repoquery.json || true
+HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= micromamba repoquery depends --json --override-channels -c conda-forge "$CONDA_SPEC" > /work/repoquery.json || true
 APT_LIST=$(micromamba run -p "$ENV_ROOT" python - <<'PY'
 import json, os
 from pathlib import Path
@@ -178,7 +179,25 @@ if [ -n "$ALL_APT" ]; then
   ALL_APT=$(printf "%s\n" "$ALL_APT" | tr ' ' '\n' | sed '/^$/d' | sort -u | xargs)
   export ALL_APT
   __APT_MIRROR_SETUP__
-  apt-get $APT_OPTS update -y >/dev/null
+  APT_ATTEMPT=0
+  while true; do
+    if apt-get $APT_OPTS update -y >/dev/null; then
+      break
+    fi
+    if apt-get $APT_OPTS_NOPROXY update -y >/dev/null; then
+      APT_OPTS="$APT_OPTS_NOPROXY"
+      break
+    fi
+    APT_ATTEMPT=$((APT_ATTEMPT+1))
+    if [ "$APT_ATTEMPT" -ge 5 ]; then
+      echo "apt-get update failed after $APT_ATTEMPT attempts" >&2
+      apt-get $APT_OPTS update || true
+      exit 1
+    fi
+    rm -rf /var/lib/apt/lists/*
+    apt-get $APT_OPTS clean >/dev/null || true
+    sleep $((APT_ATTEMPT*2))
+  done
   APT_INSTALL=$(micromamba run -p "$ENV_ROOT" python - <<'PY'
 import json, os, subprocess
 from pathlib import Path
@@ -217,9 +236,17 @@ print(" ".join(install))
 PY
 )
   if [ -n "$APT_INSTALL" ]; then
-    DEBIAN_FRONTEND=noninteractive apt-get $APT_OPTS install -y --no-install-recommends $APT_INSTALL >/dev/null
+    if ! DEBIAN_FRONTEND=noninteractive apt-get $APT_OPTS install -y --no-install-recommends $APT_INSTALL >/dev/null; then
+      DEBIAN_FRONTEND=noninteractive apt-get $APT_OPTS_NOPROXY install -y --no-install-recommends $APT_INSTALL >/dev/null
+      APT_OPTS="$APT_OPTS_NOPROXY"
+    fi
   fi
 fi
+MULTIARCH="$(/usr/bin/gcc -print-multiarch 2>/dev/null || true)"
+if [ -n "$MULTIARCH" ]; then
+  SYS_PKG_CONFIG_PATH="$SYS_PKG_CONFIG_PATH:/usr/lib/$MULTIARCH/pkgconfig"
+fi
+export PKG_CONFIG_PATH="$SYS_PKG_CONFIG_PATH"
 # Suitesparse doesn't ship a stable pkg-config name on all distros, but some sdists
 # (e.g. scikit-umfpack) require `dependency('umfpack')` to succeed. Provide a minimal
 # fallback when SuiteSparse headers are present.
@@ -239,13 +266,129 @@ Cflags: -I${includedir}
 EOF
   fi
 fi
-micromamba run -p "$ENV_ROOT" env PKG_CONFIG=/usr/bin/pkg-config PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-}" PKG_CONFIG_LIBDIR= CC=/usr/bin/gcc CXX=/usr/bin/g++ "$PY_BIN" -m pip wheel --no-deps --wheel-dir "$DIST_DIR" "$SDIST"
+
+if [ -f /work/system-deps.json ] && grep -q '\"arrow\"' /work/system-deps.json; then
+  export PYARROW_BUNDLE_ARROW_CPP=1
+  if ! micromamba install -y -p "$ENV_ROOT" --override-channels -c conda-forge arrow-cpp >/dev/null; then
+    HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= \
+      micromamba install -y -p "$ENV_ROOT" --override-channels -c conda-forge arrow-cpp >/dev/null
+  fi
+  export CMAKE_PREFIX_PATH="$ENV_ROOT${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+fi
+
+NEEDS_RUST=$(micromamba run -p "$ENV_ROOT" "$PY_BIN" - "$SDIST" <<'PY'
+import sys
+import tarfile
+import zipfile
+
+path = sys.argv[1]
+
+def wants_rust_from_pyproject(contents: str) -> bool:
+    lower = contents.lower()
+    return ("maturin" in lower) or ("setuptools-rust" in lower) or ("setuptools_rust" in lower)
+
+need = False
+try:
+    if path.endswith((".tar.gz", ".tgz", ".tar.bz2", ".tar")):
+        with tarfile.open(path) as t:
+            names = t.getnames()
+            need = any(name.endswith("Cargo.toml") for name in names)
+            if not need:
+                for name in names:
+                    if not name.endswith("pyproject.toml"):
+                        continue
+                    fileobj = t.extractfile(name)
+                    if not fileobj:
+                        continue
+                    try:
+                        data = fileobj.read().decode("utf-8", "ignore")
+                    except Exception:
+                        continue
+                    if wants_rust_from_pyproject(data):
+                        need = True
+                        break
+    elif path.endswith(".zip"):
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+            need = any(name.endswith("Cargo.toml") for name in names)
+            if not need:
+                for name in names:
+                    if not name.endswith("pyproject.toml"):
+                        continue
+                    try:
+                        data = z.read(name).decode("utf-8", "ignore")
+                    except Exception:
+                        continue
+                    if wants_rust_from_pyproject(data):
+                        need = True
+                        break
+except Exception:
+    need = False
+
+print("1" if need else "0")
+PY
+)
+if [ "$NEEDS_RUST" = "1" ]; then
+  export RUSTUP_HOME=/builder/rustup
+  export CARGO_HOME=/builder/cargo
+  if [ ! -x "$CARGO_HOME/bin/cargo" ]; then
+    curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable >/dev/null
+  fi
+  export PATH="$CARGO_HOME/bin:$PATH"
+fi
+BUILD_INPUT="$SDIST"
+if [ -n "$SOURCE_SUBDIR" ] && [ "$SOURCE_SUBDIR" != "." ]; then
+  SRC_EXTRACT=$(mktemp -d)
+  export SRC_EXTRACT
+  export SDIST
+  micromamba run -p "$ENV_ROOT" python - <<'PY'
+import os
+import tarfile
+import zipfile
+from pathlib import Path
+
+sdist = Path(os.environ["SDIST"])
+dest = Path(os.environ["SRC_EXTRACT"])
+dest.mkdir(parents=True, exist_ok=True)
+
+name = sdist.name.lower()
+if name.endswith((".tar.gz", ".tgz", ".tar", ".tar.bz2")):
+    mode = "r:*"
+    with tarfile.open(sdist, mode) as tf:
+        tf.extractall(dest)
+elif name.endswith(".zip"):
+    with zipfile.ZipFile(sdist) as zf:
+        zf.extractall(dest)
+else:
+    raise SystemExit(f"unsupported sdist archive: {sdist}")
+PY
+  TOP_DIR=$(micromamba run -p "$ENV_ROOT" python - <<'PY'
+from pathlib import Path
+import os
+
+dest = Path(os.environ["SRC_EXTRACT"])
+entries = [p for p in dest.iterdir()]
+if len(entries) == 1:
+    print(entries[0])
+else:
+    dirs = [p for p in entries if p.is_dir()]
+    print(dirs[0] if dirs else dest)
+PY
+)
+  BUILD_INPUT="$TOP_DIR/$SOURCE_SUBDIR"
+  if [ ! -d "$BUILD_INPUT" ]; then
+    echo "source subdir '$SOURCE_SUBDIR' missing under $TOP_DIR" >&2
+    exit 1
+  fi
+fi
+micromamba run -p "$ENV_ROOT" env PKG_CONFIG=/usr/bin/pkg-config PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-}" PKG_CONFIG_LIBDIR= CC=/usr/bin/gcc CXX=/usr/bin/g++ "$PY_BIN" -m pip wheel --no-deps --wheel-dir "$DIST_DIR" "$BUILD_INPUT"
 "#
     .to_string();
     script = script
         .replace("__ENV_ROOT__", env_root_container)
         .replace("__DIST_DIR__", dist_dir_container)
         .replace("__SDIST__", &sdist_container)
+        .replace("__SOURCE_SUBDIR__", request.source_subdir.unwrap_or(""))
         .replace("__CAP_RULES__", &cap_rules_json)
         .replace("__APT_RULES__", &apt_rules_json)
         .replace("__BASE_APT__", &base_apt)

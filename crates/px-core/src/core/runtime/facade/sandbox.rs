@@ -37,13 +37,30 @@ impl SysEnvGuard {
         }
     }
 
+    fn append_paths(&mut self, key: &str, entries: &[PathBuf]) {
+        let mut parts: Vec<PathBuf> = Vec::new();
+        if let Some(existing) = env::var_os(key) {
+            parts.extend(env::split_paths(&existing));
+        }
+        parts.extend(entries.iter().filter(|path| path.exists()).cloned());
+        if parts.is_empty() {
+            return;
+        }
+        if let Ok(joined) = env::join_paths(&parts) {
+            self.set_var(key, joined.to_string_lossy().to_string());
+        }
+    }
+
     pub(super) fn apply(&mut self, root: &Path) {
         let path_entries = [
             root.join("usr/bin"),
             root.join("bin"),
             root.join("usr/sbin"),
         ];
-        self.prepend_paths("PATH", &path_entries);
+        // System-deps rootfs may contain compilers/toolchains that don't work when executed
+        // outside a proper chroot/container. Prefer host PATH and only fall back to rootfs
+        // tools when missing.
+        self.append_paths("PATH", &path_entries);
 
         let lib_paths = [
             root.join("lib"),
@@ -74,18 +91,6 @@ impl SysEnvGuard {
         let proj_lib = root.join("usr/share/proj");
         if proj_lib.exists() {
             self.set_var("PROJ_LIB", proj_lib.display().to_string());
-        }
-        if env::var_os("CC").is_none() {
-            let cc = root.join("usr/bin/gcc");
-            if cc.exists() {
-                self.set_var("CC", cc.display().to_string());
-            }
-        }
-        if env::var_os("CXX").is_none() {
-            let cxx = root.join("usr/bin/g++");
-            if cxx.exists() {
-                self.set_var("CXX", cxx.display().to_string());
-            }
         }
     }
 }

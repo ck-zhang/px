@@ -97,6 +97,7 @@ fn builder_container_required_when_backend_missing() {
         filename: "demo-0.1.0.tar.gz",
         url: "https://example.com/demo-0.1.0.tar.gz",
         sha256: None,
+        source_subdir: None,
         python_path: "python",
         builder_id: "demo-builder",
         builder_root: Some(temp.path().to_path_buf()),

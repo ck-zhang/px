@@ -8,9 +8,12 @@ use std::{
 use anyhow::{anyhow, Result};
 use px_domain::api::{LockSnapshot, LockedArtifact};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use toml_edit::{DocumentMut, Item};
 
 use crate::core::runtime::builder::builder_identity_for_runtime;
+use crate::core::runtime::artifacts::archive_source_dir_for_sdist;
 use crate::core::runtime::facade::RuntimeMetadata;
 use crate::store::cas::{
     archive_dir_canonical, global_store, pkg_build_lookup_key, source_lookup_key, LoadedObject,
@@ -135,6 +138,20 @@ pub(crate) fn ensure_profile_manifest(
     let mut packages = Vec::new();
     let mut sys_path_order = Vec::new();
     let mut sys_seen = HashSet::new();
+    if wants_project_pkg_build(&snapshot.manifest_path) {
+        let project_pkg = ensure_project_pkg_build(
+            cache_root,
+            snapshot,
+            runtime,
+            &runtime_abi,
+            &builder_id,
+            &default_build_options_hash,
+        )?;
+        if sys_seen.insert(project_pkg.pkg_build_oid.clone()) {
+            sys_path_order.push(project_pkg.pkg_build_oid.clone());
+        }
+        packages.push(project_pkg);
+    }
     for dep in &lock.resolved {
         let Some(artifact) = &dep.artifact else {
             continue;
@@ -162,16 +179,23 @@ pub(crate) fn ensure_profile_manifest(
             index_url: artifact.url.clone(),
             sha256: artifact.sha256.clone(),
         };
-        let builder_needed = artifact.build_options_hash.contains("native-libs")
-            || !artifact.platform_tag.eq_ignore_ascii_case("any")
-            || !artifact.abi_tag.eq_ignore_ascii_case("none");
+        let build_from_source = {
+            let url = artifact.url.to_ascii_lowercase();
+            let filename = artifact.filename.to_ascii_lowercase();
+            !filename.ends_with(".whl")
+                || url.ends_with(".tar.gz")
+                || url.ends_with(".tgz")
+                || url.ends_with(".tar.bz2")
+                || url.ends_with(".tar")
+                || url.ends_with(".zip")
+        };
         let mut build_options_hash = if artifact.build_options_hash.is_empty() {
             default_build_options_hash.clone()
         } else {
             artifact.build_options_hash.clone()
         };
         let mut builder_dist: Option<PathBuf> = None;
-        let wheel_path = if builder_needed {
+        let wheel_path = if build_from_source {
             let sha = if artifact.filename.ends_with(".whl") || source_header.sha256.is_empty() {
                 None
             } else {
@@ -185,6 +209,7 @@ pub(crate) fn ensure_profile_manifest(
                     filename: &source_header.filename,
                     url: &source_header.index_url,
                     sha256: sha,
+                    source_subdir: None,
                     python_path: &runtime.path,
                     builder_id: &builder_id,
                     builder_root: Some(cache_root.to_path_buf()),
@@ -240,7 +265,7 @@ pub(crate) fn ensure_profile_manifest(
                 stored.oid
             }
         };
-        if builder_needed {
+        if build_options_hash.contains("native-libs") {
             for dir in [
                 "lib",
                 "lib64",
@@ -315,6 +340,327 @@ pub(crate) fn ensure_profile_manifest(
         profile_oid: profile_obj.oid,
         runtime_path: runtime_exe,
         header: manifest,
+    })
+}
+
+fn wants_project_pkg_build(manifest_path: &Path) -> bool {
+    fn contains_native_sources(project_root: &Path) -> bool {
+        fn should_skip_entry(entry: &walkdir::DirEntry) -> bool {
+            let name = entry.file_name().to_str().unwrap_or_default();
+            matches!(
+                name,
+                ".git"
+                    | ".px"
+                    | "__pycache__"
+                    | ".pytest_cache"
+                    | ".mypy_cache"
+                    | ".ruff_cache"
+                    | "tests"
+                    | "test"
+                    | ".cache"
+                    | ".venv"
+                    | ".tox"
+                    | "target"
+                    | "dist"
+                    | "build"
+                    | "node_modules"
+                    | ".idea"
+                    | ".vscode"
+            ) || name == "px.lock"
+                || name == "px.workspace.lock"
+        }
+
+        for entry in walkdir::WalkDir::new(project_root)
+            .max_depth(5)
+            .into_iter()
+            .filter_entry(|entry| !should_skip_entry(entry))
+            .flatten()
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let Some(ext) = entry.path().extension().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if matches!(
+                ext,
+                "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" | "pyx" | "pxd"
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
+    let Ok(contents) = fs::read_to_string(manifest_path) else {
+        return false;
+    };
+    let Ok(doc) = contents.parse::<DocumentMut>() else {
+        return false;
+    };
+    let build_system = doc.get("build-system").and_then(Item::as_table);
+    let build_backend = build_system
+        .and_then(|table| table.get("build-backend"))
+        .and_then(Item::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if build_backend == "mesonpy" || build_backend == "maturin" {
+        return true;
+    }
+    let requires = build_system
+        .and_then(|table| table.get("requires"))
+        .and_then(Item::as_array)
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(|value| value.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let is_setuptools = build_backend.starts_with("setuptools")
+        || (build_backend.is_empty() && requires.iter().any(|req| req.contains("setuptools")));
+    if is_setuptools
+        && requires.iter().any(|req| {
+            req.contains("cython") || req.contains("scikit-build-core") || req.contains("setuptools-rust")
+        })
+    {
+        return true;
+    }
+    if let Some(root) = manifest_path.parent() {
+        if contains_native_sources(root) {
+            return true;
+        }
+    }
+    requires
+        .iter()
+        .any(|req| req.contains("meson-python") || req.contains("maturin"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wants_project_pkg_build;
+
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    #[test]
+    fn project_pkg_build_ignores_native_sources_in_tests_dirs() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        fs::write(
+            root.join("pyproject.toml"),
+            r#"[build-system]
+requires = ["setuptools>=42"]
+"#,
+        )
+        .expect("write pyproject");
+        fs::create_dir_all(root.join("tests")).expect("create tests");
+        fs::write(root.join("tests/demo.pyx"), "print('demo')\n").expect("write pyx");
+
+        assert!(
+            !wants_project_pkg_build(&root.join("pyproject.toml")),
+            "native sources under tests/ should not force a project wheel build"
+        );
+
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("src/native.c"), "/* native */\n").expect("write native");
+
+        assert!(
+            wants_project_pkg_build(&root.join("pyproject.toml")),
+            "native sources under src/ should force a project wheel build"
+        );
+    }
+}
+
+fn ensure_project_pkg_build(
+    cache_root: &Path,
+    snapshot: &ManifestSnapshot,
+    runtime: &RuntimeMetadata,
+    runtime_abi: &str,
+    builder_id: &str,
+    default_build_options_hash: &str,
+) -> Result<ProfilePackage> {
+    fn wheel_metadata(dist_dir: &Path) -> Result<(String, String)> {
+        let meta = fs::read_dir(dist_dir)?
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".dist-info"))
+            })
+            .ok_or_else(|| anyhow!("wheel dist-info missing in {}", dist_dir.display()))?;
+        let metadata = meta.join("METADATA");
+        let contents = fs::read_to_string(&metadata)
+            .map_err(|err| anyhow!(err).context(format!("reading {}", metadata.display())))?;
+        let mut name = String::new();
+        let mut version = String::new();
+        for line in contents.lines() {
+            if let Some(value) = line.strip_prefix("Name:") {
+                name = value.trim().to_string();
+            }
+            if let Some(value) = line.strip_prefix("Version:") {
+                version = value.trim().to_string();
+            }
+            if !name.is_empty() && !version.is_empty() {
+                break;
+            }
+        }
+        if name.is_empty() || version.is_empty() {
+            return Err(anyhow!(
+                "wheel metadata missing name/version in {}",
+                metadata.display()
+            ));
+        }
+        Ok((name, version))
+    }
+
+    fn setuptools_scm_root(snapshot: &ManifestSnapshot) -> Option<PathBuf> {
+        let contents = fs::read_to_string(&snapshot.manifest_path).ok()?;
+        let doc = contents.parse::<DocumentMut>().ok()?;
+        let build_system = doc.get("build-system").and_then(Item::as_table);
+        let build_backend = build_system
+            .and_then(|table| table.get("build-backend"))
+            .and_then(Item::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let requires = build_system
+            .and_then(|table| table.get("requires"))
+            .and_then(Item::as_array)
+            .map(|array| {
+                array
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .map(|value| value.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let is_setuptools = build_backend.starts_with("setuptools")
+            || (build_backend.is_empty() && requires.iter().any(|req| req.contains("setuptools")));
+        if !is_setuptools {
+            return None;
+        }
+        let root = doc
+            .get("tool")
+            .and_then(Item::as_table)
+            .and_then(|table| table.get("setuptools_scm"))
+            .and_then(Item::as_table)
+            .and_then(|table| table.get("root"))
+            .and_then(Item::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != ".");
+        let root = root?;
+        let candidate = snapshot.root.join(root);
+        fs::canonicalize(candidate).ok()
+    }
+
+    let archive_prefix = format!("{}-0.0.0", snapshot.name);
+    let snapshot_root_canon =
+        fs::canonicalize(&snapshot.root).unwrap_or_else(|_| snapshot.root.clone());
+    let (archive_root, source_subdir) = match setuptools_scm_root(snapshot) {
+        Some(root) => {
+            let root_canon = fs::canonicalize(&root).unwrap_or(root);
+            match snapshot_root_canon.strip_prefix(&root_canon) {
+                Ok(rel) => {
+                    let rel = rel.to_string_lossy().replace('\\', "/");
+                    let rel = rel.trim_matches('/').to_string();
+                    let subdir = if rel.is_empty() { None } else { Some(rel) };
+                    (root_canon, subdir)
+                }
+                Err(_) => (snapshot.root.clone(), None),
+            }
+        }
+        None => (snapshot.root.clone(), None),
+    };
+    let archive = archive_source_dir_for_sdist(&archive_root, &archive_prefix)?;
+    let sha256 = hex::encode(Sha256::digest(&archive));
+    let version_id = format!("0.0.0+px{}", sha256.chars().take(16).collect::<String>());
+    let filename = format!("{}-{}.tar.gz", snapshot.name, version_id);
+
+    let archive_root = cache_root.join("project-sources").join(&snapshot.name);
+    fs::create_dir_all(&archive_root)?;
+    let archive_path = archive_root.join(format!("{sha256}.tar.gz"));
+    if !archive_path.exists() {
+        fs::write(&archive_path, &archive)?;
+    }
+
+    let built = ensure_sdist_build(
+        cache_root,
+        &SdistRequest {
+            normalized_name: &snapshot.name,
+            version: &version_id,
+            filename: &filename,
+            url: &archive_path.display().to_string(),
+            sha256: Some(&sha256),
+            source_subdir: source_subdir.as_deref(),
+            python_path: &runtime.path,
+            builder_id,
+            builder_root: Some(cache_root.to_path_buf()),
+        },
+    )?;
+    let wheel_filename = built.filename.clone();
+    let wheel_sha256 = built.sha256.clone();
+    let wheel_path = built.cached_path.clone();
+    let dist_dir = built.dist_path.clone();
+    let build_options_hash = if built.build_options_hash.is_empty() {
+        default_build_options_hash.to_string()
+    } else {
+        built.build_options_hash.clone()
+    };
+    let (name, version) = wheel_metadata(&dist_dir)?;
+
+    let store = global_store();
+    let source_header = SourceHeader {
+        name: name.clone(),
+        version: version.clone(),
+        filename: wheel_filename,
+        index_url: archive_path.display().to_string(),
+        sha256: wheel_sha256,
+    };
+    let source_key = source_lookup_key(&source_header);
+    let source_oid = match store.lookup_key(ObjectKind::Source, &source_key)? {
+        Some(oid) => oid,
+        None => {
+            let bytes = fs::read(&wheel_path)?;
+            let payload = ObjectPayload::Source {
+                header: source_header.clone(),
+                bytes: Cow::Owned(bytes),
+            };
+            let stored = store.store(&payload)?;
+            store.record_key(ObjectKind::Source, &source_key, &stored.oid)?;
+            stored.oid
+        }
+    };
+
+    let pkg_header = PkgBuildHeader {
+        source_oid,
+        runtime_abi: runtime_abi.to_string(),
+        builder_id: builder_id.to_string(),
+        build_options_hash,
+    };
+    let pkg_key = pkg_build_lookup_key(&pkg_header);
+    let pkg_oid = match store.lookup_key(ObjectKind::PkgBuild, &pkg_key)? {
+        Some(existing) => existing,
+        None => {
+            let (stage_guard, staging_root) = stage_pkg_build(&dist_dir)?;
+            let archive = archive_dir_canonical(&staging_root)?;
+            drop(stage_guard);
+            let payload = ObjectPayload::PkgBuild {
+                header: pkg_header,
+                archive: Cow::Owned(archive),
+            };
+            let stored = store.store(&payload)?;
+            store.record_key(ObjectKind::PkgBuild, &pkg_key, &stored.oid)?;
+            stored.oid
+        }
+    };
+
+    Ok(ProfilePackage {
+        name,
+        version,
+        pkg_build_oid: pkg_oid,
     })
 }
 

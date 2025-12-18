@@ -207,6 +207,62 @@ fn apply_runtime_python_home(envs: &mut EnvPairs, runtime: &Path) {
     set_env_pair(envs, "PYTHONHOME", runtime_root.display().to_string());
 }
 
+fn python_args_disable_site(args: &[String]) -> bool {
+    let mut idx = 0usize;
+    while idx < args.len() {
+        let arg = &args[idx];
+        if arg == "--" {
+            break;
+        }
+        if arg == "-S" {
+            return true;
+        }
+        if arg == "-c" || arg == "-m" {
+            break;
+        }
+        if arg == "-W" || arg == "-X" {
+            idx = idx.saturating_add(2);
+            continue;
+        }
+        if arg == "-" || !arg.starts_with('-') {
+            break;
+        }
+        idx = idx.saturating_add(1);
+    }
+    false
+}
+
+fn apply_cas_native_sys_path_for_no_site(envs: &mut EnvPairs, sys_path_entries: &[PathBuf]) {
+    if sys_path_entries.is_empty() {
+        return;
+    }
+
+    let existing = envs
+        .iter()
+        .find(|(key, _)| key == "PYTHONPATH")
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default();
+    let mut merged = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in env::split_paths(&existing) {
+        if seen.insert(entry.clone()) {
+            merged.push(entry);
+        }
+    }
+    for entry in sys_path_entries {
+        if seen.insert(entry.clone()) {
+            merged.push(entry.clone());
+        }
+    }
+    let Ok(joined) = env::join_paths(merged.iter().map(|path| path.as_os_str())) else {
+        return;
+    };
+    let Ok(pythonpath) = joined.into_string() else {
+        return;
+    };
+    set_env_pair(envs, "PYTHONPATH", pythonpath);
+}
+
 fn program_on_path(program: &str, envs: &EnvPairs) -> bool {
     let value = envs
         .iter()
@@ -504,6 +560,9 @@ fn run_executable_cas_native(
     if uses_px_python {
         apply_runtime_python_home(&mut envs, &native.runtime_path);
         apply_profile_env_vars(&mut envs, &native.env_vars);
+        if python_args_disable_site(extra_args) {
+            apply_cas_native_sys_path_for_no_site(&mut envs, &native.sys_path_entries);
+        }
     } else {
         envs.retain(|(key, _)| key != "PX_PYTHON");
     }

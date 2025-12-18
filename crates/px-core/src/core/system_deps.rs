@@ -22,6 +22,11 @@ pub struct SystemDeps {
 /// Capability matchers keyed by package names (PyPI/conda).
 pub(crate) fn package_capability_rules() -> &'static [(&'static str, &'static [&'static str])] {
     &[
+        ("arrow", &["pyarrow"]),
+        ("autotools", &["uvloop"]),
+        ("blas", &["scipy"]),
+        ("fortran", &["scipy"]),
+        ("hdf5", &["h5py"]),
         (
             "postgres",
             &[
@@ -46,7 +51,8 @@ pub(crate) fn package_capability_rules() -> &'static [(&'static str, &'static [&
         ("xml", &["lxml", "libxml2", "libxslt", "xmlsec"]),
         ("ldap", &["ldap", "python-ldap", "pyldap", "libldap"]),
         ("ffi", &["cffi", "libffi"]),
-        ("curl", &["curl", "libcurl", "openssl", "pycurl"]),
+        ("openssl", &["cryptography", "pyopenssl", "openssl", "libssl"]),
+        ("curl", &["curl", "libcurl", "pycurl"]),
         (
             "gdal",
             &[
@@ -75,7 +81,7 @@ pub(crate) fn library_capability_rules() -> &'static [(&'static str, &'static st
         ("libldap", "ldap"),
         ("libffi", "ffi"),
         ("libcurl", "curl"),
-        ("libssl", "curl"),
+        ("libssl", "openssl"),
         ("libgdal", "gdal"),
         ("libproj", "gdal"),
         ("libgeos", "gdal"),
@@ -85,8 +91,28 @@ pub(crate) fn library_capability_rules() -> &'static [(&'static str, &'static st
 /// Debian-style apt packages to satisfy each capability.
 pub(crate) fn capability_apt_map() -> &'static [(&'static str, &'static [&'static str])] {
     &[
+        (
+            "arrow",
+            &[
+                "ninja-build",
+                "libboost-dev",
+                "libbrotli-dev",
+                "libbz2-dev",
+                "liblz4-dev",
+                "libsnappy-dev",
+                "libutf8proc-dev",
+                "libzstd-dev",
+                "rapidjson-dev",
+                "pkg-config",
+            ],
+        ),
+        ("autotools", &["autoconf", "automake", "libtool", "m4"]),
+        ("blas", &["libopenblas-dev", "liblapack-dev"]),
+        ("fortran", &["gfortran"]),
+        ("hdf5", &["libhdf5-dev"]),
         ("postgres", &["libpq-dev", "libpq5"]),
         ("mysql", &["libmysqlclient-dev", "libmysqlclient21"]),
+        ("openssl", &["libssl-dev"]),
         (
             "imagecodecs",
             &[
@@ -100,7 +126,16 @@ pub(crate) fn capability_apt_map() -> &'static [(&'static str, &'static [&'stati
                 "libtiff6",
             ],
         ),
-        ("xml", &["libxml2", "libxml2-dev", "libxslt1-dev"]),
+        (
+            "xml",
+            &[
+                "libxml2",
+                "libxml2-dev",
+                "libxslt1-dev",
+                "zlib1g",
+                "zlib1g-dev",
+            ],
+        ),
         ("ldap", &["libldap-2.5-0", "libldap2-dev"]),
         ("ffi", &["libffi8", "libffi-dev"]),
         (
@@ -324,10 +359,17 @@ mod tests {
 
     #[test]
     fn infers_capabilities_from_dependency_names() {
-        let deps = ["libpq", "jpeg", "pycurl", "unknown"];
+        let deps = [
+            "libpq", "jpeg", "pycurl", "pyarrow", "scipy", "uvloop", "h5py", "unknown",
+        ];
         let caps = capabilities_from_names(deps);
         assert!(caps.contains("postgres"));
         assert!(caps.contains("imagecodecs"));
+        assert!(caps.contains("arrow"));
+        assert!(caps.contains("blas"));
+        assert!(caps.contains("fortran"));
+        assert!(caps.contains("autotools"));
+        assert!(caps.contains("hdf5"));
         assert!(
             caps.contains("curl"),
             "http deps should map to curl capability"
@@ -390,6 +432,13 @@ mod tests {
         let deps = system_deps_from_names(["scikit-umfpack"]);
         assert!(deps.capabilities.contains("suitesparse"));
         assert!(deps.apt_packages.contains("libsuitesparse-dev"));
+    }
+
+    #[test]
+    fn cryptography_maps_to_openssl_dev_packages() {
+        let deps = system_deps_from_names(["cryptography"]);
+        assert!(deps.capabilities.contains("openssl"));
+        assert!(deps.apt_packages.contains("libssl-dev"));
     }
 
     #[test]

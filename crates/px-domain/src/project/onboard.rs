@@ -1,4 +1,6 @@
 use std::{
+    collections::BTreeMap,
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -10,7 +12,8 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 use super::init::sanitize_package_candidate;
 use super::manifest::{
     ensure_dependency_group_config, ensure_tooling_requirements, merge_dependency_specs,
-    merge_dev_dependency_specs, normalize_onboard_path, relative_path, OnboardPackagePlan,
+    merge_dev_dependency_specs, normalize_onboard_path, read_build_system_requires, relative_path,
+    OnboardPackagePlan,
 };
 use super::snapshot::ensure_pyproject_exists;
 
@@ -143,7 +146,7 @@ pub fn prepare_pyproject_plan(
         created = true;
         create_minimal_pyproject_doc(root)?
     };
-    ensure_project_metadata(&mut doc, root);
+    let mut changed = ensure_project_metadata(&mut doc, root);
 
     let mut prod_specs = Vec::new();
     let mut dev_specs = Vec::new();
@@ -158,11 +161,15 @@ pub fn prepare_pyproject_plan(
         }
     }
 
-    let mut changed = false;
     changed |= merge_dependency_specs(&mut doc, &prod_specs);
     changed |= merge_dev_dependency_specs(&mut doc, &dev_specs);
+    if changed {
+        let build_requires = read_build_system_requires(&doc);
+        changed |= merge_dev_dependency_specs(&mut doc, &build_requires);
+    }
     changed |= ensure_dependency_group_config(&mut doc);
     changed |= ensure_tooling_requirements(&mut doc);
+    changed |= dedupe_dependency_arrays(&mut doc);
 
     if changed || created {
         Ok(PyprojectPlan {
@@ -177,6 +184,49 @@ pub fn prepare_pyproject_plan(
             created: false,
         })
     }
+}
+
+fn dedupe_dependency_arrays(doc: &mut DocumentMut) -> bool {
+    fn dedupe(array: &mut Array) -> bool {
+        let mut seen = HashSet::new();
+        let mut duplicates = Vec::new();
+        for (idx, value) in array.iter().enumerate() {
+            let Some(spec) = value.as_str() else {
+                continue;
+            };
+            if !seen.insert(spec.to_string()) {
+                duplicates.push(idx);
+            }
+        }
+        if duplicates.is_empty() {
+            return false;
+        }
+        for idx in duplicates.into_iter().rev() {
+            let _ = array.remove(idx);
+        }
+        true
+    }
+
+    let mut changed = false;
+    if let Some(deps) = doc
+        .get_mut("project")
+        .and_then(Item::as_table_mut)
+        .and_then(|project| project.get_mut("dependencies"))
+        .and_then(Item::as_array_mut)
+    {
+        changed |= dedupe(deps);
+    }
+    if let Some(dev) = doc
+        .get_mut("project")
+        .and_then(Item::as_table_mut)
+        .and_then(|project| project.get_mut("optional-dependencies"))
+        .and_then(Item::as_table_mut)
+        .and_then(|optional| optional.get_mut("px-dev"))
+        .and_then(Item::as_array_mut)
+    {
+        changed |= dedupe(dev);
+    }
+    changed
 }
 
 pub fn resolve_onboard_path(
@@ -211,7 +261,114 @@ fn create_minimal_pyproject_doc(root: &Path) -> Result<DocumentMut> {
     Ok(template.parse()?)
 }
 
-fn ensure_project_metadata(doc: &mut DocumentMut, root: &Path) {
+#[derive(Default)]
+struct SetupCfgProjectInfo {
+    name: Option<String>,
+    version: Option<String>,
+    description: Option<String>,
+    requires_python: Option<String>,
+    scripts: BTreeMap<String, String>,
+    gui_scripts: BTreeMap<String, String>,
+}
+
+fn read_setup_cfg_project_info(path: &Path) -> Result<SetupCfgProjectInfo> {
+    let contents = fs::read_to_string(path)?;
+    let mut info = SetupCfgProjectInfo::default();
+    let mut section = String::new();
+    let mut collecting: Option<String> = None;
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            section = trimmed
+                .trim_matches(&['[', ']'][..])
+                .to_ascii_lowercase();
+            collecting = None;
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        match section.as_str() {
+            "metadata" => {
+                let Some((raw_key, raw_value)) = line.split_once('=') else {
+                    continue;
+                };
+                let key = raw_key.trim().to_ascii_lowercase();
+                let value = raw_value.trim();
+                if value.is_empty() || value.starts_with('#') {
+                    continue;
+                }
+                match key.as_str() {
+                    "name" => info.name = Some(value.to_string()),
+                    "version" => info.version = Some(value.to_string()),
+                    "description" => info.description = Some(value.to_string()),
+                    _ => {}
+                }
+            }
+            "options" => {
+                let Some((raw_key, raw_value)) = line.split_once('=') else {
+                    continue;
+                };
+                let key = raw_key.trim().to_ascii_lowercase();
+                if key != "python_requires" {
+                    continue;
+                }
+                let value = raw_value.trim();
+                if value.is_empty() || value.starts_with('#') {
+                    continue;
+                }
+                info.requires_python = Some(value.to_string());
+            }
+            "options.entry_points" => {
+                if let Some(group) = collecting.as_deref() {
+                    if line.chars().next().is_some_and(char::is_whitespace) {
+                        if trimmed.starts_with('#') {
+                            continue;
+                        }
+                        if let Some((raw_name, raw_value)) = trimmed.split_once('=') {
+                            let name = raw_name.trim();
+                            let value = raw_value.trim();
+                            if name.is_empty() || value.is_empty() {
+                                continue;
+                            }
+                            match group {
+                                "console_scripts" => {
+                                    info.scripts.insert(name.to_string(), value.to_string());
+                                }
+                                "gui_scripts" => {
+                                    info.gui_scripts.insert(name.to_string(), value.to_string());
+                                }
+                                _ => {}
+                            }
+                        }
+                        continue;
+                    }
+                    collecting = None;
+                }
+
+                let Some((raw_key, raw_value)) = line.split_once('=') else {
+                    continue;
+                };
+                let key = raw_key.trim().to_ascii_lowercase();
+                let value = raw_value.trim();
+                if value.is_empty() {
+                    collecting = Some(key);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(info)
+}
+
+fn ensure_project_metadata(doc: &mut DocumentMut, root: &Path) -> bool {
+    let mut changed = false;
+    if !doc.contains_key("project") {
+        changed = true;
+    }
     let project = doc
         .entry("project")
         .or_insert(Item::Table(Table::new()))
@@ -229,27 +386,172 @@ fn ensure_project_metadata(doc: &mut DocumentMut, root: &Path) {
         })
         .unwrap_or_default();
     let is_dynamic = |field: &str| dynamic_fields.iter().any(|entry| entry == field);
+
+    // When onboarding legacy setuptools projects (setup.py / setup.cfg), prefer leaving
+    // existing metadata to the build backend by marking select fields as dynamic when
+    // we can detect that metadata is provided outside `pyproject.toml`.
+    //
+    // This avoids setuptools treating existing metadata as "defined outside pyproject"
+    // (and in some cases crashing while normalizing missing values), while also
+    // avoiding declaring dynamic fields that setuptools cannot satisfy.
+    let setup_cfg_path = root.join("setup.cfg");
+    if setup_cfg_path.exists() {
+        let mut inferred = Vec::new();
+        if let Ok(contents) = fs::read_to_string(&setup_cfg_path) {
+            let mut section = String::new();
+            for line in contents.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                    section = trimmed
+                        .trim_matches(&['[', ']'][..])
+                        .to_ascii_lowercase();
+                    continue;
+                }
+                if section != "metadata" {
+                    continue;
+                }
+                let Some((raw_key, _)) = trimmed.split_once('=') else {
+                    continue;
+                };
+                let key = raw_key.trim().to_ascii_lowercase();
+                match key.as_str() {
+                    "long_description" | "description_file" | "long_description_content_type" => {
+                        inferred.push("readme");
+                    }
+                    "license" | "license_files" => inferred.push("license"),
+                    "classifier" | "classifiers" => inferred.push("classifiers"),
+                    "url" | "project_urls" => inferred.push("urls"),
+                    "author" | "author_email" => inferred.push("authors"),
+                    "maintainer" | "maintainer_email" => inferred.push("maintainers"),
+                    _ => {}
+                }
+            }
+        }
+        inferred.sort();
+        inferred.dedup();
+
+        let mut missing = Vec::new();
+        for field in inferred {
+            if project.contains_key(field) || is_dynamic(field) {
+                continue;
+            }
+            missing.push(field);
+        }
+        if !missing.is_empty() {
+            let dynamic = project
+                .entry("dynamic")
+                .or_insert_with(|| Item::Value(TomlValue::Array(Array::new())))
+                .as_array_mut()
+                .expect("project.dynamic array");
+            changed = true;
+            for field in missing {
+                dynamic.push(field);
+            }
+        }
+
+        if let Ok(info) = read_setup_cfg_project_info(&setup_cfg_path) {
+            let should_override = project
+                .get("description")
+                .and_then(Item::as_str)
+                .is_some_and(|desc| desc == "Onboarded by px");
+            if should_override {
+                if !is_dynamic("name") {
+                    if let Some(name) = info.name.as_deref() {
+                        if project.get("name").and_then(Item::as_str) != Some(name) {
+                            changed = true;
+                            project.insert("name", Item::Value(TomlValue::from(name)));
+                        }
+                    }
+                }
+                if !is_dynamic("version") {
+                    if let Some(version) = info.version.as_deref() {
+                        let looks_static =
+                            !version.contains(':') && !version.contains(' ') && !version.is_empty();
+                        if looks_static && project.get("version").and_then(Item::as_str) != Some(version) {
+                            changed = true;
+                            project.insert("version", Item::Value(TomlValue::from(version)));
+                        }
+                    }
+                }
+                if !is_dynamic("requires-python") {
+                    if let Some(req) = info.requires_python.as_deref() {
+                        if project.get("requires-python").and_then(Item::as_str) != Some(req) {
+                            changed = true;
+                            project.insert("requires-python", Item::Value(TomlValue::from(req)));
+                        }
+                    }
+                }
+                if !is_dynamic("description") {
+                    if let Some(description) = info.description.as_deref() {
+                        if project.get("description").and_then(Item::as_str) != Some(description) {
+                            changed = true;
+                            project.insert("description", Item::Value(TomlValue::from(description)));
+                        }
+                    }
+                }
+            }
+
+            if !info.scripts.is_empty() {
+                let scripts = project
+                    .entry("scripts")
+                    .or_insert_with(|| Item::Table(Table::new()))
+                    .as_table_mut()
+                    .expect("project.scripts table");
+                for (name, value) in info.scripts {
+                    if !scripts.contains_key(&name) {
+                        changed = true;
+                        scripts.insert(&name, Item::Value(TomlValue::from(value)));
+                    }
+                }
+            }
+            if !info.gui_scripts.is_empty() {
+                let gui_scripts = project
+                    .entry("gui-scripts")
+                    .or_insert_with(|| Item::Table(Table::new()))
+                    .as_table_mut()
+                    .expect("project.gui-scripts table");
+                for (name, value) in info.gui_scripts {
+                    if !gui_scripts.contains_key(&name) {
+                        changed = true;
+                        gui_scripts.insert(&name, Item::Value(TomlValue::from(value)));
+                    }
+                }
+            }
+        }
+    }
+
     if !is_dynamic("name") && !project.contains_key("name") {
+        changed = true;
         project.insert(
             "name",
             Item::Value(TomlValue::from(sanitize_package_candidate(root))),
         );
     }
     if !is_dynamic("version") && !project.contains_key("version") {
+        changed = true;
         project.insert("version", Item::Value(TomlValue::from("0.1.0")));
     }
     if !is_dynamic("requires-python") && !project.contains_key("requires-python") {
+        changed = true;
         project.insert("requires-python", Item::Value(TomlValue::from(">=3.11")));
     }
     if !is_dynamic("dependencies") && !project.contains_key("dependencies") {
+        changed = true;
         project.insert("dependencies", Item::Value(TomlValue::Array(Array::new())));
+    }
+    if !doc.contains_key("tool") {
+        changed = true;
     }
     let tool = doc
         .entry("tool")
         .or_insert(Item::Table(Table::new()))
         .as_table_mut()
         .expect("tool table");
+    if !tool.contains_key("px") {
+        changed = true;
+    }
     tool.entry("px").or_insert(Item::Table(Table::new()));
+    changed
 }
 
 #[cfg(test)]
@@ -411,6 +713,140 @@ build-backend = "flit_core.buildapi"
                 .any(|item| item.as_str().is_some_and(|value| value == "version")),
             "dynamic version entry should be preserved"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn prepare_plan_writes_metadata_when_pyproject_missing_project_table() -> Result<()> {
+        let dir = tempdir()?;
+        let pyproject_path = dir.path().join("pyproject.toml");
+        fs::write(
+            &pyproject_path,
+            r#"[build-system]
+requires = ["setuptools>=42", "packaging"]
+"#,
+        )?;
+
+        let plan = prepare_pyproject_plan(dir.path(), &pyproject_path, false, &[])?;
+        let contents = plan.contents.expect("pyproject should be updated");
+        let doc: DocumentMut = contents.parse()?;
+        assert!(
+            doc.get("project").and_then(Item::as_table).is_some(),
+            "pyproject should include a [project] table"
+        );
+        assert!(
+            doc["project"]["name"].as_str().is_some(),
+            "[project].name should be populated"
+        );
+        assert!(
+            doc.get("tool")
+                .and_then(Item::as_table)
+                .and_then(|tool| tool.get("px"))
+                .and_then(Item::as_table)
+                .is_some(),
+            "pyproject should include [tool.px]"
+        );
+        let dev_specs = read_optional_dependency_group(&doc, "px-dev");
+        assert!(
+            dev_specs.contains(&"setuptools>=42".to_string()),
+            "build-system.requires should be added to px-dev group"
+        );
+        assert!(
+            dev_specs.contains(&"packaging".to_string()),
+            "build-system.requires should be added to px-dev group"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_setuptools_dynamic_fields_are_inferred_from_setup_cfg() -> Result<()> {
+        let dir = tempdir()?;
+        fs::write(
+            dir.path().join("setup.cfg"),
+            r#"[metadata]
+long_description = file: README.md
+maintainer = Example Maintainer
+"#,
+        )?;
+
+        let mut doc: DocumentMut = r#"[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#
+        .parse()?;
+        ensure_project_metadata(&mut doc, dir.path());
+        let dynamic = doc["project"]["dynamic"]
+            .as_array()
+            .expect("project.dynamic array");
+        let entries: Vec<_> = dynamic.iter().filter_map(|item| item.as_str()).collect();
+        assert!(
+            entries.iter().any(|entry| *entry == "readme"),
+            "readme should be marked dynamic when setup.cfg provides long_description"
+        );
+        assert!(
+            entries.iter().any(|entry| *entry == "maintainers"),
+            "maintainers should only be marked dynamic when setup.cfg provides maintainer metadata"
+        );
+
+        let dir = tempdir()?;
+        fs::write(
+            dir.path().join("setup.cfg"),
+            r#"[metadata]
+long_description = file: README.md
+"#,
+        )?;
+        let mut doc: DocumentMut = r#"[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#
+        .parse()?;
+        ensure_project_metadata(&mut doc, dir.path());
+        let dynamic = doc["project"]["dynamic"]
+            .as_array()
+            .expect("project.dynamic array");
+        let entries: Vec<_> = dynamic.iter().filter_map(|item| item.as_str()).collect();
+        assert!(
+            entries.iter().any(|entry| *entry == "readme"),
+            "readme should be marked dynamic when setup.cfg provides long_description"
+        );
+        assert!(
+            !entries.iter().any(|entry| *entry == "maintainers"),
+            "maintainers should not be marked dynamic when setup.cfg omits maintainer metadata"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prepare_plan_reads_setup_cfg_entry_points() -> Result<()> {
+        let dir = tempdir()?;
+        fs::write(
+            dir.path().join("setup.cfg"),
+            r#"[metadata]
+name = pre_commit
+version = 4.5.0
+description = A demo
+
+[options]
+python_requires = >=3.10
+
+[options.entry_points]
+console_scripts =
+    pre-commit = pre_commit.main:main
+"#,
+        )?;
+
+        let pyproject_path = dir.path().join("pyproject.toml");
+        let packages = vec![pkg("cfgv==3.5.0", "prod", "setup.cfg")];
+        let plan = prepare_pyproject_plan(dir.path(), &pyproject_path, false, &packages)?;
+        assert!(plan.created);
+        let contents = plan.contents.expect("pyproject should be created");
+        let doc: DocumentMut = contents.parse()?;
+
+        assert_eq!(doc["project"]["name"].as_str(), Some("pre_commit"));
+        assert_eq!(doc["project"]["version"].as_str(), Some("4.5.0"));
+        assert_eq!(doc["project"]["requires-python"].as_str(), Some(">=3.10"));
+        assert_eq!(doc["project"]["scripts"]["pre-commit"].as_str(), Some("pre_commit.main:main"));
+
         Ok(())
     }
 

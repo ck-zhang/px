@@ -134,6 +134,16 @@ fn missing_import(
             confidence: Some("high"),
         });
     }
+    if looks_like_missing_local_extension(&module, &summary.frames) {
+        return Some(TracebackRecommendation {
+            reason: "missing_import",
+            hint: format!(
+                "`{module}` looks like a compiled extension imported from your source tree; build the project (native extensions) or install a prebuilt wheel, then rerun the command"
+            ),
+            command: None,
+            confidence: Some("medium"),
+        });
+    }
     let dev_tool = should_treat_as_dev_tool(&package, ctx);
     let command = if dev_tool {
         format!("px add --dev {package}")
@@ -304,6 +314,7 @@ fn extract_missing_module(message: &str) -> Option<String> {
 }
 
 fn module_to_package(module: &str) -> String {
+    let module = module.split('.').next().unwrap_or(module);
     match module {
         "yaml" => "PyYAML".to_string(),
         "cv2" => "opencv-python".to_string(),
@@ -312,6 +323,39 @@ fn module_to_package(module: &str) -> String {
         "bs4" => "beautifulsoup4".to_string(),
         other => other.to_string(),
     }
+}
+
+fn looks_like_missing_local_extension(module: &str, frames: &[TracebackFrame]) -> bool {
+    let mut parts = module.split('.');
+    let Some(package) = parts.next() else {
+        return false;
+    };
+    let Some(submodule) = parts.next() else {
+        return false;
+    };
+    if !submodule.starts_with('_') {
+        return false;
+    }
+    let unix_marker = format!("/{package}/");
+    let windows_marker = format!("\\{package}\\");
+    frames.iter().any(|frame| {
+        let file = frame.file.as_str();
+        if !file.ends_with(".py") {
+            return false;
+        }
+        if !file.contains(&unix_marker) && !file.contains(&windows_marker) {
+            return false;
+        }
+        let lower = file.to_ascii_lowercase();
+        if lower.contains("site-packages")
+            || lower.contains("dist-packages")
+            || lower.contains("/.px/")
+            || lower.contains("\\.px\\")
+        {
+            return false;
+        }
+        true
+    })
 }
 
 fn should_treat_as_dev_tool(package: &str, ctx: &TracebackContext) -> bool {
@@ -387,6 +431,48 @@ mod tests {
                 .as_deref()
                 .is_some_and(|cmd| cmd.contains("px add")),
             "missing dependency should suggest px add, got {rec:?}"
+        );
+    }
+
+    #[test]
+    fn missing_import_strips_submodules_for_resolution() {
+        let stderr = "Traceback (most recent call last):\n  File \"/tmp/app/main.py\", line 1, in <module>\n    import requests.packages\nModuleNotFoundError: No module named 'requests.packages'\n";
+        let ctx = TracebackContext::new(
+            "run",
+            "main",
+            Some(&json!({
+                "manifest_deps": ["requests>=2.0"],
+                "locked_deps": ["requests"],
+            })),
+        );
+        let report = analyze_python_traceback(stderr, &ctx).expect("report");
+        let rec = report.recommendation.expect("recommendation");
+        assert_eq!(rec.command.as_deref(), Some("px sync"));
+    }
+
+    #[test]
+    fn missing_import_for_local_extension_does_not_suggest_px_add() {
+        let stderr = "Traceback (most recent call last):\n  File \"/repo/pkg/__init__.py\", line 1, in <module>\n    import pkg._ext\nModuleNotFoundError: No module named 'pkg._ext'\n";
+        let ctx = TracebackContext::new(
+            "run",
+            "main",
+            Some(&json!({
+                "manifest_deps": [],
+                "locked_deps": [],
+            })),
+        );
+        let report = analyze_python_traceback(stderr, &ctx).expect("report");
+        let rec = report.recommendation.expect("recommendation");
+        assert!(
+            rec.hint.contains("compiled extension"),
+            "expected hint to mention compiled extension, got {rec:?}"
+        );
+        assert!(
+            match rec.command.as_deref() {
+                Some(cmd) => !cmd.contains("px add"),
+                None => true,
+            },
+            "expected missing local extension to avoid px add, got {rec:?}"
         );
     }
 

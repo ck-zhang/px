@@ -52,11 +52,67 @@ pub(crate) enum InstallState {
 }
 
 pub fn lock_is_fresh(snapshot: &ManifestSnapshot) -> Result<bool> {
+    fn artifact_supported_by_runtime(
+        tags: &crate::python_sys::InterpreterTags,
+        artifact: &px_domain::api::LockedArtifact,
+    ) -> bool {
+        if artifact.filename.is_empty() {
+            return true;
+        }
+        if !artifact.filename.to_ascii_lowercase().ends_with(".whl") {
+            return true;
+        }
+        if artifact.python_tag.is_empty() || artifact.abi_tag.is_empty() || artifact.platform_tag.is_empty() {
+            return true;
+        }
+
+        let supports = |py: &str, abi: &str, platform: &str| {
+            if !tags.supported.is_empty() {
+                tags.supports_triple(py, abi, platform)
+            } else {
+                tags.python.iter().any(|tag| tag == py)
+                    && tags.abi.iter().any(|tag| tag == abi)
+                    && tags.platform.iter().any(|tag| tag == platform)
+            }
+        };
+
+        for py in artifact.python_tag.split('.').map(str::trim).filter(|s| !s.is_empty()) {
+            let py = py.to_ascii_lowercase();
+            for abi in artifact.abi_tag.split('.').map(str::trim).filter(|s| !s.is_empty()) {
+                let abi = abi.to_ascii_lowercase();
+                for platform in artifact
+                    .platform_tag
+                    .split('.')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    let platform = platform.to_ascii_lowercase();
+                    if supports(&py, &abi, &platform) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     let marker_env = marker_env_for_snapshot(snapshot);
     match load_lockfile_optional(&snapshot.lock_path)? {
         Some(lock) => {
             if !detect_lock_drift(snapshot, &lock, marker_env.as_ref()).is_empty() {
                 return Ok(false);
+            }
+            if let Ok(runtime) = prepare_project_runtime(snapshot) {
+                if let Ok(tags) = detect_interpreter_tags(&runtime.record.path) {
+                    if lock
+                        .resolved
+                        .iter()
+                        .filter_map(|dep| dep.artifact.as_ref())
+                        .any(|artifact| !artifact_supported_by_runtime(&tags, artifact))
+                    {
+                        return Ok(false);
+                    }
+                }
             }
             if let Some(fingerprint) = &lock.manifest_fingerprint {
                 Ok(fingerprint == &snapshot.manifest_fingerprint)
@@ -326,7 +382,9 @@ pub(crate) fn resolve_dependencies_with_effects(
         pin_system_deps(&mut system_deps).map_err(anyhow::Error::from)?;
     }
     let requirements = apply_system_lib_compatibility(requirements, &system_deps)?;
-    let sysroot = if system_deps.capabilities.is_empty()
+    let host_supports_debian_rootfs = Path::new("/etc/debian_version").exists();
+    let sysroot = if !host_supports_debian_rootfs
+        || system_deps.capabilities.is_empty()
         || matches!(system_deps_mode(), SystemDepsMode::Offline)
     {
         None
@@ -340,6 +398,7 @@ pub(crate) fn resolve_dependencies_with_effects(
     tracing::debug!(?requirements, "resolver_requirements");
     let request = ResolverRequest {
         project: snapshot.name.clone(),
+        root: snapshot.root.clone(),
         requirements,
         tags: ResolverTags {
             python: tags.python.clone(),
@@ -376,6 +435,7 @@ pub(crate) fn resolve_dependencies_with_effects(
             marker: spec.marker,
             direct: spec.direct,
             requires: spec.requires,
+            source: spec.dist_source,
         };
         autopin_lookup.insert(autopin_pin_key(&pin), formatted);
         if seen.insert(pin.normalized.clone()) {

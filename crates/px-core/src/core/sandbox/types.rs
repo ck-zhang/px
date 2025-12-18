@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::core::system_deps::SystemDeps;
 
-pub(crate) const SBX_VERSION: u32 = 5;
+pub(crate) const SBX_VERSION: u32 = 8;
 pub(crate) const PXAPP_VERSION: u32 = 1;
 
 #[derive(Clone, Debug)]

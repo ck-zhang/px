@@ -90,6 +90,24 @@ pub fn collect_setup_cfg_packages(
     ))
 }
 
+/// Convert `setup.py` install requirements into onboarding rows.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or parsed.
+pub fn collect_setup_py_packages(root: &Path, path: &Path) -> Result<(Value, Vec<OnboardPackagePlan>)> {
+    let specs = read_setup_py_requires(path)?;
+    let rel = relative_path(root, path);
+    let mut rows = Vec::new();
+    for spec in specs {
+        rows.push(OnboardPackagePlan::new(spec, "prod", rel.clone()));
+    }
+    Ok((
+        json!({ "kind": "setup.py", "path": rel, "count": rows.len() }),
+        rows,
+    ))
+}
+
 /// Read every requirement entry from `path`.
 ///
 /// # Errors
@@ -123,11 +141,15 @@ fn read_requirements_file_inner(
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let mut spec = if let Some(idx) = trimmed.find('#') {
-            trimmed[..idx].trim()
-        } else {
-            trimmed
-        };
+        let mut spec = trimmed;
+        if let Some(idx) = trimmed.find('#') {
+            let before = &trimmed[..idx];
+            let is_comment =
+                idx == 0 || before.chars().last().is_some_and(|ch| ch.is_whitespace());
+            if is_comment {
+                spec = before.trim();
+            }
+        }
         if let Some(rest) = spec.strip_prefix("-r") {
             let target = rest.trim_start_matches([' ', '=']).trim();
             if !target.is_empty() {
@@ -159,6 +181,26 @@ fn read_requirements_file_inner(
             spec = stripped.trim();
         } else if let Some(stripped) = spec.strip_prefix("--editable ") {
             spec = stripped.trim();
+        }
+        if spec.starts_with("git+")
+            || spec.starts_with("hg+")
+            || spec.starts_with("bzr+")
+            || spec.starts_with("svn+")
+        {
+            if let Some((url, fragment)) = spec.split_once("#egg=") {
+                let mut parts = fragment.split('&');
+                let egg = parts.next().unwrap_or("").trim();
+                if !egg.is_empty() {
+                    let rest = parts.collect::<Vec<_>>();
+                    let mut clean_url = url.to_string();
+                    if !rest.is_empty() {
+                        clean_url.push('#');
+                        clean_url.push_str(&rest.join("&"));
+                    }
+                    specs.push(format!("{egg} @ {clean_url}"));
+                    continue;
+                }
+            }
         }
         if let Some(extras_block) = spec.strip_prefix(".[") {
             if let Some(end) = extras_block.find(']') {
@@ -225,7 +267,7 @@ pub fn read_setup_cfg_requires(path: &Path) -> Result<Vec<String>> {
 
         if let Some((raw_key, raw_value)) = line.split_once('=') {
             let key = raw_key.trim().to_ascii_lowercase();
-            if key == "requires-dist" || key == "install_requires" {
+            if key == "requires-dist" || key == "requires_dist" || key == "install_requires" {
                 let value = raw_value.trim();
                 if !value.is_empty() && !value.starts_with('#') {
                     specs.push(value.to_string());
@@ -235,6 +277,236 @@ pub fn read_setup_cfg_requires(path: &Path) -> Result<Vec<String>> {
         }
     }
 
+    Ok(specs)
+}
+
+/// Read dependency entries from `setup.py` without executing it.
+///
+/// The parser is intentionally conservative: it looks for a top-level
+/// `install_requires = [...]` list containing either string literals or
+/// `deps["name"]` lookups. When a `_deps = [...]` list of requirement strings
+/// is present, it is used to resolve `deps[...]` keys into full specifiers.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read from disk.
+pub fn read_setup_py_requires(path: &Path) -> Result<Vec<String>> {
+    fn setup_py_key(spec: &str) -> String {
+        let trimmed = spec.trim();
+        let mut key = String::new();
+        for ch in trimmed.chars() {
+            if ch.is_whitespace() || matches!(ch, '!' | '=' | '<' | '>' | '~' | ';') {
+                break;
+            }
+            key.push(ch);
+        }
+        key
+    }
+
+    fn extract_string_literals(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '\'' && ch != '"' {
+                continue;
+            }
+            let quote = ch;
+            let mut buf = String::new();
+            let mut escaped = false;
+            for next in chars.by_ref() {
+                if escaped {
+                    buf.push(next);
+                    escaped = false;
+                    continue;
+                }
+                if next == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if next == quote {
+                    out.push(buf);
+                    break;
+                }
+                buf.push(next);
+            }
+        }
+        out
+    }
+
+    fn first_string_literal(line: &str) -> Option<String> {
+        let trimmed = line.trim_start();
+        let quote = trimmed.chars().next()?;
+        if quote != '"' && quote != '\'' {
+            return None;
+        }
+        let mut buf = String::new();
+        let mut escaped = false;
+        for ch in trimmed.chars().skip(1) {
+            if escaped {
+                buf.push(ch);
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == quote {
+                return Some(buf);
+            }
+            buf.push(ch);
+        }
+        None
+    }
+
+    fn collect_list_literal(contents: &str, var: &str) -> Vec<String> {
+        let mut items = Vec::new();
+        let mut in_block = false;
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if !in_block {
+                let Some(rest) = trimmed.strip_prefix(var) else {
+                    continue;
+                };
+                if !rest.trim_start().starts_with('=') {
+                    continue;
+                }
+                let Some(start) = trimmed.find('[') else {
+                    continue;
+                };
+                let after = &trimmed[start + 1..];
+                if let Some(end) = after.rfind(']') {
+                    let inside = &after[..end];
+                    items.extend(extract_string_literals(inside));
+                    break;
+                }
+                in_block = true;
+                continue;
+            }
+            if trimmed.starts_with(']') {
+                break;
+            }
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some(value) = first_string_literal(trimmed) {
+                items.push(value);
+            }
+        }
+        items
+    }
+
+    fn collect_install_requires(contents: &str) -> Vec<String> {
+        let mut items = Vec::new();
+        let mut in_block = false;
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if !in_block {
+                let Some(rest) = trimmed.strip_prefix("install_requires") else {
+                    continue;
+                };
+                if !rest.trim_start().starts_with('=') {
+                    continue;
+                }
+                if trimmed.contains('[') {
+                    in_block = true;
+                    continue;
+                }
+                if trimmed.contains("deps_list(") || trimmed.contains("deps[") {
+                    items.extend(extract_string_literals(trimmed));
+                } else if let Some(value) = first_string_literal(trimmed.split_once('=').map(|(_, v)| v).unwrap_or("")) {
+                    items.push(value);
+                }
+                continue;
+            }
+            if trimmed.starts_with(']') {
+                break;
+            }
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if trimmed.starts_with("deps_list(") {
+                items.extend(extract_string_literals(trimmed));
+                continue;
+            }
+            if trimmed.starts_with("deps[") {
+                items.extend(extract_string_literals(trimmed));
+                continue;
+            }
+            if trimmed.starts_with('"') || trimmed.starts_with('\'') {
+                if let Some(value) = first_string_literal(trimmed) {
+                    items.push(value);
+                }
+            }
+        }
+        items
+    }
+
+    fn install_requires_variable(contents: &str) -> Option<String> {
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some(idx) = trimmed.find("install_requires") else {
+                continue;
+            };
+            let after = trimmed[idx + "install_requires".len()..].trim_start();
+            if !after.starts_with('=') {
+                continue;
+            }
+            let mut value = after.trim_start_matches('=').trim();
+            value = value
+                .trim_end_matches(',')
+                .trim_end_matches(')')
+                .trim_end_matches(',');
+            if value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            {
+                return Some(value.to_string());
+            }
+        }
+        None
+    }
+
+    let contents = fs::read_to_string(path)?;
+
+    let mut spec_by_key = BTreeMap::<String, String>::new();
+    for spec in collect_list_literal(&contents, "_deps") {
+        let key = setup_py_key(&spec);
+        if key.is_empty() {
+            continue;
+        }
+        spec_by_key.entry(key.clone()).or_insert_with(|| spec.clone());
+        spec_by_key
+            .entry(key.to_ascii_lowercase())
+            .or_insert(spec.clone());
+    }
+
+    let mut raw_requires = collect_install_requires(&contents);
+    if raw_requires.is_empty() {
+        if let Some(var) = install_requires_variable(&contents) {
+            raw_requires = collect_list_literal(&contents, &var);
+        }
+    }
+
+    let mut specs = Vec::new();
+    for raw in raw_requires {
+        let key = raw.trim();
+        if key.is_empty() {
+            continue;
+        }
+        if let Some(spec) = spec_by_key
+            .get(key)
+            .or_else(|| spec_by_key.get(&key.to_ascii_lowercase()))
+        {
+            specs.push(spec.clone());
+        } else {
+            specs.push(key.to_string());
+        }
+    }
+    specs.retain(|spec| !spec.trim().is_empty());
     Ok(specs)
 }
 
@@ -275,5 +547,59 @@ impl OnboardPackagePlan {
             scope: scope.to_string(),
             source,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn read_setup_py_requires_resolves_install_requires_variable() -> Result<()> {
+        let dir = tempdir()?;
+        let setup_py = dir.path().join("setup.py");
+        fs::write(
+            &setup_py,
+            r#"import setuptools
+
+dependencies = [
+    "requests>=2.22,<3.0",
+    "google-auth>=2.0,<3.0",
+]
+
+setuptools.setup(
+    name="demo",
+    version="0.1.0",
+    install_requires=dependencies,
+)
+"#,
+        )?;
+
+        let deps = read_setup_py_requires(&setup_py)?;
+        assert_eq!(
+            deps,
+            vec![
+                "requests>=2.22,<3.0".to_string(),
+                "google-auth>=2.0,<3.0".to_string(),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_requirements_file_converts_editable_vcs_egg_urls() -> Result<()> {
+        let dir = tempdir()?;
+        let reqs = dir.path().join("requirements.txt");
+        fs::write(
+            &reqs,
+            "-e git+https://github.com/boto/botocore.git@develop#egg=botocore\n",
+        )?;
+        let parsed = read_requirements_file(&reqs)?;
+        assert_eq!(
+            parsed.specs,
+            vec!["botocore @ git+https://github.com/boto/botocore.git@develop".to_string()]
+        );
+        Ok(())
     }
 }

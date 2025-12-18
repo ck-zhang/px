@@ -116,7 +116,7 @@ pub(super) fn merge_pin_sets(existing: &mut Vec<PinSpec>, extra: Vec<PinSpec>) {
 }
 
 pub(super) enum LockPinChoice {
-    Reuse { pin: PinSpec, source: String },
+    Reuse { pin: Box<PinSpec>, source: String },
     Skip(String),
 }
 
@@ -171,7 +171,7 @@ pub(super) fn pin_from_locked_versions(
     let specifier = format_specifier(&normalized, &extras, version, marker.as_deref());
     let normalized_label = normalized.clone();
     LockPinChoice::Reuse {
-        pin: PinSpec {
+        pin: Box::new(PinSpec {
             name,
             specifier,
             version: version.clone(),
@@ -180,7 +180,8 @@ pub(super) fn pin_from_locked_versions(
             marker,
             direct: true,
             requires: Vec::new(),
-        },
+            source: None,
+        }),
         source: format!("{normalized_label}=={version} ({source_label})"),
     }
 }

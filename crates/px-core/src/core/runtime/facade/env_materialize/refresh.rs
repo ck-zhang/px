@@ -246,6 +246,14 @@ fn ensure_project_pip(
     runtime: &RuntimeMetadata,
     env_python: &Path,
 ) -> Result<()> {
+    fn set_env_pair(envs: &mut Vec<(String, String)>, key: &str, value: String) {
+        if let Some((_, existing)) = envs.iter_mut().find(|(k, _)| k == key) {
+            *existing = value;
+        } else {
+            envs.push((key.to_string(), value));
+        }
+    }
+
     fn pip_bootstrap_env(envs: &[(String, String)]) -> Vec<(String, String)> {
         let mut sanitized = Vec::with_capacity(envs.len() + 1);
         for (key, value) in envs {
@@ -265,6 +273,17 @@ fn ensure_project_pip(
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let site_packages = site_packages_dir(site_dir, &runtime.version);
+    let sitecustomize = site_dir.join("sitecustomize.py");
+    if !sitecustomize.exists() {
+        ctx.fs().create_dir_all(site_dir)?;
+        ctx.fs().write(&sitecustomize, SITE_CUSTOMIZE.as_bytes())?;
+    }
+    let sitecustomize_site_packages = site_packages.join("sitecustomize.py");
+    if !sitecustomize_site_packages.exists() {
+        ctx.fs().create_dir_all(&site_packages)?;
+        ctx.fs()
+            .write(&sitecustomize_site_packages, SITE_CUSTOMIZE.as_bytes())?;
+    }
     let pip_installed = has_pip_in_site(&site_packages);
     let pip_editable = has_px_editable_stub(site_dir, &normalize_project_name("pip"));
     let pip_entrypoints =
@@ -282,6 +301,8 @@ fn ensure_project_pip(
     }
 
     let envs = project_site_env(ctx, snapshot, site_dir, env_python)?;
+    let mut envs = envs;
+    set_env_pair(&mut envs, "PX_PYTHON", runtime.path.clone());
     let mut pip_main_available =
         module_available(ctx, snapshot, env_python, &envs, "pip.__main__")?;
 

@@ -3,6 +3,7 @@ use std::str::FromStr;
 use pep508_rs::{MarkerEnvironment, Requirement as PepRequirement};
 
 use crate::project::manifest::{dependency_name, strip_wrapping_quotes};
+use crate::resolution::resolver::ResolvedDistSource;
 
 #[derive(Clone, Debug)]
 pub struct PinSpec {
@@ -14,6 +15,7 @@ pub struct PinSpec {
     pub marker: Option<String>,
     pub direct: bool,
     pub requires: Vec<String>,
+    pub source: Option<ResolvedDistSource>,
 }
 
 #[derive(Clone, Debug)]
@@ -111,6 +113,7 @@ mod tests {
             marker: Some("python_version<'3.12'".into()),
             direct: true,
             requires: Vec::new(),
+            source: None,
         };
         assert_eq!(autopin_pin_key(&pin), "requests|secure,socks");
     }

@@ -575,6 +575,25 @@ fn parse_workspace(table: &Table) -> Option<WorkspaceLock> {
 }
 
 fn parse_artifact_table(table: &Table) -> Option<LockedArtifact> {
+    fn wheel_tags_from_filename(filename: &str) -> Option<(String, String, String)> {
+        let filename = filename.trim();
+        if filename.is_empty() {
+            return None;
+        }
+        if !filename.to_ascii_lowercase().ends_with(".whl") {
+            return None;
+        }
+        let stem = filename.get(..filename.len().saturating_sub(4))?;
+        let parts: Vec<&str> = stem.split('-').collect();
+        if parts.len() < 5 {
+            return None;
+        }
+        let py = parts[parts.len() - 3].to_ascii_lowercase();
+        let abi = parts[parts.len() - 2].to_ascii_lowercase();
+        let platform = parts[parts.len() - 1].to_ascii_lowercase();
+        Some((py, abi, platform))
+    }
+
     let filename = table.get("filename").and_then(Item::as_str)?.to_string();
     let url = table.get("url").and_then(Item::as_str)?.to_string();
     let sha256 = table.get("sha256").and_then(Item::as_str)?.to_string();
@@ -588,21 +607,36 @@ fn parse_artifact_table(table: &Table) -> Option<LockedArtifact> {
         .and_then(Item::as_str)
         .unwrap_or_default()
         .to_string();
-    let python_tag = table
+    let mut python_tag = table
         .get("python_tag")
         .and_then(Item::as_str)
         .unwrap_or_default()
         .to_string();
-    let abi_tag = table
+    let mut abi_tag = table
         .get("abi_tag")
         .and_then(Item::as_str)
         .unwrap_or_default()
         .to_string();
-    let platform_tag = table
+    let mut platform_tag = table
         .get("platform_tag")
         .and_then(Item::as_str)
         .unwrap_or_default()
         .to_string();
+    if (python_tag.is_empty() || abi_tag.is_empty() || platform_tag.is_empty())
+        && filename.to_ascii_lowercase().ends_with(".whl")
+    {
+        if let Some((py, abi, platform)) = wheel_tags_from_filename(&filename) {
+            if python_tag.is_empty() {
+                python_tag = py;
+            }
+            if abi_tag.is_empty() {
+                abi_tag = abi;
+            }
+            if platform_tag.is_empty() {
+                platform_tag = platform;
+            }
+        }
+    }
     let is_direct_url = table
         .get("is_direct_url")
         .and_then(Item::as_bool)

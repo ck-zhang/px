@@ -347,6 +347,7 @@ dependencies = ["demo"]
                 marker: None,
                 direct: true,
                 requires: Vec::new(),
+                source: None,
             }])
         };
 
@@ -396,6 +397,7 @@ dependencies = ["demo>=1.0", "helper==0.5"]
                 marker: None,
                 direct: true,
                 requires: Vec::new(),
+                source: None,
             }])
         };
 

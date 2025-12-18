@@ -201,6 +201,71 @@ fn project_paths_precede_local_site_packages() -> Result<()> {
 }
 
 #[test]
+fn native_sources_in_tests_do_not_force_wheel_preference() -> Result<()> {
+    let temp = tempdir()?;
+    let project_root = temp.path();
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[build-system]
+requires = ["setuptools>=42"]
+"#,
+    )?;
+    let tests_dir = project_root.join("tests");
+    fs::create_dir_all(&tests_dir)?;
+    fs::write(tests_dir.join("demo.pyx"), "print('demo')\n")?;
+
+    let site_dir = project_root.join("site");
+    let site_packages = site_dir.join("site-packages");
+    fs::create_dir_all(&site_packages)?;
+    fs::write(site_dir.join("sitecustomize.py"), SITE_CUSTOMIZE)?;
+
+    let site_pkg = site_packages.join("demo");
+    fs::create_dir_all(&site_pkg)?;
+    fs::write(site_pkg.join("__init__.py"), "VALUE = 'site'\n")?;
+
+    let project_pkg = project_root.join("demo");
+    fs::create_dir_all(&project_pkg)?;
+    fs::write(project_pkg.join("__init__.py"), "VALUE = 'project'\n")?;
+
+    let effects = SystemEffects::new();
+    let paths = build_pythonpath(effects.fs(), project_root, Some(site_dir.clone()))?;
+    let allowed_env = env::join_paths(&paths.allowed_paths)?
+        .into_string()
+        .expect("allowed paths");
+    let python = match effects.python().detect_interpreter() {
+        Ok(path) => path,
+        Err(_) => return Ok(()),
+    };
+
+    let mut cmd = Command::new(&python);
+    cmd.current_dir(project_root);
+    cmd.env("PYTHONPATH", paths.pythonpath.clone());
+    cmd.env("PX_ALLOWED_PATHS", allowed_env);
+    cmd.env("PYTHONSAFEPATH", "1");
+    cmd.arg("-c").arg(
+        "import importlib, json; mod = importlib.import_module('demo'); \
+         print(json.dumps({'value': getattr(mod, 'VALUE', '')}))",
+    );
+    let output = cmd.output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "python exited with {}: {}\n{}",
+        output.status,
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload: Value = serde_json::from_str(stdout.trim())?;
+    let value = payload
+        .get("value")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert_eq!(value, "project");
+    Ok(())
+}
+
+#[test]
 fn lib_layout_is_included_in_sys_path() -> Result<()> {
     let temp = tempdir()?;
     let project_root = temp.path();
@@ -252,6 +317,82 @@ fn lib_layout_is_included_in_sys_path() -> Result<()> {
     assert!(
         file.contains(package_dir.to_string_lossy().as_ref()),
         "expected module to load from lib layout, got {file}"
+    );
+    Ok(())
+}
+
+#[test]
+fn native_backend_prefers_site_packages_over_project_paths() -> Result<()> {
+    let temp = tempdir()?;
+    let project_root = temp.path();
+    fs::write(
+        project_root.join("pyproject.toml"),
+        r#"[project]
+name = "native-demo"
+dynamic = ["version"]
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["meson-python>=0.17.1"]
+build-backend = "mesonpy"
+"#,
+    )?;
+
+    let site_dir = project_root.join("site");
+    let site_packages = site_dir.join("site-packages");
+    fs::create_dir_all(&site_packages)?;
+    fs::write(site_dir.join("sitecustomize.py"), SITE_CUSTOMIZE)?;
+
+    let dep_root = site_dir.join("deps");
+    let dep_pkg = dep_root.join("demo");
+    fs::create_dir_all(&dep_pkg)?;
+    fs::write(dep_pkg.join("__init__.py"), "VALUE = 'site'\n")?;
+    fs::write(site_dir.join("px.pth"), format!("{}\n", dep_root.display()))?;
+
+    let project_pkg = project_root.join("demo");
+    fs::create_dir_all(&project_pkg)?;
+    fs::write(project_pkg.join("__init__.py"), "VALUE = 'project'\n")?;
+
+    let effects = SystemEffects::new();
+    let paths = build_pythonpath(effects.fs(), project_root, Some(site_dir.clone()))?;
+    let allowed_env = env::join_paths(&paths.allowed_paths)?
+        .into_string()
+        .expect("allowed paths");
+    let python = match effects.python().detect_interpreter() {
+        Ok(path) => path,
+        Err(_) => return Ok(()),
+    };
+
+    let mut cmd = Command::new(&python);
+    cmd.current_dir(project_root);
+    cmd.env("PYTHONPATH", paths.pythonpath.clone());
+    cmd.env("PX_ALLOWED_PATHS", allowed_env);
+    cmd.env("PYTHONSAFEPATH", "1");
+    cmd.arg("-c").arg(
+        "import importlib, json; mod = importlib.import_module('demo'); \
+         print(json.dumps({'value': getattr(mod, 'VALUE', ''), 'file': getattr(mod, '__file__', '')}))",
+    );
+    let output = cmd.output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "python exited with {}: {}\n{}",
+        output.status,
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload: Value = serde_json::from_str(stdout.trim())?;
+    let value = payload
+        .get("value")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert_eq!(value, "site");
+    let file = payload.get("file").and_then(Value::as_str).unwrap_or("");
+    assert!(
+        file.contains(dep_pkg.to_string_lossy().as_ref()),
+        "expected module to load from site packages for native backend, got {file}"
     );
     Ok(())
 }

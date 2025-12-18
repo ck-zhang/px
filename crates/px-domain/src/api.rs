@@ -16,10 +16,11 @@ pub use crate::project::init::{
 };
 pub use crate::project::manifest::{
     canonicalize_package_name, canonicalize_spec, collect_pyproject_packages,
-    collect_requirement_packages, collect_setup_cfg_packages, manifest_fingerprint,
-    px_options_from_doc, read_requirements_file, read_setup_cfg_requires, sandbox_config_from_doc,
-    sandbox_config_from_manifest, DependencyGroupSource, ManifestAddReport, ManifestEditor,
-    ManifestRemoveReport, OnboardPackagePlan, PxOptions, SandboxConfig,
+    collect_requirement_packages, collect_setup_cfg_packages, collect_setup_py_packages,
+    manifest_fingerprint, px_options_from_doc, read_requirements_file, read_setup_cfg_requires,
+    read_setup_py_requires, sandbox_config_from_doc, sandbox_config_from_manifest,
+    DependencyGroupSource, ManifestAddReport, ManifestEditor, ManifestRemoveReport,
+    OnboardPackagePlan, PxOptions, SandboxConfig,
 };
 pub use crate::project::onboard::{
     prepare_pyproject_plan, resolve_onboard_path, BackupManager, BackupSummary, PyprojectPlan,
@@ -38,8 +39,8 @@ pub use crate::resolution::project_resolver::{
     spec_requires_pin, InstallOverride, PinSpec, ResolvedSpecOutput,
 };
 pub use crate::resolution::resolver::{
-    normalize_dist_name, resolve, ResolveRequest as ResolverRequest, ResolvedSpecifier,
-    ResolverEnv, ResolverTags,
+    normalize_dist_name, resolve, ResolveRequest as ResolverRequest, ResolvedDistSource,
+    ResolvedSpecifier, ResolverEnv, ResolverTags,
 };
 pub use crate::workspace::{
     discover_workspace_root, manifest_has_workspace, read_workspace_config,
