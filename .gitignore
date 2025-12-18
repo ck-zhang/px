@@ -1,3 +1,7 @@
 .code/
+.px/
 target/
 devnote/
+tmp/
+__pycache__/
+*.pyc
