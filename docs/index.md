@@ -19,6 +19,7 @@ Platform support: px targets Linux and macOS today; Windows is not supported yet
 - [Commands](./reference/commands.md)
 - [Tools and runtimes API](./reference/tools-and-runtimes-api.md)
 - [Errors and troubleshooting](./reference/errors-and-troubleshooting.md)
+- [Code map](./reference/code-map.md)
 
 ## Design
 
