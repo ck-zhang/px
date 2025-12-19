@@ -25,11 +25,6 @@ fn main() -> Result<()> {
         .bin("px")
         .complete();
 
-    if cfg!(windows) {
-        eprintln!("px currently supports Linux and macOS only; Windows is not supported yet. Please use WSL or a Unix host.");
-        std::process::exit(1);
-    }
-
     let raw_args: Vec<_> = env::args_os().collect();
     let cli = PxCli::parse_from(normalize_run_args(raw_args));
     let trace = cli.trace || cli.debug;

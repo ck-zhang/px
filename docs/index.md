@@ -2,7 +2,7 @@
 
 This documentation is the authoritative source of truth for px. Start here, then dive into the section you need.
 
-Platform support: px targets Linux and macOS today; Windows is not supported yet (use WSL in the meantime).
+Platform support: px supports Linux, macOS, and Windows.
 
 ## Guides
 

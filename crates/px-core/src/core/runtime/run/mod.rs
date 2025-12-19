@@ -4,6 +4,9 @@ use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+use std::io::Read;
+
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -201,7 +204,7 @@ fn apply_profile_env_vars(envs: &mut EnvPairs, vars: &BTreeMap<String, Value>) {
 }
 
 fn apply_runtime_python_home(envs: &mut EnvPairs, runtime: &Path) {
-    let Some(runtime_root) = runtime.parent().and_then(|bin| bin.parent()) else {
+    let Some(runtime_root) = crate::core::fs::python_install_root(runtime) else {
         return;
     };
     set_env_pair(envs, "PYTHONHOME", runtime_root.display().to_string());
@@ -461,18 +464,76 @@ fn run_executable(
         return Ok(pip_mutation_outcome(program, &subcommand, extra_args));
     }
     let (mut envs, _) = build_env_with_preflight(core_ctx, py_ctx, command_args)?;
-    let uses_px_python = program_matches_python(program, py_ctx);
-    let needs_stdin = uses_px_python && extra_args.first().map(|arg| arg == "-").unwrap_or(false);
+
+    #[cfg(windows)]
+    let mut exec_program = program.to_string();
+    #[cfg(not(windows))]
+    let exec_program = program.to_string();
+
+    #[cfg(windows)]
+    let mut exec_args: Vec<String> = extra_args.to_vec();
+    #[cfg(not(windows))]
+    let exec_args: Vec<String> = extra_args.to_vec();
+
+    #[cfg(windows)]
+    {
+        let path = Path::new(program);
+        if path.is_file()
+            && path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+        {
+            exec_program = "cmd".to_string();
+            let mut argv = Vec::with_capacity(extra_args.len() + 2);
+            argv.push("/C".to_string());
+            argv.push(program.to_string());
+            argv.extend(extra_args.iter().cloned());
+            exec_args = argv;
+        } else {
+            let should_run_via_python = path.is_file()
+                && (path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("py") || ext.eq_ignore_ascii_case("pyw"))
+                || {
+                    let mut file = match fs::File::open(path) {
+                        Ok(file) => file,
+                        Err(_) => return Ok(ExecutionOutcome::failure(
+                            "failed to execute program",
+                            json!({ "error": format!("failed to open {}", path.display()) }),
+                        )),
+                    };
+                    let mut buf = [0u8; 256];
+                    let read = file.read(&mut buf).unwrap_or(0);
+                    let prefix = std::str::from_utf8(&buf[..read]).unwrap_or_default();
+                    prefix
+                        .lines()
+                        .next()
+                        .is_some_and(|line| line.starts_with("#!") && line.to_ascii_lowercase().contains("python"))
+                });
+            if should_run_via_python {
+                exec_program = py_ctx.python.clone();
+                let mut argv = Vec::with_capacity(extra_args.len() + 1);
+                argv.push(program.to_string());
+                argv.extend(extra_args.iter().cloned());
+                exec_args = argv;
+            }
+        }
+    }
+
+    let uses_px_python = program_matches_python(&exec_program, py_ctx);
+    let needs_stdin = uses_px_python && exec_args.first().map(|arg| arg == "-").unwrap_or(false);
     if !uses_px_python {
         envs.retain(|(key, _)| key != "PX_PYTHON");
     }
     let interactive = interactive || needs_stdin;
     let output = if needs_stdin {
-        runner.run_command_with_stdin(program, extra_args, &envs, workdir, true)?
+        runner.run_command_with_stdin(&exec_program, &exec_args, &envs, workdir, true)?
     } else if interactive {
-        runner.run_command_passthrough(program, extra_args, &envs, workdir)?
+        runner.run_command_passthrough(&exec_program, &exec_args, &envs, workdir)?
     } else {
-        runner.run_command(program, extra_args, &envs, workdir)?
+        runner.run_command(&exec_program, &exec_args, &envs, workdir)?
     };
     let mut details = json!({
         "mode": if uses_px_python { "passthrough" } else { "executable" },

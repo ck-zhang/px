@@ -205,6 +205,24 @@ pub(crate) fn build_pythonpath(
             }
         }
     }
+    #[cfg(windows)]
+    {
+        let legacy_site_packages = canonical.join("Lib").join("site-packages");
+        if fs.metadata(&legacy_site_packages).is_ok() {
+            let should_add = site_packages_used
+                .as_ref()
+                .map(|existing| existing != &legacy_site_packages)
+                .unwrap_or(true);
+            if should_add {
+                site_paths.push(legacy_site_packages.clone());
+                if let Ok(canon) = fs.canonicalize(&legacy_site_packages) {
+                    if canon != legacy_site_packages {
+                        site_paths.push(canon);
+                    }
+                }
+            }
+        }
+    }
 
     let mut project_paths = Vec::new();
     let src = project_root.join("src");

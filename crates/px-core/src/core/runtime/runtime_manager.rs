@@ -358,9 +358,11 @@ mod tests {
     use serial_test::serial;
     use std::env;
     use std::fs;
-    use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     struct RegistryEnvGuard;
 
@@ -485,6 +487,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     #[serial]
     fn install_runtime_canonicalizes_relative_paths() {
         let temp = TempDir::new().unwrap();

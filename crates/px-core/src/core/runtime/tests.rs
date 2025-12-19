@@ -188,17 +188,24 @@ fn python_environment_markers_create_pyvenv_and_shims() -> Result<()> {
         "pyvenv.cfg should record runtime version"
     );
     assert!(
-        site_dir.join("bin/python").exists(),
-        "python shim should be created"
+        cfg!(windows) || site_dir.join("bin/python").exists(),
+        "python shim should be created (non-Windows)"
     );
     assert!(
-        site_dir.join("bin/python3").exists(),
-        "python3 shim should be created"
+        cfg!(windows) || site_dir.join("bin/python3").exists(),
+        "python3 shim should be created (non-Windows)"
     );
-    assert!(
-        env_python.starts_with(site_dir.join("bin")),
-        "primary python should live under the site bin dir"
-    );
+    if cfg!(windows) {
+        assert_eq!(
+            env_python, runtime_python,
+            "Windows uses the runtime executable directly"
+        );
+    } else {
+        assert!(
+            env_python.starts_with(site_dir.join("bin")),
+            "primary python should live under the site bin dir"
+        );
+    }
     Ok(())
 }
 

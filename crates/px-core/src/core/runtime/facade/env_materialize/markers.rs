@@ -26,17 +26,9 @@ pub(crate) fn write_python_environment_markers(
         }
         env_vars
     };
-    write_python_shim(
-        &bin_dir,
-        &canonical_runtime,
-        &site_packages,
-        &manifest_env_vars,
-    )?;
 
-    let home = canonical_runtime
-        .parent()
-        .and_then(|parent| parent.parent())
-        .unwrap_or_else(|| canonical_runtime.parent().unwrap_or(Path::new("")));
+    let home = crate::core::fs::python_install_root(&canonical_runtime)
+        .unwrap_or_else(|| canonical_runtime.parent().unwrap_or_else(|| Path::new("")).to_path_buf());
     let pyvenv_cfg = format!(
         "home = {}\ninclude-system-site-packages = false\nversion = {}\n",
         home.display(),
@@ -44,15 +36,32 @@ pub(crate) fn write_python_environment_markers(
     );
     fs.write(&site_dir.join("pyvenv.cfg"), pyvenv_cfg.as_bytes())?;
 
-    let primary = bin_dir.join("python");
-    let mut names = vec!["python3".to_string()];
-    if let Some((major, minor)) = parse_python_version(&runtime.version) {
-        names.push(format!("python{major}"));
-        names.push(format!("python{major}.{minor}"));
+    #[cfg(windows)]
+    {
+        // Windows needs a native launcher for `bin/python`; prefer using the real runtime
+        // executable path and rely on px to set environment variables when spawning.
+        return Ok(canonical_runtime);
     }
-    for name in names {
-        let dest = bin_dir.join(&name);
-        install_python_link(&primary, &dest)?;
+
+    #[cfg(not(windows))]
+    {
+        write_python_shim(
+            &bin_dir,
+            &canonical_runtime,
+            &site_packages,
+            &manifest_env_vars,
+        )?;
+
+        let primary = bin_dir.join("python");
+        let mut names = vec!["python3".to_string()];
+        if let Some((major, minor)) = parse_python_version(&runtime.version) {
+            names.push(format!("python{major}"));
+            names.push(format!("python{major}.{minor}"));
+        }
+        for name in names {
+            let dest = bin_dir.join(&name);
+            install_python_link(&primary, &dest)?;
+        }
+        Ok(primary)
     }
-    Ok(primary)
 }

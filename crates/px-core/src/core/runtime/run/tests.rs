@@ -233,11 +233,19 @@ oid sha256:deadbeef\nsize 4\n",
     // Fake git-lfs subcommand on PATH.
     let fake_bin = workspace.path().join("bin");
     fs::create_dir_all(&fake_bin)?;
-    let fake = fake_bin.join("git-lfs");
-    fs::write(
-        &fake,
-        "#!/bin/sh\nif [ \"$1\" = \"smudge\" ]; then cat >/dev/null; echo \"SMUDGED\"; else exit 1; fi\n",
-    )?;
+    let fake = if cfg!(windows) {
+        fake_bin.join("git-lfs.cmd")
+    } else {
+        fake_bin.join("git-lfs")
+    };
+    let body = if cfg!(windows) {
+        "@echo off\r\nif \"%1\"==\"smudge\" (\r\n  more >nul\r\n  echo SMUDGED\r\n  exit /B 0\r\n)\r\nexit /B 1\r\n"
+            .to_string()
+    } else {
+        "#!/bin/sh\nif [ \"$1\" = \"smudge\" ]; then cat >/dev/null; echo \"SMUDGED\"; else exit 1; fi\n"
+            .to_string()
+    };
+    fs::write(&fake, body)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -245,14 +253,14 @@ oid sha256:deadbeef\nsize 4\n",
         perms.set_mode(0o755);
         fs::set_permissions(&fake, perms)?;
     }
-    let _path_guard = EnvVarGuard::set(
-        "PATH",
-        format!(
-            "{}:{}",
-            fake_bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        ),
-    );
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut entries = vec![fake_bin];
+    entries.extend(std::env::split_paths(&existing));
+    let value = std::env::join_paths(entries)
+        .unwrap_or_else(|_| existing)
+        .into_string()
+        .unwrap_or_else(|value| value.to_string_lossy().to_string());
+    let _path_guard = EnvVarGuard::set("PATH", value);
 
     restore_lfs_pointers(root, "HEAD", root).expect("smudge lfs pointers");
     let contents = fs::read_to_string(&pointer)?;

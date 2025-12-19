@@ -395,17 +395,20 @@ fn write_console_shims(
     }
     fs::create_dir_all(&bin_dir)?;
     for name in scripts.keys() {
-        let shim = bin_dir.join(name);
-        let contents = format!(
-            "#!/usr/bin/env sh\nexec px tool run {} --console {} \"$@\"\n",
-            metadata.name, name
-        );
-        fs::write(&shim, contents)?;
-        #[cfg(unix)]
+        #[cfg(not(windows))]
         {
-            let mut perms = fs::metadata(&shim)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&shim, perms)?;
+            let shim = bin_dir.join(name);
+            let contents = format!(
+                "#!/usr/bin/env sh\nexec px tool run {} --console {} \"$@\"\n",
+                metadata.name, name
+            );
+            fs::write(&shim, contents)?;
+            #[cfg(unix)]
+            {
+                let mut perms = fs::metadata(&shim)?.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&shim, perms)?;
+            }
         }
         #[cfg(windows)]
         {

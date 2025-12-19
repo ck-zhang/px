@@ -154,6 +154,14 @@ impl PythonContext {
         let mut path_entries = Vec::new();
         if let Some(bin) = &self.site_bin {
             path_entries.push(bin.clone());
+            if cfg!(windows) {
+                if let Some(site_root) = bin.parent() {
+                    let scripts = site_root.join("Scripts");
+                    if scripts.exists() {
+                        path_entries.push(scripts);
+                    }
+                }
+            }
         }
         path_entries.extend(self.pep582_bin.iter().cloned());
         if let Some(python_dir) = Path::new(&self.python).parent() {

@@ -4,7 +4,6 @@ px does **not**:
 
 * Act as a general task runner (no `px task` DSL).
 * Manage non-Python languages.
-* Support native Windows hosts (use WSL; we aim for Unix-first).
 * Provide a plugin marketplace or unbounded extension API.
 * Implicitly mutate state from read-only commands (`status`, `why`, `fmt` with respect to project/workspace state).
 * Expose `cache` or `env` as primary user concepts.

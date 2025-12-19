@@ -8,6 +8,7 @@ use std::{
 use anyhow::Result;
 use serde_json::Value;
 
+#[cfg(not(windows))]
 pub(crate) fn write_python_shim(
     bin_dir: &Path,
     runtime: &Path,

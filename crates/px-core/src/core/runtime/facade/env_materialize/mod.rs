@@ -11,9 +11,9 @@ use crate::context::CommandContext;
 use crate::core::runtime as effects;
 use crate::core::runtime::artifacts::{dependency_name, select_wheel};
 use crate::core::runtime::builder::{builder_identity_for_python, builder_identity_for_runtime};
-use crate::core::runtime::cas_env::{
-    copy_tree, ensure_profile_env, project_env_owner_id, write_python_shim,
-};
+use crate::core::runtime::cas_env::{copy_tree, ensure_profile_env, project_env_owner_id};
+#[cfg(not(windows))]
+use crate::core::runtime::cas_env::write_python_shim;
 use crate::core::runtime::runtime_manager;
 use crate::core::tooling::diagnostics;
 use crate::outcome::InstallUserError;

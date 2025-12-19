@@ -185,13 +185,13 @@ fn test_repairs_missing_env_in_dev_mode() {
     );
 
     // Verify the repaired environment is usable by running a guaranteed-core module.
-    let shim = project
-        .join(".px")
-        .join("envs")
-        .join("current")
-        .join("bin")
-        .join("python");
-    let output = std::process::Command::new(&shim)
+    let state_path = project.join(".px").join("state.json");
+    let state_contents = fs::read_to_string(&state_path).expect("read state.json");
+    let state: Value = serde_json::from_str(&state_contents).expect("parse state.json");
+    let python = state["current_env"]["python"]["path"]
+        .as_str()
+        .expect("state python path");
+    let output = std::process::Command::new(python)
         .arg("-c")
         .arg("import json; print(123)")
         .output()
@@ -210,6 +210,7 @@ fn test_repairs_missing_env_in_dev_mode() {
     );
 }
 
+#[cfg(not(windows))]
 #[test]
 fn sandbox_run_requires_consistent_env() {
     let _guard = test_env_guard();

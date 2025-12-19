@@ -234,6 +234,7 @@ fn workspace_run_at_ref_uses_workspace_identity() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn sandbox_workspace_requires_consistent_env() {
     let _guard = test_env_guard();
     if !require_online() {

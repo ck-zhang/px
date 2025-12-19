@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fs;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
@@ -176,19 +175,7 @@ pub(super) fn refresh_workspace_site(
     let local_envs = workspace.config.root.join(".px").join("envs");
     ctx.fs().create_dir_all(&local_envs)?;
     let current = local_envs.join("current");
-    if current.exists() {
-        let _ = fs::remove_file(&current).or_else(|_| fs::remove_dir_all(&current));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::symlink;
-        let _ = symlink(&cas_profile.env_path, &current);
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = fs::remove_dir_all(&current);
-        let _ = fs::hard_link(&cas_profile.env_path, &current);
-    }
+    crate::core::fs::replace_dir_link(&cas_profile.env_path, &current)?;
     persist_workspace_state(ctx.fs(), &workspace.config.root, env_state, runtime_state)?;
 
     if let Some(prev) = previous_env {

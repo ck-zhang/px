@@ -2,7 +2,7 @@
 
 px is the front door for Python projects: it owns the runtime, dependencies, and environment layout so commands are deterministic.
 
-px currently supports Linux and macOS only; Windows is not supported yet. Use WSL or a Unix host for now.
+px supports Linux, macOS, and Windows.
 
 ## Quick start (single project)
 

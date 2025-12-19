@@ -938,6 +938,7 @@ fn sync_repairs_stale_cached_paths_and_run_succeeds() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn sandbox_bypasses_cas_native_default() {
     let _guard = test_env_guard();
     reset_test_store_env();

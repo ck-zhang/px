@@ -139,19 +139,7 @@ pub(crate) fn refresh_project_site(
     let local_envs = snapshot.root.join(".px").join("envs");
     ctx.fs().create_dir_all(&local_envs)?;
     let current = local_envs.join("current");
-    if current.exists() {
-        let _ = fs::remove_file(&current).or_else(|_| fs::remove_dir_all(&current));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::symlink;
-        let _ = symlink(&cas_profile.env_path, &current);
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = fs::remove_dir_all(&current);
-        let _ = fs::hard_link(&cas_profile.env_path, &current);
-    }
+    crate::core::fs::replace_dir_link(&cas_profile.env_path, &current)?;
     let site_packages = site_packages_dir(&current, &runtime.version);
     let env_state = StoredEnvironment {
         id: cas_profile.profile_oid.clone(),
@@ -223,6 +211,14 @@ pub(in super::super) fn project_site_env(
     ];
     if let Some(bin) = &paths.site_bin {
         let mut path_entries = vec![bin.clone()];
+        if cfg!(windows) {
+            if let Some(site_root) = bin.parent() {
+                let scripts = site_root.join("Scripts");
+                if scripts.exists() {
+                    path_entries.push(scripts);
+                }
+            }
+        }
         if let Some(site_root) = bin.parent() {
             envs.push(("VIRTUAL_ENV".into(), site_root.display().to_string()));
         }
@@ -266,6 +262,49 @@ fn ensure_project_pip(
             sanitized.push(("PYTHONSAFEPATH".into(), "1".into()));
         }
         sanitized
+    }
+
+    #[cfg(windows)]
+    fn bootstrap_pip_from_ensurepip_bundle(
+        ctx: &CommandContext,
+        snapshot: &ManifestSnapshot,
+        env_python: &Path,
+        envs: &[(String, String)],
+        site_packages: &Path,
+    ) -> Result<()> {
+        let script = r#"
+import ensurepip
+from pathlib import Path
+
+bundled = Path(ensurepip.__file__).with_name("_bundled")
+candidates = sorted(bundled.glob("pip-*.whl"))
+print(str(candidates[0]) if candidates else "")
+"#;
+        let output = ctx.python_runtime().run_command(
+            env_python
+                .to_str()
+                .ok_or_else(|| anyhow!("invalid python path"))?,
+            &["-c".to_string(), script.trim().to_string()],
+            envs,
+            &snapshot.root,
+        )?;
+        if output.code != 0 {
+            bail!(
+                "failed to locate bundled pip wheel via ensurepip (exit {})",
+                output.code
+            );
+        }
+        let wheel_path = output.stdout.trim();
+        if wheel_path.is_empty() {
+            bail!("ensurepip did not provide a bundled pip wheel");
+        }
+        let wheel = Path::new(wheel_path);
+        if !wheel.exists() {
+            bail!("bundled pip wheel missing at {}", wheel.display());
+        }
+        ctx.fs().create_dir_all(site_packages)?;
+        crate::store::unpack_wheel(wheel, site_packages)
+            .with_context(|| format!("failed to unpack bundled pip wheel from {}", wheel.display()))
     }
 
     let debug_pip = std::env::var("PX_DEBUG_PIP").is_ok();
@@ -338,44 +377,57 @@ fn ensure_project_pip(
     if !pip_entrypoints || !pip_main_available {
         if !pip_main_available {
             let bootstrap_envs = pip_bootstrap_env(&envs);
-            let output = ctx.python_runtime().run_command(
-                env_python
-                    .to_str()
-                    .ok_or_else(|| anyhow!("invalid python path"))?,
-                &[
-                    "-m".to_string(),
-                    "ensurepip".to_string(),
-                    "--default-pip".to_string(),
-                    "--upgrade".to_string(),
-                    "--user".to_string(),
-                ],
-                &bootstrap_envs,
-                &snapshot.root,
-            )?;
-            if output.code != 0 {
-                let mut message = String::from("failed to bootstrap pip in the px environment");
-                if !output.stderr.trim().is_empty() {
-                    message.push_str(": ");
-                    message.push_str(output.stderr.trim());
-                }
-                if output.stderr.trim().is_empty() && !output.stdout.trim().is_empty() {
-                    message.push_str(": ");
-                    message.push_str(output.stdout.trim());
+            #[cfg(windows)]
+            {
+                bootstrap_pip_from_ensurepip_bundle(
+                    ctx,
+                    snapshot,
+                    env_python,
+                    &bootstrap_envs,
+                    &site_packages,
+                )?;
+            }
+            #[cfg(not(windows))]
+            {
+                let output = ctx.python_runtime().run_command(
+                    env_python
+                        .to_str()
+                        .ok_or_else(|| anyhow!("invalid python path"))?,
+                    &[
+                        "-m".to_string(),
+                        "ensurepip".to_string(),
+                        "--default-pip".to_string(),
+                        "--upgrade".to_string(),
+                        "--user".to_string(),
+                    ],
+                    &bootstrap_envs,
+                    &snapshot.root,
+                )?;
+                if output.code != 0 {
+                    let mut message = String::from("failed to bootstrap pip in the px environment");
+                    if !output.stderr.trim().is_empty() {
+                        message.push_str(": ");
+                        message.push_str(output.stderr.trim());
+                    }
+                    if output.stderr.trim().is_empty() && !output.stdout.trim().is_empty() {
+                        message.push_str(": ");
+                        message.push_str(output.stdout.trim());
+                    }
+                    if debug_pip {
+                        eprintln!(
+                            "ensurepip failed stdout={}, stderr={}",
+                            output.stdout, output.stderr
+                        );
+                    }
+                    bail!(message);
                 }
                 if debug_pip {
                     eprintln!(
-                        "ensurepip failed stdout={}, stderr={}",
-                        output.stdout, output.stderr
+                        "ensurepip ok stdout={}, stderr={}",
+                        output.stdout.trim(),
+                        output.stderr.trim()
                     );
                 }
-                bail!(message);
-            }
-            if debug_pip {
-                eprintln!(
-                    "ensurepip ok stdout={}, stderr={}",
-                    output.stdout.trim(),
-                    output.stderr.trim()
-                );
             }
         }
 
@@ -926,55 +978,86 @@ fn link_runtime_pip(
     runtime_path: &Path,
     runtime_version: &str,
 ) -> Result<()> {
-    let runtime_root = match runtime_path.parent().and_then(|bin| bin.parent()) {
-        Some(root) => root.to_path_buf(),
-        None => return Ok(()),
-    };
-    let Some((major, minor)) = parse_python_version(runtime_version) else {
+    #[cfg(windows)]
+    {
+        fn write_pip_shim(bin: &Path, name: &str) -> Result<()> {
+            let path = bin.join(name);
+            if path.exists() {
+                let _ = fs::remove_file(&path);
+            }
+            let contents = format!(
+                "#!/usr/bin/env python3\nimport runpy, sys\n\nif __name__ == '__main__':\n    sys.argv[0] = {name:?}\n    runpy.run_module('pip', run_name='__main__')\n"
+            );
+            fs::write(&path, contents)?;
+            Ok(())
+        }
+
+        let _ = env_site;
+        let _ = runtime_path;
+        fs::create_dir_all(env_bin)?;
+        let mut names = vec!["pip".to_string(), "pip3".to_string()];
+        if let Some((major, minor)) = parse_python_version(runtime_version) {
+            names.push(format!("pip{major}"));
+            names.push(format!("pip{major}.{minor}"));
+        }
+        for name in names {
+            write_pip_shim(env_bin, &name)?;
+        }
         return Ok(());
-    };
-    let runtime_site = runtime_root
-        .join("lib")
-        .join(format!("python{major}.{minor}"))
-        .join("site-packages");
-    if runtime_site.exists() {
-        let pip_src = runtime_site.join("pip");
-        let pip_dest = env_site.join("pip");
-        if pip_src.exists() && !pip_dest.exists() {
-            symlink_or_copy_dir(&pip_src, &pip_dest)?;
-        }
-
-        for entry in fs::read_dir(&runtime_site)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let Some(name_str) = name.to_str() else {
-                continue;
-            };
-            if !name_str.starts_with("pip") {
-                continue;
-            }
-            let src = entry.path();
-            let dest = env_site.join(name);
-            if entry.file_type()?.is_dir() && !dest.exists() {
-                symlink_or_copy_dir(&src, &dest)?;
-            }
-        }
     }
 
-    let runtime_bin = runtime_root.join("bin");
-    let mut bin_names = vec!["pip".to_string(), "pip3".to_string()];
-    bin_names.push(format!("pip{major}"));
-    bin_names.push(format!("pip{major}.{minor}"));
-    for name in bin_names {
-        let src = runtime_bin.join(&name);
-        if !src.exists() {
-            continue;
-        }
-        let dest = env_bin.join(&name);
-        let _ = install_python_link(&src, &dest);
-    }
+    #[cfg(not(windows))]
+    {
+        let runtime_root = match runtime_path.parent().and_then(|bin| bin.parent()) {
+            Some(root) => root.to_path_buf(),
+            None => return Ok(()),
+        };
+        let Some((major, minor)) = parse_python_version(runtime_version) else {
+            return Ok(());
+        };
+        let runtime_site = runtime_root
+            .join("lib")
+            .join(format!("python{major}.{minor}"))
+            .join("site-packages");
+        if runtime_site.exists() {
+            let pip_src = runtime_site.join("pip");
+            let pip_dest = env_site.join("pip");
+            if pip_src.exists() && !pip_dest.exists() {
+                symlink_or_copy_dir(&pip_src, &pip_dest)?;
+            }
 
-    Ok(())
+            for entry in fs::read_dir(&runtime_site)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let Some(name_str) = name.to_str() else {
+                    continue;
+                };
+                if !name_str.starts_with("pip") {
+                    continue;
+                }
+                let src = entry.path();
+                let dest = env_site.join(name);
+                if entry.file_type()?.is_dir() && !dest.exists() {
+                    symlink_or_copy_dir(&src, &dest)?;
+                }
+            }
+        }
+
+        let runtime_bin = runtime_root.join("bin");
+        let mut bin_names = vec!["pip".to_string(), "pip3".to_string()];
+        bin_names.push(format!("pip{major}"));
+        bin_names.push(format!("pip{major}.{minor}"));
+        for name in bin_names {
+            let src = runtime_bin.join(&name);
+            if !src.exists() {
+                continue;
+            }
+            let dest = env_bin.join(&name);
+            let _ = install_python_link(&src, &dest);
+        }
+
+        Ok(())
+    }
 }
 
 fn symlink_or_copy_dir(src: &Path, dest: &Path) -> Result<()> {

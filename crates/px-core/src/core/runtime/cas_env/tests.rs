@@ -14,7 +14,9 @@ use crate::store::cas::{
 };
 use crate::ManifestSnapshot;
 
-use super::{materialize, profile, runtime, write_python_shim};
+use super::{materialize, profile, runtime};
+#[cfg(not(windows))]
+use super::write_python_shim;
 
 #[test]
 fn runtime_archive_captures_full_tree() -> Result<()> {
@@ -58,6 +60,7 @@ fn runtime_archive_captures_full_tree() -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 #[test]
 fn python_shim_carries_runtime_site_and_home() -> Result<()> {
     let temp = tempdir()?;
@@ -333,7 +336,11 @@ fn python_bin_entries_are_rewritten_to_env_python() -> Result<()> {
 
     let env_script = env_root.join("bin").join("demo");
     let contents = fs::read_to_string(&env_script)?;
-    let expected_shebang = format!("#!{}\n", env_root.join("bin").join("python").display());
+    let expected_shebang = if cfg!(windows) {
+        format!("#!{}\n", runtime_exe.display())
+    } else {
+        format!("#!{}\n", env_root.join("bin").join("python").display())
+    };
     assert!(
         contents.starts_with(&expected_shebang),
         "shebang should point at env python"

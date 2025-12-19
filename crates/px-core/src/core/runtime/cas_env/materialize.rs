@@ -18,7 +18,9 @@ use crate::ManifestSnapshot;
 
 use super::fs_tree::make_writable_recursive;
 use super::scripts::{rewrite_python_entrypoint, should_rewrite_python_entrypoint};
-use super::{default_envs_root, write_python_shim};
+use super::default_envs_root;
+#[cfg(not(windows))]
+use super::write_python_shim;
 
 pub(super) fn materialize_profile_env(
     _snapshot: &ManifestSnapshot,
@@ -45,6 +47,11 @@ pub(super) fn materialize_profile_env(
     fs::create_dir_all(&bin_dir)?;
 
     let mut site_entries: HashMap<String, PathBuf> = HashMap::new();
+    let env_python_for_rewrite = if cfg!(windows) {
+        runtime_exe.to_path_buf()
+    } else {
+        env_root.join("bin").join("python")
+    };
     for pkg in &manifest.packages {
         let loaded = store.load(&pkg.pkg_build_oid)?;
         let LoadedObject::PkgBuild { archive, .. } = loaded else {
@@ -67,8 +74,7 @@ pub(super) fn materialize_profile_env(
                 if entry.file_type()?.is_file() {
                     let src = entry.path();
                     let dest = bin_dir.join(entry.file_name());
-                    let env_python = env_root.join("bin").join("python");
-                    link_bin_entry(&src, &dest, Some(&env_python))?;
+                    link_bin_entry(&src, &dest, Some(&env_python_for_rewrite))?;
                 }
             }
         }
@@ -141,14 +147,17 @@ pub(super) fn materialize_profile_env(
     }
     let _ = fs::remove_dir_all(&backup_root);
 
-    let final_site = site_packages_dir(&env_root, &runtime.version);
-    write_python_shim(
-        &env_root.join("bin"),
-        runtime_exe,
-        &final_site,
-        &manifest.env_vars,
-    )?;
-    install_python_links(&env_root.join("bin"), runtime_exe)?;
+    #[cfg(not(windows))]
+    {
+        let final_site = site_packages_dir(&env_root, &runtime.version);
+        write_python_shim(
+            &env_root.join("bin"),
+            runtime_exe,
+            &final_site,
+            &manifest.env_vars,
+        )?;
+        install_python_links(&env_root.join("bin"), runtime_exe)?;
+    }
     Ok(env_root)
 }
 
@@ -296,6 +305,7 @@ fn write_sitecustomize(env_root: &Path, site_packages: Option<&Path>) -> Result<
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn install_python_links(bin_dir: &Path, runtime: &Path) -> Result<()> {
     let python_path = PathBuf::from(runtime);
     for name in ["python", "python3"] {

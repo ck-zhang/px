@@ -1,3 +1,5 @@
+#![cfg(not(windows))]
+
 use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::process::Command;
