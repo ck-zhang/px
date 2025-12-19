@@ -1,0 +1,13 @@
+{
+  "name": "px-devtools",
+  "private": true,
+  "devDependencies": {
+    "@commitlint/cli": "^19.6.1"
+  },
+  "scripts": {
+    "hooks:install": "git config core.hooksPath .githooks",
+    "hooks:uninstall": "git config --unset core.hooksPath",
+    "lint:last-commit": "commitlint --from HEAD~1 --to HEAD"
+  }
+}
+
