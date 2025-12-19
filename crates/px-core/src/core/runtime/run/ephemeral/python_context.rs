@@ -9,7 +9,7 @@ use crate::core::runtime::facade::load_project_state;
 use crate::core::runtime::runtime_manager;
 use crate::core::sandbox::env_root_from_site_packages;
 
-pub(super) fn ephemeral_python_context(
+pub(in super::super) fn ephemeral_python_context(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
     runtime: &runtime_manager::RuntimeSelection,

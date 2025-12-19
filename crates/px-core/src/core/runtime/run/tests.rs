@@ -38,12 +38,20 @@ fn run_reference_parsing_normalizes_gh_locator_case_and_git_suffix() {
     let parsed = parse_run_reference_target(&target)
         .expect("parse")
         .expect("run reference");
+    let RunReferenceTarget::Script {
+        locator,
+        git_ref,
+        script_path,
+    } = parsed
+    else {
+        panic!("expected Script run-by-reference target");
+    };
     assert_eq!(
-        parsed.locator, "git+https://github.com/foo/bar.git",
+        locator, "git+https://github.com/foo/bar.git",
         "GitHub shorthand should normalize case and .git suffix"
     );
-    assert_eq!(parsed.git_ref.as_deref(), Some(sha));
-    assert_eq!(parsed.script_path, PathBuf::from("scripts/hello.py"));
+    assert_eq!(git_ref.as_deref(), Some(sha));
+    assert_eq!(script_path, PathBuf::from("scripts/hello.py"));
 }
 
 #[test]

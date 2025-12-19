@@ -62,9 +62,14 @@ Applies to all commands that show progress (resolver, env build, tool install, e
 * `pyc_cache_unwritable`: px could not create the Python bytecode cache directory; ensure `~/.px/cache` (or `PX_CACHE_PATH`) is writable and retry. If bytecode caches grow too large, it is always safe to delete `~/.px/cache/pyc`.
 * `ambiguous_console_script`: multiple dists provide the same `console_scripts` name; px typically falls back to a materialized env to pick a deterministic winner, but if fallback is unavailable, remove one of the conflicting deps (or run a specific module via `px run python -m <module>`).
 
-## Run by reference (`gh:` / `git+`)
+## Run by reference / URL runs (`https://` / `gh:` / `git+`)
 
-Run-by-reference targets fetch/cache a commit-pinned repo snapshot in the CAS and execute a Python script from it.
+Run-by-reference targets fetch/cache a commit-pinned repo snapshot in the CAS and execute a Python script from it. URL targets are detected only when an explicit scheme is present (for example `https://...`).
+
+* `run_url_requires_pin`: the URL uses a floating ref (branch/tag/HEAD), but pinned commits are required by default.
+
+  * Fix: use a commit-pinned URL containing a full SHA, e.g. `px run https://github.com/ORG/REPO/tree/<sha>/` or `px run https://github.com/ORG/REPO/blob/<sha>/path/to/script.py`
+  * Fix: or allow floating refs explicitly: `px run --allow-floating <URL> …` (refused under `--frozen` or `CI=1`)
 
 * `run_reference_requires_pin`: the repo ref is floating (branch/tag/no `@`), but pinned commits are required by default.
 
@@ -76,7 +81,7 @@ Run-by-reference targets fetch/cache a commit-pinned repo snapshot in the CAS an
   * Fix: use a full 40‑character commit SHA (recommended), e.g. `px run gh:ORG/REPO@<full_sha>:path/to/script.py`
   * Fix: or resolve it explicitly: `px run --allow-floating <TARGET> …` (refused under `--frozen` or `CI=1`)
 
-* `run_reference_offline_missing_snapshot`: `--offline` / `PX_ONLINE=0` was set, but the snapshot is not cached yet.
+* `run_reference_offline_missing_snapshot`: `--offline` / `PX_ONLINE=0` was set, but the snapshot is not cached yet (applies to URL and run-by-reference targets).
 
   * Fix: re-run once without `--offline` to populate the CAS, then retry with `--offline`
 
@@ -87,6 +92,14 @@ Run-by-reference targets fetch/cache a commit-pinned repo snapshot in the CAS an
 * `run_reference_floating_disallowed`: floating refs were requested under `--frozen` or `CI=1`.
 
   * Fix: pin a full commit SHA and retry
+
+* `run_reference_missing_repo_entrypoint`: a repo URL target did not specify an entrypoint and px could not infer one.
+
+  * Fix: provide an explicit entrypoint after the URL, e.g. `px run <URL> <console_script>` or `px run <URL> path/to/script.py`
+
+* `run_reference_ambiguous_repo_entrypoint`: a repo URL target has multiple plausible entrypoints.
+
+  * Fix: re-run with an explicit entrypoint after the URL; the error lists deterministic candidates
 
 * `invalid_run_reference_target`: the target is malformed.
 

@@ -122,7 +122,8 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 * **Preconditions**:
   * **`.pxapp` bundle targets**: no local project is required; px executes the bundle in a sandbox and does not read or write `pyproject.toml`, lockfiles, or `.px/` from the current directory.
   * **Project targets**: project root exists. Lock must exist and match manifest (otherwise suggest `px sync`). In CI/`--frozen`, px never re-resolves; if a materialized env is required (e.g. `--sandbox` or compatibility fallback), it must already be consistent.
-  * **Run-by-reference targets** (`gh:` / `git+`): no local project is required; px runs from a commit-pinned repository snapshot stored in the CAS and does not write `pyproject.toml`, `px.lock`, or `.px/` into the caller directory.
+  * **URL run targets** (`https://` / `http://`): no local project is required; px runs from a commit-pinned repository snapshot stored in the CAS and does not write `pyproject.toml`, `px.lock`, or `.px/` into the caller directory. (No guessing for strings without a URL scheme.)
+    * `--ephemeral` / `--try` is accepted but has no additional effect for URL targets (they already never adopt or write into the caller directory).
   * **Ephemeral / try mode** (`--ephemeral` / `--try`): no local px project is required; px derives a cached env profile from read-only inputs in the current directory and **never** writes `.px/` or `px.lock` into that directory.
     * Inputs (in order): PEP 723 `# /// script` metadata on the target script, otherwise `pyproject.toml`, otherwise `requirements.txt`, otherwise an empty env.
     * Workdir: the user’s current directory.
@@ -135,19 +136,29 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
      * All args after the bundle path are forwarded to the bundle’s entrypoint.
      * This mode does not support `--at` (commit-scoped execution).
 
-  1. **Run by reference** (explicit prefixes only):
+  1. **Run by URL** (explicit scheme only):
 
+     * **GitHub blob URL (script)**: `https://github.com/ORG/REPO/blob/<sha>/path/to/script.py`
+     * **GitHub raw URL (script)**: `https://raw.githubusercontent.com/ORG/REPO/<sha>/path/to/script.py`
+     * **GitHub tree URL (dir, script)**: `https://github.com/ORG/REPO/tree/<sha>/<dir>?px=run.py` (uses an explicit entrypoint via `?px=…` or `#px=…`)
+     * **GitHub repo URL (repo root)**: `https://github.com/ORG/REPO/tree/<sha>/` (or `…/commit/<sha>`)
+       * Optional entrypoint argument: `px run <URL> <ENTRYPOINT> [-- args...]`
+       * If `<ENTRYPOINT>` is omitted, px infers a default when unambiguous (exactly one `console_scripts` entry in `pyproject.toml`, otherwise exactly one “main-like” file such as `main.py`/`run.py`); otherwise px errors with a deterministic candidate list.
+
+     Legacy/explicit forms are still supported:
      * **GitHub shorthand**: `gh:ORG/REPO@<sha>:path/to/script.py`
      * **Git URL**: `git+file:///abs/path/to/repo@<sha>:path/to/script.py` (also supports `git+https://…@<sha>:…`)
 
      Semantics:
-     * **Pinned by default**: `@<sha>` must be a full commit SHA; floating refs (branch/tag/no `@`) are rejected unless `--allow-floating`.
+     * **Pinned by default**: URLs must include a full commit SHA; floating refs (branch/tag/HEAD) are rejected unless `--allow-floating`.
      * **Frozen/CI**: floating refs are refused even with `--allow-floating`.
      * **Offline** (`--offline` / `PX_ONLINE=0`): the repo snapshot must already be in the CAS; otherwise the run fails (no implicit network or git fetch).
      * **Locator hygiene**: `git+https://…` locators must not embed credentials, query strings, or fragments; use a git credential helper instead.
-     * **Dependencies**: if the target script contains PEP 723 `# /// script` (or `# /// px`) metadata, px uses it; otherwise the script runs in an empty env.
+     * **Dependencies**:
+       * **Script URLs**: if the target script contains PEP 723 `# /// script` (or `# /// px`) metadata, px uses it; otherwise the script runs in an empty env.
+       * **Repo URLs**: px derives a cached env from `pyproject.toml` (or `requirements.txt`) in the repo snapshot; if the selected entrypoint is a script file with PEP 723 metadata, that overrides.
      * **No project mutation**: the snapshot is materialized into px’s cache (read-only) and never touches the caller’s working directory.
-     * **Current limitations**: run-by-reference currently supports Python scripts only and does not support `--sandbox` or `--at`.
+     * **Current limitations**: URL targets do not support `--sandbox` or `--at`; blob/raw/tree “script URL” targets support Python scripts only.
 
   2. If `<target>` is a file under the project root, run it as a script with the project runtime.
   3. If `<target>` is a Python alias (`python`, `python3`, `py`, etc.), run the project runtime directly.

@@ -14,6 +14,7 @@ use crate::core::runtime::facade::{
     prepare_project_runtime, select_python_from_site, EnvironmentIssue, EnvironmentSyncReport,
     ManifestSnapshot, PythonContext,
 };
+use crate::core::sandbox::env_root_from_site_packages;
 use crate::core::runtime::run::{
     run_project_script, sandbox_runner_for_context, CommandRunner, HostCommandRunner,
     SandboxRunContext,
@@ -210,6 +211,62 @@ pub(crate) fn detect_inline_script(target: &str) -> Result<Option<InlineScript>,
     }))
 }
 
+/// Like [`detect_inline_script`], but resolves relative paths against `root`
+/// instead of the process CWD.
+pub(crate) fn detect_inline_script_at(
+    root: &Path,
+    target: &str,
+) -> Result<Option<InlineScript>, ExecutionOutcome> {
+    let path = Path::new(target);
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    if !abs_path.is_file() {
+        return Ok(None);
+    }
+    let is_python = abs_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("py"))
+        .unwrap_or(false);
+    if !is_python {
+        return Ok(None);
+    }
+
+    let contents = fs::read_to_string(&abs_path).map_err(|err| {
+        ExecutionOutcome::failure(
+            "unable to read script",
+            json!({
+                "script": abs_path.display().to_string(),
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+
+    let Some(block) = extract_inline_block(&contents, &abs_path)? else {
+        return Ok(None);
+    };
+    let metadata = parse_inline_metadata(&block, &abs_path)?;
+    let canonical_path = fs::canonicalize(&abs_path).map_err(|err| {
+        ExecutionOutcome::failure(
+            "unable to canonicalize script path",
+            json!({
+                "script": abs_path.display().to_string(),
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+
+    Ok(Some(InlineScript {
+        path: abs_path,
+        canonical_path,
+        working_dir: root.to_path_buf(),
+        metadata,
+    }))
+}
+
 /// Resolve, lock, and run an inline script using the metadata in its px block.
 pub(crate) fn run_inline_script(
     ctx: &CommandContext,
@@ -390,7 +447,39 @@ fn inline_python_context(
         .map_err(|err| map_install_error(err, "failed to prepare inline script runtime"))?;
     let sync_report = ensure_environment_with_guard(ctx, snapshot, guard)
         .map_err(|err| map_install_error(err, "failed to prepare inline script environment"))?;
-    let paths = build_pythonpath(ctx.fs(), &snapshot.root, None).map_err(|err| {
+    let state = load_project_state(ctx.fs(), &snapshot.root).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to read project state",
+            json!({ "error": err.to_string() }),
+        )
+    })?;
+    let env_state = state.current_env.as_ref().ok_or_else(|| {
+        ExecutionOutcome::user_error(
+            "inline script environment is missing",
+            json!({
+                "reason": "missing_env",
+                "hint": "rerun without --frozen (or enable PX_ONLINE=1) to populate the cache",
+            }),
+        )
+    })?;
+
+    let env_root = env_state
+        .env_path
+        .as_ref()
+        .map(|path| PathBuf::from(path.trim()))
+        .filter(|path| !path.as_os_str().is_empty())
+        .or_else(|| {
+            let site = PathBuf::from(env_state.site_packages.trim());
+            env_root_from_site_packages(&site)
+        })
+        .ok_or_else(|| {
+            ExecutionOutcome::failure(
+                "inline script environment missing env root",
+                json!({ "reason": "missing_env_root" }),
+            )
+        })?;
+
+    let paths = build_pythonpath(ctx.fs(), &script.working_dir, Some(env_root)).map_err(|err| {
         ExecutionOutcome::failure(
             "failed to assemble inline script PYTHONPATH",
             json!({
@@ -400,6 +489,9 @@ fn inline_python_context(
         )
     })?;
     let mut allowed_paths = paths.allowed_paths;
+    if snapshot.root != script.working_dir && !allowed_paths.iter().any(|p| p == &snapshot.root) {
+        allowed_paths.push(snapshot.root.clone());
+    }
     push_unique_path(
         &mut allowed_paths,
         script
@@ -407,7 +499,6 @@ fn inline_python_context(
             .parent()
             .unwrap_or_else(|| Path::new(".")),
     );
-    push_unique_path(&mut allowed_paths, &script.working_dir);
     let pythonpath = env::join_paths(&allowed_paths)
         .map_err(|err| {
             ExecutionOutcome::failure(
@@ -427,12 +518,6 @@ fn inline_python_context(
         &runtime.record.path,
         &runtime.record.full_version,
     );
-    let state = load_project_state(ctx.fs(), &snapshot.root).map_err(|err| {
-        ExecutionOutcome::failure(
-            "failed to read project state",
-            json!({ "error": err.to_string() }),
-        )
-    })?;
     let profile_oid = state
         .current_env
         .as_ref()

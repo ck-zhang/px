@@ -1,17 +1,74 @@
 use super::super::*;
 use super::EphemeralInput;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
+use toml_edit::DocumentMut;
 
-pub(super) fn detect_ephemeral_input(
+fn collect_entry_points(project: &toml_edit::Table) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut groups: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+
+    for (project_key, group_key) in [
+        ("scripts", "console_scripts"),
+        ("gui-scripts", "gui_scripts"),
+    ] {
+        if let Some(table) = project.get(project_key).and_then(toml_edit::Item::as_table) {
+            let mut mapped = BTreeMap::new();
+            for (name, value) in table.iter() {
+                if let Some(target) = value.as_str() {
+                    let trimmed_name = name.trim();
+                    let trimmed_target = target.trim();
+                    if trimmed_name.is_empty() || trimmed_target.is_empty() {
+                        continue;
+                    }
+                    mapped.insert(trimmed_name.to_string(), trimmed_target.to_string());
+                }
+            }
+            if !mapped.is_empty() {
+                groups.insert(group_key.to_string(), mapped);
+            }
+        }
+    }
+
+    if let Some(ep_table) = project
+        .get("entry-points")
+        .and_then(toml_edit::Item::as_table)
+    {
+        for (group, table) in ep_table.iter() {
+            if let Some(entries) = table.as_table() {
+                let mut mapped = BTreeMap::new();
+                for (name, value) in entries.iter() {
+                    if let Some(target) = value.as_str() {
+                        let trimmed_name = name.trim();
+                        let trimmed_target = target.trim();
+                        if trimmed_name.is_empty() || trimmed_target.is_empty() {
+                            continue;
+                        }
+                        mapped.insert(trimmed_name.to_string(), trimmed_target.to_string());
+                    }
+                }
+                if !mapped.is_empty() {
+                    groups.insert(group.to_string(), mapped);
+                }
+            }
+        }
+    }
+
+    groups
+}
+
+pub(in super::super) fn detect_ephemeral_input(
     invocation_root: &Path,
     run_target: Option<&str>,
 ) -> Result<EphemeralInput, ExecutionOutcome> {
     if let Some(target) = run_target {
-        if let Some(inline) = detect_inline_script(target)? {
+        if let Some(inline) = crate::core::runtime::script::detect_inline_script_at(
+            invocation_root,
+            target,
+        )? {
             let mut deps = inline.dependencies().to_vec();
             deps.sort();
             deps.dedup();
@@ -33,12 +90,7 @@ pub(super) fn detect_ephemeral_input(
                 }),
             )
         })?;
-        let snapshot = px_domain::api::ProjectSnapshot::from_contents(
-            invocation_root,
-            &pyproject_path,
-            &contents,
-        )
-        .map_err(|err| {
+        let doc: DocumentMut = contents.parse::<DocumentMut>().map_err(|err| {
             ExecutionOutcome::failure(
                 "failed to parse pyproject.toml for ephemeral run",
                 json!({
@@ -47,9 +99,26 @@ pub(super) fn detect_ephemeral_input(
                 }),
             )
         })?;
+        let entry_points = doc
+            .get("project")
+            .and_then(toml_edit::Item::as_table)
+            .map(collect_entry_points)
+            .unwrap_or_default();
+        let snapshot =
+            px_domain::api::ProjectSnapshot::from_document(invocation_root, &pyproject_path, doc)
+                .map_err(|err| {
+                    ExecutionOutcome::failure(
+                        "failed to parse pyproject.toml for ephemeral run",
+                        json!({
+                            "error": err.to_string(),
+                            "pyproject": pyproject_path.display().to_string(),
+                        }),
+                    )
+                })?;
         return Ok(EphemeralInput::Pyproject {
             requires_python: snapshot.python_requirement,
             deps: snapshot.requirements,
+            entry_points,
         });
     }
 
@@ -62,7 +131,7 @@ pub(super) fn detect_ephemeral_input(
     Ok(EphemeralInput::Empty)
 }
 
-pub(super) fn enforce_pinned_inputs(
+pub(in super::super) fn enforce_pinned_inputs(
     command: &str,
     invocation_root: &Path,
     input: &EphemeralInput,
@@ -77,6 +146,7 @@ pub(super) fn enforce_pinned_inputs(
         EphemeralInput::Pyproject {
             requires_python,
             deps,
+            ..
         } => (Some(requires_python.as_str()), deps.as_slice()),
         EphemeralInput::Requirements { deps } => (None, deps.as_slice()),
         EphemeralInput::Empty => (None, empty),

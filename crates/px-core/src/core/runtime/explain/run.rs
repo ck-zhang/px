@@ -140,12 +140,37 @@ fn normalize_pinned_commit(value: &str) -> Option<String> {
     Some(normalized)
 }
 
+fn is_http_url_target(target: &str) -> bool {
+    match url::Url::parse(target) {
+        Ok(url) => matches!(url.scheme(), "http" | "https"),
+        Err(_) => false,
+    }
+}
+
 fn plan_run_by_reference(
     ctx: &CommandContext,
     request: &RunRequest,
     reference: &RunReferenceTarget,
     strict: bool,
+    requested_target: &str,
 ) -> std::result::Result<execution_plan::ExecutionPlan, ExecutionOutcome> {
+    let (locator, git_ref_value, script_path) = match reference {
+        RunReferenceTarget::Script {
+            locator,
+            git_ref,
+            script_path,
+        } => (locator, git_ref.as_deref(), script_path),
+        RunReferenceTarget::Repo { .. } => {
+            return Err(ExecutionOutcome::user_error(
+                "px explain run does not yet support repo URL targets",
+                json!({
+                    "reason": "run_reference_explain_unsupported_repo_url",
+                    "hint": "Provide a script URL (blob/raw) or use `px run <URL>` to execute it.",
+                }),
+            ));
+        }
+    };
+
     if request.at.is_some() {
         return Err(ExecutionOutcome::user_error(
             "px run <ref>:<script> does not support --at",
@@ -166,9 +191,7 @@ fn plan_run_by_reference(
     }
 
     // Do not resolve floating refs or fetch snapshots; only report pinned commits and cached oids.
-    let ref_value = reference
-        .git_ref
-        .as_deref()
+    let ref_value = git_ref_value
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string());
@@ -200,6 +223,21 @@ fn plan_run_by_reference(
                     }),
                 ));
             }
+            if is_http_url_target(requested_target) {
+                return Err(ExecutionOutcome::user_error(
+                    "unpinned URL refused",
+                    json!({
+                        "reason": "run_url_requires_pin",
+                        "url": requested_target,
+                        "ref": raw_ref,
+                        "hint": "use a commit-pinned URL (example: https://github.com/<org>/<repo>/blob/<sha>/<path/to/script.py)",
+                        "recommendation": {
+                            "command": "px run --allow-floating <URL> [-- args...]",
+                            "hint": "use --allow-floating to resolve a branch/tag at runtime (refused under --frozen or CI=1)",
+                        }
+                    }),
+                ));
+            }
             return Err(ExecutionOutcome::user_error(
                 "run-by-reference requires a pinned commit SHA",
                 json!({
@@ -213,11 +251,16 @@ fn plan_run_by_reference(
             ));
         }
         if strict {
+            let hint = if is_http_url_target(requested_target) {
+                "use a commit-pinned URL containing a full SHA"
+            } else {
+                "pin a full commit SHA in the run target (use @<sha>)"
+            };
             return Err(ExecutionOutcome::user_error(
                 "floating git refs are disabled under --frozen or CI=1",
                 json!({
                     "reason": "run_reference_floating_disallowed",
-                    "hint": "pin a full commit SHA in the run target (use @<sha>)",
+                    "hint": hint,
                 }),
             ));
         }
@@ -235,7 +278,7 @@ fn plan_run_by_reference(
     let store = crate::store::cas::global_store();
     let repo_snapshot_oid = commit.as_deref().and_then(|commit| {
         let spec = crate::RepoSnapshotSpec {
-            locator: reference.locator.clone(),
+            locator: locator.clone(),
             commit: commit.to_string(),
             subdir: None,
         };
@@ -250,21 +293,21 @@ fn plan_run_by_reference(
 
     let mut argv = Vec::with_capacity(request.args.len() + 2);
     argv.push(runtime_exe.clone());
-    argv.push(reference.script_path.display().to_string());
+    argv.push(script_path.display().to_string());
     argv.extend(request.args.iter().cloned());
     let target_resolution = execution_plan::TargetResolution {
         kind: execution_plan::TargetKind::File,
-        resolved: reference.script_path.display().to_string(),
+        resolved: script_path.display().to_string(),
         argv,
     };
 
     Ok(execution_plan::ExecutionPlan {
         schema_version: 1,
         context: execution_plan::PlanContext::UrlRun {
-            locator: reference.locator.clone(),
+            locator: locator.clone(),
             git_ref: git_ref.clone(),
             commit: commit.clone(),
-            script_repo_path: reference.script_path.display().to_string(),
+            script_repo_path: script_path.display().to_string(),
         },
         runtime,
         lock_profile: execution_plan::LockProfilePlan {
@@ -295,11 +338,11 @@ fn plan_run_by_reference(
                 capabilities: Vec::new(),
             },
             source: execution_plan::SourceProvenance::RepoSnapshot {
-                locator: reference.locator.clone(),
+                locator: locator.clone(),
                 git_ref,
                 commit,
                 repo_snapshot_oid,
-                script_repo_path: reference.script_path.display().to_string(),
+                script_repo_path: script_path.display().to_string(),
             },
         },
         would_repair_env: !strict,
@@ -704,7 +747,7 @@ pub fn explain_run(ctx: &CommandContext, request: &RunRequest) -> AnyhowResult<E
             Err(outcome) => return Ok(outcome),
         };
         if let Some(reference) = reference {
-            let plan = match plan_run_by_reference(ctx, request, &reference, strict) {
+            let plan = match plan_run_by_reference(ctx, request, &reference, strict, &target) {
                 Ok(plan) => plan,
                 Err(outcome) => return Ok(outcome),
             };

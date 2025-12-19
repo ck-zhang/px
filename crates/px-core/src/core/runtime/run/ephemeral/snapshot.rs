@@ -1,6 +1,7 @@
 use super::super::*;
 use super::{EphemeralInput, DEFAULT_EPHEMERAL_REQUIRES_PYTHON, EPHEMERAL_PROJECT_NAME};
 
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -21,13 +22,14 @@ struct EphemeralKeyPayload<'a> {
     kind: &'a str,
     requires_python: &'a str,
     deps: &'a [String],
+    entry_points: &'a BTreeMap<String, BTreeMap<String, String>>,
     runtime: &'a str,
     platform: &'a str,
     indexes: &'a [String],
     force_sdist: bool,
 }
 
-pub(super) fn prepare_ephemeral_snapshot(
+pub(in super::super) fn prepare_ephemeral_snapshot(
     ctx: &CommandContext,
     invocation_root: &Path,
     input: &EphemeralInput,
@@ -40,22 +42,32 @@ pub(super) fn prepare_ephemeral_snapshot(
     ),
     ExecutionOutcome,
 > {
-    let (requires_python, deps) = match input {
+    let empty_entry_points: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let (requires_python, deps, entry_points) = match input {
         EphemeralInput::InlineScript {
             requires_python,
             deps,
-        } => (requires_python.clone(), deps.clone()),
+        } => (requires_python.clone(), deps.clone(), &empty_entry_points),
         EphemeralInput::Pyproject {
             requires_python,
             deps,
-        } => (requires_python.clone(), deps.clone()),
+            entry_points,
+        } => (requires_python.clone(), deps.clone(), entry_points),
         EphemeralInput::Requirements { deps } => {
-            (DEFAULT_EPHEMERAL_REQUIRES_PYTHON.to_string(), deps.clone())
+            (
+                DEFAULT_EPHEMERAL_REQUIRES_PYTHON.to_string(),
+                deps.clone(),
+                &empty_entry_points,
+            )
         }
-        EphemeralInput::Empty => (DEFAULT_EPHEMERAL_REQUIRES_PYTHON.to_string(), Vec::new()),
+        EphemeralInput::Empty => (
+            DEFAULT_EPHEMERAL_REQUIRES_PYTHON.to_string(),
+            Vec::new(),
+            &empty_entry_points,
+        ),
     };
 
-    let manifest_doc = build_ephemeral_manifest_doc(&requires_python, &deps);
+    let manifest_doc = build_ephemeral_manifest_doc(&requires_python, &deps, entry_points);
     let manifest_contents = manifest_doc.to_string();
     let temp_snapshot = px_domain::api::ProjectSnapshot::from_contents(
         invocation_root,
@@ -94,6 +106,7 @@ pub(super) fn prepare_ephemeral_snapshot(
         kind,
         requires_python: &requires_python,
         deps: &deps,
+        entry_points,
         runtime: &runtime.record.full_version,
         platform: &platform,
         indexes: &indexes,
@@ -140,7 +153,11 @@ pub(super) fn prepare_ephemeral_snapshot(
     Ok((snapshot, runtime, sync_report))
 }
 
-fn build_ephemeral_manifest_doc(requires_python: &str, dependencies: &[String]) -> DocumentMut {
+fn build_ephemeral_manifest_doc(
+    requires_python: &str,
+    dependencies: &[String],
+    entry_points: &BTreeMap<String, BTreeMap<String, String>>,
+) -> DocumentMut {
     let mut doc = DocumentMut::new();
     let mut project = Table::new();
     project.insert("name", Item::Value(TomlValue::from(EPHEMERAL_PROJECT_NAME)));
@@ -154,6 +171,63 @@ fn build_ephemeral_manifest_doc(requires_python: &str, dependencies: &[String]) 
         deps.push(dep.as_str());
     }
     project.insert("dependencies", Item::Value(TomlValue::Array(deps)));
+
+    if let Some(entries) = entry_points.get("console_scripts") {
+        let mut scripts = Table::new();
+        for (name, target) in entries {
+            let trimmed_name = name.trim();
+            let trimmed_target = target.trim();
+            if trimmed_name.is_empty() || trimmed_target.is_empty() {
+                continue;
+            }
+            scripts.insert(trimmed_name, Item::Value(TomlValue::from(trimmed_target)));
+        }
+        if !scripts.is_empty() {
+            project.insert("scripts", Item::Table(scripts));
+        }
+    }
+
+    if let Some(entries) = entry_points.get("gui_scripts") {
+        let mut scripts = Table::new();
+        for (name, target) in entries {
+            let trimmed_name = name.trim();
+            let trimmed_target = target.trim();
+            if trimmed_name.is_empty() || trimmed_target.is_empty() {
+                continue;
+            }
+            scripts.insert(trimmed_name, Item::Value(TomlValue::from(trimmed_target)));
+        }
+        if !scripts.is_empty() {
+            project.insert("gui-scripts", Item::Table(scripts));
+        }
+    }
+
+    let mut extra_groups = Table::new();
+    for (group, entries) in entry_points {
+        if group == "console_scripts" || group == "gui_scripts" {
+            continue;
+        }
+        let group_name = group.trim();
+        if group_name.is_empty() {
+            continue;
+        }
+        let mut table = Table::new();
+        for (name, target) in entries {
+            let trimmed_name = name.trim();
+            let trimmed_target = target.trim();
+            if trimmed_name.is_empty() || trimmed_target.is_empty() {
+                continue;
+            }
+            table.insert(trimmed_name, Item::Value(TomlValue::from(trimmed_target)));
+        }
+        if !table.is_empty() {
+            extra_groups.insert(group_name, Item::Table(table));
+        }
+    }
+    if !extra_groups.is_empty() {
+        project.insert("entry-points", Item::Table(extra_groups));
+    }
+
     doc.insert("project", Item::Table(project));
     let mut tool = Table::new();
     tool.insert("px", Item::Table(Table::new()));

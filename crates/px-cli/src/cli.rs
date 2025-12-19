@@ -129,7 +129,7 @@ pub enum CommandGroupCli {
     )]
     Update(SpecArgs),
     #[command(
-        about = "Run scripts/tasks with auto-sync unless --frozen or CI=1. Also supports gh:/git+ run-by-reference targets.",
+        about = "Run scripts/tasks with auto-sync unless --frozen or CI=1. Also supports https://... URL targets and gh:/git+ run-by-reference forms.",
         override_usage = "px run <TARGET> [ARG...]"
     )]
     Run(RunArgs),
@@ -387,13 +387,13 @@ pub struct SyncArgs {
 pub struct RunArgs {
     #[arg(
         long,
-        help = "Target to run (same as positional TARGET; supports gh:/git+ run-by-reference forms)",
+        help = "Target to run (same as positional TARGET; supports https://... URL targets and gh:/git+ run-by-reference forms)",
         add = ArgValueCompleter::new(run_target_completer)
     )]
     pub target: Option<String>,
     #[arg(
         long,
-        help = "Allow floating git refs in gh:/git+ run targets (resolved to a commit at runtime)"
+        help = "Allow floating git refs in URL/gh:/git+ run targets (resolved to a commit at runtime)"
     )]
     pub allow_floating: bool,
     #[arg(long, help = "Force interactive stdio (inherit stdin/stdout/stderr)")]
@@ -431,7 +431,7 @@ pub struct RunArgs {
         value_name = "TARGET",
         allow_hyphen_values = true,
         add = ArgValueCompleter::new(run_target_completer),
-        help = "Target to run. Run-by-reference: gh:ORG/REPO@<sha>:path/to/script.py or git+file:///abs/path/to/repo@<sha>:path/to/script.py"
+        help = "Target to run. URL forms: https://github.com/ORG/REPO/blob/<sha>/path/to/script.py (also raw.githubusercontent.com) or https://github.com/ORG/REPO/tree/<sha>/ (repo URL; may be followed by an entrypoint arg). Run-by-reference form: gh:ORG/REPO@<sha>:path/to/script.py or git+file:///abs/path/to/repo@<sha>:path/to/script.py"
     )]
     pub target_value: Option<String>,
     #[arg(
