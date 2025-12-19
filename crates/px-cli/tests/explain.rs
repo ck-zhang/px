@@ -206,7 +206,7 @@ fn snapshot_paths(root: &Path) -> Vec<String> {
             return;
         };
         let mut entries = entries.flatten().collect::<Vec<_>>();
-        entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             let path = entry.path();
             let rel = path

@@ -61,14 +61,13 @@ fn contains_suffix(root: &Path, suffix: &str) -> bool {
                     return true;
                 }
                 stack.push(path);
-            } else if ft.is_file() {
-                if path
+            } else if ft.is_file()
+                && path
                     .extension()
                     .and_then(|ext| ext.to_str())
                     .is_some_and(|ext| ext.eq_ignore_ascii_case(suffix))
-                {
-                    return true;
-                }
+            {
+                return true;
             }
         }
     }

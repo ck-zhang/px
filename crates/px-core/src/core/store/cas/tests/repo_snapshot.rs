@@ -1,6 +1,8 @@
 use super::*;
+use serial_test::serial;
 
 #[test]
+#[serial]
 fn repo_snapshot_oid_changes_with_commit() -> Result<()> {
     if !git_available() {
         eprintln!("skipping repo_snapshot_oid_changes_with_commit (git missing)");
@@ -39,6 +41,7 @@ fn repo_snapshot_oid_changes_with_commit() -> Result<()> {
 }
 
 #[test]
+#[serial]
 fn repo_snapshot_ensure_is_stable_and_cached() -> Result<()> {
     if !git_available() {
         eprintln!("skipping repo_snapshot_ensure_is_stable_and_cached (git missing)");
@@ -72,6 +75,7 @@ fn repo_snapshot_ensure_is_stable_and_cached() -> Result<()> {
 }
 
 #[test]
+#[serial]
 fn repo_snapshot_archive_metadata_is_normalized_and_excludes_git() -> Result<()> {
     if !git_available() {
         eprintln!(
@@ -131,6 +135,7 @@ fn repo_snapshot_archive_metadata_is_normalized_and_excludes_git() -> Result<()>
 
 #[cfg(unix)]
 #[test]
+#[serial]
 fn repo_snapshot_preserves_symlinks_and_exec_bits() -> Result<()> {
     if !git_available() {
         eprintln!("skipping repo_snapshot_preserves_symlinks_and_exec_bits (git missing)");
@@ -200,6 +205,7 @@ fn repo_snapshot_preserves_symlinks_and_exec_bits() -> Result<()> {
 }
 
 #[test]
+#[serial]
 fn repo_snapshot_offline_fails_for_remote_when_missing() -> Result<()> {
     let (_temp, store) = new_store()?;
     let _offline = EnvVarGuard::set("PX_ONLINE", "0");
@@ -226,6 +232,7 @@ fn repo_snapshot_offline_fails_for_remote_when_missing() -> Result<()> {
 
 #[cfg(unix)]
 #[test]
+#[serial]
 fn repo_snapshot_file_locator_normalization_is_fs_independent() -> Result<()> {
     use std::os::unix::fs::symlink;
 
@@ -259,6 +266,7 @@ fn repo_snapshot_file_locator_normalization_is_fs_independent() -> Result<()> {
 }
 
 #[test]
+#[serial]
 fn repo_snapshot_locator_with_credentials_is_rejected_and_redacted() -> Result<()> {
     let (_temp, store) = new_store()?;
     let spec = RepoSnapshotSpec {
@@ -295,6 +303,7 @@ fn repo_snapshot_locator_with_credentials_is_rejected_and_redacted() -> Result<(
 }
 
 #[test]
+#[serial]
 fn repo_snapshot_file_locator_normalizes_dot_segments() -> Result<()> {
     let (_temp, store) = new_store()?;
     let temp = tempdir()?;
@@ -318,6 +327,7 @@ fn repo_snapshot_file_locator_normalizes_dot_segments() -> Result<()> {
 }
 
 #[test]
+#[serial]
 fn archive_dir_canonical_excludes_dot_git_dir() -> Result<()> {
     use flate2::read::GzDecoder;
 
@@ -343,6 +353,7 @@ fn archive_dir_canonical_excludes_dot_git_dir() -> Result<()> {
 }
 
 #[test]
+#[serial]
 fn repo_snapshot_parse_reports_invalid_spec() -> Result<()> {
     let err = RepoSnapshotSpec::parse("git+file:///tmp/repo").unwrap_err();
     let user = err
@@ -360,6 +371,7 @@ fn repo_snapshot_parse_reports_invalid_spec() -> Result<()> {
 }
 
 #[test]
+#[serial]
 fn repo_snapshot_invalid_commit_is_user_error() -> Result<()> {
     let (_temp, store) = new_store()?;
     let spec = RepoSnapshotSpec {
@@ -383,6 +395,7 @@ fn repo_snapshot_invalid_commit_is_user_error() -> Result<()> {
 }
 
 #[test]
+#[serial]
 fn repo_snapshot_cache_hit_does_not_require_online_or_git() -> Result<()> {
     let (_temp, store) = new_store()?;
     let temp = tempdir()?;
@@ -420,6 +433,7 @@ fn repo_snapshot_cache_hit_does_not_require_online_or_git() -> Result<()> {
 }
 
 #[test]
+#[serial]
 fn repo_snapshot_locator_normalization_is_stable() -> Result<()> {
     let (_temp, store) = new_store()?;
     let temp = tempdir()?;

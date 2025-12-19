@@ -780,11 +780,11 @@ build-backend = "setuptools.build_meta"
             .expect("project.dynamic array");
         let entries: Vec<_> = dynamic.iter().filter_map(|item| item.as_str()).collect();
         assert!(
-            entries.iter().any(|entry| *entry == "readme"),
+            entries.contains(&"readme"),
             "readme should be marked dynamic when setup.cfg provides long_description"
         );
         assert!(
-            entries.iter().any(|entry| *entry == "maintainers"),
+            entries.contains(&"maintainers"),
             "maintainers should only be marked dynamic when setup.cfg provides maintainer metadata"
         );
 
@@ -806,11 +806,11 @@ build-backend = "setuptools.build_meta"
             .expect("project.dynamic array");
         let entries: Vec<_> = dynamic.iter().filter_map(|item| item.as_str()).collect();
         assert!(
-            entries.iter().any(|entry| *entry == "readme"),
+            entries.contains(&"readme"),
             "readme should be marked dynamic when setup.cfg provides long_description"
         );
         assert!(
-            !entries.iter().any(|entry| *entry == "maintainers"),
+            !entries.contains(&"maintainers"),
             "maintainers should not be marked dynamic when setup.cfg omits maintainer metadata"
         );
         Ok(())

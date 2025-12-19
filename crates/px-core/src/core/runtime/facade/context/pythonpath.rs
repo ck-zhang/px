@@ -95,6 +95,7 @@ fn contains_native_sources(
                 | "target"
                 | "dist"
                 | "build"
+                | "artifacts"
                 | "node_modules"
                 | ".idea"
                 | ".vscode"

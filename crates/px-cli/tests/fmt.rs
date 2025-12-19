@@ -5,10 +5,14 @@ use tempfile::tempdir;
 
 mod common;
 
-use common::{parse_json, prepare_fixture};
+use common::{detect_host_python, parse_json, prepare_fixture, require_online, test_env_guard};
 
 #[test]
-fn fmt_requires_tool_install_and_preserves_manifest() {
+fn fmt_auto_installs_tool_and_preserves_manifest() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
     let (_tmp, project) = prepare_fixture("fmt-missing-tool");
     let pyproject = project.join("pyproject.toml");
     let lock = project.join("px.lock");
@@ -17,21 +21,35 @@ fn fmt_requires_tool_install_and_preserves_manifest() {
 
     let tools_dir = tempdir().expect("tools dir");
     let store_dir = tempdir().expect("store dir");
+    let registry_dir = tempdir().expect("registry dir");
+    let registry = registry_dir.path().join("runtimes.json");
+    let Some(python) = common::find_python() else {
+        eprintln!("skipping fmt auto-install test (python binary not found)");
+        return;
+    };
+    let Some((python_path, channel)) = detect_host_python(&python) else {
+        eprintln!("skipping fmt auto-install test (unable to inspect python interpreter)");
+        return;
+    };
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .args(["python", "install", &channel, "--path", &python_path])
+        .assert()
+        .success();
+
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_RUNTIME_REGISTRY", &registry)
         .env("PX_TOOLS_DIR", tools_dir.path())
         .env("PX_TOOL_STORE", store_dir.path())
         .args(["--json", "fmt"])
         .assert()
-        .failure();
+        .success();
 
     let payload = parse_json(&assert);
-    assert_eq!(payload["status"], "user-error");
-    let hint = payload["details"]["hint"].as_str().unwrap_or_default();
-    assert!(
-        hint.contains("px tool install ruff"),
-        "px fmt should recommend installing the formatter via px tool install: {hint:?}"
-    );
+    assert_eq!(payload["status"], "ok");
     assert_eq!(
         manifest_before,
         fs::read_to_string(&pyproject).expect("read pyproject after fmt"),

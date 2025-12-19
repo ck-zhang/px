@@ -363,6 +363,7 @@ fn wants_project_pkg_build(manifest_path: &Path) -> bool {
                     | "target"
                     | "dist"
                     | "build"
+                    | "artifacts"
                     | "node_modules"
                     | ".idea"
                     | ".vscode"
@@ -435,43 +436,6 @@ fn wants_project_pkg_build(manifest_path: &Path) -> bool {
     requires
         .iter()
         .any(|req| req.contains("meson-python") || req.contains("maturin"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::wants_project_pkg_build;
-
-    use std::fs;
-
-    use tempfile::tempdir;
-
-    #[test]
-    fn project_pkg_build_ignores_native_sources_in_tests_dirs() {
-        let temp = tempdir().expect("tempdir");
-        let root = temp.path();
-        fs::write(
-            root.join("pyproject.toml"),
-            r#"[build-system]
-requires = ["setuptools>=42"]
-"#,
-        )
-        .expect("write pyproject");
-        fs::create_dir_all(root.join("tests")).expect("create tests");
-        fs::write(root.join("tests/demo.pyx"), "print('demo')\n").expect("write pyx");
-
-        assert!(
-            !wants_project_pkg_build(&root.join("pyproject.toml")),
-            "native sources under tests/ should not force a project wheel build"
-        );
-
-        fs::create_dir_all(root.join("src")).expect("create src");
-        fs::write(root.join("src/native.c"), "/* native */\n").expect("write native");
-
-        assert!(
-            wants_project_pkg_build(&root.join("pyproject.toml")),
-            "native sources under src/ should force a project wheel build"
-        );
-    }
 }
 
 fn ensure_project_pkg_build(
@@ -755,4 +719,41 @@ fn stage_pkg_build(dist_dir: &Path) -> Result<(TempDir, PathBuf)> {
     copy_tree(dist_dir, &site_dir)?;
     materialize_wheel_scripts(dist_dir, &bin_dir)?;
     Ok((staging, root))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wants_project_pkg_build;
+
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    #[test]
+    fn project_pkg_build_ignores_native_sources_in_tests_dirs() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+        fs::write(
+            root.join("pyproject.toml"),
+            r#"[build-system]
+requires = ["setuptools>=42"]
+"#,
+        )
+        .expect("write pyproject");
+        fs::create_dir_all(root.join("tests")).expect("create tests");
+        fs::write(root.join("tests/demo.pyx"), "print('demo')\n").expect("write pyx");
+
+        assert!(
+            !wants_project_pkg_build(&root.join("pyproject.toml")),
+            "native sources under tests/ should not force a project wheel build"
+        );
+
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("src/native.c"), "/* native */\n").expect("write native");
+
+        assert!(
+            wants_project_pkg_build(&root.join("pyproject.toml")),
+            "native sources under src/ should force a project wheel build"
+        );
+    }
 }

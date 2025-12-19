@@ -1,4 +1,4 @@
-use std::{env, path::Path};
+use std::{env, io::IsTerminal, path::Path};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -10,8 +10,9 @@ use super::fmt_plan::{
 use crate::{
     build_pythonpath, ensure_project_environment_synced, is_missing_project_error,
     manifest_snapshot, missing_project_outcome, outcome_from_output,
-    tools::{disable_proxy_env, load_installed_tool, MIN_PYTHON_REQUIREMENT},
-    CommandContext, ExecutionOutcome, InstallUserError,
+    progress::ProgressSuspendGuard,
+    tools::{disable_proxy_env, load_installed_tool, tool_install, ToolInstallRequest, MIN_PYTHON_REQUIREMENT},
+    CommandContext, CommandStatus, ExecutionOutcome, InstallUserError,
 };
 use px_domain::api::ProjectSnapshot;
 
@@ -158,24 +159,54 @@ fn prepare_tool_run(
 ) -> Result<PreparedToolRun, ExecutionOutcome> {
     let descriptor = match load_installed_tool(tool.install_name()) {
         Ok(desc) => desc,
-        Err(user) => {
-            let mut details = json!({
-                "tool": tool.display_name(),
-                "module": tool.module,
-                "config_source": env.config.source.as_str(),
-                "hint": tool.install_command(),
-            });
-            if !user.details.is_null() {
-                details["tool_state"] = user.details;
-            }
-            return Err(ExecutionOutcome::user_error(
-                format!(
-                    "px {}: tool '{}' is not installed",
+        Err(_) => {
+            if should_announce_tool_install(env.ctx) {
+                eprintln!(
+                    "px {}: installing {}",
                     kind.section_name(),
-                    tool.display_name()
-                ),
-                details,
-            ));
+                    tool_install_display(tool)
+                );
+            }
+            let request = ToolInstallRequest {
+                name: tool.install_name().to_string(),
+                spec: tool.requirement_spec(),
+                python: None,
+                entry: Some(tool.module.clone()),
+            };
+            let _suspend = ProgressSuspendGuard::new();
+            let outcome = match tool_install(env.ctx, &request) {
+                Ok(outcome) => outcome,
+                Err(err) => match err.downcast::<InstallUserError>() {
+                    Ok(user) => {
+                        return Err(ExecutionOutcome::user_error(user.message, user.details));
+                    }
+                    Err(other) => {
+                        return Err(ExecutionOutcome::failure(
+                            format!("px {}: failed to install tool", kind.section_name()),
+                            json!({
+                                "tool": tool.display_name(),
+                                "module": tool.module,
+                                "error": other.to_string(),
+                                "config_source": env.config.source.as_str(),
+                            }),
+                        ));
+                    }
+                },
+            };
+            if outcome.status != CommandStatus::Ok {
+                return Err(outcome);
+            }
+            load_installed_tool(tool.install_name()).map_err(|err| {
+                ExecutionOutcome::failure(
+                    format!("px {}: failed to load tool after install", kind.section_name()),
+                    json!({
+                        "tool": tool.display_name(),
+                        "module": tool.module,
+                        "error": err.to_string(),
+                        "config_source": env.config.source.as_str(),
+                    }),
+                )
+            })?
         }
     };
     let runtime_selection = match runtime_manager::resolve_runtime(
@@ -295,6 +326,15 @@ fn prepare_tool_run(
         tool_root: descriptor.root.display().to_string(),
         runtime: runtime_selection.record.full_version,
     })
+}
+
+fn tool_install_display(tool: &QualityTool) -> String {
+    tool.requirement_spec()
+        .unwrap_or_else(|| tool.install_name().to_string())
+}
+
+fn should_announce_tool_install(ctx: &CommandContext) -> bool {
+    !ctx.global.json && !ctx.global.quiet && std::io::stderr().is_terminal()
 }
 
 fn missing_module_outcome(

@@ -7,7 +7,7 @@ use toml_edit::DocumentMut;
 
 mod common;
 
-use common::{parse_json, prepare_fixture, require_online, test_env_guard};
+use common::{detect_host_python, parse_json, prepare_fixture, require_online, test_env_guard};
 
 fn px_cmd() -> assert_cmd::Command {
     common::ensure_test_store_env();
@@ -977,21 +977,37 @@ fn run_and_test_report_missing_manifest_command() {
 }
 
 #[test]
-fn project_test_surfaces_missing_pytest() {
+fn project_test_auto_installs_pytest_and_preserves_manifest() {
     let _guard = test_env_guard();
     if !require_online() {
         return;
     }
-    let (_temp, root) = common::init_empty_project("px-missing-pytest");
+    let (_temp, root) = common::init_empty_project("px-auto-pytest");
     let cache = root.join(".px-cache");
     let store = cache.join("store");
     let envs = cache.join("envs");
     fs::create_dir_all(&envs).expect("create envs dir");
 
+    let tools_dir = tempfile::tempdir().expect("tools dir");
+    let tool_store = tempfile::tempdir().expect("tool store dir");
+    let registry_dir = tempfile::tempdir().expect("registry dir");
+    let registry = registry_dir.path().join("runtimes.json");
+
     let Some(python) = find_python() else {
-        eprintln!("skipping missing pytest test (python binary not found)");
+        eprintln!("skipping pytest auto-install test (python binary not found)");
         return;
     };
+    let Some((python_path, channel)) = detect_host_python(&python) else {
+        eprintln!("skipping pytest auto-install test (unable to inspect python interpreter)");
+        return;
+    };
+    cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .args(["python", "install", &channel, "--path", &python_path])
+        .assert()
+        .success();
+
     let has_pytest = std::process::Command::new(&python)
         .args([
             "-c",
@@ -1001,43 +1017,46 @@ fn project_test_surfaces_missing_pytest() {
         .ok()
         .is_some_and(|status| status.success());
     if has_pytest {
-        eprintln!("skipping missing pytest test (pytest already available on runtime)");
+        eprintln!("skipping pytest auto-install test (pytest already available on runtime)");
         return;
     }
+
+    let tests = root.join("tests");
+    fs::create_dir_all(&tests).expect("create tests dir");
+    fs::write(tests.join("test_smoke.py"), "def test_smoke():\n    assert True\n")
+        .expect("write test");
+
+    let pyproject = root.join("pyproject.toml");
+    let lock = root.join("px.lock");
+    let manifest_before = fs::read_to_string(&pyproject).expect("read pyproject");
+    let lock_before = fs::read_to_string(&lock).expect("read lock");
 
     let assert = px_cmd()
         .current_dir(&root)
         .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_RUNTIME_REGISTRY", &registry)
         .env("PX_CACHE_PATH", &cache)
         .env("PX_STORE_PATH", &store)
         .env("PX_ENVS_PATH", &envs)
+        .env("PX_TOOLS_DIR", tools_dir.path())
+        .env("PX_TOOL_STORE", tool_store.path())
         .env("PX_RUNTIME_HOST_ONLY", "1")
+        .env("PYTHONNOUSERSITE", "1")
         .args(["--json", "test"])
         .assert()
-        .failure();
+        .success();
     let payload = parse_json(&assert);
-    assert_eq!(payload["status"], "user-error");
-    let message = payload["message"]
-        .as_str()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    assert!(
-        message.contains("pytest is not available"),
-        "expected pytest missing message, got {message:?}"
-    );
-    let hint = payload["details"]["hint"].as_str().unwrap_or_default();
-    assert!(
-        hint.contains("px add pytest"),
-        "hint should suggest installing pytest via px add: {hint:?}"
-    );
-    assert!(
-        !hint.contains("--dev"),
-        "hint must not suggest --dev flag: {hint:?}"
+    assert_eq!(payload["status"], "ok");
+
+    assert_eq!(
+        manifest_before,
+        fs::read_to_string(&pyproject).expect("read pyproject after test"),
+        "px test should not modify pyproject.toml when auto-installing pytest"
     );
     assert_eq!(
-        payload["details"]["code"].as_str(),
-        Some("PX202"),
-        "expected PX202 code for missing pytest"
+        lock_before,
+        fs::read_to_string(&lock).expect("read lock after test"),
+        "px test should not modify px.lock when auto-installing pytest"
     );
 }
 

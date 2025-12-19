@@ -13,6 +13,7 @@ use px_domain::api::marker_applies;
 use px_domain::api::{
     DependencyGroupSource, LockSnapshot, LockedArtifact, LockedDependency, PxOptions,
 };
+use serial_test::serial;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
@@ -65,6 +66,7 @@ fn resolver_enabled_by_default() {
 }
 
 #[test]
+#[serial]
 fn base_env_exports_manage_command_alias() -> Result<()> {
     let temp = tempdir()?;
     let python =

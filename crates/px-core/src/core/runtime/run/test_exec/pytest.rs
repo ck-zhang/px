@@ -1,14 +1,25 @@
 use super::*;
+use std::io::IsTerminal;
 
 use super::builtin::run_builtin_tests;
 use super::env::{append_allowed_paths, append_pythonpath, run_python_command};
 use super::outcome::{mark_reporter_rendered, missing_pytest_outcome, test_failure, test_success};
+use crate::{
+    build_pythonpath,
+    progress::ProgressSuspendGuard,
+    tools::{load_installed_tool, tool_install, ToolInstallRequest},
+    CommandStatus, InstallUserError,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::core::runtime::run) enum TestReporter {
     Px,
     Pytest,
 }
+
+const DEFAULT_PYTEST_REQUIREMENT: &str = "pytest==8.3.3";
+const PYTEST_CHECK_SCRIPT: &str =
+    "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('pytest') else 1)";
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_pytest_runner(
@@ -22,7 +33,13 @@ pub(super) fn run_pytest_runner(
     workdir: &Path,
 ) -> Result<ExecutionOutcome> {
     let reporter = test_reporter_from_env();
-    let (envs, pytest_cmd) = build_pytest_invocation(ctx, py_ctx, envs, test_args, reporter)?;
+    let (mut envs, pytest_cmd) = build_pytest_invocation(ctx, py_ctx, envs, test_args, reporter)?;
+    if let Err(outcome) = ensure_pytest_available(ctx, py_ctx, &mut envs) {
+        if ctx.config().test.fallback_builtin || allow_builtin_fallback {
+            return run_builtin_tests(ctx, runner, py_ctx, envs, stream_runner, workdir);
+        }
+        return Ok(outcome);
+    }
     let output = run_python_command(runner, py_ctx, &pytest_cmd, &envs, stream_runner, workdir)?;
     if output.code == 0 {
         let mut outcome = test_success("pytest", output, stream_runner, test_args);
@@ -42,6 +59,112 @@ pub(super) fn run_pytest_runner(
         mark_reporter_rendered(&mut outcome);
     }
     Ok(outcome)
+}
+
+fn ensure_pytest_available(
+    ctx: &CommandContext,
+    py_ctx: &PythonContext,
+    envs: &mut EnvPairs,
+) -> Result<(), ExecutionOutcome> {
+    match pytest_available(ctx, py_ctx, envs)? {
+        true => Ok(()),
+        false => {
+            let tool_root = ensure_pytest_tool(ctx)?;
+            append_tool_env_paths(ctx, envs, &tool_root)?;
+            Ok(())
+        }
+    }
+}
+
+fn pytest_available(
+    ctx: &CommandContext,
+    py_ctx: &PythonContext,
+    envs: &[(String, String)],
+) -> Result<bool, ExecutionOutcome> {
+    let args = vec!["-c".to_string(), PYTEST_CHECK_SCRIPT.to_string()];
+    let output = ctx
+        .python_runtime()
+        .run_command(&py_ctx.python, &args, envs, &py_ctx.project_root)
+        .map_err(|err| {
+            ExecutionOutcome::failure(
+                "px test: failed to probe pytest availability",
+                json!({
+                    "error": err.to_string(),
+                }),
+            )
+        })?;
+    Ok(output.code == 0)
+}
+
+fn ensure_pytest_tool(ctx: &CommandContext) -> Result<PathBuf, ExecutionOutcome> {
+    if let Ok(tool) = load_installed_tool("pytest") {
+        return Ok(tool.root);
+    }
+    if should_announce_tool_install(ctx) {
+        eprintln!("px test: installing {DEFAULT_PYTEST_REQUIREMENT}");
+    }
+    let request = ToolInstallRequest {
+        name: "pytest".to_string(),
+        spec: Some(DEFAULT_PYTEST_REQUIREMENT.to_string()),
+        python: None,
+        entry: Some("pytest".to_string()),
+    };
+    let _suspend = ProgressSuspendGuard::new();
+    let outcome = match tool_install(ctx, &request) {
+        Ok(outcome) => outcome,
+        Err(err) => match err.downcast::<InstallUserError>() {
+            Ok(user) => {
+                return Err(ExecutionOutcome::user_error(user.message, user.details));
+            }
+            Err(other) => {
+                return Err(ExecutionOutcome::failure(
+                    "px test: failed to install pytest tool",
+                    json!({
+                        "error": other.to_string(),
+                        "spec": DEFAULT_PYTEST_REQUIREMENT,
+                    }),
+                ));
+            }
+        },
+    };
+    if outcome.status != CommandStatus::Ok {
+        return Err(outcome);
+    }
+    let tool = load_installed_tool("pytest").map_err(|err| {
+        ExecutionOutcome::failure(
+            "px test: failed to load pytest tool after install",
+            json!({
+                "error": err.to_string(),
+                "spec": DEFAULT_PYTEST_REQUIREMENT,
+            }),
+        )
+    })?;
+    Ok(tool.root)
+}
+
+fn append_tool_env_paths(
+    ctx: &CommandContext,
+    envs: &mut EnvPairs,
+    tool_root: &Path,
+) -> Result<(), ExecutionOutcome> {
+    let paths = build_pythonpath(ctx.fs(), tool_root, None).map_err(|err| {
+        ExecutionOutcome::failure(
+            "px test: failed to load tool environment paths",
+            json!({
+                "tool_root": tool_root.display().to_string(),
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    for path in paths.allowed_paths {
+        append_allowed_paths(envs, &path);
+        append_pythonpath(envs, &path);
+    }
+    Ok(())
+}
+
+fn should_announce_tool_install(ctx: &CommandContext) -> bool {
+    !ctx.global.json && !ctx.global.quiet && std::io::stderr().is_terminal()
 }
 
 pub(in crate::core::runtime::run) fn build_pytest_invocation(

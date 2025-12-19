@@ -193,6 +193,27 @@ pub fn find_python() -> Option<String> {
     None
 }
 
+pub fn detect_host_python(python: &str) -> Option<(String, String)> {
+    const INSPECT_SCRIPT: &str =
+        "import json, platform, sys; print(json.dumps({'version': platform.python_version(), 'executable': sys.executable}))";
+    let output = Command::new(python)
+        .arg("-c")
+        .arg(INSPECT_SCRIPT)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let payload: Value = serde_json::from_slice(&output.stdout).ok()?;
+    let executable = payload.get("executable")?.as_str()?.to_string();
+    let version = payload.get("version")?.as_str()?.to_string();
+    let mut parts = version.split('.');
+    let major = parts.next().unwrap_or("0");
+    let minor = parts.next().unwrap_or("0");
+    let channel = format!("{major}.{minor}");
+    Some((executable, channel))
+}
+
 pub fn fake_sandbox_backend(dir: &Path) -> io::Result<(PathBuf, PathBuf)> {
     let script = dir.join("fake-sandbox-backend.sh");
     let log = dir.join("sandbox.log");

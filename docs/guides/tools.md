@@ -20,4 +20,4 @@ px can manage standalone CLI tools in their own locked environments, separate fr
 * Tools live under `~/.px/tools/...` with their own `tool.lock` and env.
 * `px tool run` uses the runtime recorded in `tool.lock`; if it is missing, px fails with a clear error instead of falling back.
 * Project state (manifest/lock/env) is unaffected by tool installs and runs.
-* `px fmt` uses tool envs only—it never touches project envs or locks. If a required tool is missing, it tells you which `px tool install` to run.
+* `px fmt` uses tool envs only—it never touches project envs or locks. Missing tools are auto-installed into the tool store.
