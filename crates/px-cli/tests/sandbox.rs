@@ -357,7 +357,13 @@ fn pack_app_builds_bundle_and_runs() {
     };
     let (tmp, project) = prepare_fixture("sandbox-pack-app");
     let (backend, log) = fake_sandbox_backend(tmp.path()).expect("backend script");
-    let store = tmp.path().join("sandbox-store");
+    let store_root = common::workspace_root().join("target").join("px-test-sandbox-store");
+    fs::create_dir_all(&store_root).expect("sandbox store root");
+    let store_dir = tempfile::Builder::new()
+        .prefix("sandbox-store")
+        .tempdir_in(&store_root)
+        .expect("sandbox store dir");
+    let store = store_dir.path().to_path_buf();
     let bundle = tmp.path().join("sample-bundle.pxapp");
 
     cargo_bin_cmd!("px")

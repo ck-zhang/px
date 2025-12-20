@@ -463,6 +463,12 @@ fn pytest_plugin_path_is_on_env_vars() -> Result<()> {
         .map(|(_, v)| v)
         .cloned()
         .unwrap_or_default();
+    let python_no_user_site = envs
+        .iter()
+        .find(|(k, _)| k == "PYTHONNOUSERSITE")
+        .map(|(_, v)| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     let allowed = envs
         .iter()
         .find(|(k, _)| k == "PX_ALLOWED_PATHS")
@@ -478,6 +484,11 @@ fn pytest_plugin_path_is_on_env_vars() -> Result<()> {
     assert!(
         allowed_entries.iter().any(|entry| entry == &plugin_dir),
         "PX_ALLOWED_PATHS should include the px pytest plugin dir"
+    );
+    assert_eq!(
+        python_no_user_site,
+        "1",
+        "px test should disable user site-packages by default"
     );
     Ok(())
 }

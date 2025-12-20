@@ -59,7 +59,7 @@ pub(crate) fn replace_dir_link(target: &Path, link: &Path) -> Result<()> {
                 target.display()
             )
         })?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(windows)]

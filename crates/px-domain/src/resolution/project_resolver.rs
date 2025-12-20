@@ -61,6 +61,10 @@ pub fn marker_applies(spec: &str, marker_env: &MarkerEnvironment) -> bool {
 
 pub fn spec_requires_pin(spec: &str) -> bool {
     let head = spec.split(';').next().unwrap_or(spec).trim();
+    let name = dependency_name(head);
+    if matches!(name.as_str(), "pip" | "setuptools" | "wheel") {
+        return false;
+    }
     !head.contains("==")
 }
 

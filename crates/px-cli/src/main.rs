@@ -4,8 +4,8 @@ use std::{env, ffi::OsStr, ffi::OsString, path::PathBuf, sync::Arc};
 
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
-use color_eyre::{eyre::eyre, Result};
-use px_core::api::{CommandContext, GlobalOptions, SystemEffects};
+use color_eyre::Result;
+use px_core::api::{CommandContext, CommandGroup, CommandInfo, ExecutionOutcome, GlobalOptions, SystemEffects};
 
 mod cli;
 mod completion;
@@ -50,9 +50,6 @@ fn main() -> Result<()> {
         json: cli.json || subcommand_json,
     };
 
-    let ctx = CommandContext::new(&global, Arc::new(SystemEffects::new()))
-        .map_err(|err| eyre!("{err:?}"))?;
-    let (info, outcome) = dispatch_command(&ctx, &cli.command)?;
     let output_opts = OutputOptions {
         quiet: cli.quiet,
         json: cli.json,
@@ -65,12 +62,93 @@ fn main() -> Result<()> {
         CommandGroupCli::Status(args) => Some(StatusRenderOptions { brief: args.brief }),
         _ => None,
     };
+    let default_info = command_info_for_cli(&cli.command);
+
+    let ctx = match CommandContext::new(&global, Arc::new(SystemEffects::new())) {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            let outcome = ExecutionOutcome::failure(
+                "failed to initialize px",
+                serde_json::json!({
+                    "reason": "context_init_failed",
+                    "error": err.to_string(),
+                    "hint": "Check PX_* env vars and config files, then re-run with `--debug` for more detail.",
+                }),
+            );
+            let code = emit_output(
+                &output_opts,
+                subcommand_json,
+                status_opts,
+                default_info,
+                &outcome,
+            )?;
+            std::process::exit(code);
+        }
+    };
+
+    let (info, outcome) = match dispatch_command(&ctx, &cli.command) {
+        Ok(result) => result,
+        Err(err) => {
+            let outcome = ExecutionOutcome::failure(
+                err.to_string(),
+                serde_json::json!({
+                    "reason": "internal_error",
+                    "error": err.to_string(),
+                    "hint": "Re-run with `--debug` for more detail, or open an issue if this persists.",
+                }),
+            );
+            let code =
+                emit_output(&output_opts, subcommand_json, status_opts, default_info, &outcome)?;
+            std::process::exit(code);
+        }
+    };
+
     let code = emit_output(&output_opts, subcommand_json, status_opts, info, &outcome)?;
 
     if code == 0 {
         Ok(())
     } else {
         std::process::exit(code);
+    }
+}
+
+fn command_info_for_cli(group: &CommandGroupCli) -> CommandInfo {
+    match group {
+        CommandGroupCli::Init(_) => CommandInfo::new(CommandGroup::Init, "init"),
+        CommandGroupCli::Add(_) => CommandInfo::new(CommandGroup::Add, "add"),
+        CommandGroupCli::Remove(_) => CommandInfo::new(CommandGroup::Remove, "remove"),
+        CommandGroupCli::Sync(_) => CommandInfo::new(CommandGroup::Sync, "sync"),
+        CommandGroupCli::Update(_) => CommandInfo::new(CommandGroup::Update, "update"),
+        CommandGroupCli::Run(_) => CommandInfo::new(CommandGroup::Run, "run"),
+        CommandGroupCli::Test(_) => CommandInfo::new(CommandGroup::Test, "test"),
+        CommandGroupCli::Fmt(_) => CommandInfo::new(CommandGroup::Fmt, "fmt"),
+        CommandGroupCli::Status(_) => CommandInfo::new(CommandGroup::Status, "status"),
+        CommandGroupCli::Explain(cmd) => match cmd {
+            ExplainCommand::Run(_) => CommandInfo::new(CommandGroup::Explain, "run"),
+            ExplainCommand::Entrypoint(_) => CommandInfo::new(CommandGroup::Explain, "entrypoint"),
+        },
+        CommandGroupCli::Build(_) => CommandInfo::new(CommandGroup::Build, "build"),
+        CommandGroupCli::Publish(_) => CommandInfo::new(CommandGroup::Publish, "publish"),
+        CommandGroupCli::Pack(cmd) => match cmd {
+            PackCommand::Image(_) => CommandInfo::new(CommandGroup::Pack, "pack image"),
+            PackCommand::App(_) => CommandInfo::new(CommandGroup::Pack, "pack app"),
+        },
+        CommandGroupCli::Migrate(_) => CommandInfo::new(CommandGroup::Migrate, "migrate"),
+        CommandGroupCli::Why(_) => CommandInfo::new(CommandGroup::Why, "why"),
+        CommandGroupCli::Tool(cmd) => match cmd {
+            ToolCommand::Install(_) => CommandInfo::new(CommandGroup::Tool, "install"),
+            ToolCommand::Run(_) => CommandInfo::new(CommandGroup::Tool, "run"),
+            ToolCommand::List => CommandInfo::new(CommandGroup::Tool, "list"),
+            ToolCommand::Remove(_) => CommandInfo::new(CommandGroup::Tool, "remove"),
+            ToolCommand::Upgrade(_) => CommandInfo::new(CommandGroup::Tool, "upgrade"),
+        },
+        CommandGroupCli::Python(cmd) => match cmd {
+            PythonCommand::List => CommandInfo::new(CommandGroup::Python, "list"),
+            PythonCommand::Info => CommandInfo::new(CommandGroup::Python, "info"),
+            PythonCommand::Install(_) => CommandInfo::new(CommandGroup::Python, "install"),
+            PythonCommand::Use(_) => CommandInfo::new(CommandGroup::Python, "use"),
+        },
+        CommandGroupCli::Completions(_) => CommandInfo::new(CommandGroup::Completions, "completions"),
     }
 }
 

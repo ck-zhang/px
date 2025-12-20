@@ -23,9 +23,19 @@ pub(super) fn run_project_at_ref(
         .clone()
         .or_else(|| request.target.clone())
         .unwrap_or_default();
+    if ctx.global.json && request.interactive == Some(true) {
+        return Ok(ExecutionOutcome::user_error(
+            "--json requires non-interactive execution",
+            json!({
+                "code": crate::diag_commands::RUN,
+                "reason": "json_interactive_conflict",
+                "hint": "Drop `--interactive` or use `--non-interactive` when `--json` is set.",
+            }),
+        ));
+    }
     let interactive = request
         .interactive
-        .unwrap_or_else(|| std::io::stdin().is_terminal() && std::io::stdout().is_terminal());
+        .unwrap_or_else(|| !ctx.global.json && std::io::stdin().is_terminal() && std::io::stdout().is_terminal());
     let command_args = json!({
         "target": &target,
         "args": &request.args,

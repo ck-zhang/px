@@ -221,6 +221,67 @@ fn tool_run_executes_happy_path_environment() {
     );
 }
 
+#[test]
+fn tool_run_without_args_honors_json_flag() {
+    let tools_dir = tempdir().expect("tools dir");
+    let store_dir = tempdir().expect("tool store");
+    let tool_root = tools_dir.path().join("ruff");
+    let site_dir = tool_root.join(".px").join("site");
+    std::fs::create_dir_all(&site_dir).expect("site dir");
+
+    // Seed a minimal importable module the tool entry points to.
+    let module_dir = site_dir.join("tool_pkg");
+    std::fs::create_dir_all(&module_dir).expect("module dir");
+    std::fs::write(
+        module_dir.join("echo.py"),
+        "def main():\n    print('TOOL_OK')\n    return 0\n\nif __name__ == '__main__':\n    raise SystemExit(main())\n",
+    )
+    .expect("write echo module");
+    std::fs::write(module_dir.join("__init__.py"), b"").expect("init file");
+
+    let info = system_python_info();
+    let lock_id = "test-lock-hash";
+
+    write_minimal_tool_manifest(&tool_root, "ruff");
+    write_tool_lockfile(&tool_root, "ruff", lock_id, ">=3.8");
+    write_tool_state(&tool_root, lock_id, &site_dir, &info);
+    write_tool_metadata_with_entry(&tool_root, "ruff", "tool_pkg.echo", &info);
+
+    let assert = cargo_bin_cmd!("px")
+        .env("PX_TOOLS_DIR", tools_dir.path())
+        .env("PX_TOOL_STORE", store_dir.path())
+        .env("PX_RUNTIME_PYTHON", &info.executable)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
+        .args(["--json", "tool", "run", "ruff"])
+        .assert();
+
+    let output = assert.get_output();
+    let stdout_text = String::from_utf8_lossy(&output.stdout);
+    let stderr_text = String::from_utf8_lossy(&output.stderr);
+    if output.status.code() != Some(0)
+        && (stdout_text.contains("runtime unavailable")
+            || stderr_text.contains("runtime unavailable"))
+    {
+        return;
+    }
+    assert!(
+        output.status.success(),
+        "tool run failed: {stdout_text:?} {stderr_text:?}"
+    );
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse tool run json");
+    assert_eq!(payload["status"], "ok");
+    let stdout = payload["details"]["stdout"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        stdout.contains("TOOL_OK"),
+        "tool run should capture tool output under --json, got {stdout:?}"
+    );
+}
+
 fn write_minimal_tool_manifest(root: &std::path::Path, name: &str) {
     let pyproject = root.join("pyproject.toml");
     let contents = format!(

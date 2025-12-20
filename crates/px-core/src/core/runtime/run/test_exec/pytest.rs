@@ -191,6 +191,8 @@ pub(in crate::core::runtime::run) fn build_pytest_invocation(
     test_args: &[String],
     reporter: TestReporter,
 ) -> Result<(EnvPairs, Vec<String>)> {
+    super::super::set_env_pair(&mut envs, "PYTHONNOUSERSITE", "1".into());
+
     let mut defaults = default_pytest_flags(reporter);
     if py_ctx.project_root != py_ctx.state_root {
         let cache_dir = py_ctx.state_root.join(".px").join("pytest-cache");

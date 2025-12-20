@@ -147,9 +147,10 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
         .context("allowed path contains invalid UTF-8")?
         .into_string()
         .map_err(|_| anyhow!("allowed path contains non-utf8 data"))?;
-    let passthrough = ctx.env_flag_enabled("PX_TOOL_PASSTHROUGH") || request.args.is_empty();
+    let passthrough = !ctx.global.json
+        && (ctx.env_flag_enabled("PX_TOOL_PASSTHROUGH") || request.args.is_empty());
     let cwd = env::current_dir().unwrap_or(tool_root.clone());
-    if passthrough {
+    if passthrough && !ctx.global.quiet {
         if metadata.name == "grip" {
             let port = infer_grip_port(&request.args).unwrap_or(6419);
             println!(

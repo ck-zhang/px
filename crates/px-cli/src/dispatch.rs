@@ -1,4 +1,4 @@
-use color_eyre::{eyre::eyre, Result};
+use color_eyre::Result;
 use px_core::api as px_core;
 use px_core::{
     explain_entrypoint, explain_run, is_missing_project_error,
@@ -205,7 +205,17 @@ where
                     ),
                 ))
             } else {
-                Err(eyre!("{err:?}"))
+                Ok((
+                    info,
+                    px_core::ExecutionOutcome::failure(
+                        err.to_string(),
+                        serde_json::json!({
+                            "reason": "internal_error",
+                            "error": err.to_string(),
+                            "hint": "Re-run with `--debug` for more detail, or open an issue if this persists.",
+                        }),
+                    ),
+                ))
             }
         }
     }

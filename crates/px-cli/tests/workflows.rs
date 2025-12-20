@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{fs, path::Path, process::Command};
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::{json, Value};
@@ -27,6 +27,105 @@ fn run_prints_fixture_output() {
     assert!(
         stdout.contains("Hello, PxTest!"),
         "run should print greeting, got {stdout:?}"
+    );
+}
+
+#[test]
+fn run_missing_program_honors_json_flag() {
+    let _guard = common::test_env_guard();
+    let (_tmp, project) = prepare_fixture("run-missing-program-json");
+    let Some(python) = find_python() else {
+        eprintln!("skipping json run test (python binary not found)");
+        return;
+    };
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["--json", "run", "definitely-does-not-exist"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_ne!(payload["status"], Value::String("ok".into()));
+    assert!(
+        payload["message"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("px run"),
+        "message should be prefixed with `px run`, got {:?}",
+        payload["message"]
+    );
+    let reason = payload["details"]["reason"].as_str().unwrap_or_default();
+    assert!(
+        matches!(
+            reason,
+            "command_not_found" | "command_not_executable" | "command_failed_to_start"
+        ),
+        "unexpected run error reason: {reason:?}"
+    );
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        !stderr.contains("Backtrace omitted") && !stderr.contains("Location:"),
+        "stderr should not contain a Rust report when --json is set: {stderr:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn run_json_output_is_stable_under_tty() {
+    let _guard = common::test_env_guard();
+    let (_tmp, project) = prepare_fixture("run-json-tty");
+    let Some(python) = find_python() else {
+        eprintln!("skipping tty json run test (python binary not found)");
+        return;
+    };
+
+    let script_ok = Command::new("script")
+        .args(["-q", "-c", "true", "/dev/null"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !script_ok {
+        eprintln!("skipping tty json run test (script command unavailable)");
+        return;
+    }
+
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let px = assert_cmd::cargo::cargo_bin!("px");
+    let command = format!(
+        "{} --json run python -c \"print('hi')\"",
+        px.display()
+    );
+    let output = Command::new("script")
+        .args(["-q", "-c", &command, "/dev/null"])
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .output()
+        .expect("spawn script");
+    assert!(
+        output.status.success(),
+        "tty json run should succeed, stdout: {:?}, stderr: {:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(payload["status"], Value::String("ok".into()));
+    assert_eq!(payload["details"]["interactive"], Value::Bool(false));
+    assert!(
+        payload["details"]["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("hi"),
+        "expected captured runner stdout in json payload: {:?}",
+        payload["details"]["stdout"]
     );
 }
 

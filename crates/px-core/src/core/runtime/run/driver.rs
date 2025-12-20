@@ -39,8 +39,18 @@ pub fn run_project(ctx: &CommandContext, request: &RunRequest) -> Result<Executi
 
 fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<ExecutionOutcome> {
     let strict = request.frozen || ctx.env_flag_enabled("CI");
+    if ctx.global.json && request.interactive == Some(true) {
+        return Ok(ExecutionOutcome::user_error(
+            "--json requires non-interactive execution",
+            json!({
+                "code": crate::diag_commands::RUN,
+                "reason": "json_interactive_conflict",
+                "hint": "Drop `--interactive` or use `--non-interactive` when `--json` is set.",
+            }),
+        ));
+    }
     let interactive = request.interactive.unwrap_or_else(|| {
-        !strict && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+        !ctx.global.json && !strict && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
     });
     if let Some(bundle) = pxapp_path_from_request(request) {
         if request.at.is_some() {

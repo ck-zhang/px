@@ -33,6 +33,14 @@ pub(super) fn handle_run_output(
             true
         }
         CommandStatus::Failure => {
+            let reason = outcome
+                .details
+                .as_object()
+                .and_then(|map| map.get("reason"))
+                .and_then(Value::as_str);
+            if reason == Some("internal_error") {
+                return false;
+            }
             if let Some(stdout) = stdout {
                 if !stdout.trim().is_empty() {
                     println!("{stdout}");

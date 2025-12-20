@@ -8,7 +8,7 @@ Rule of thumb: user-facing behavior should be a CLI flag first; env vars stay as
 * `-v/--verbose` (repeatable) – increase logging; `-vv` reaches trace.
 * `--trace` – force trace logging even without `-v`.
 * `--debug` – enable debug output and full tracebacks.
-* `--json` – emit `{status,message,details}` JSON envelopes (for `px fmt`, `px fmt --json` is an equivalent shortcut).
+* `--json` – emit `{status,message,details}` JSON envelopes (for `px fmt`, `px fmt --json` is an equivalent shortcut). Commands that normally attach stdio will run non-interactively so stdout stays machine-readable.
 * `--no-color` – disable colored output.
 * `--offline` / `--online` – force network mode for this run (sets `PX_ONLINE`).
 * `--force-sdist` / `--prefer-wheels` – pick sdists vs wheels when both exist (sets `PX_FORCE_SDIST`).

@@ -158,6 +158,7 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         .map(|path| crate::relative_path_str(path, &root));
     let mut foreign_tools = Vec::new();
     let mut foreign_owners = Vec::new();
+    let mut used_dev_requirements = false;
 
     if pyproject_exists {
         let (summary, mut rows) = collect_pyproject_packages(&root, &pyproject_path)?;
@@ -184,7 +185,7 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
 
     let should_skip_prod_sources =
         pyproject_exists && pyproject_dep_count > 0 && source_override.is_none();
-    let should_skip_dev_sources =
+    let dev_sources_autopin_only =
         pyproject_exists && pyproject_dev_dep_count > 0 && dev_override.is_none();
 
     if let Some(path) = setup_cfg_path.as_ref() {
@@ -213,11 +214,15 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     }
 
     if let Some(path) = dev_path.as_ref() {
-        if !should_skip_dev_sources {
-            let (summary, mut rows) =
-                collect_requirement_packages(&root, path, "requirements-dev", "dev")?;
+        let (summary, mut rows) =
+            collect_requirement_packages(&root, path, "requirements-dev", "dev")?;
+        if dev_sources_autopin_only {
+            rows.retain(|pkg| px_domain::api::spec_requires_pin(&pkg.requested));
+        }
+        if !rows.is_empty() {
             source_summaries.push(summary);
             packages.append(&mut rows);
+            used_dev_requirements = true;
         }
     }
 
@@ -234,7 +239,7 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     if requirements_path.is_some() && !should_skip_prod_sources {
         project_parts.push("requirements");
     }
-    if dev_path.is_some() && !should_skip_dev_sources {
+    if dev_path.is_some() && used_dev_requirements {
         project_parts.push("requirements-dev");
     }
     let project_type = if project_parts.is_empty() {

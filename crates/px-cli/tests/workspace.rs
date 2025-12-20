@@ -1,6 +1,7 @@
 use std::{fs, process::Command};
 
 use assert_cmd::cargo::cargo_bin_cmd;
+use serde_json::Value;
 use toml_edit::{DocumentMut, Item};
 
 mod common;
@@ -46,6 +47,35 @@ fn workspace_sync_writes_workspace_metadata() {
         paths.contains(&"apps/a") && paths.contains(&"libs/b"),
         "workspace members paths should be recorded"
     );
+}
+
+#[test]
+fn workspace_sync_makes_status_env_clean() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let (_temp, root) = prepare_named_fixture("workspace_basic", "workspace_sync_status_clean");
+
+    cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .arg("sync")
+        .assert()
+        .success();
+
+    let status = cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .args(["status", "--json"])
+        .assert()
+        .success();
+    let payload = parse_json(&status);
+
+    assert_eq!(payload["workspace"]["env_clean"], Value::Bool(true));
+    assert_ne!(
+        payload["workspace"]["state"],
+        Value::String("WNeedsEnv".into())
+    );
+    assert_eq!(payload["env"]["status"], Value::String("clean".into()));
 }
 
 #[test]

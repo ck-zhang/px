@@ -160,9 +160,15 @@ pub(crate) fn run_project_script(
     args.push(script.display().to_string());
     args.extend(extra_args.iter().cloned());
     let output = if interactive {
-        runner.run_command_passthrough(program, &args, &envs, workdir)?
+        match runner.run_command_passthrough(program, &args, &envs, workdir) {
+            Ok(output) => output,
+            Err(err) => return Ok(command_start_error_outcome("run", program, &args, err)),
+        }
     } else {
-        runner.run_command(program, &args, &envs, workdir)?
+        match runner.run_command(program, &args, &envs, workdir) {
+            Ok(output) => output,
+            Err(err) => return Ok(command_start_error_outcome("run", program, &args, err)),
+        }
     };
     let details = json!({
         "mode": "script",
@@ -195,6 +201,43 @@ fn set_env_pair(envs: &mut EnvPairs, key: &str, value: String) {
     } else {
         envs.push((key.to_string(), value));
     }
+}
+
+fn command_start_error_outcome(
+    command: &str,
+    program: &str,
+    args: &[String],
+    err: anyhow::Error,
+) -> ExecutionOutcome {
+    let kind = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>().map(|io| io.kind()));
+    let (reason, hint) = match kind {
+        Some(std::io::ErrorKind::NotFound) => (
+            "command_not_found",
+            "Check the command name; if it comes from a dependency, add that dependency and run `px sync`.",
+        ),
+        Some(std::io::ErrorKind::PermissionDenied) => (
+            "command_not_executable",
+            "Check executable permissions and try again.",
+        ),
+        _ => (
+            "command_failed_to_start",
+            "Re-run with `--debug` to see more detail, or verify the command can be executed on this machine.",
+        ),
+    };
+    ExecutionOutcome::user_error(
+        format!("failed to start {program}"),
+        json!({
+            "code": crate::diag_commands::RUN,
+            "reason": reason,
+            "command": command,
+            "program": program,
+            "args": args,
+            "error": err.to_string(),
+            "hint": hint,
+        }),
+    )
 }
 
 fn apply_profile_env_vars(envs: &mut EnvPairs, vars: &BTreeMap<String, Value>) {
@@ -529,11 +572,41 @@ fn run_executable(
     }
     let interactive = interactive || needs_stdin;
     let output = if needs_stdin {
-        runner.run_command_with_stdin(&exec_program, &exec_args, &envs, workdir, true)?
+        match runner.run_command_with_stdin(&exec_program, &exec_args, &envs, workdir, true) {
+            Ok(output) => output,
+            Err(err) => {
+                return Ok(command_start_error_outcome(
+                    "run",
+                    &exec_program,
+                    &exec_args,
+                    err,
+                ))
+            }
+        }
     } else if interactive {
-        runner.run_command_passthrough(&exec_program, &exec_args, &envs, workdir)?
+        match runner.run_command_passthrough(&exec_program, &exec_args, &envs, workdir) {
+            Ok(output) => output,
+            Err(err) => {
+                return Ok(command_start_error_outcome(
+                    "run",
+                    &exec_program,
+                    &exec_args,
+                    err,
+                ))
+            }
+        }
     } else {
-        runner.run_command(&exec_program, &exec_args, &envs, workdir)?
+        match runner.run_command(&exec_program, &exec_args, &envs, workdir) {
+            Ok(output) => output,
+            Err(err) => {
+                return Ok(command_start_error_outcome(
+                    "run",
+                    &exec_program,
+                    &exec_args,
+                    err,
+                ))
+            }
+        }
     };
     let mut details = json!({
         "mode": if uses_px_python { "passthrough" } else { "executable" },
