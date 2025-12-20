@@ -4,10 +4,10 @@ use super::*;
 fn objects_are_made_read_only() -> Result<()> {
     let (_temp, store) = new_store()?;
     let stored = store.store(&demo_source_payload())?;
-    let metadata = fs::metadata(&stored.path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let metadata = fs::metadata(&stored.path)?;
         assert_eq!(
             metadata.permissions().mode() & 0o222,
             0,
@@ -42,10 +42,10 @@ fn permission_health_check_hardens_existing_objects() -> Result<()> {
 
     let root = store.root().to_path_buf();
     let _rehydrated = ContentAddressableStore::new(Some(root))?;
-    let metadata = fs::metadata(&stored.path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let metadata = fs::metadata(&stored.path)?;
         assert_eq!(
             metadata.permissions().mode() & 0o222,
             0,

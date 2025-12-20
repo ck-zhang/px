@@ -1067,7 +1067,7 @@ fn symlink_or_copy_dir(src: &Path, dest: &Path) -> Result<()> {
     copy_tree(src, dest)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::api::{GlobalOptions, SystemEffects};

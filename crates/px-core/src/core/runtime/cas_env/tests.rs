@@ -1,4 +1,7 @@
-use std::{borrow::Cow, collections::BTreeMap, env, fs, path::PathBuf, process::Command};
+use std::{borrow::Cow, collections::BTreeMap, env, fs, path::PathBuf};
+
+#[cfg(unix)]
+use std::process::Command;
 
 use anyhow::Result;
 use flate2::read::GzDecoder;
