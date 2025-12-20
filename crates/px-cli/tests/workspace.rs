@@ -276,7 +276,8 @@ fn sandbox_workspace_requires_consistent_env() {
     };
     let (tmp, root) = prepare_named_fixture("workspace_basic", "workspace_sandbox_env");
     let (backend, log) = fake_sandbox_backend(tmp.path()).expect("backend script");
-    let store = tmp.path().join("sandbox-store");
+    let store_dir = common::sandbox_store_dir("sandbox-store");
+    let store = store_dir.path().to_path_buf();
     let member = root.join("apps").join("a");
     fs::create_dir_all(&member).expect("create member root");
     fs::write(

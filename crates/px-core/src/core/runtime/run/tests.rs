@@ -257,7 +257,7 @@ oid sha256:deadbeef\nsize 4\n",
     let mut entries = vec![fake_bin];
     entries.extend(std::env::split_paths(&existing));
     let value = std::env::join_paths(entries)
-        .unwrap_or_else(|_| existing)
+        .unwrap_or(existing)
         .into_string()
         .unwrap_or_else(|value| value.to_string_lossy().to_string());
     let _path_guard = EnvVarGuard::set("PATH", value);

@@ -30,4 +30,4 @@ jobs:
           git config --global protocol.file.allow always
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --workspace --jobs 1 -- --test-threads=1

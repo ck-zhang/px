@@ -43,7 +43,8 @@ fn sandbox_run_uses_container_backend() {
     };
     let (tmp, project) = prepare_traceback_fixture("sandbox-run");
     let (backend, log) = fake_sandbox_backend(tmp.path()).expect("backend script");
-    let store = tmp.path().join("sandbox-store");
+    let store_dir = common::sandbox_store_dir("sandbox-store");
+    let store = store_dir.path().to_path_buf();
 
     cargo_bin_cmd!("px")
         .current_dir(&project)
@@ -103,7 +104,8 @@ fn sandbox_test_runs_in_workspace() {
     .expect("write runtests script");
 
     let (backend, log) = fake_sandbox_backend(tmp.path()).expect("backend script");
-    let store = tmp.path().join("sandbox-store");
+    let store_dir = common::sandbox_store_dir("sandbox-store");
+    let store = store_dir.path().to_path_buf();
 
     cargo_bin_cmd!("px")
         .current_dir(&workspace)
@@ -146,8 +148,9 @@ fn sandbox_backend_unavailable_surfaces_px_error() {
         eprintln!("skipping sandbox backend error test (python binary not found)");
         return;
     };
-    let (tmp, project) = prepare_traceback_fixture("sandbox-backend-missing");
-    let store = tmp.path().join("sandbox-store");
+    let (_tmp, project) = prepare_traceback_fixture("sandbox-backend-missing");
+    let store_dir = common::sandbox_store_dir("sandbox-store");
+    let store = store_dir.path().to_path_buf();
 
     cargo_bin_cmd!("px")
         .current_dir(&project)
@@ -199,7 +202,8 @@ fn sandbox_invalid_base_is_reported() {
         .write_all(b"\n[tool.px.sandbox]\nbase = \"does-not-exist\"\n")
         .expect("write sandbox config");
     let (backend, log) = fake_sandbox_backend(tmp.path()).expect("backend script");
-    let store = tmp.path().join("sandbox-store");
+    let store_dir = common::sandbox_store_dir("sandbox-store");
+    let store = store_dir.path().to_path_buf();
 
     cargo_bin_cmd!("px")
         .current_dir(&project)
@@ -240,7 +244,8 @@ fn sandbox_frozen_requires_existing_env() {
         return;
     };
     let (_tmp, project) = prepare_traceback_fixture("sandbox-frozen");
-    let store = project.join("sandbox-store");
+    let store_dir = common::sandbox_store_dir("sandbox-store");
+    let store = store_dir.path().to_path_buf();
     fs::remove_dir_all(project.join(".px")).ok();
 
     let assert = cargo_bin_cmd!("px")
@@ -279,7 +284,8 @@ fn pack_image_still_builds_layout() {
         return;
     };
     let (tmp, project) = prepare_traceback_fixture("sandbox-pack");
-    let store = tmp.path().join("sandbox-store");
+    let store_dir = common::sandbox_store_dir("sandbox-store");
+    let store = store_dir.path().to_path_buf();
     let out = tmp.path().join("image.tar");
 
     cargo_bin_cmd!("px")
@@ -357,12 +363,7 @@ fn pack_app_builds_bundle_and_runs() {
     };
     let (tmp, project) = prepare_fixture("sandbox-pack-app");
     let (backend, log) = fake_sandbox_backend(tmp.path()).expect("backend script");
-    let store_root = common::workspace_root().join("target").join("px-test-sandbox-store");
-    fs::create_dir_all(&store_root).expect("sandbox store root");
-    let store_dir = tempfile::Builder::new()
-        .prefix("sandbox-store")
-        .tempdir_in(&store_root)
-        .expect("sandbox store dir");
+    let store_dir = common::sandbox_store_dir("sandbox-store");
     let store = store_dir.path().to_path_buf();
     let bundle = tmp.path().join("sample-bundle.pxapp");
 
@@ -460,7 +461,8 @@ fn pack_app_is_deterministic() {
         return;
     };
     let (tmp, project) = prepare_fixture("sandbox-pack-app-deterministic");
-    let store = tmp.path().join("sandbox-store");
+    let store_dir = common::sandbox_store_dir("sandbox-store");
+    let store = store_dir.path().to_path_buf();
     let bundle_a = tmp.path().join("a.pxapp");
     let bundle_b = tmp.path().join("b.pxapp");
 
@@ -502,7 +504,8 @@ fn pack_app_is_deterministic() {
 fn run_pxapp_rejects_corrupted_bundle() {
     let _guard = test_env_guard();
     let (tmp, _project) = prepare_fixture("sandbox-pack-app-corrupt");
-    let store = tmp.path().join("sandbox-store");
+    let store_dir = common::sandbox_store_dir("sandbox-store");
+    let store = store_dir.path().to_path_buf();
     let bundle = tmp.path().join("bad.pxapp");
     fs::write(&bundle, b"not a valid pxapp").expect("write corrupted bundle");
 
@@ -534,7 +537,8 @@ fn run_pxapp_rejects_incompatible_bundle_version() {
         return;
     };
     let (tmp, project) = prepare_fixture("sandbox-pack-app-incompatible");
-    let store = tmp.path().join("sandbox-store");
+    let store_dir = common::sandbox_store_dir("sandbox-store");
+    let store = store_dir.path().to_path_buf();
     let bundle = tmp.path().join("orig.pxapp");
     let broken = tmp.path().join("broken.pxapp");
 

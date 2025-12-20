@@ -70,9 +70,10 @@ pub fn ensure_test_store_env() {
     let _guard = env_lock().lock().unwrap();
     TEST_CACHE.with(|cell| {
         if cell.borrow().is_none() {
+            let root = test_temp_root();
             let dir = tempfile::Builder::new()
                 .prefix("px-test-cache")
-                .tempdir()
+                .tempdir_in(&root)
                 .expect("tempdir");
             *cell.borrow_mut() = Some(dir);
         }
@@ -119,9 +120,10 @@ pub fn prepare_fixture(prefix: &str) -> (TempDir, PathBuf) {
 pub fn prepare_named_fixture(fixture: &str, prefix: &str) -> (TempDir, PathBuf) {
     reset_test_store_env();
     ensure_test_store_env();
+    let root = test_temp_root();
     let temp = tempfile::Builder::new()
         .prefix(prefix)
-        .tempdir()
+        .tempdir_in(&root)
         .expect("tempdir");
     let dst = temp.path().join(fixture);
     copy_dir_all(&fixture_root(fixture), &dst).expect("copy fixture");
@@ -139,6 +141,40 @@ pub fn workspace_root() -> PathBuf {
         .and_then(|p| p.parent())
         .expect("workspace root")
         .to_path_buf()
+}
+
+#[must_use]
+pub fn sandbox_store_dir(prefix: &str) -> TempDir {
+    let root = test_temp_root().join("px-test-sandbox-store");
+    fs::create_dir_all(&root).expect("sandbox store root");
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(&root)
+        .expect("sandbox store dir")
+}
+
+#[must_use]
+pub fn test_temp_root() -> PathBuf {
+    if let Ok(raw) = env::var("PX_TEST_TMPDIR") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let root = PathBuf::from(trimmed);
+            fs::create_dir_all(&root).expect("test tmp root");
+            return root;
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        let root = PathBuf::from("/var/tmp").join("px-test-tmp");
+        if fs::create_dir_all(&root).is_ok() {
+            return root;
+        }
+    }
+
+    let root = env::temp_dir().join("px-test-tmp");
+    fs::create_dir_all(&root).expect("test tmp root");
+    root
 }
 
 #[must_use]
@@ -164,9 +200,10 @@ pub fn traceback_fixture_source() -> PathBuf {
 pub fn prepare_traceback_fixture(prefix: &str) -> (TempDir, PathBuf) {
     reset_test_store_env();
     ensure_test_store_env();
+    let root = test_temp_root();
     let temp = tempfile::Builder::new()
         .prefix(prefix)
-        .tempdir()
+        .tempdir_in(&root)
         .expect("tempdir");
     let dst = temp.path().join("traceback_lab");
     copy_dir_all(&traceback_fixture_source(), &dst).expect("copy traceback fixture");
@@ -358,9 +395,10 @@ pub fn parse_json(assert: &Assert) -> Value {
 pub fn init_empty_project(prefix: &str) -> (TempDir, PathBuf) {
     reset_test_store_env();
     ensure_test_store_env();
+    let root = test_temp_root();
     let temp = tempfile::Builder::new()
         .prefix(prefix)
-        .tempdir()
+        .tempdir_in(&root)
         .expect("tempdir");
     cargo_bin_cmd!("px")
         .current_dir(temp.path())

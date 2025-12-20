@@ -219,7 +219,8 @@ fn sandbox_run_requires_consistent_env() {
         return;
     };
     let (tmp, project) = prepare_traceback_fixture("sandbox-run-env");
-    let store = tmp.path().join("sandbox-store");
+    let store_dir = common::sandbox_store_dir("sandbox-store");
+    let store = store_dir.path().to_path_buf();
     let (backend, log) = fake_sandbox_backend(tmp.path()).expect("sandbox backend");
     fs::remove_dir_all(project.join(".px")).ok();
 

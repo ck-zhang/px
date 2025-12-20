@@ -957,7 +957,8 @@ fn sandbox_bypasses_cas_native_default() {
     write_lock(project, "sandbox_bypass", ">=3.11", &[]);
 
     let (backend, log) = fake_sandbox_backend(project).expect("backend script");
-    let store = project.join("sandbox-store");
+    let store_dir = common::sandbox_store_dir("sandbox-store");
+    let store = store_dir.path().to_path_buf();
 
     assert_envs_empty("before sandbox run");
     let assert = cargo_bin_cmd!("px")
