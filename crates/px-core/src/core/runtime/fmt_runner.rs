@@ -170,7 +170,7 @@ fn prepare_tool_run(
             let request = ToolInstallRequest {
                 name: tool.install_name().to_string(),
                 spec: tool.requirement_spec(),
-                python: None,
+                python: tool_install_python_override(),
                 entry: Some(tool.module.clone()),
             };
             let _suspend = ProgressSuspendGuard::new();
@@ -209,27 +209,37 @@ fn prepare_tool_run(
             })?
         }
     };
-    let runtime_selection = match runtime_manager::resolve_runtime(
-        Some(&descriptor.runtime_version),
-        MIN_PYTHON_REQUIREMENT,
-    ) {
-        Ok(runtime) => runtime,
-        Err(err) => {
-            return Err(ExecutionOutcome::user_error(
-                format!(
-                    "px {}: Python runtime {} for tool '{}' is unavailable",
-                    kind.section_name(),
-                    descriptor.runtime_version,
-                    descriptor.name
-                ),
-                json!({
-                    "tool": descriptor.name,
-                    "module": tool.module,
-                    "runtime": descriptor.runtime_version,
-                    "config_source": env.config.source.as_str(),
-                    "hint": err.to_string(),
-                }),
-            ));
+    let runtime_selection = if !descriptor.runtime_path.trim().is_empty() {
+        runtime_manager::RuntimeSelection {
+            record: runtime_manager::RuntimeRecord {
+                version: descriptor.runtime_version.clone(),
+                full_version: descriptor.runtime_full_version.clone(),
+                path: descriptor.runtime_path.clone(),
+                default: false,
+            },
+            source: runtime_manager::RuntimeSource::Explicit,
+        }
+    } else {
+        match runtime_manager::resolve_runtime(Some(&descriptor.runtime_version), MIN_PYTHON_REQUIREMENT)
+        {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                return Err(ExecutionOutcome::user_error(
+                    format!(
+                        "px {}: Python runtime {} for tool '{}' is unavailable",
+                        kind.section_name(),
+                        descriptor.runtime_version,
+                        descriptor.name
+                    ),
+                    json!({
+                        "tool": descriptor.name,
+                        "module": tool.module,
+                        "runtime": descriptor.runtime_version,
+                        "config_source": env.config.source.as_str(),
+                        "hint": err.to_string(),
+                    }),
+                ));
+            }
         }
     };
 
@@ -331,6 +341,15 @@ fn prepare_tool_run(
 fn tool_install_display(tool: &QualityTool) -> String {
     tool.requirement_spec()
         .unwrap_or_else(|| tool.install_name().to_string())
+}
+
+fn tool_install_python_override() -> Option<String> {
+    if runtime_manager::resolve_runtime(None, MIN_PYTHON_REQUIREMENT).is_ok() {
+        return None;
+    }
+    std::env::var("PX_RUNTIME_PYTHON")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn should_announce_tool_install(ctx: &CommandContext) -> bool {

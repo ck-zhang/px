@@ -52,7 +52,7 @@ pub(super) fn missing_pytest_outcome(
         json!({
             "stdout": output.stdout,
             "stderr": output.stderr,
-            "hint": "Add pytest to your project with `px add pytest`, then rerun `px test`.",
+            "hint": "Install pytest with `px tool install pytest`, then rerun `px test`.",
             "reason": "missing_pytest",
             "code": crate::diag_commands::TEST,
             "runner": "pytest",

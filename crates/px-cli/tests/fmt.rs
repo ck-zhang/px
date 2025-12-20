@@ -1,11 +1,11 @@
-use std::fs;
+use std::{fs, process::Command};
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use tempfile::tempdir;
 
 mod common;
 
-use common::{detect_host_python, parse_json, prepare_fixture, require_online, test_env_guard};
+use common::{parse_json, prepare_fixture, require_online, test_env_guard};
 
 #[test]
 fn fmt_auto_installs_tool_and_preserves_manifest() {
@@ -21,29 +21,26 @@ fn fmt_auto_installs_tool_and_preserves_manifest() {
 
     let tools_dir = tempdir().expect("tools dir");
     let store_dir = tempdir().expect("store dir");
-    let registry_dir = tempdir().expect("registry dir");
-    let registry = registry_dir.path().join("runtimes.json");
-    let Some(python) = common::find_python() else {
+    let candidates = ["python3.12", "python3", "python"];
+    let python = candidates.iter().find_map(|candidate| {
+        Command::new(candidate)
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|_| candidate.to_string())
+    });
+    let Some(python) = python else {
         eprintln!("skipping fmt auto-install test (python binary not found)");
         return;
     };
-    let Some((python_path, channel)) = detect_host_python(&python) else {
-        eprintln!("skipping fmt auto-install test (unable to inspect python interpreter)");
-        return;
-    };
-    cargo_bin_cmd!("px")
-        .current_dir(&project)
-        .env("PX_RUNTIME_REGISTRY", &registry)
-        .args(["python", "install", &channel, "--path", &python_path])
-        .assert()
-        .success();
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_RUNTIME_REGISTRY", &registry)
         .env("PX_TOOLS_DIR", tools_dir.path())
         .env("PX_TOOL_STORE", store_dir.path())
+        .env_remove("PX_NO_ENSUREPIP")
         .args(["--json", "fmt"])
         .assert()
         .success();

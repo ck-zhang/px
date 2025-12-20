@@ -17,7 +17,7 @@ pub(in crate::core::runtime::run) enum TestReporter {
     Pytest,
 }
 
-const DEFAULT_PYTEST_REQUIREMENT: &str = "pytest==8.3.3";
+const DEFAULT_PYTEST_REQUIREMENT: &str = "pytest";
 const PYTEST_CHECK_SCRIPT: &str =
     "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('pytest') else 1)";
 
@@ -69,7 +69,7 @@ fn ensure_pytest_available(
     match pytest_available(ctx, py_ctx, envs)? {
         true => Ok(()),
         false => {
-            let tool_root = ensure_pytest_tool(ctx)?;
+            let tool_root = ensure_pytest_tool(ctx, py_ctx)?;
             append_tool_env_paths(ctx, envs, &tool_root)?;
             Ok(())
         }
@@ -96,9 +96,14 @@ fn pytest_available(
     Ok(output.code == 0)
 }
 
-fn ensure_pytest_tool(ctx: &CommandContext) -> Result<PathBuf, ExecutionOutcome> {
+fn ensure_pytest_tool(
+    ctx: &CommandContext,
+    py_ctx: &PythonContext,
+) -> Result<PathBuf, ExecutionOutcome> {
     if let Ok(tool) = load_installed_tool("pytest") {
-        return Ok(tool.root);
+        if tool_env_has_pytest(ctx, py_ctx, &tool.root) {
+            return Ok(tool.root);
+        }
     }
     if should_announce_tool_install(ctx) {
         eprintln!("px test: installing {DEFAULT_PYTEST_REQUIREMENT}");
@@ -106,7 +111,7 @@ fn ensure_pytest_tool(ctx: &CommandContext) -> Result<PathBuf, ExecutionOutcome>
     let request = ToolInstallRequest {
         name: "pytest".to_string(),
         spec: Some(DEFAULT_PYTEST_REQUIREMENT.to_string()),
-        python: None,
+        python: Some(py_ctx.python.clone()),
         entry: Some("pytest".to_string()),
     };
     let _suspend = ProgressSuspendGuard::new();
@@ -140,6 +145,18 @@ fn ensure_pytest_tool(ctx: &CommandContext) -> Result<PathBuf, ExecutionOutcome>
         )
     })?;
     Ok(tool.root)
+}
+
+fn tool_env_has_pytest(
+    ctx: &CommandContext,
+    py_ctx: &PythonContext,
+    tool_root: &Path,
+) -> bool {
+    let mut envs = Vec::new();
+    if append_tool_env_paths(ctx, &mut envs, tool_root).is_err() {
+        return false;
+    }
+    pytest_available(ctx, py_ctx, &envs).unwrap_or(false)
 }
 
 fn append_tool_env_paths(

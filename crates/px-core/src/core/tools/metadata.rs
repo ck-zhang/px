@@ -30,6 +30,8 @@ pub(crate) struct ToolMetadata {
 pub(crate) struct InstalledTool {
     pub name: String,
     pub runtime_version: String,
+    pub runtime_full_version: String,
+    pub runtime_path: String,
     pub root: PathBuf,
 }
 
@@ -59,6 +61,8 @@ pub(crate) fn load_installed_tool(name: &str) -> Result<InstalledTool, InstallUs
     Ok(InstalledTool {
         name: metadata.name,
         runtime_version: metadata.runtime_version,
+        runtime_full_version: metadata.runtime_full_version,
+        runtime_path: metadata.runtime_path,
         root,
     })
 }

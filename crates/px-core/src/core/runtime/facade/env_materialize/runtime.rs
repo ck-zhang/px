@@ -17,8 +17,8 @@ pub(crate) fn prepare_project_runtime(
                 .python_override
                 .as_deref()
                 .unwrap_or(&snapshot.python_requirement);
-            if let (Ok(specs), Ok(version)) = (
-                pep440_rs::VersionSpecifiers::from_str(requirement),
+            if let (Some(specs), Ok(version)) = (
+                runtime_requirement_specs(requirement),
                 pep440_rs::Version::from_str(&details.full_version),
             ) {
                 if specs.contains(&version) {
@@ -56,6 +56,17 @@ pub(crate) fn prepare_project_runtime(
     })?;
     env::set_var("PX_RUNTIME_PYTHON", &selection.record.path);
     Ok(selection)
+}
+
+fn runtime_requirement_specs(requirement: &str) -> Option<pep440_rs::VersionSpecifiers> {
+    if let Ok(specs) = pep440_rs::VersionSpecifiers::from_str(requirement) {
+        return Some(specs);
+    }
+    if let Ok(channel) = runtime_manager::normalize_channel(requirement) {
+        let spec = format!("=={channel}.*");
+        return pep440_rs::VersionSpecifiers::from_str(&spec).ok();
+    }
+    None
 }
 
 pub(crate) fn detect_runtime_metadata(

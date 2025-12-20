@@ -7,7 +7,7 @@ use toml_edit::DocumentMut;
 
 mod common;
 
-use common::{detect_host_python, parse_json, prepare_fixture, require_online, test_env_guard};
+use common::{parse_json, prepare_fixture, require_online, test_env_guard};
 
 fn px_cmd() -> assert_cmd::Command {
     common::ensure_test_store_env();
@@ -990,23 +990,11 @@ fn project_test_auto_installs_pytest_and_preserves_manifest() {
 
     let tools_dir = tempfile::tempdir().expect("tools dir");
     let tool_store = tempfile::tempdir().expect("tool store dir");
-    let registry_dir = tempfile::tempdir().expect("registry dir");
-    let registry = registry_dir.path().join("runtimes.json");
 
     let Some(python) = find_python() else {
         eprintln!("skipping pytest auto-install test (python binary not found)");
         return;
     };
-    let Some((python_path, channel)) = detect_host_python(&python) else {
-        eprintln!("skipping pytest auto-install test (unable to inspect python interpreter)");
-        return;
-    };
-    cargo_bin_cmd!("px")
-        .current_dir(&root)
-        .env("PX_RUNTIME_REGISTRY", &registry)
-        .args(["python", "install", &channel, "--path", &python_path])
-        .assert()
-        .success();
 
     let has_pytest = std::process::Command::new(&python)
         .args([
@@ -1034,7 +1022,6 @@ fn project_test_auto_installs_pytest_and_preserves_manifest() {
     let assert = px_cmd()
         .current_dir(&root)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_RUNTIME_REGISTRY", &registry)
         .env("PX_CACHE_PATH", &cache)
         .env("PX_STORE_PATH", &store)
         .env("PX_ENVS_PATH", &envs)
@@ -1042,6 +1029,7 @@ fn project_test_auto_installs_pytest_and_preserves_manifest() {
         .env("PX_TOOL_STORE", tool_store.path())
         .env("PX_RUNTIME_HOST_ONLY", "1")
         .env("PYTHONNOUSERSITE", "1")
+        .env_remove("PX_NO_ENSUREPIP")
         .args(["--json", "test"])
         .assert()
         .success();

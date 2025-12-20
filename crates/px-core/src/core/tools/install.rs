@@ -1,11 +1,13 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 use anyhow::{anyhow, Context, Result};
+use pep440_rs::{Version, VersionSpecifiers};
 use serde_json::json;
 use toml_edit::{Array, DocumentMut, Item, Table, Value as TomlValue};
 
@@ -175,6 +177,11 @@ pub fn tool_upgrade(
 
 pub(crate) fn resolve_runtime(explicit: Option<&str>) -> Result<runtime_manager::RuntimeSelection> {
     let requirement = MIN_PYTHON_REQUIREMENT.to_string();
+    if let Some(value) = explicit {
+        if looks_like_python_path(value) {
+            return resolve_runtime_from_path(value, &requirement);
+        }
+    }
     runtime_manager::resolve_runtime(explicit, &requirement).map_err(|err| {
         anyhow!(InstallUserError::new(
             "python runtime unavailable",
@@ -183,14 +190,87 @@ pub(crate) fn resolve_runtime(explicit: Option<&str>) -> Result<runtime_manager:
     })
 }
 
+fn looks_like_python_path(value: &str) -> bool {
+    runtime_manager::normalize_channel(value).is_err()
+}
+
+fn resolve_runtime_from_path(
+    value: &str,
+    requirement: &str,
+) -> Result<runtime_manager::RuntimeSelection> {
+    let details = runtime_manager::inspect_python(Path::new(value)).map_err(|err| {
+        anyhow!(InstallUserError::new(
+            "python runtime unavailable",
+            json!({
+                "python": value,
+                "hint": err.to_string(),
+            }),
+        ))
+    })?;
+    let specs = VersionSpecifiers::from_str(requirement).map_err(|err| {
+        anyhow!(InstallUserError::new(
+            "python runtime unavailable",
+            json!({ "hint": err.to_string() }),
+        ))
+    })?;
+    let version = Version::from_str(&details.full_version).map_err(|err| {
+        anyhow!(InstallUserError::new(
+            "python runtime unavailable",
+            json!({ "hint": err.to_string() }),
+        ))
+    })?;
+    if !specs.contains(&version) {
+        return Err(anyhow!(InstallUserError::new(
+            "python runtime unavailable",
+            json!({
+                "python": details.executable,
+                "version": details.full_version,
+                "requires_python": requirement,
+                "hint": format!(
+                    "Python {} does not satisfy requires-python {}",
+                    details.full_version, requirement
+                ),
+            }),
+        )));
+    }
+    let channel = runtime_manager::format_channel(&details.full_version).map_err(|err| {
+        anyhow!(InstallUserError::new(
+            "python runtime unavailable",
+            json!({ "hint": err.to_string() }),
+        ))
+    })?;
+    Ok(runtime_manager::RuntimeSelection {
+        record: runtime_manager::RuntimeRecord {
+            version: channel,
+            full_version: details.full_version,
+            path: details.executable,
+            default: false,
+        },
+        source: runtime_manager::RuntimeSource::Explicit,
+    })
+}
+
 fn scaffold_tool_pyproject(root: &Path, name: &str) -> Result<()> {
     let path = root.join("pyproject.toml");
+    let desired_name = format!("px-tool-{name}");
     if path.exists() {
+        let contents = fs::read_to_string(&path)?;
+        let mut doc: DocumentMut = contents.parse()?;
+        let table = doc
+            .entry("project")
+            .or_insert(Item::Table(Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| anyhow!("[project] must be a table"))?;
+        let current = table.get("name").and_then(Item::as_str).unwrap_or("");
+        if current.is_empty() || current == name {
+            table.insert("name", Item::Value(TomlValue::from(desired_name)));
+            fs::write(&path, doc.to_string())?;
+        }
         return Ok(());
     }
     let mut doc = DocumentMut::new();
     let mut project = Table::new();
-    project.insert("name", Item::Value(TomlValue::from(name)));
+    project.insert("name", Item::Value(TomlValue::from(desired_name)));
     project.insert("version", Item::Value(TomlValue::from("0.0.0")));
     project.insert(
         "requires-python",
@@ -368,6 +448,7 @@ fn update_tool_state(root: &Path, site_path: &Path, env_id: &str) -> Result<()> 
             serde_json::Value::String(site_path.display().to_string()),
         );
         env.insert("id".into(), serde_json::Value::String(env_id.to_string()));
+        env.insert("env_path".into(), serde_json::Value::String(String::new()));
     }
     let mut buf = serde_json::to_vec_pretty(&value)?;
     buf.push(b'\n');

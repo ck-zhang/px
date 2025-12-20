@@ -187,7 +187,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 
 ### `px test`
 
-* Same consistency semantics as `px run`. Prefers CAS-native execution and falls back to a materialized env when needed. Prefers project-provided runners like `tests/runtests.py` (or `runtests.py`) and otherwise runs `pytest` inside the project env.
+* Same consistency semantics as `px run`. Prefers CAS-native execution and falls back to a materialized env when needed. Prefers project-provided runners like `tests/runtests.py` (or `runtests.py`) and otherwise runs `pytest` inside the project env (auto-installs pytest into the tool store when missing).
 * Supports `--sandbox` with the same sandbox definition/resolution rules as `px run`; working tree is bind-mounted for live code.
 * `--at <git-ref>` mirrors `px run --at …`, using the manifest + lock at that ref with frozen semantics (no re-resolution; fail if lock is missing or drifted).
 * `--ephemeral` / `--try` mirrors `px run --ephemeral`: derive a cached env from `pyproject.toml` / `requirements.txt` without adopting the directory (no `.px/` or `px.lock` writes). In `CI=1` or `--frozen`, dependencies must be fully pinned.
@@ -236,7 +236,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
   * Does not resolve or update `px.lock`; does not rebuild project env in dev or CI.
   * May modify code via invoked tools.
 
-* **Missing tools**: fail with a clear message and a suggestion like `px tool install ruff`.
+* **Missing tools**: auto-install into the tool store.
 * **Postconditions**: project manifest/lock/env unchanged; tool envs may be created/updated.
 
 ### `px pack image`

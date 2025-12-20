@@ -222,6 +222,9 @@ impl ProgressReporter {
 
     pub fn finish(mut self, message: impl Into<String>) {
         self.stop();
+        if !progress_enabled() || progress_suspended() {
+            return;
+        }
         eprintln!("px ▸ {}", message.into());
     }
 
@@ -234,6 +237,14 @@ impl ProgressReporter {
             self.enabled = false;
         }
     }
+}
+
+fn progress_suspended() -> bool {
+    manager()
+        .state
+        .lock()
+        .map(|state| state.suspend_count > 0)
+        .unwrap_or(false)
 }
 
 pub(crate) fn download_concurrency(total: usize) -> usize {
