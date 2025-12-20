@@ -99,10 +99,7 @@ fn run_json_output_is_stable_under_tty() {
         .success();
 
     let px = assert_cmd::cargo::cargo_bin!("px");
-    let command = format!(
-        "{} --json run python -c \"print('hi')\"",
-        px.display()
-    );
+    let command = format!("{} --json run python -c \"print('hi')\"", px.display());
     let output = Command::new("script")
         .args(["-q", "-c", &command, "/dev/null"])
         .current_dir(&project)

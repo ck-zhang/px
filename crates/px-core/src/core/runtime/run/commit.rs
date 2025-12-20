@@ -33,9 +33,9 @@ pub(super) fn run_project_at_ref(
             }),
         ));
     }
-    let interactive = request
-        .interactive
-        .unwrap_or_else(|| !ctx.global.json && std::io::stdin().is_terminal() && std::io::stdout().is_terminal());
+    let interactive = request.interactive.unwrap_or_else(|| {
+        !ctx.global.json && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+    });
     let command_args = json!({
         "target": &target,
         "args": &request.args,

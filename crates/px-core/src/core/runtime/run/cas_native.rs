@@ -247,9 +247,10 @@ pub(super) fn prepare_cas_native_run_context(
             }),
         )
     })?;
-    if let Err(err) =
-        install_python_link(&cas_profile.runtime_path, &site_dir.join("bin").join("python"))
-    {
+    if let Err(err) = install_python_link(
+        &cas_profile.runtime_path,
+        &site_dir.join("bin").join("python"),
+    ) {
         return Err(ExecutionOutcome::failure(
             "failed to prepare native execution site",
             json!({
@@ -480,9 +481,10 @@ pub(super) fn prepare_cas_native_workspace_run_context(
             }),
         )
     })?;
-    if let Err(err) =
-        install_python_link(&cas_profile.runtime_path, &site_dir.join("bin").join("python"))
-    {
+    if let Err(err) = install_python_link(
+        &cas_profile.runtime_path,
+        &site_dir.join("bin").join("python"),
+    ) {
         return Err(ExecutionOutcome::failure(
             "failed to prepare native execution site",
             json!({
@@ -629,7 +631,10 @@ fn artifact_supported_by_runtime(
     if !artifact.filename.to_ascii_lowercase().ends_with(".whl") {
         return true;
     }
-    if artifact.python_tag.is_empty() || artifact.abi_tag.is_empty() || artifact.platform_tag.is_empty() {
+    if artifact.python_tag.is_empty()
+        || artifact.abi_tag.is_empty()
+        || artifact.platform_tag.is_empty()
+    {
         return true;
     }
 

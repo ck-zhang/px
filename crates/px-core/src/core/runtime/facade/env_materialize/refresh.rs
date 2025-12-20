@@ -303,8 +303,12 @@ print(str(candidates[0]) if candidates else "")
             bail!("bundled pip wheel missing at {}", wheel.display());
         }
         ctx.fs().create_dir_all(site_packages)?;
-        crate::store::unpack_wheel(wheel, site_packages)
-            .with_context(|| format!("failed to unpack bundled pip wheel from {}", wheel.display()))
+        crate::store::unpack_wheel(wheel, site_packages).with_context(|| {
+            format!(
+                "failed to unpack bundled pip wheel from {}",
+                wheel.display()
+            )
+        })
     }
 
     let debug_pip = std::env::var("PX_DEBUG_PIP").is_ok();
@@ -663,13 +667,7 @@ fn ensure_seeded_tool(
     version: &str,
     module: &str,
 ) -> Result<()> {
-    if module_available(
-        seed.ctx,
-        seed.snapshot,
-        seed.env_python,
-        seed.envs,
-        module,
-    )? {
+    if module_available(seed.ctx, seed.snapshot, seed.env_python, seed.envs, module)? {
         return Ok(());
     }
 
@@ -778,13 +776,7 @@ fn ensure_seeded_tool(
         .into());
     }
 
-    if !module_available(
-        seed.ctx,
-        seed.snapshot,
-        seed.env_python,
-        seed.envs,
-        module,
-    )? {
+    if !module_available(seed.ctx, seed.snapshot, seed.env_python, seed.envs, module)? {
         return Err(InstallUserError::new(
             format!("{package} seed did not install correctly"),
             json!({
@@ -1209,10 +1201,8 @@ build-backend = "setuptools.build_meta"
 
             zip.start_file(format!("{dist_info}/METADATA"), opts)?;
             zip.write_all(
-                format!(
-                    "Metadata-Version: 2.1\nName: {dist_name}\nVersion: {version}\n\n"
-                )
-                .as_bytes(),
+                format!("Metadata-Version: 2.1\nName: {dist_name}\nVersion: {version}\n\n")
+                    .as_bytes(),
             )?;
             zip.start_file(format!("{dist_info}/WHEEL"), opts)?;
             zip.write_all(
@@ -1247,11 +1237,7 @@ build-backend = "setuptools.build_meta"
                 _specifier: &str,
             ) -> Result<PypiReleaseResponse> {
                 Ok(PypiReleaseResponse {
-                    urls: self
-                        .releases
-                        .get(normalized)
-                        .cloned()
-                        .unwrap_or_default(),
+                    urls: self.releases.get(normalized).cloned().unwrap_or_default(),
                 })
             }
         }
@@ -1294,7 +1280,11 @@ build-backend = "setuptools.build_meta"
                 Ok(PrefetchSummary::default())
             }
 
-            fn cache_wheel(&self, _cache: &Path, request: &ArtifactRequest) -> Result<CachedArtifact> {
+            fn cache_wheel(
+                &self,
+                _cache: &Path,
+                request: &ArtifactRequest,
+            ) -> Result<CachedArtifact> {
                 let wheel_path = self
                     .wheels
                     .get(request.filename)
@@ -1307,7 +1297,11 @@ build-backend = "setuptools.build_meta"
                 })
             }
 
-            fn ensure_sdist_build(&self, _cache: &Path, _request: &SdistRequest) -> Result<BuiltWheel> {
+            fn ensure_sdist_build(
+                &self,
+                _cache: &Path,
+                _request: &SdistRequest,
+            ) -> Result<BuiltWheel> {
                 panic!("unexpected sdist build while seeding tooling wheels")
             }
         }
@@ -1380,11 +1374,12 @@ build-backend = "maturin"
         let wheel_dir = temp.path().join("wheels");
         fs::create_dir_all(&wheel_dir)?;
 
-        let packaging_wheel =
-            write_seed_wheel(&wheel_dir, "packaging", PACKAGING_SEED_VERSION, &[(
-                "packaging/__init__.py",
-                "__version__ = '0.0.0'\n",
-            )])?;
+        let packaging_wheel = write_seed_wheel(
+            &wheel_dir,
+            "packaging",
+            PACKAGING_SEED_VERSION,
+            &[("packaging/__init__.py", "__version__ = '0.0.0'\n")],
+        )?;
         let pyproject_hooks_wheel = write_seed_wheel(
             &wheel_dir,
             "pyproject-hooks",
@@ -1470,11 +1465,23 @@ build-backend = "maturin"
             pypi: MapPypiClient { releases },
         };
         let ctx = CommandContext::new(&global, Arc::new(effects))?;
-        ensure_project_pip(&ctx, &snapshot, site_dir, &runtime, Path::new(&runtime.path))?;
+        ensure_project_pip(
+            &ctx,
+            &snapshot,
+            site_dir,
+            &runtime,
+            Path::new(&runtime.path),
+        )?;
 
         let envs = project_site_env(&ctx, &snapshot, site_dir, Path::new(&runtime.path))?;
         assert!(
-            module_available(&ctx, &snapshot, Path::new(&runtime.path), &envs, "build.__main__")?,
+            module_available(
+                &ctx,
+                &snapshot,
+                Path::new(&runtime.path),
+                &envs,
+                "build.__main__"
+            )?,
             "expected build tooling to be seeded for maturin projects"
         );
 

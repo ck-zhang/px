@@ -525,7 +525,9 @@ fn run_executable(
             && path
                 .extension()
                 .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+                .is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat")
+                })
         {
             exec_program = "cmd".to_string();
             let mut argv = Vec::with_capacity(extra_args.len() + 2);
@@ -536,25 +538,28 @@ fn run_executable(
         } else {
             let should_run_via_python = path.is_file()
                 && (path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("py") || ext.eq_ignore_ascii_case("pyw"))
-                || {
-                    let mut file = match fs::File::open(path) {
-                        Ok(file) => file,
-                        Err(_) => return Ok(ExecutionOutcome::failure(
-                            "failed to execute program",
-                            json!({ "error": format!("failed to open {}", path.display()) }),
-                        )),
-                    };
-                    let mut buf = [0u8; 256];
-                    let read = file.read(&mut buf).unwrap_or(0);
-                    let prefix = std::str::from_utf8(&buf[..read]).unwrap_or_default();
-                    prefix
-                        .lines()
-                        .next()
-                        .is_some_and(|line| line.starts_with("#!") && line.to_ascii_lowercase().contains("python"))
-                });
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("py") || ext.eq_ignore_ascii_case("pyw")
+                    })
+                    || {
+                        let mut file = match fs::File::open(path) {
+                            Ok(file) => file,
+                            Err(_) => {
+                                return Ok(ExecutionOutcome::failure(
+                                    "failed to execute program",
+                                    json!({ "error": format!("failed to open {}", path.display()) }),
+                                ))
+                            }
+                        };
+                        let mut buf = [0u8; 256];
+                        let read = file.read(&mut buf).unwrap_or(0);
+                        let prefix = std::str::from_utf8(&buf[..read]).unwrap_or_default();
+                        prefix.lines().next().is_some_and(|line| {
+                            line.starts_with("#!") && line.to_ascii_lowercase().contains("python")
+                        })
+                    });
             if should_run_via_python {
                 exec_program = py_ctx.python.clone();
                 let mut argv = Vec::with_capacity(extra_args.len() + 1);

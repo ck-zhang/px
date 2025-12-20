@@ -16,9 +16,9 @@ use crate::store::cas::{
 };
 use crate::ManifestSnapshot;
 
+use super::default_envs_root;
 use super::fs_tree::make_writable_recursive;
 use super::scripts::{rewrite_python_entrypoint, should_rewrite_python_entrypoint};
-use super::default_envs_root;
 #[cfg(not(windows))]
 use super::write_python_shim;
 

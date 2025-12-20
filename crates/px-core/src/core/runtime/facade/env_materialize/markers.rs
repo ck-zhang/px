@@ -27,8 +27,12 @@ pub(crate) fn write_python_environment_markers(
         env_vars
     };
 
-    let home = crate::core::fs::python_install_root(&canonical_runtime)
-        .unwrap_or_else(|| canonical_runtime.parent().unwrap_or_else(|| Path::new("")).to_path_buf());
+    let home = crate::core::fs::python_install_root(&canonical_runtime).unwrap_or_else(|| {
+        canonical_runtime
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf()
+    });
     let pyvenv_cfg = format!(
         "home = {}\ninclude-system-site-packages = false\nversion = {}\n",
         home.display(),

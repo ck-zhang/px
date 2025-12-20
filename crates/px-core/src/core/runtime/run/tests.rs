@@ -486,8 +486,7 @@ fn pytest_plugin_path_is_on_env_vars() -> Result<()> {
         "PX_ALLOWED_PATHS should include the px pytest plugin dir"
     );
     assert_eq!(
-        python_no_user_site,
-        "1",
+        python_no_user_site, "1",
         "px test should disable user site-packages by default"
     );
     Ok(())

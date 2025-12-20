@@ -13,8 +13,8 @@ use px_domain::api::marker_applies;
 use px_domain::api::{
     DependencyGroupSource, LockSnapshot, LockedArtifact, LockedDependency, PxOptions,
 };
-use serial_test::serial;
 use serde_json::json;
+use serial_test::serial;
 use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]

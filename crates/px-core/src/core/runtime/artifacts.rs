@@ -11,9 +11,9 @@ use px_domain::api::{
     canonical_extras, canonicalize_package_name, format_specifier, marker_applies,
     normalize_dist_name, LockedArtifact, PinSpec, ResolvedDependency, ResolvedDistSource,
 };
-use sha2::{Digest, Sha256};
 use reqwest::{blocking::Client, StatusCode};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::context::CommandContext;
 use crate::core::runtime::builder::builder_identity_from_tags;
@@ -30,8 +30,8 @@ pub(crate) fn archive_source_dir_for_sdist(source_dir: &Path, prefix: &str) -> R
     use std::fs::{self, File};
     use std::io::ErrorKind;
 
-    use flate2::GzBuilder;
     use flate2::Compression;
+    use flate2::GzBuilder;
 
     const MIN_ZIP_TIMESTAMP: u64 = 315_532_800; // 1980-01-01T00:00:00Z
 

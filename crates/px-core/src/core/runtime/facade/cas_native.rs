@@ -35,7 +35,10 @@ pub(crate) fn ensure_project_environment_synced(
         if !artifact.filename.to_ascii_lowercase().ends_with(".whl") {
             return true;
         }
-        if artifact.python_tag.is_empty() || artifact.abi_tag.is_empty() || artifact.platform_tag.is_empty() {
+        if artifact.python_tag.is_empty()
+            || artifact.abi_tag.is_empty()
+            || artifact.platform_tag.is_empty()
+        {
             return true;
         }
         let supports = |py: &str, abi: &str, platform: &str| {
@@ -47,8 +50,18 @@ pub(crate) fn ensure_project_environment_synced(
                     && tags.platform.iter().any(|tag| tag == platform)
             }
         };
-        for py in artifact.python_tag.split('.').map(str::trim).filter(|s| !s.is_empty()) {
-            for abi in artifact.abi_tag.split('.').map(str::trim).filter(|s| !s.is_empty()) {
+        for py in artifact
+            .python_tag
+            .split('.')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            for abi in artifact
+                .abi_tag
+                .split('.')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 for platform in artifact
                     .platform_tag
                     .split('.')

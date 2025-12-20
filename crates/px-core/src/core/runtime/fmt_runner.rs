@@ -11,7 +11,10 @@ use crate::{
     build_pythonpath, ensure_project_environment_synced, is_missing_project_error,
     manifest_snapshot, missing_project_outcome, outcome_from_output,
     progress::ProgressSuspendGuard,
-    tools::{disable_proxy_env, load_installed_tool, tool_install, ToolInstallRequest, MIN_PYTHON_REQUIREMENT},
+    tools::{
+        disable_proxy_env, load_installed_tool, tool_install, ToolInstallRequest,
+        MIN_PYTHON_REQUIREMENT,
+    },
     CommandContext, CommandStatus, ExecutionOutcome, InstallUserError,
 };
 use px_domain::api::ProjectSnapshot;
@@ -198,7 +201,10 @@ fn prepare_tool_run(
             }
             load_installed_tool(tool.install_name()).map_err(|err| {
                 ExecutionOutcome::failure(
-                    format!("px {}: failed to load tool after install", kind.section_name()),
+                    format!(
+                        "px {}: failed to load tool after install",
+                        kind.section_name()
+                    ),
                     json!({
                         "tool": tool.display_name(),
                         "module": tool.module,
@@ -220,8 +226,10 @@ fn prepare_tool_run(
             source: runtime_manager::RuntimeSource::Explicit,
         }
     } else {
-        match runtime_manager::resolve_runtime(Some(&descriptor.runtime_version), MIN_PYTHON_REQUIREMENT)
-        {
+        match runtime_manager::resolve_runtime(
+            Some(&descriptor.runtime_version),
+            MIN_PYTHON_REQUIREMENT,
+        ) {
             Ok(runtime) => runtime,
             Err(err) => {
                 return Err(ExecutionOutcome::user_error(

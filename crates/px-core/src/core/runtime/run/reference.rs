@@ -927,12 +927,9 @@ fn run_reference_repo_target(
     };
     let pinned_required = request.frozen || ctx.env_flag_enabled("CI");
     if pinned_required {
-        if let Err(outcome) = super::ephemeral::enforce_pinned_inputs(
-            "run",
-            &invocation_root,
-            &input,
-            request.frozen,
-        ) {
+        if let Err(outcome) =
+            super::ephemeral::enforce_pinned_inputs("run", &invocation_root, &input, request.frozen)
+        {
             return Ok(outcome);
         }
     }
@@ -949,54 +946,80 @@ fn run_reference_repo_target(
     let workdir = super::invocation_workdir(&invocation_root);
     let host_runner = super::HostCommandRunner::new(ctx);
 
-    let cas_native_fallback = match super::prepare_cas_native_run_context(ctx, &snapshot, &invocation_root)
-    {
-        Ok(native_ctx) => {
-            let deps = super::DependencyContext::from_sources(
-                &snapshot.requirements,
-                Some(&snapshot.lock_path),
-            );
-            let mut command_args = json!({
-                "target": requested_target,
-                "entrypoint": &entrypoint,
-                "args": &forwarded_args,
-                "repo_snapshot": {
-                    "oid": &oid,
-                    "locator": &header.locator,
-                    "commit": &header.commit,
-                    "subdir": subdir.map(|p| p.to_string_lossy()).unwrap_or_default(),
-                },
-            });
-            deps.inject(&mut command_args);
-            let plan = super::plan_run_target(
-                &native_ctx.py_ctx,
-                &snapshot.manifest_path,
-                &entrypoint,
-                &workdir,
-            )?;
-            let outcome = match plan {
-                super::RunTargetPlan::Script(path) => super::run_project_script_cas_native(
-                    ctx,
-                    &host_runner,
-                    &native_ctx,
-                    &path,
-                    &forwarded_args,
-                    &command_args,
+    let cas_native_fallback =
+        match super::prepare_cas_native_run_context(ctx, &snapshot, &invocation_root) {
+            Ok(native_ctx) => {
+                let deps = super::DependencyContext::from_sources(
+                    &snapshot.requirements,
+                    Some(&snapshot.lock_path),
+                );
+                let mut command_args = json!({
+                    "target": requested_target,
+                    "entrypoint": &entrypoint,
+                    "args": &forwarded_args,
+                    "repo_snapshot": {
+                        "oid": &oid,
+                        "locator": &header.locator,
+                        "commit": &header.commit,
+                        "subdir": subdir.map(|p| p.to_string_lossy()).unwrap_or_default(),
+                    },
+                });
+                deps.inject(&mut command_args);
+                let plan = super::plan_run_target(
+                    &native_ctx.py_ctx,
+                    &snapshot.manifest_path,
+                    &entrypoint,
                     &workdir,
-                    interactive,
-                )?,
-                super::RunTargetPlan::Executable(program) => super::run_executable_cas_native(
-                    ctx,
-                    &host_runner,
-                    &native_ctx,
-                    &program,
-                    &forwarded_args,
-                    &command_args,
-                    &workdir,
-                    interactive,
-                )?,
-            };
-            if let Some(reason) = super::cas_native_fallback_reason(&outcome) {
+                )?;
+                let outcome = match plan {
+                    super::RunTargetPlan::Script(path) => super::run_project_script_cas_native(
+                        ctx,
+                        &host_runner,
+                        &native_ctx,
+                        &path,
+                        &forwarded_args,
+                        &command_args,
+                        &workdir,
+                        interactive,
+                    )?,
+                    super::RunTargetPlan::Executable(program) => super::run_executable_cas_native(
+                        ctx,
+                        &host_runner,
+                        &native_ctx,
+                        &program,
+                        &forwarded_args,
+                        &command_args,
+                        &workdir,
+                        interactive,
+                    )?,
+                };
+                if let Some(reason) = super::cas_native_fallback_reason(&outcome) {
+                    if super::is_integrity_failure(&outcome) {
+                        return Ok(outcome);
+                    }
+                    Some(super::CasNativeFallback {
+                        reason,
+                        summary: super::cas_native_fallback_summary(&outcome),
+                    })
+                } else {
+                    let mut outcome = outcome;
+                    super::attach_autosync_details(&mut outcome, sync_report);
+                    attach_reference_details(
+                        &mut outcome,
+                        &header,
+                        &oid,
+                        &materialized_root,
+                        None,
+                        None,
+                        None,
+                    );
+                    return Ok(outcome);
+                }
+            }
+            Err(outcome) => {
+                let Some(reason) = super::cas_native_fallback_reason(&outcome) else {
+                    return Ok(outcome);
+                };
                 if super::is_integrity_failure(&outcome) {
                     return Ok(outcome);
                 }
@@ -1004,34 +1027,8 @@ fn run_reference_repo_target(
                     reason,
                     summary: super::cas_native_fallback_summary(&outcome),
                 })
-            } else {
-                let mut outcome = outcome;
-                super::attach_autosync_details(&mut outcome, sync_report);
-                attach_reference_details(
-                    &mut outcome,
-                    &header,
-                    &oid,
-                    &materialized_root,
-                    None,
-                    None,
-                    None,
-                );
-                return Ok(outcome);
             }
-        }
-        Err(outcome) => {
-            let Some(reason) = super::cas_native_fallback_reason(&outcome) else {
-                return Ok(outcome);
-            };
-            if super::is_integrity_failure(&outcome) {
-                return Ok(outcome);
-            }
-            Some(super::CasNativeFallback {
-                reason,
-                summary: super::cas_native_fallback_summary(&outcome),
-            })
-        }
-    };
+        };
 
     let py_ctx = match super::ephemeral::ephemeral_python_context(
         ctx,
@@ -1043,7 +1040,8 @@ fn run_reference_repo_target(
         Err(outcome) => return Ok(outcome),
     };
 
-    let deps = super::DependencyContext::from_sources(&snapshot.requirements, Some(&snapshot.lock_path));
+    let deps =
+        super::DependencyContext::from_sources(&snapshot.requirements, Some(&snapshot.lock_path));
     let mut command_args = json!({
         "target": requested_target,
         "entrypoint": &entrypoint,

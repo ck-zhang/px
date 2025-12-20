@@ -252,7 +252,10 @@ requires_dist =
         packages.iter().any(|pkg| {
             pkg["name"].as_str() == Some("botocore")
                 && pkg["source"].as_str() == Some("setup.cfg")
-                && pkg["requested"].as_str().unwrap_or_default().contains("botocore")
+                && pkg["requested"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("botocore")
         }),
         "setup.cfg botocore requirement should be kept"
     );

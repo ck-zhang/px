@@ -50,7 +50,10 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         ));
     }
     let interactive = request.interactive.unwrap_or_else(|| {
-        !ctx.global.json && !strict && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+        !ctx.global.json
+            && !strict
+            && std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
     });
     if let Some(bundle) = pxapp_path_from_request(request) {
         if request.at.is_some() {

@@ -53,13 +53,11 @@ pub(in super::super) fn prepare_ephemeral_snapshot(
             deps,
             entry_points,
         } => (requires_python.clone(), deps.clone(), entry_points),
-        EphemeralInput::Requirements { deps } => {
-            (
-                DEFAULT_EPHEMERAL_REQUIRES_PYTHON.to_string(),
-                deps.clone(),
-                &empty_entry_points,
-            )
-        }
+        EphemeralInput::Requirements { deps } => (
+            DEFAULT_EPHEMERAL_REQUIRES_PYTHON.to_string(),
+            deps.clone(),
+            &empty_entry_points,
+        ),
         EphemeralInput::Empty => (
             DEFAULT_EPHEMERAL_REQUIRES_PYTHON.to_string(),
             Vec::new(),

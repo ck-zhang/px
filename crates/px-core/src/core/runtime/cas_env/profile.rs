@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use toml_edit::{DocumentMut, Item};
 
-use crate::core::runtime::builder::builder_identity_for_runtime;
 use crate::core::runtime::artifacts::archive_source_dir_for_sdist;
+use crate::core::runtime::builder::builder_identity_for_runtime;
 use crate::core::runtime::facade::RuntimeMetadata;
 use crate::store::cas::{
     archive_dir_canonical, global_store, pkg_build_lookup_key, source_lookup_key, LoadedObject,
@@ -423,7 +423,9 @@ fn wants_project_pkg_build(manifest_path: &Path) -> bool {
         || (build_backend.is_empty() && requires.iter().any(|req| req.contains("setuptools")));
     if is_setuptools
         && requires.iter().any(|req| {
-            req.contains("cython") || req.contains("scikit-build-core") || req.contains("setuptools-rust")
+            req.contains("cython")
+                || req.contains("scikit-build-core")
+                || req.contains("setuptools-rust")
         })
     {
         return true;

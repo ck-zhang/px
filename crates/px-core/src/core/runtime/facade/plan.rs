@@ -62,7 +62,10 @@ pub fn lock_is_fresh(snapshot: &ManifestSnapshot) -> Result<bool> {
         if !artifact.filename.to_ascii_lowercase().ends_with(".whl") {
             return true;
         }
-        if artifact.python_tag.is_empty() || artifact.abi_tag.is_empty() || artifact.platform_tag.is_empty() {
+        if artifact.python_tag.is_empty()
+            || artifact.abi_tag.is_empty()
+            || artifact.platform_tag.is_empty()
+        {
             return true;
         }
 
@@ -76,9 +79,19 @@ pub fn lock_is_fresh(snapshot: &ManifestSnapshot) -> Result<bool> {
             }
         };
 
-        for py in artifact.python_tag.split('.').map(str::trim).filter(|s| !s.is_empty()) {
+        for py in artifact
+            .python_tag
+            .split('.')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             let py = py.to_ascii_lowercase();
-            for abi in artifact.abi_tag.split('.').map(str::trim).filter(|s| !s.is_empty()) {
+            for abi in artifact
+                .abi_tag
+                .split('.')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 let abi = abi.to_ascii_lowercase();
                 for platform in artifact
                     .platform_tag

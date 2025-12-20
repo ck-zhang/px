@@ -280,9 +280,7 @@ fn read_setup_cfg_project_info(path: &Path) -> Result<SetupCfgProjectInfo> {
     for line in contents.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            section = trimmed
-                .trim_matches(&['[', ']'][..])
-                .to_ascii_lowercase();
+            section = trimmed.trim_matches(&['[', ']'][..]).to_ascii_lowercase();
             collecting = None;
             continue;
         }
@@ -402,9 +400,7 @@ fn ensure_project_metadata(doc: &mut DocumentMut, root: &Path) -> bool {
             for line in contents.lines() {
                 let trimmed = line.trim();
                 if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                    section = trimmed
-                        .trim_matches(&['[', ']'][..])
-                        .to_ascii_lowercase();
+                    section = trimmed.trim_matches(&['[', ']'][..]).to_ascii_lowercase();
                     continue;
                 }
                 if section != "metadata" {
@@ -467,7 +463,9 @@ fn ensure_project_metadata(doc: &mut DocumentMut, root: &Path) -> bool {
                     if let Some(version) = info.version.as_deref() {
                         let looks_static =
                             !version.contains(':') && !version.contains(' ') && !version.is_empty();
-                        if looks_static && project.get("version").and_then(Item::as_str) != Some(version) {
+                        if looks_static
+                            && project.get("version").and_then(Item::as_str) != Some(version)
+                        {
                             changed = true;
                             project.insert("version", Item::Value(TomlValue::from(version)));
                         }
@@ -485,7 +483,8 @@ fn ensure_project_metadata(doc: &mut DocumentMut, root: &Path) -> bool {
                     if let Some(description) = info.description.as_deref() {
                         if project.get("description").and_then(Item::as_str) != Some(description) {
                             changed = true;
-                            project.insert("description", Item::Value(TomlValue::from(description)));
+                            project
+                                .insert("description", Item::Value(TomlValue::from(description)));
                         }
                     }
                 }
@@ -845,7 +844,10 @@ console_scripts =
         assert_eq!(doc["project"]["name"].as_str(), Some("pre_commit"));
         assert_eq!(doc["project"]["version"].as_str(), Some("4.5.0"));
         assert_eq!(doc["project"]["requires-python"].as_str(), Some(">=3.10"));
-        assert_eq!(doc["project"]["scripts"]["pre-commit"].as_str(), Some("pre_commit.main:main"));
+        assert_eq!(
+            doc["project"]["scripts"]["pre-commit"].as_str(),
+            Some("pre_commit.main:main")
+        );
 
         Ok(())
     }

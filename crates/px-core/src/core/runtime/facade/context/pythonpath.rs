@@ -166,7 +166,9 @@ fn prefers_installed_project_wheel(fs: &dyn effects::FileSystem, project_root: &
         || (build_backend.is_empty() && requires.iter().any(|req| req.contains("setuptools")));
     if is_setuptools
         && requires.iter().any(|req| {
-            req.contains("cython") || req.contains("scikit-build-core") || req.contains("setuptools-rust")
+            req.contains("cython")
+                || req.contains("scikit-build-core")
+                || req.contains("setuptools-rust")
         })
     {
         return true;
@@ -296,10 +298,7 @@ pub(crate) fn build_pythonpath(
             if Some(path) == site_dir_used.as_ref() {
                 continue;
             }
-            if site_packages_used
-                .as_ref()
-                .is_some_and(|pkgs| pkgs == path)
-            {
+            if site_packages_used.as_ref().is_some_and(|pkgs| pkgs == path) {
                 continue;
             }
             paths.push(path.clone());
@@ -316,10 +315,7 @@ pub(crate) fn build_pythonpath(
             if Some(path) == site_dir_used.as_ref() {
                 continue;
             }
-            if site_packages_used
-                .as_ref()
-                .is_some_and(|pkgs| pkgs == path)
-            {
+            if site_packages_used.as_ref().is_some_and(|pkgs| pkgs == path) {
                 continue;
             }
             if project_paths.iter().any(|pkg| pkg == path) {

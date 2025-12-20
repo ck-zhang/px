@@ -100,7 +100,12 @@ build-backend = "setuptools.build_meta"
     fs::write(root.join("pyproject.toml"), pyproject).expect("write pyproject.toml");
 }
 
-fn write_pyproject_with_scripts(root: &Path, name: &str, python_req: &str, scripts: &[(&str, &str)]) {
+fn write_pyproject_with_scripts(
+    root: &Path,
+    name: &str,
+    python_req: &str,
+    scripts: &[(&str, &str)],
+) {
     let mut scripts_body = String::new();
     for (script, target) in scripts {
         scripts_body.push_str(&format!("{script} = \"{target}\"\n"));
@@ -421,7 +426,10 @@ fn run_url_sys_path_parity_supports_src_layout_like_local_console_script() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&caller)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_TEST_GITHUB_FILE_REPO", remote_repo.display().to_string())
+        .env(
+            "PX_TEST_GITHUB_FILE_REPO",
+            remote_repo.display().to_string(),
+        )
         .env_remove("CI")
         .args(["run", &url])
         .assert()
@@ -517,9 +525,7 @@ fn run_url_repo_tree_requires_explicit_entrypoint_when_ambiguous() {
     init_git_repo(&repo);
     write_src_pkg(&repo);
     fs::write(
-        repo.join("src")
-            .join("demo_pkg")
-            .join("cli2.py"),
+        repo.join("src").join("demo_pkg").join("cli2.py"),
         "def main():\n    print('hello from demo_pkg two')\n",
     )
     .expect("write cli2");
@@ -582,9 +588,7 @@ fn run_url_repo_tree_allows_explicit_entrypoint_arg() {
     init_git_repo(&repo);
     write_src_pkg(&repo);
     fs::write(
-        repo.join("src")
-            .join("demo_pkg")
-            .join("cli2.py"),
+        repo.join("src").join("demo_pkg").join("cli2.py"),
         "def main():\n    print('hello from demo_pkg two')\n",
     )
     .expect("write cli2");

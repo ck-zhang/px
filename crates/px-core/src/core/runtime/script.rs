@@ -14,12 +14,12 @@ use crate::core::runtime::facade::{
     prepare_project_runtime, select_python_from_site, EnvironmentIssue, EnvironmentSyncReport,
     ManifestSnapshot, PythonContext,
 };
-use crate::core::sandbox::env_root_from_site_packages;
 use crate::core::runtime::run::{
     run_project_script, sandbox_runner_for_context, CommandRunner, HostCommandRunner,
     SandboxRunContext,
 };
 use crate::core::runtime::EnvGuard;
+use crate::core::sandbox::env_root_from_site_packages;
 use crate::{CommandContext, ExecutionOutcome, InstallUserError};
 use px_domain::api::{manifest_fingerprint, ProjectStateKind, ProjectStateReport, PxOptions};
 

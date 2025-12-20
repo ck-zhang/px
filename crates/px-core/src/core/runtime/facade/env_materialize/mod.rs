@@ -11,9 +11,9 @@ use crate::context::CommandContext;
 use crate::core::runtime as effects;
 use crate::core::runtime::artifacts::{dependency_name, select_wheel};
 use crate::core::runtime::builder::{builder_identity_for_python, builder_identity_for_runtime};
-use crate::core::runtime::cas_env::{copy_tree, ensure_profile_env, project_env_owner_id};
 #[cfg(not(windows))]
 use crate::core::runtime::cas_env::write_python_shim;
+use crate::core::runtime::cas_env::{copy_tree, ensure_profile_env, project_env_owner_id};
 use crate::core::runtime::runtime_manager;
 use crate::core::tooling::diagnostics;
 use crate::outcome::InstallUserError;
@@ -67,12 +67,12 @@ pub(crate) use state::{load_project_state, StoredEnvironment, StoredPython, Stor
 
 #[cfg(test)]
 pub(super) use editable::load_editable_project_metadata;
+pub(crate) use editable::write_project_metadata_stub;
 #[cfg(test)]
 pub(super) use editable::write_sitecustomize;
 pub(super) use editable::{
     materialize_wheel_scripts, normalize_project_name, uses_maturin_backend,
 };
-pub(crate) use editable::write_project_metadata_stub;
 #[cfg(test)]
 pub(super) use refresh::uv_cli_candidates;
 pub(super) use refresh::{

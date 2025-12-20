@@ -95,7 +95,10 @@ pub fn collect_setup_cfg_packages(
 /// # Errors
 ///
 /// Returns an error if the file cannot be read or parsed.
-pub fn collect_setup_py_packages(root: &Path, path: &Path) -> Result<(Value, Vec<OnboardPackagePlan>)> {
+pub fn collect_setup_py_packages(
+    root: &Path,
+    path: &Path,
+) -> Result<(Value, Vec<OnboardPackagePlan>)> {
     let specs = read_setup_py_requires(path)?;
     let rel = relative_path(root, path);
     let mut rows = Vec::new();
@@ -144,8 +147,7 @@ fn read_requirements_file_inner(
         let mut spec = trimmed;
         if let Some(idx) = trimmed.find('#') {
             let before = &trimmed[..idx];
-            let is_comment =
-                idx == 0 || before.chars().last().is_some_and(|ch| ch.is_whitespace());
+            let is_comment = idx == 0 || before.chars().last().is_some_and(|ch| ch.is_whitespace());
             if is_comment {
                 spec = before.trim();
             }
@@ -414,7 +416,9 @@ pub fn read_setup_py_requires(path: &Path) -> Result<Vec<String>> {
                 }
                 if trimmed.contains("deps_list(") || trimmed.contains("deps[") {
                     items.extend(extract_string_literals(trimmed));
-                } else if let Some(value) = first_string_literal(trimmed.split_once('=').map(|(_, v)| v).unwrap_or("")) {
+                } else if let Some(value) =
+                    first_string_literal(trimmed.split_once('=').map(|(_, v)| v).unwrap_or(""))
+                {
                     items.push(value);
                 }
                 continue;
@@ -478,7 +482,9 @@ pub fn read_setup_py_requires(path: &Path) -> Result<Vec<String>> {
         if key.is_empty() {
             continue;
         }
-        spec_by_key.entry(key.clone()).or_insert_with(|| spec.clone());
+        spec_by_key
+            .entry(key.clone())
+            .or_insert_with(|| spec.clone());
         spec_by_key
             .entry(key.to_ascii_lowercase())
             .or_insert(spec.clone());

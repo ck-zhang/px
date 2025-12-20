@@ -147,11 +147,7 @@ fn ensure_pytest_tool(
     Ok(tool.root)
 }
 
-fn tool_env_has_pytest(
-    ctx: &CommandContext,
-    py_ctx: &PythonContext,
-    tool_root: &Path,
-) -> bool {
+fn tool_env_has_pytest(ctx: &CommandContext, py_ctx: &PythonContext, tool_root: &Path) -> bool {
     let mut envs = Vec::new();
     if append_tool_env_paths(ctx, &mut envs, tool_root).is_err() {
         return false;

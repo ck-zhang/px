@@ -24,7 +24,8 @@ fn remove_path_for_replace(path: &Path) -> Result<()> {
         if fs::remove_dir(path).is_ok() {
             return Ok(());
         }
-        fs::remove_dir_all(path).with_context(|| format!("failed to remove dir {}", path.display()))?;
+        fs::remove_dir_all(path)
+            .with_context(|| format!("failed to remove dir {}", path.display()))?;
         return Ok(());
     }
 
@@ -112,7 +113,9 @@ pub(crate) fn replace_dir_link(target: &Path, link: &Path) -> Result<()> {
     {
         let _ = target;
         let _ = link;
-        Err(anyhow!("directory links are not supported on this platform"))
+        Err(anyhow!(
+            "directory links are not supported on this platform"
+        ))
     }
 }
 

@@ -14,9 +14,9 @@ use crate::store::cas::{
 };
 use crate::ManifestSnapshot;
 
-use super::{materialize, profile, runtime};
 #[cfg(not(windows))]
 use super::write_python_shim;
+use super::{materialize, profile, runtime};
 
 #[test]
 fn runtime_archive_captures_full_tree() -> Result<()> {

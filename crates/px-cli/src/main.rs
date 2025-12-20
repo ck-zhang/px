@@ -5,7 +5,9 @@ use std::{env, ffi::OsStr, ffi::OsString, path::PathBuf, sync::Arc};
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
 use color_eyre::Result;
-use px_core::api::{CommandContext, CommandGroup, CommandInfo, ExecutionOutcome, GlobalOptions, SystemEffects};
+use px_core::api::{
+    CommandContext, CommandGroup, CommandInfo, ExecutionOutcome, GlobalOptions, SystemEffects,
+};
 
 mod cli;
 mod completion;
@@ -97,8 +99,13 @@ fn main() -> Result<()> {
                     "hint": "Re-run with `--debug` for more detail, or open an issue if this persists.",
                 }),
             );
-            let code =
-                emit_output(&output_opts, subcommand_json, status_opts, default_info, &outcome)?;
+            let code = emit_output(
+                &output_opts,
+                subcommand_json,
+                status_opts,
+                default_info,
+                &outcome,
+            )?;
             std::process::exit(code);
         }
     };
@@ -148,7 +155,9 @@ fn command_info_for_cli(group: &CommandGroupCli) -> CommandInfo {
             PythonCommand::Install(_) => CommandInfo::new(CommandGroup::Python, "install"),
             PythonCommand::Use(_) => CommandInfo::new(CommandGroup::Python, "use"),
         },
-        CommandGroupCli::Completions(_) => CommandInfo::new(CommandGroup::Completions, "completions"),
+        CommandGroupCli::Completions(_) => {
+            CommandInfo::new(CommandGroup::Completions, "completions")
+        }
     }
 }
 

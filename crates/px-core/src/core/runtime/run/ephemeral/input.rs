@@ -65,10 +65,9 @@ pub(in super::super) fn detect_ephemeral_input(
     run_target: Option<&str>,
 ) -> Result<EphemeralInput, ExecutionOutcome> {
     if let Some(target) = run_target {
-        if let Some(inline) = crate::core::runtime::script::detect_inline_script_at(
-            invocation_root,
-            target,
-        )? {
+        if let Some(inline) =
+            crate::core::runtime::script::detect_inline_script_at(invocation_root, target)?
+        {
             let mut deps = inline.dependencies().to_vec();
             deps.sort();
             deps.dedup();
@@ -107,14 +106,14 @@ pub(in super::super) fn detect_ephemeral_input(
         let snapshot =
             px_domain::api::ProjectSnapshot::from_document(invocation_root, &pyproject_path, doc)
                 .map_err(|err| {
-                    ExecutionOutcome::failure(
-                        "failed to parse pyproject.toml for ephemeral run",
-                        json!({
-                            "error": err.to_string(),
-                            "pyproject": pyproject_path.display().to_string(),
-                        }),
-                    )
-                })?;
+                ExecutionOutcome::failure(
+                    "failed to parse pyproject.toml for ephemeral run",
+                    json!({
+                        "error": err.to_string(),
+                        "pyproject": pyproject_path.display().to_string(),
+                    }),
+                )
+            })?;
         return Ok(EphemeralInput::Pyproject {
             requires_python: snapshot.python_requirement,
             deps: snapshot.requirements,

@@ -37,8 +37,9 @@ pub(crate) use context::{
 };
 pub(crate) use env_materialize::{
     detect_runtime_metadata, load_project_state, prepare_project_runtime, refresh_project_site,
-    select_python_from_site, site_packages_dir, write_python_environment_markers, RuntimeMetadata,
-    write_project_metadata_stub, StoredEnvironment, StoredPython, StoredRuntime, SITE_CUSTOMIZE,
+    select_python_from_site, site_packages_dir, write_project_metadata_stub,
+    write_python_environment_markers, RuntimeMetadata, StoredEnvironment, StoredPython,
+    StoredRuntime, SITE_CUSTOMIZE,
 };
 pub(crate) use execute::outcome_from_output;
 pub(crate) use plan::{

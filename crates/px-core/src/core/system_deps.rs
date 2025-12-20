@@ -51,7 +51,10 @@ pub(crate) fn package_capability_rules() -> &'static [(&'static str, &'static [&
         ("xml", &["lxml", "libxml2", "libxslt", "xmlsec"]),
         ("ldap", &["ldap", "python-ldap", "pyldap", "libldap"]),
         ("ffi", &["cffi", "libffi"]),
-        ("openssl", &["cryptography", "pyopenssl", "openssl", "libssl"]),
+        (
+            "openssl",
+            &["cryptography", "pyopenssl", "openssl", "libssl"],
+        ),
         ("curl", &["curl", "libcurl", "pycurl"]),
         (
             "gdal",

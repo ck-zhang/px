@@ -1011,8 +1011,11 @@ fn project_test_auto_installs_pytest_and_preserves_manifest() {
 
     let tests = root.join("tests");
     fs::create_dir_all(&tests).expect("create tests dir");
-    fs::write(tests.join("test_smoke.py"), "def test_smoke():\n    assert True\n")
-        .expect("write test");
+    fs::write(
+        tests.join("test_smoke.py"),
+        "def test_smoke():\n    assert True\n",
+    )
+    .expect("write test");
 
     let pyproject = root.join("pyproject.toml");
     let lock = root.join("px.lock");

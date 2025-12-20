@@ -68,9 +68,13 @@ async fn resolve_with_uv(request: &ResolveRequest) -> Result<Vec<ResolvedSpecifi
 
     let workspace_cache = WorkspaceCache::default();
     let mut requirements = parse_requirements(&request.requirements, &request.root)?;
-    let workspace_sources =
-        apply_uv_workspace_sources(&mut requirements, &request.root, &marker_env, &workspace_cache)
-            .await?;
+    let workspace_sources = apply_uv_workspace_sources(
+        &mut requirements,
+        &request.root,
+        &marker_env,
+        &workspace_cache,
+    )
+    .await?;
     let constraints = Constraints::from_requirements(workspace_sources.constraints.into_iter());
     let overrides = Overrides::from_requirements(workspace_sources.overrides);
     let manifest = Manifest::new(
@@ -177,7 +181,8 @@ async fn apply_uv_workspace_sources(
         members: MemberDiscovery::All,
         ..DiscoveryOptions::default()
     };
-    let project_workspace = match ProjectWorkspace::discover(project_root, &discovery, cache).await {
+    let project_workspace = match ProjectWorkspace::discover(project_root, &discovery, cache).await
+    {
         Ok(workspace) => workspace,
         Err(err) => {
             tracing::debug!(?err, "uv_workspace_discovery_failed");
@@ -231,10 +236,12 @@ async fn apply_uv_workspace_sources(
             }
         }
 
-        let Ok(dependency_groups) = uv_workspace::dependency_groups::FlatDependencyGroups::from_pyproject_toml(
-            member.root(),
-            member.pyproject_toml(),
-        ) else {
+        let Ok(dependency_groups) =
+            uv_workspace::dependency_groups::FlatDependencyGroups::from_pyproject_toml(
+                member.root(),
+                member.pyproject_toml(),
+            )
+        else {
             tracing::debug!(
                 root = %member.root().display(),
                 "uv_dependency_groups_parse_failed"
@@ -333,7 +340,11 @@ async fn apply_uv_workspace_sources(
             continue;
         };
 
-        let Some(member) = project_workspace.workspace().packages().get(&requirement.name) else {
+        let Some(member) = project_workspace
+            .workspace()
+            .packages()
+            .get(&requirement.name)
+        else {
             return Err(anyhow!(
                 "`tool.uv.sources` marks `{}` as `workspace = true`, but no workspace member named `{}` was found",
                 requirement.name,
@@ -343,7 +354,12 @@ async fn apply_uv_workspace_sources(
 
         let editable = editable.unwrap_or(true);
         let url = VerbatimUrl::from_absolute_path(member.root())
-            .map_err(|err| anyhow!("invalid workspace member url for {}: {err}", requirement.name))?
+            .map_err(|err| {
+                anyhow!(
+                    "invalid workspace member url for {}: {err}",
+                    requirement.name
+                )
+            })?
             .with_given(member.root().to_string_lossy());
         requirement.source = RequirementSource::Directory {
             install_path: member.root().clone().into_boxed_path(),
@@ -775,8 +791,8 @@ version = "0.1.0"
         )?;
 
         let mut requirements = parse_requirements(&["member-pkg==0.1.0".to_string()], root)?;
-        let marker_env = uv_pep508::MarkerEnvironment::try_from(
-            uv_pep508::MarkerEnvironmentBuilder {
+        let marker_env =
+            uv_pep508::MarkerEnvironment::try_from(uv_pep508::MarkerEnvironmentBuilder {
                 implementation_name: "cpython",
                 implementation_version: "3.12.0",
                 os_name: "posix",
@@ -788,14 +804,17 @@ version = "0.1.0"
                 python_full_version: "3.12.0",
                 python_version: "3.12",
                 sys_platform: "linux",
-            },
-        )?;
+            })?;
         let cache = WorkspaceCache::default();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        let _lookaheads =
-            runtime.block_on(apply_uv_workspace_sources(&mut requirements, root, &marker_env, &cache))?;
+        let _lookaheads = runtime.block_on(apply_uv_workspace_sources(
+            &mut requirements,
+            root,
+            &marker_env,
+            &cache,
+        ))?;
 
         let requirement = requirements
             .into_iter()
@@ -842,8 +861,8 @@ version = "0.1.0"
         if !root.exists() {
             return Ok(());
         }
-        let marker_env = uv_pep508::MarkerEnvironment::try_from(
-            uv_pep508::MarkerEnvironmentBuilder {
+        let marker_env =
+            uv_pep508::MarkerEnvironment::try_from(uv_pep508::MarkerEnvironmentBuilder {
                 implementation_name: "cpython",
                 implementation_version: "3.12.0",
                 os_name: "posix",
@@ -855,15 +874,18 @@ version = "0.1.0"
                 python_full_version: "3.12.0",
                 python_version: "3.12",
                 sys_platform: "linux",
-            },
-        )?;
+            })?;
         let cache = WorkspaceCache::default();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
         let mut requirements: Vec<UvRequirement> = Vec::new();
-        let sources =
-            runtime.block_on(apply_uv_workspace_sources(&mut requirements, root, &marker_env, &cache))?;
+        let sources = runtime.block_on(apply_uv_workspace_sources(
+            &mut requirements,
+            root,
+            &marker_env,
+            &cache,
+        ))?;
         assert!(
             sources.constraints.iter().any(|req| {
                 req.name.as_ref() == "sphinx-airflow-theme"
