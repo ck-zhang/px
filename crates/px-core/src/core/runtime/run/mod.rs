@@ -324,6 +324,23 @@ fn program_on_path(program: &str, envs: &EnvPairs) -> bool {
     false
 }
 
+#[cfg(windows)]
+fn resolve_program_on_path(program: &str, envs: &EnvPairs) -> Option<PathBuf> {
+    let value = envs
+        .iter()
+        .find(|(key, _)| key == "PATH")
+        .map(|(_, value)| value.clone())
+        .or_else(|| env::var("PATH").ok())
+        .unwrap_or_default();
+    for entry in env::split_paths(&value) {
+        let candidate = entry.join(program);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn execute_plan(
     runner: &dyn CommandRunner,
     plan: &ProcessPlan,
@@ -644,13 +661,14 @@ fn run_executable_cas_native(
 ) -> Result<ExecutionOutcome> {
     let display_program = program.to_string();
     let is_python_alias = is_python_alias_target(program);
-    let exec_program = if is_python_alias {
+    let initial_program = if is_python_alias {
         native.py_ctx.python.clone()
     } else {
         display_program.clone()
     };
 
-    if let Some(subcommand) = mutating_pip_invocation(&exec_program, extra_args, &native.py_ctx) {
+    if let Some(subcommand) = mutating_pip_invocation(&initial_program, extra_args, &native.py_ctx)
+    {
         return Ok(pip_mutation_outcome(
             &display_program,
             &subcommand,
@@ -694,21 +712,94 @@ fn run_executable_cas_native(
             }),
         ));
     }
+
+    #[cfg(windows)]
+    let mut exec_program = initial_program;
+    #[cfg(not(windows))]
+    let exec_program = initial_program;
+
+    #[cfg(windows)]
+    let mut exec_args: Vec<String> = extra_args.to_vec();
+    #[cfg(not(windows))]
+    let exec_args: Vec<String> = extra_args.to_vec();
+
+    #[cfg(windows)]
+    {
+        if !is_python_alias && !program_matches_python(&display_program, &native.py_ctx) {
+            let program_path = Path::new(&display_program);
+            let resolved = if program_path.is_file() {
+                Some(program_path.to_path_buf())
+            } else if program_path.components().count() == 1 {
+                resolve_program_on_path(&display_program, &envs)
+            } else {
+                None
+            };
+            if let Some(path) = resolved {
+                if path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat")
+                    })
+                {
+                    exec_program = "cmd".to_string();
+                    let mut argv = Vec::with_capacity(extra_args.len() + 2);
+                    argv.push("/C".to_string());
+                    argv.push(path.display().to_string());
+                    argv.extend(extra_args.iter().cloned());
+                    exec_args = argv;
+                } else {
+                    let should_run_via_python = path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| {
+                            ext.eq_ignore_ascii_case("py") || ext.eq_ignore_ascii_case("pyw")
+                        })
+                        || {
+                            let mut file = match fs::File::open(&path) {
+                                Ok(file) => file,
+                                Err(_) => {
+                                    return Ok(ExecutionOutcome::failure(
+                                        "failed to execute program",
+                                        json!({ "error": format!("failed to open {}", path.display()) }),
+                                    ))
+                                }
+                            };
+                            let mut buf = [0u8; 256];
+                            let read = file.read(&mut buf).unwrap_or(0);
+                            let prefix = std::str::from_utf8(&buf[..read]).unwrap_or_default();
+                            prefix.lines().next().is_some_and(|line| {
+                                line.starts_with("#!")
+                                    && line.to_ascii_lowercase().contains("python")
+                            })
+                        };
+                    if should_run_via_python {
+                        exec_program = native.py_ctx.python.clone();
+                        let mut argv = Vec::with_capacity(extra_args.len() + 1);
+                        argv.push(path.display().to_string());
+                        argv.extend(extra_args.iter().cloned());
+                        exec_args = argv;
+                    }
+                }
+            }
+        }
+    }
+
     let uses_px_python = program_matches_python(&exec_program, &native.py_ctx);
-    let needs_stdin = uses_px_python && extra_args.first().is_some_and(|arg| arg == "-");
+    let needs_stdin = uses_px_python && exec_args.first().is_some_and(|arg| arg == "-");
     if uses_px_python {
         apply_runtime_python_home(&mut envs, &native.runtime_path);
         apply_profile_env_vars(&mut envs, &native.env_vars);
-        if python_args_disable_site(extra_args) {
+        if python_args_disable_site(&exec_args) {
             apply_cas_native_sys_path_for_no_site(&mut envs, &native.sys_path_entries);
         }
     } else {
         envs.retain(|(key, _)| key != "PX_PYTHON");
     }
     let interactive = interactive || needs_stdin;
-    let mut argv = Vec::with_capacity(extra_args.len() + 1);
+    let mut argv = Vec::with_capacity(exec_args.len() + 1);
     argv.push(exec_program.clone());
-    argv.extend(extra_args.iter().cloned());
+    argv.extend(exec_args.iter().cloned());
     let plan = ProcessPlan {
         runtime_path: native.runtime_path.clone(),
         sys_path_entries: native.sys_path_entries.clone(),
