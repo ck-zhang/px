@@ -213,7 +213,7 @@ pub fn prepare_traceback_fixture(prefix: &str) -> (TempDir, PathBuf) {
 #[must_use]
 pub fn find_python() -> Option<String> {
     const MIN_MAJOR: u64 = 3;
-    const MIN_MINOR: u64 = 11;
+    const MIN_MINOR: u64 = 12;
 
     let candidates = [
         std::env::var("PYTHON").ok(),
