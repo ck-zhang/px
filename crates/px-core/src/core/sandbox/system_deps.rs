@@ -480,19 +480,19 @@ fn copy_dir(src: &Path, dest: &Path) -> Result<(), InstallUserError> {
                 )
             })?;
         } else if entry.file_type().is_symlink() {
-            let target = fs::read_link(path).map_err(|err| {
-                sandbox_error(
-                    "PX903",
-                    "failed to read system dependency symlink",
-                    json!({ "path": path.display().to_string(), "error": err.to_string() }),
-                )
-            })?;
             #[allow(clippy::redundant_closure_for_method_calls)]
             if dest_path.exists() {
                 fs::remove_file(&dest_path).ok();
             }
             #[cfg(unix)]
             {
+                let target = fs::read_link(path).map_err(|err| {
+                    sandbox_error(
+                        "PX903",
+                        "failed to read system dependency symlink",
+                        json!({ "path": path.display().to_string(), "error": err.to_string() }),
+                    )
+                })?;
                 std::os::unix::fs::symlink(&target, &dest_path).map_err(|err| {
                     sandbox_error(
                         "PX903",

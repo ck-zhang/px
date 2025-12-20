@@ -1,4 +1,7 @@
-use std::{fs, process::Command};
+use std::process::Command;
+
+#[cfg(unix)]
+use std::fs;
 
 use anyhow::{anyhow, bail, Context, Result};
 use pep508_rs::MarkerEnvironment;

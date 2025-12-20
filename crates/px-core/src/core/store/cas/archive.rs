@@ -300,14 +300,13 @@ pub fn archive_selected(root: &Path, paths: &[PathBuf]) -> Result<Vec<u8>> {
     Ok(encoder.finish()?)
 }
 
+#[cfg(unix)]
 fn is_executable(metadata: &fs::Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(_metadata: &fs::Metadata) -> bool {
+    false
 }
