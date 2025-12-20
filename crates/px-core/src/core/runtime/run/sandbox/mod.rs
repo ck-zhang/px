@@ -10,5 +10,5 @@ pub(super) use prepare::{
     attach_sandbox_details, prepare_commit_sandbox, prepare_project_sandbox,
     prepare_workspace_sandbox, sandbox_workspace_env_inconsistent,
 };
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) use runner::map_program_for_container;
