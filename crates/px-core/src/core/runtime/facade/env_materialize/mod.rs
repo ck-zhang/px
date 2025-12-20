@@ -145,7 +145,7 @@ if _target_exe:
     try:
         target_real = os.path.realpath(_target_exe)
         current_real = os.path.realpath(sys.executable)
-        if os.path.normpath(target_real) != os.path.normpath(current_real):
+        if os.path.normcase(os.path.normpath(target_real)) != os.path.normcase(os.path.normpath(current_real)):
             _FILTER_PATHS = False
     except Exception:
         _FILTER_PATHS = False

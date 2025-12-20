@@ -345,7 +345,10 @@ print(str(candidates[0]) if candidates else "")
 
     let envs = project_site_env(ctx, snapshot, site_dir, env_python)?;
     let mut envs = envs;
-    set_env_pair(&mut envs, "PX_PYTHON", runtime.path.clone());
+    #[cfg(not(windows))]
+    {
+        set_env_pair(&mut envs, "PX_PYTHON", runtime.path.clone());
+    }
     let mut pip_main_available =
         module_available(ctx, snapshot, env_python, &envs, "pip.__main__")?;
 
