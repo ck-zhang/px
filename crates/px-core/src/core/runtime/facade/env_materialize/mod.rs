@@ -12,8 +12,10 @@ use crate::core::runtime as effects;
 use crate::core::runtime::artifacts::{dependency_name, select_wheel};
 use crate::core::runtime::builder::{builder_identity_for_python, builder_identity_for_runtime};
 #[cfg(not(windows))]
+use crate::core::runtime::cas_env::copy_tree;
+#[cfg(not(windows))]
 use crate::core::runtime::cas_env::write_python_shim;
-use crate::core::runtime::cas_env::{copy_tree, ensure_profile_env, project_env_owner_id};
+use crate::core::runtime::cas_env::{ensure_profile_env, project_env_owner_id};
 use crate::core::runtime::runtime_manager;
 use crate::core::tooling::diagnostics;
 use crate::outcome::InstallUserError;
@@ -85,6 +87,7 @@ pub(super) use wheel::{
     project_wheel_cache_dir,
 };
 
+#[cfg(not(windows))]
 use site::install_python_link;
 use state::persist_project_state;
 

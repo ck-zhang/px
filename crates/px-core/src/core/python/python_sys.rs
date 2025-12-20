@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::{fs, process::Command};
 
 use anyhow::{anyhow, bail, Context, Result};
 use pep508_rs::MarkerEnvironment;
@@ -72,6 +72,8 @@ print(json.dumps(data))
 pub fn detect_interpreter() -> Result<String> {
     if let Ok(explicit) = std::env::var("PX_RUNTIME_PYTHON") {
         if let Ok(path) = which(&explicit) {
+            #[cfg(unix)]
+            let path = fs::canonicalize(&path).unwrap_or(path);
             return path
                 .into_os_string()
                 .into_string()
@@ -82,6 +84,8 @@ pub fn detect_interpreter() -> Result<String> {
 
     for candidate in ["python3", "python"] {
         if let Ok(path) = which(candidate) {
+            #[cfg(unix)]
+            let path = fs::canonicalize(&path).unwrap_or(path);
             return path
                 .into_os_string()
                 .into_string()

@@ -229,12 +229,15 @@ fn write_entrypoint_script(
     Ok(script_path)
 }
 
+#[cfg(unix)]
 fn set_exec_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
-    }
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_exec_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
