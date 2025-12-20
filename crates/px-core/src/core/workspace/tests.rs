@@ -232,11 +232,37 @@ fn workspace_status_reports_missing_env() {
 
 #[test]
 fn workspace_status_reports_consistent() {
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     let tmp = tempdir().unwrap();
     let root = tmp.path();
     write_workspace(root);
     let workspace = load_workspace(root);
     write_lock(&workspace);
+    let python = which::which("python3")
+        .or_else(|_| which::which("python"))
+        .expect("locate python");
+    let _python_guard = EnvVarGuard::set("PX_RUNTIME_PYTHON", python.as_os_str());
     let ctx = command_context();
     super::sync::refresh_workspace_site(&ctx, &workspace).unwrap();
 

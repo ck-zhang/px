@@ -12,6 +12,7 @@ pub(crate) fn site_packages_dir(site_dir: &Path, runtime_version: &str) -> PathB
     }
 }
 
+#[cfg(not(windows))]
 pub(super) fn install_python_link(source: &Path, dest: &Path) -> Result<()> {
     if dest.symlink_metadata().is_ok() {
         let _ = fs::remove_file(dest);

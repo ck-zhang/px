@@ -1,11 +1,15 @@
 use std::{
-    collections::BTreeMap,
     fs,
     io::Read,
     path::{Path, PathBuf},
 };
 
 use anyhow::Result;
+
+#[cfg(not(windows))]
+use std::collections::BTreeMap;
+
+#[cfg(not(windows))]
 use serde_json::Value;
 
 #[cfg(not(windows))]
@@ -99,6 +103,7 @@ pub(crate) fn write_python_shim(
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn env_var_value(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
@@ -109,6 +114,7 @@ fn env_var_value(value: &Value) -> String {
     }
 }
 
+#[cfg(not(windows))]
 fn shell_escape(value: &str) -> String {
     let mut escaped = String::from("'");
     for ch in value.chars() {

@@ -265,7 +265,7 @@ impl WorkspaceBackup {
         &self,
         path: &Path,
         contents: &str,
-        permissions: &fs::Permissions,
+        _permissions: &fs::Permissions,
     ) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -273,7 +273,7 @@ impl WorkspaceBackup {
         fs::write(path, contents)?;
         #[cfg(unix)]
         {
-            fs::set_permissions(path, permissions.clone())?;
+            fs::set_permissions(path, _permissions.clone())?;
         }
         Ok(())
     }

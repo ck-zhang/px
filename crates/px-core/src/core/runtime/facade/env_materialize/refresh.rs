@@ -1052,6 +1052,7 @@ fn link_runtime_pip(
     }
 }
 
+#[cfg(not(windows))]
 fn symlink_or_copy_dir(src: &Path, dest: &Path) -> Result<()> {
     if dest.exists() {
         return Ok(());
@@ -1079,6 +1080,32 @@ mod tests {
     use std::io::Write as _;
     use std::sync::Arc;
     use zip::write::FileOptions;
+
+    #[cfg(unix)]
+    fn system_python_runtime(platform: &str) -> Result<RuntimeMetadata> {
+        let interpreter = which::which("python3")
+            .or_else(|_| which::which("python"))
+            .map_err(|err| anyhow::anyhow!("no system python found: {err}"))?;
+        let details = crate::runtime_manager::inspect_python(&interpreter)?;
+        let (major, minor) = parse_python_version(&details.full_version)
+            .and_then(|(major, minor)| {
+                Some((major.parse::<u64>().ok()?, minor.parse::<u64>().ok()?))
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("unexpected python version: {}", details.full_version)
+            })?;
+        if (major, minor) < (3, 11) {
+            return Err(anyhow::anyhow!(
+                "system python {} does not satisfy requires-python >=3.11",
+                details.full_version
+            ));
+        }
+        Ok(RuntimeMetadata {
+            path: details.executable,
+            version: details.full_version,
+            platform: platform.to_string(),
+        })
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1117,11 +1144,7 @@ build-backend = "setuptools.build_meta"
         fs::create_dir_all(site_dir.join("bin"))?;
         fs::write(site_dir.join("bin").join("pip"), "")?;
 
-        let runtime = RuntimeMetadata {
-            path: "/usr/bin/python3.11".to_string(),
-            version: "3.11.14".to_string(),
-            platform: "any".to_string(),
-        };
+        let runtime = system_python_runtime("any")?;
         let site_packages = site_packages_dir(site_dir, &runtime.version);
         fs::create_dir_all(&site_packages)?;
 
@@ -1141,11 +1164,13 @@ build-backend = "setuptools.build_meta"
 
         let log_path = project_root.join("ensurepip.log");
         let wrapper = project_root.join("python-wrapper.sh");
+        let python_path = runtime.path.replace('"', "\\\"");
         fs::write(
             &wrapper,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = \"-m\" ] && [ \"$2\" = \"ensurepip\" ]; then echo ensurepip >> \"{}\"; exit 17; fi\nexec /usr/bin/python3.11 \"$@\"\n",
-                log_path.display()
+                "#!/bin/sh\nif [ \"$1\" = \"-m\" ] && [ \"$2\" = \"ensurepip\" ]; then echo ensurepip >> \"{}\"; exit 17; fi\nexec \"{}\" \"$@\"\n",
+                log_path.display(),
+                python_path,
             ),
         )?;
         #[cfg(unix)]
@@ -1358,11 +1383,7 @@ build-backend = "maturin"
         let site_dir = site_temp.path();
         fs::create_dir_all(site_dir.join("bin"))?;
 
-        let runtime = RuntimeMetadata {
-            path: "/usr/bin/python3.11".to_string(),
-            version: "3.11.14".to_string(),
-            platform: "test".to_string(),
-        };
+        let runtime = system_python_runtime("test")?;
         let site_packages = site_packages_dir(site_dir, &runtime.version);
         fs::create_dir_all(&site_packages)?;
         fs::create_dir_all(site_packages.join("setuptools"))?;
