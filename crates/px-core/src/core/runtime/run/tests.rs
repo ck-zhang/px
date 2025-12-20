@@ -1,6 +1,7 @@
 use super::ref_tree::{
     copy_tree, is_lfs_pointer, list_submodules, restore_lfs_pointers, EnvVarGuard,
 };
+#[cfg(unix)]
 use super::sandbox::map_program_for_container;
 use super::test_exec::{
     build_pytest_command, build_pytest_invocation, default_pytest_flags, find_runtests_script,
