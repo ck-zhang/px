@@ -340,26 +340,21 @@ pub(super) fn restore_lfs_pointers(
 }
 
 fn smudge_lfs_pointer(repo_root: &Path, pointer: &[u8]) -> std::result::Result<Vec<u8>, String> {
-    let mut child = match Command::new("git-lfs")
-        .current_dir(repo_root)
-        .arg("smudge")
+    let mut cmd = if let Ok(path) = which::which("git-lfs") {
+        let mut cmd = Command::new(path);
+        cmd.current_dir(repo_root).arg("smudge");
+        cmd
+    } else {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(repo_root).arg("lfs").arg("smudge");
+        cmd
+    };
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => Command::new("git")
-            .arg("-C")
-            .arg(repo_root)
-            .arg("lfs")
-            .arg("smudge")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|err| format!("failed to invoke git-lfs smudge: {err}"))?,
-    };
+        .map_err(|err| format!("failed to invoke git-lfs smudge: {err}"))?;
     if let Some(stdin) = child.stdin.as_mut() {
         if let Err(err) = stdin.write_all(pointer) {
             return Err(format!("failed to write LFS pointer to smudge: {err}"));
