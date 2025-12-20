@@ -1,6 +1,7 @@
 #![deny(clippy::all, warnings)]
 
 use std::fs;
+use std::path::Path;
 
 use tempfile::tempdir;
 
@@ -40,7 +41,7 @@ fn prefers_console_script_from_site_bin() -> anyhow::Result<()> {
         other => panic!("expected executable plan, got {other:?}"),
     };
     assert!(
-        resolved.contains("bin/demo"),
+        Path::new(&resolved).ends_with(Path::new("bin").join("demo")),
         "expected site-bin script to be resolved, got {resolved}"
     );
     Ok(())

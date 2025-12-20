@@ -267,6 +267,8 @@ impl ContentAddressableStore {
         match file.try_lock_exclusive() {
             Ok(()) => Ok(Some(file)),
             Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(None),
+            #[cfg(windows)]
+            Err(err) if matches!(err.raw_os_error(), Some(32 | 33)) => Ok(None),
             Err(err) => Err(err.into()),
         }
     }

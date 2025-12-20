@@ -138,10 +138,13 @@ pub fn lock_is_fresh(snapshot: &ManifestSnapshot) -> Result<bool> {
 }
 
 pub(crate) fn relative_path_str(path: &Path, root: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .display()
-        .to_string()
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let rendered = rel.display().to_string();
+    if cfg!(windows) {
+        rendered.replace('\\', "/")
+    } else {
+        rendered
+    }
 }
 
 pub(crate) fn manifest_snapshot() -> Result<ManifestSnapshot> {

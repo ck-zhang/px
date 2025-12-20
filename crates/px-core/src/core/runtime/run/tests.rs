@@ -54,6 +54,7 @@ fn run_reference_parsing_normalizes_gh_locator_case_and_git_suffix() {
     assert_eq!(script_path, PathBuf::from("scripts/hello.py"));
 }
 
+#[cfg(unix)]
 #[test]
 fn maps_program_path_into_container_roots() {
     let mapped_env = map_program_for_container(
@@ -330,11 +331,15 @@ fn run_executable_uses_workdir() -> Result<()> {
     let temp = tempdir()?;
     let workdir = temp.path().join("nested");
     fs::create_dir_all(&workdir)?;
+    let python = match ctx.python_runtime().detect_interpreter() {
+        Ok(path) => path,
+        Err(_) => return Ok(()),
+    };
     let py_ctx = PythonContext {
         project_root: temp.path().to_path_buf(),
         state_root: temp.path().to_path_buf(),
         project_name: "demo".into(),
-        python: "/usr/bin/python".into(),
+        python: python.clone(),
         pythonpath: String::new(),
         allowed_paths: vec![temp.path().to_path_buf()],
         site_bin: None,
@@ -344,12 +349,16 @@ fn run_executable_uses_workdir() -> Result<()> {
     };
 
     let runner = HostCommandRunner::new(&ctx);
+    let args = vec![
+        "-c".to_string(),
+        "import os; print(os.getcwd())".to_string(),
+    ];
     let outcome = run_executable(
         &ctx,
         &runner,
         &py_ctx,
-        "pwd",
-        &[],
+        &python,
+        &args,
         &json!({}),
         &workdir,
         false,
@@ -361,7 +370,10 @@ fn run_executable_uses_workdir() -> Result<()> {
         .and_then(|value| value.as_str())
         .unwrap_or_default()
         .trim();
-    assert_eq!(PathBuf::from(stdout), workdir);
+    let out_path = PathBuf::from(stdout);
+    let out_canon = out_path.canonicalize().unwrap_or(out_path);
+    let workdir_canon = workdir.canonicalize().unwrap_or(workdir);
+    assert_eq!(out_canon, workdir_canon);
     Ok(())
 }
 
@@ -572,15 +584,28 @@ fn prefers_tests_runtests_script() -> Result<()> {
 
 #[test]
 fn merged_pythonpath_keeps_extra_entries() {
+    let allowed = std::env::join_paths([Path::new("a"), Path::new("b")])
+        .expect("allowed paths")
+        .into_string()
+        .unwrap_or_else(|value| value.to_string_lossy().to_string());
+    let pythonpath = std::env::join_paths([Path::new("extra"), Path::new("b")])
+        .expect("pythonpath")
+        .into_string()
+        .unwrap_or_else(|value| value.to_string_lossy().to_string());
     let envs = vec![
-        ("PX_ALLOWED_PATHS".into(), "/a:/b".into()),
-        ("PYTHONPATH".into(), "/extra:/b".into()),
+        ("PX_ALLOWED_PATHS".into(), allowed),
+        ("PYTHONPATH".into(), pythonpath),
     ];
     let merged = merged_pythonpath(&envs).expect("merged path");
-    let entries: Vec<_> = std::env::split_paths(&merged)
-        .map(|p| p.display().to_string())
-        .collect();
-    assert_eq!(entries, vec!["/a", "/b", "/extra"]);
+    let entries: Vec<_> = std::env::split_paths(&merged).collect();
+    assert_eq!(
+        entries,
+        vec![
+            PathBuf::from("a"),
+            PathBuf::from("b"),
+            PathBuf::from("extra")
+        ]
+    );
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Result<String> {

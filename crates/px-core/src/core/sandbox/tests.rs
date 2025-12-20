@@ -86,7 +86,11 @@ fn internal_containers_forward_proxy_env_when_set() {
         env::remove_var(key);
     }
     env::set_var("HTTP_PROXY", "http://proxy.example:3128");
-    env::set_var("http_proxy", "http://proxy-lower.example:3128");
+    if cfg!(windows) {
+        env::set_var("http_proxy", "http://proxy.example:3128");
+    } else {
+        env::set_var("http_proxy", "http://proxy-lower.example:3128");
+    }
     env::set_var("ALL_PROXY", "http://proxy.example:3128");
     env::set_var("NO_PROXY", "localhost,127.0.0.1");
     env::set_var("FTP_PROXY", "http://should-not-pass");
@@ -101,7 +105,14 @@ fn internal_containers_forward_proxy_env_when_set() {
         "HTTP_PROXY should be forwarded"
     );
     assert!(
-        proxy_envs.contains(&"http_proxy=http://proxy-lower.example:3128".to_string()),
+        proxy_envs.contains(&format!(
+            "http_proxy={}",
+            if cfg!(windows) {
+                "http://proxy.example:3128"
+            } else {
+                "http://proxy-lower.example:3128"
+            }
+        )),
         "http_proxy should be forwarded"
     );
     assert!(

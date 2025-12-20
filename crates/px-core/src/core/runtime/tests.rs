@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::Command;
 use tempfile::tempdir;
@@ -197,8 +198,14 @@ fn python_environment_markers_create_pyvenv_and_shims() -> Result<()> {
         "python3 shim should be created (non-Windows)"
     );
     if cfg!(windows) {
+        let env_python_canon = env_python
+            .canonicalize()
+            .unwrap_or_else(|_| env_python.clone());
+        let runtime_python_canon = runtime_python
+            .canonicalize()
+            .unwrap_or_else(|_| runtime_python.clone());
         assert_eq!(
-            env_python, runtime_python,
+            env_python_canon, runtime_python_canon,
             "Windows uses the runtime executable directly"
         );
     } else {
@@ -358,8 +365,17 @@ fn materialize_project_site_writes_cached_paths() {
         "env site px.pth should be created alongside install"
     );
     let contents = fs::read_to_string(pxpth).expect("read px.pth");
+    let expected = dist_dir.canonicalize().unwrap_or_else(|_| dist_dir.clone());
     assert!(
-        contents.contains(dist_dir.to_str().unwrap()),
+        contents.lines().any(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return false;
+            }
+            let candidate = PathBuf::from(line);
+            let candidate = candidate.canonicalize().unwrap_or(candidate);
+            candidate == expected
+        }),
         "px.pth should reference unpacked artifact path"
     );
 }

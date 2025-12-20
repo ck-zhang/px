@@ -28,9 +28,9 @@ pub(crate) fn plan_run_target(
 }
 
 fn script_under_project_root(root: &Path, cwd: &Path, target: &str) -> Option<PathBuf> {
-    resolve_script_path(root, root, target)
-        .or_else(|| resolve_script_path(cwd, root, target))
-        .filter(|path| path.starts_with(root))
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    resolve_script_path(root, &canonical_root, target)
+        .or_else(|| resolve_script_path(cwd, &canonical_root, target))
 }
 
 fn resolve_script_path(base: &Path, project_root: &Path, target: &str) -> Option<PathBuf> {

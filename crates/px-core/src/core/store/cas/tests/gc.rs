@@ -151,10 +151,9 @@ fn gc_rebuilds_index_before_running() -> Result<()> {
     let garbage = store.store(&ObjectPayload::Meta {
         bytes: Cow::Owned(b"stale".to_vec()),
     })?;
-    filetime::set_file_mtime(
-        store.object_path(&garbage.oid),
-        filetime::FileTime::from_unix_time(0, 0),
-    )?;
+    let garbage_path = store.object_path(&garbage.oid);
+    make_writable(&garbage_path);
+    filetime::set_file_mtime(&garbage_path, filetime::FileTime::from_unix_time(0, 0))?;
 
     let env_root = temp.path().join("envs").join(&profile.oid);
     fs::create_dir_all(&env_root)?;

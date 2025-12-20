@@ -186,14 +186,22 @@ fn project_paths_precede_local_site_packages() -> Result<()> {
                 .collect()
         })
         .unwrap_or_default();
-    let proj_pos = prefix
-        .iter()
-        .position(|entry| fs::canonicalize(entry).ok() == Some(project_root.to_path_buf()));
-    let site_pos = prefix
-        .iter()
-        .position(|entry| fs::canonicalize(entry).ok() == Some(site_packages.clone()));
+    let project_root_canon =
+        fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let site_packages_canon =
+        fs::canonicalize(&site_packages).unwrap_or_else(|_| site_packages.clone());
+    let proj_pos = prefix.iter().position(|entry| {
+        fs::canonicalize(entry)
+            .ok()
+            .is_some_and(|canon| canon == project_root_canon)
+    });
+    let site_pos = prefix.iter().position(|entry| {
+        fs::canonicalize(entry)
+            .ok()
+            .is_some_and(|canon| canon == site_packages_canon)
+    });
     assert!(
-        proj_pos < site_pos,
+        proj_pos.is_some() && site_pos.is_some() && proj_pos < site_pos,
         "project path should precede site-packages in sys.path, got {:?}",
         prefix
     );

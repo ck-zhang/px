@@ -58,6 +58,18 @@ fn project_wheel_cache_dir_varies_with_build_env() -> Result<()> {
     let original = env::var(key).ok();
     env::set_var(key, "value-a");
 
+    let effects = SystemEffects::new();
+    let python = match effects.python().detect_interpreter() {
+        Ok(path) => path,
+        Err(_) => {
+            match original {
+                Some(value) => env::set_var(key, value),
+                None => env::remove_var(key),
+            }
+            return Ok(());
+        }
+    };
+
     let temp = tempdir()?;
     let project_root = temp.path().join("maturin-fingerprint");
     fs::create_dir_all(&project_root)?;
@@ -75,7 +87,7 @@ build-backend = "maturin"
 
     let snapshot = ProjectSnapshot::read_from(&project_root)?;
     let runtime = RuntimeMetadata {
-        path: "/usr/bin/python".into(),
+        path: python.clone(),
         version: "3.12.0".into(),
         platform: "test-platform".into(),
     };
@@ -85,7 +97,7 @@ build-backend = "maturin"
     let first_hash = project_build_hash(
         &runtime,
         &snapshot,
-        Path::new("/usr/bin/python"),
+        Path::new(&python),
         false,
         &builder.builder_id,
     )?;
@@ -93,7 +105,7 @@ build-backend = "maturin"
     let second_hash = project_build_hash(
         &runtime,
         &snapshot,
-        Path::new("/usr/bin/python"),
+        Path::new(&python),
         false,
         &builder.builder_id,
     )?;
@@ -111,7 +123,7 @@ build-backend = "maturin"
         &cache_root,
         &snapshot,
         &runtime,
-        Path::new("/usr/bin/python"),
+        Path::new(&python),
         false,
         &first_hash,
     );
@@ -119,7 +131,7 @@ build-backend = "maturin"
         &cache_root,
         &snapshot,
         &runtime,
-        Path::new("/usr/bin/python"),
+        Path::new(&python),
         false,
         &second_hash,
     );
@@ -229,6 +241,12 @@ build-backend = "maturin"
 fn installs_scripts_from_cached_maturin_wheel() -> Result<()> {
     use std::io::Write as _;
 
+    let effects = SystemEffects::new();
+    let python = match effects.python().detect_interpreter() {
+        Ok(path) => path,
+        Err(_) => return Ok(()),
+    };
+
     let temp = tempdir()?;
     let project_root = temp.path().join("maturin-demo");
     fs::create_dir_all(&project_root)?;
@@ -247,7 +265,7 @@ build-backend = "maturin"
 
     let snapshot = ProjectSnapshot::read_from(&project_root)?;
     let runtime = RuntimeMetadata {
-        path: "/usr/bin/python".into(),
+        path: python.clone(),
         version: "3.12.0".into(),
         platform: "test-platform".into(),
     };
@@ -255,7 +273,7 @@ build-backend = "maturin"
     let build_hash = project_build_hash(
         &runtime,
         &snapshot,
-        Path::new("/usr/bin/python"),
+        Path::new(&python),
         false,
         &builder.builder_id,
     )?;
@@ -264,7 +282,7 @@ build-backend = "maturin"
         &cache_root,
         &snapshot,
         &runtime,
-        Path::new("/usr/bin/python"),
+        Path::new(&python),
         false,
         &build_hash,
     );
@@ -310,6 +328,18 @@ fn reuses_cached_maturin_wheel_when_build_env_changes() -> Result<()> {
     let saved_rustflags = env::var("RUSTFLAGS").ok();
     env::set_var("RUSTFLAGS", "first-hash");
 
+    let effects = SystemEffects::new();
+    let python = match effects.python().detect_interpreter() {
+        Ok(path) => path,
+        Err(_) => {
+            match saved_rustflags {
+                Some(prev) => env::set_var("RUSTFLAGS", prev),
+                None => env::remove_var("RUSTFLAGS"),
+            }
+            return Ok(());
+        }
+    };
+
     let temp = tempdir()?;
     let project_root = temp.path().join("maturin-change");
     fs::create_dir_all(&project_root)?;
@@ -328,7 +358,7 @@ build-backend = "maturin"
 
     let snapshot = ProjectSnapshot::read_from(&project_root)?;
     let runtime = RuntimeMetadata {
-        path: "/usr/bin/python".into(),
+        path: python.clone(),
         version: "3.12.0".into(),
         platform: "test-platform".into(),
     };
@@ -337,7 +367,7 @@ build-backend = "maturin"
     let first_hash = project_build_hash(
         &runtime,
         &snapshot,
-        Path::new(&runtime.path),
+        Path::new(&python),
         false,
         &builder.builder_id,
     )?;
@@ -345,7 +375,7 @@ build-backend = "maturin"
         &cache_root,
         &snapshot,
         &runtime,
-        Path::new(&runtime.path),
+        Path::new(&python),
         false,
         &first_hash,
     );
@@ -366,7 +396,7 @@ build-backend = "maturin"
     let second_hash = project_build_hash(
         &runtime,
         &snapshot,
-        Path::new(&runtime.path),
+        Path::new(&python),
         false,
         &builder.builder_id,
     )?;

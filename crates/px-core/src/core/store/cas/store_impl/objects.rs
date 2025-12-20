@@ -349,7 +349,18 @@ impl ContentAddressableStore {
     }
 
     pub(in super::super) fn lock_path(&self, oid: &str) -> PathBuf {
-        self.root.join(LOCKS_DIR).join(format!("{oid}.lock"))
+        let filename = if !oid.is_empty()
+            && oid.bytes().all(|b| {
+                matches!(
+                    b,
+                    b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'.' | b'_' | b'-'
+                )
+            }) {
+            oid.to_string()
+        } else {
+            hex::encode(Sha256::digest(oid.as_bytes()))
+        };
+        self.root.join(LOCKS_DIR).join(format!("{filename}.lock"))
     }
 
     pub(in super::super) fn tmp_path(&self, oid: &str) -> PathBuf {
