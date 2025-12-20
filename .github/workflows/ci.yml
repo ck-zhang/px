@@ -21,6 +21,11 @@ jobs:
           toolchain: 1.89.0
           components: rustfmt, clippy
 
+      - name: Install Python (>=3.11)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Configure git identity for tests

@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
     sync::Mutex,
 };
 
@@ -212,27 +212,32 @@ pub fn prepare_traceback_fixture(prefix: &str) -> (TempDir, PathBuf) {
 
 #[must_use]
 pub fn find_python() -> Option<String> {
+    const MIN_MAJOR: u64 = 3;
+    const MIN_MINOR: u64 = 11;
+
     let candidates = [
         std::env::var("PYTHON").ok(),
         Some("python3".to_string()),
         Some("python".to_string()),
     ];
     for candidate in candidates.into_iter().flatten() {
-        let status = Command::new(&candidate)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if matches!(status, Ok(code) if code.success()) {
-            return Some(candidate);
+        let Some((executable, channel)) = detect_host_python(&candidate) else {
+            continue;
+        };
+        let Some((major, minor)) = channel.split_once('.').and_then(|(major, minor)| {
+            Some((major.parse::<u64>().ok()?, minor.parse::<u64>().ok()?))
+        }) else {
+            continue;
+        };
+        if major > MIN_MAJOR || (major == MIN_MAJOR && minor >= MIN_MINOR) {
+            return Some(executable);
         }
     }
     None
 }
 
 pub fn detect_host_python(python: &str) -> Option<(String, String)> {
-    const INSPECT_SCRIPT: &str =
-        "import json, platform, sys; print(json.dumps({'version': platform.python_version(), 'executable': sys.executable}))";
+    const INSPECT_SCRIPT: &str = "import json, sys; print(json.dumps({'major': sys.version_info[0], 'minor': sys.version_info[1], 'executable': sys.executable}))";
     let output = Command::new(python)
         .arg("-c")
         .arg(INSPECT_SCRIPT)
@@ -243,10 +248,8 @@ pub fn detect_host_python(python: &str) -> Option<(String, String)> {
     }
     let payload: Value = serde_json::from_slice(&output.stdout).ok()?;
     let executable = payload.get("executable")?.as_str()?.to_string();
-    let version = payload.get("version")?.as_str()?.to_string();
-    let mut parts = version.split('.');
-    let major = parts.next().unwrap_or("0");
-    let minor = parts.next().unwrap_or("0");
+    let major = payload.get("major")?.as_u64()?;
+    let minor = payload.get("minor")?.as_u64()?;
     let channel = format!("{major}.{minor}");
     Some((executable, channel))
 }
