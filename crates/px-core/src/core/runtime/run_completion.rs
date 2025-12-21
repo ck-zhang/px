@@ -332,7 +332,7 @@ fn discover_env_bin(context: &CompletionContext) -> Option<PathBuf> {
 
 fn env_bin_from_env(env: &StoredEnvironment) -> Option<PathBuf> {
     let mut roots = Vec::new();
-    if let Some(path) = env.env_path.as_ref() {
+    if let Some(path) = env.env_path.as_ref().filter(|path| !path.trim().is_empty()) {
         roots.push(PathBuf::from(path));
     }
     let site = PathBuf::from(&env.site_packages);

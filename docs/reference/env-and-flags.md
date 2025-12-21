@@ -55,7 +55,7 @@ Prefer the flags above for interactive use; env vars remain for CI/automation or
 
 ### Runtimes and paths
 
-* `PX_RUNTIME_PYTHON` – explicit interpreter px should use for resolution/env builds (else px finds `python3`/`python`).
+* `PX_RUNTIME_PYTHON` – explicit interpreter px should use for resolution/env builds. If unset, px selects a registered runtime from the runtime registry (`px python install` / `PX_RUNTIME_REGISTRY`); if no runtime is registered, commands that need Python will fail with a hint to install one.
 * `PX_RUNTIME_REGISTRY` – override the location of the runtime registry file (default `~/.px/runtimes.json`).
 * `PX_PYTHON_DOWNLOADS_URL` – alternate Python downloads manifest for `px python install` (supports `http(s)://` or `file://`).
 * `PX_CACHE_PATH` – root for the shared download/build cache (wheels, sdist builds, Python downloads manifest, etc; default `~/.px/cache`). If set and the other roots below are unset, px will derive them from the same base directory (e.g. `PX_CACHE_PATH=/tmp/px/cache` implies `PX_STORE_PATH=/tmp/px/store`, `PX_ENVS_PATH=/tmp/px/envs`, etc.).

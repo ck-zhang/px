@@ -98,7 +98,20 @@ pub fn run_command_with_stdin(
     let status = child
         .wait()
         .with_context(|| format!("failed to wait for {program}"))?;
-    let code = status.code().unwrap_or(-1);
+    let code = match status.code() {
+        Some(code) => code,
+        None => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                status.signal().map(|sig| 128 + sig).unwrap_or(-1)
+            }
+            #[cfg(not(unix))]
+            {
+                -1
+            }
+        }
+    };
     let (mut stdout, stdout_truncated) = stdout_handle
         .join()
         .map_err(|_| anyhow::anyhow!("stdout thread panicked"))??;

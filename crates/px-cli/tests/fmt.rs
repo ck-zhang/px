@@ -47,6 +47,45 @@ fn fmt_auto_installs_tool_and_preserves_manifest() {
 
     let payload = parse_json(&assert);
     assert_eq!(payload["status"], "ok");
+
+    let state_path = tools_dir.path().join("ruff").join(".px").join("state.json");
+    let state: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&state_path).expect("read ruff tool state"),
+    )
+    .expect("parse ruff tool state");
+    let env_state = state
+        .get("current_env")
+        .and_then(|value| value.as_object())
+        .expect("current_env object");
+    match env_state.get("env_path") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::String(value)) => assert!(
+            !value.trim().is_empty(),
+            "tool state must not persist an empty-string env_path"
+        ),
+        Some(other) => panic!("unexpected env_path value: {other:?}"),
+    }
+    let site = env_state
+        .get("site_packages")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    assert!(
+        !site.trim().is_empty(),
+        "tool state should include a site_packages path"
+    );
+    assert!(
+        std::path::Path::new(site).exists(),
+        "tool site_packages should exist: {site:?}"
+    );
+    let profile_oid = env_state
+        .get("profile_oid")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    assert!(
+        !profile_oid.trim().is_empty(),
+        "tool state should include a non-empty profile_oid"
+    );
+
     assert_eq!(
         manifest_before,
         fs::read_to_string(&pyproject).expect("read pyproject after fmt"),

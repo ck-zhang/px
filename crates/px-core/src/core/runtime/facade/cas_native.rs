@@ -377,6 +377,7 @@ pub(crate) fn validate_cas_environment(env: &StoredEnvironment) -> Result<()> {
         let env_root = env
             .env_path
             .as_ref()
+            .filter(|path| !path.trim().is_empty())
             .map(PathBuf::from)
             .unwrap_or(default_envs_root()?.join(profile_oid));
         let manifest_path = env_root.join("manifest.json");
@@ -626,7 +627,13 @@ fn ensure_packaging_seeds_present(
     let env_root = env
         .env_path
         .as_ref()
+        .filter(|path| !path.trim().is_empty())
         .map(PathBuf::from)
+        .or_else(|| {
+            env.profile_oid
+                .as_deref()
+                .and_then(|oid| default_envs_root().ok().map(|root| root.join(oid)))
+        })
         .or_else(|| env_root_from_site_packages(Path::new(&env.site_packages)));
     let Some(site_dir) = env_root else {
         return Ok(());

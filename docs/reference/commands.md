@@ -176,6 +176,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 
 * **Behavior (dev)**: prefers CAS-native execution (no persistent env directory required). If a materialized env is needed for compatibility, px rebuilds it from `px.lock` (no resolution) and proceeds.
 * **Behavior (CI/`--frozen`)**: fail if lock drifted or env stale; never repairs.
+* **Exit code**: px exits with the target process exit code. On Unix, if the target is terminated by a signal, px exits with `128 + <signal>`.
 * **Sandbox mode (`--sandbox`)**: runs the target inside a sandbox image derived from `[tool.px.sandbox]` + the resolved env profile. Same state requirements as unsandboxed `px run` (dev may rebuild env; frozen requires `Consistent`). px may build/reuse the sandbox image but never mutates manifest/lock/env; working tree is bind-mounted into the container for execution so code edits are live.
 * **Commit-scoped**: `px run --at <git-ref>` uses the `pyproject.toml` + lock from that ref (project or workspace) without checking it out; locks are treated as frozen (fail if missing/drifted), and envs are reused/materialized in the global cache without touching the working tree.
 * **Env prep**: PATH is rebuilt with the px env’s `site/bin` first (px materializes console/gui scripts there from wheels); exports `PYAPP_COMMAND_NAME` when `[tool.px].manage-command` is set; runs a lightweight import check for `[tool.px].plugin-imports` and sets `PX_PLUGIN_PREFLIGHT` to `1`/`0`; clears proxy env vars.
@@ -189,6 +190,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 
 * Same consistency semantics as `px run`. Prefers CAS-native execution and falls back to a materialized env when needed. Prefers project-provided runners like `tests/runtests.py` (or `runtests.py`) and otherwise runs `pytest` inside the project env (auto-installs pytest into the tool store when missing).
 * `pytest` runs with `PYTHONNOUSERSITE=1` to avoid importing user-site packages/plugins (keeps results deterministic and prevents surprise plugin breakage).
+* **Exit code**: px exits with the test runner’s exit code.
 * Supports `--sandbox` with the same sandbox definition/resolution rules as `px run`; working tree is bind-mounted for live code.
 * `--at <git-ref>` mirrors `px run --at …`, using the manifest + lock at that ref with frozen semantics (no re-resolution; fail if lock is missing or drifted).
 * `--ephemeral` / `--try` mirrors `px run --ephemeral`: derive a cached env from `pyproject.toml` / `requirements.txt` without adopting the directory (no `.px/` or `px.lock` writes). In `CI=1` or `--frozen`, dependencies must be fully pinned.
@@ -238,6 +240,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
   * May modify code via invoked tools.
 
 * **Missing tools**: auto-install into the tool store.
+* **Tool env health**: tool envs are verified before execution; if a tool reports “not ready”, rebuild it with `px tool install <tool>`.
 * **Postconditions**: project manifest/lock/env unchanged; tool envs may be created/updated.
 
 ### `px pack image`
@@ -257,7 +260,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 ### `px status`
 
 * **Intent**: read-only snapshot of manifest/lock/env alignment plus runtime identity.
-* **Behavior**: default TTY output shows location, state bullets, runtime/env/lock lines; `--brief` emits a one-liner; `--json` returns a structured payload (context, project/workspace flags, runtime/env/lock, `next_action`).
+* **Behavior**: default TTY output shows location, state bullets, runtime/env/lock lines; runtime identity is based on px’s selected runtime for the project/workspace (not whatever `python` happens to be on PATH); `--brief` emits a one-liner; `--json` returns a structured payload (context, project/workspace flags, runtime/env/lock, `next_action`).
 * **Postconditions**: read-only (except logs); never touches manifests, locks, or environments.
 
 ### `px migrate` / `px migrate --apply`

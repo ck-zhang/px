@@ -24,7 +24,7 @@ Color: code + summary in error color; “Why” bullets normal; “Fix” bullet
 * **Wrong interpreter (user ran `python` directly)** – suggest `px run python ...`.
 * **Suspect wrong Python / wrong entrypoint / unexpected engine path** – use `px explain run ...` (and `-v/-vv` for fallback codes) or `px explain entrypoint <name>` to see what px would execute without running anything.
 * **Ambiguous console script name** – px normally resolves this by falling back to a materialized env (so the `bin/` winner is deterministic). If you still see `ambiguous_console_script`, remove one of the conflicting dependencies, or run a specific module via `px run python -m <module>`.
-* **Runtime mismatch for tool** – suggest `px tool install <tool>` again or `px python install`.
+* **Tool “not ready” / runtime mismatch** – run `px tool install <tool>` to rebuild the tool environment. If the runtime is missing, register one with `px python install <version>` (or point `px tool install --python /path/to/python` at a compatible interpreter).
 * **Mutating pip under `px run`** – **Why**: px envs are immutable CAS materializations; `pip install/uninstall` cannot change them. **Fix**: use `px add/remove/update/sync` to update dependencies, then rerun the command with `px run`.
 * **CAS-native fallback happened** – px may automatically fall back to a materialized env when CAS-native execution hits packaging/runtime quirks. Re-run with `-v` / `-vv` and look for a single log line containing `CAS_NATIVE_FALLBACK=<code>`, or inspect `--json` output under `details.cas_native_fallback`.
 

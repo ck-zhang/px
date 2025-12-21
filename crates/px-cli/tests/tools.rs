@@ -1,11 +1,12 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::json;
+use std::fs;
 use std::process::Command;
 use tempfile::tempdir;
 
 mod common;
 
-use common::parse_json;
+use common::{parse_json, require_online};
 
 #[test]
 fn tool_install_rejects_requirement_like_name() {
@@ -279,6 +280,106 @@ fn tool_run_without_args_honors_json_flag() {
     assert!(
         stdout.contains("TOOL_OK"),
         "tool run should capture tool output under --json, got {stdout:?}"
+    );
+}
+
+#[test]
+fn tool_install_then_run_is_immediately_ready() {
+    if !require_online() {
+        return;
+    }
+    let info = system_python_info();
+
+    let registry_dir = tempdir().expect("runtime registry dir");
+    let registry = registry_dir.path().join("runtimes.json");
+    let cache_dir = tempdir().expect("cache dir");
+    let store_dir = cache_dir.path().join("store");
+    let envs_dir = cache_dir.path().join("envs");
+    fs::create_dir_all(&store_dir).expect("create store dir");
+    fs::create_dir_all(&envs_dir).expect("create envs dir");
+    let tools_dir = tempdir().expect("tools dir");
+    let tool_store = tempdir().expect("tool store dir");
+
+    cargo_bin_cmd!("px")
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .env("PX_CACHE_PATH", cache_dir.path())
+        .env("PX_STORE_PATH", &store_dir)
+        .env("PX_ENVS_PATH", &envs_dir)
+        .env("PX_TOOLS_DIR", tools_dir.path())
+        .env("PX_TOOL_STORE", tool_store.path())
+        .args([
+            "python",
+            "install",
+            &info.channel,
+            "--path",
+            &info.executable,
+            "--default",
+        ])
+        .assert()
+        .success();
+
+    cargo_bin_cmd!("px")
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .env("PX_CACHE_PATH", cache_dir.path())
+        .env("PX_STORE_PATH", &store_dir)
+        .env("PX_ENVS_PATH", &envs_dir)
+        .env("PX_TOOLS_DIR", tools_dir.path())
+        .env("PX_TOOL_STORE", tool_store.path())
+        .env_remove("PX_NO_ENSUREPIP")
+        .args(["tool", "install", "ruff"])
+        .assert()
+        .success();
+
+    cargo_bin_cmd!("px")
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .env("PX_CACHE_PATH", cache_dir.path())
+        .env("PX_STORE_PATH", &store_dir)
+        .env("PX_ENVS_PATH", &envs_dir)
+        .env("PX_TOOLS_DIR", tools_dir.path())
+        .env("PX_TOOL_STORE", tool_store.path())
+        .env_remove("PX_RUNTIME_PYTHON")
+        .env_remove("PX_NO_ENSUREPIP")
+        .args(["tool", "run", "ruff", "--", "--version"])
+        .assert()
+        .success();
+
+    let state_path = tools_dir.path().join("ruff").join(".px").join("state.json");
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).expect("read tool state"))
+            .expect("parse tool state");
+    let env_state = state
+        .get("current_env")
+        .and_then(|value| value.as_object())
+        .expect("current_env object");
+    let site = env_state
+        .get("site_packages")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    assert!(
+        !site.trim().is_empty(),
+        "tool state should include a site_packages path"
+    );
+    assert!(
+        std::path::Path::new(site).exists(),
+        "tool site_packages should exist: {site:?}"
+    );
+    match env_state.get("env_path") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::String(value)) => {
+            assert!(
+                !value.trim().is_empty(),
+                "tool state must not persist an empty-string env_path"
+            );
+        }
+        Some(other) => panic!("unexpected env_path value: {other:?}"),
+    }
+    let profile_oid = env_state
+        .get("profile_oid")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    assert!(
+        !profile_oid.trim().is_empty(),
+        "tool state should include a non-empty profile_oid"
     );
 }
 

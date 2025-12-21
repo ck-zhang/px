@@ -163,33 +163,30 @@ fn resolver_reports_conflicts_with_backtracking() {
 }
 
 #[test]
-fn resolver_supports_direct_url_wheels() {
+fn resolver_rejects_direct_url_wheels() {
     if !require_online() {
         return;
     }
     let temp = tempfile::tempdir().expect("tempdir");
     let project = init_project(&temp, "resolver_direct_url");
     let url = "packaging @ https://files.pythonhosted.org/packages/08/aa/cc0199a5f0ad350994d660967a8efb233fe0416e4639146c089643407ce6/packaging-24.1-py3-none-any.whl";
-    add_dependency(&project, url);
+    let assert = px_cmd(&project).args(["--json", "add", url]).assert().failure();
 
-    px_cmd(&project).args(["--json", "sync"]).assert().success();
-
-    let lock = project.join("px.lock");
-    let doc: DocumentMut = fs::read_to_string(&lock)
-        .expect("read lock")
-        .parse()
-        .expect("lock toml");
-    let deps = doc["dependencies"]
-        .as_array_of_tables()
-        .expect("deps table");
-    let dep = deps
-        .iter()
-        .find(|table| table.get("name").and_then(toml_edit::Item::as_str) == Some("packaging"))
-        .expect("packaging entry");
-    let specifier = dep["specifier"].as_str().expect("specifier");
+    let payload: Value = serde_json::from_slice(&assert.get_output().stdout).expect("json payload");
+    assert_eq!(payload["status"], "user-error");
     assert!(
-        specifier.contains("packaging==24.1"),
-        "expected packaging pin from direct URL, got {specifier}"
+        payload["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains("unsupported dependency source"),
+        "expected unsupported dependency source error, got {:?}",
+        payload["message"]
+    );
+    let hint = payload["details"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("registry-based"),
+        "expected hint to suggest supported sources, got {hint:?}"
     );
 }
 

@@ -7,8 +7,8 @@ use toml_edit::{DocumentMut, Item};
 mod common;
 
 use common::{
-    fake_sandbox_backend, find_python, parse_json, prepare_named_fixture, require_online,
-    test_env_guard,
+    detect_host_python, fake_sandbox_backend, find_python, parse_json, prepare_named_fixture,
+    require_online, test_env_guard,
 };
 
 #[test]
@@ -76,6 +76,102 @@ fn workspace_sync_makes_status_env_clean() {
         Value::String("WNeedsEnv".into())
     );
     assert_eq!(payload["env"]["status"], Value::String("clean".into()));
+}
+
+#[test]
+#[cfg(not(windows))]
+fn workspace_status_does_not_depend_on_path_python() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let Some(python) = find_python() else {
+        eprintln!("skipping workspace status runtime test (python not found)");
+        return;
+    };
+    let Some((python_exe, channel)) = detect_host_python(&python) else {
+        eprintln!("skipping workspace status runtime test (unable to inspect python)");
+        return;
+    };
+    let (_temp, root) = prepare_named_fixture("workspace_basic", "workspace_status_path_runtime");
+
+    let registry_dir = tempfile::tempdir().expect("registry dir");
+    let registry = registry_dir.path().join("runtimes.json");
+    cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .args([
+            "python",
+            "install",
+            &channel,
+            "--path",
+            &python_exe,
+            "--default",
+        ])
+        .assert()
+        .success();
+
+    cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .env_remove("PX_RUNTIME_PYTHON")
+        .arg("sync")
+        .assert()
+        .success();
+
+    // Poison PATH python to ensure status uses the selected px runtime, not PATH discovery.
+    let bin_dir = tempfile::tempdir().expect("bin dir");
+    let fake_python = bin_dir.path().join("python3");
+    std::fs::write(
+        &fake_python,
+        r#"#!/bin/sh
+if [ "$1" = "-c" ]; then
+  script="$2"
+  case "$script" in
+    *platform.python_version* )
+      echo '{"version":"0.0.0"}'
+      exit 0
+      ;;
+  esac
+  case "$script" in
+    *sysconfig.get_platform* )
+      echo '{"python":["cp00"],"abi":["none"],"platform":["any"],"tags":[]}'
+      exit 0
+      ;;
+  esac
+  echo '{}'
+  exit 0
+fi
+echo 'Python 0.0.0' >&2
+exit 0
+"#,
+    )
+    .expect("write fake python");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&fake_python)
+            .expect("fake python metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_python, perms).expect("set fake python perms");
+    }
+
+    let path = std::env::var("PATH").unwrap_or_default();
+    let poisoned_path = format!("{}:{}", bin_dir.path().display(), path);
+
+    let status = cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .env_remove("PX_RUNTIME_PYTHON")
+        .env("PATH", poisoned_path)
+        .args(["status", "--json"])
+        .assert()
+        .success();
+    let payload = parse_json(&status);
+
+    assert_eq!(payload["workspace"]["env_clean"], serde_json::Value::Bool(true));
+    assert_eq!(payload["workspace"]["env_issue"], serde_json::Value::Null);
 }
 
 #[test]

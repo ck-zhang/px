@@ -195,7 +195,18 @@ fn ensure_workspace_env_matches(
             }),
         ));
     }
-    let runtime = detect_runtime_metadata(ctx, &workspace.lock_snapshot()).map_err(|err| {
+    let snapshot = workspace.lock_snapshot();
+    let _ = crate::prepare_project_runtime(&snapshot).map_err(|err| {
+        InstallUserError::new(
+            "workspace runtime unavailable",
+            json!({
+                "error": err.to_string(),
+                "hint": "install or select a compatible Python runtime, then rerun",
+                "reason": "runtime_unavailable",
+            }),
+        )
+    })?;
+    let runtime = detect_runtime_metadata(ctx, &snapshot).map_err(|err| {
         InstallUserError::new(
             "workspace runtime unavailable",
             json!({

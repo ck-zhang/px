@@ -80,7 +80,12 @@ pub(in super::super) fn prepare_project_sandbox(
     } else {
         Some(PathBuf::from(&env.site_packages))
     };
-    let env_root = env.env_path.as_ref().map(PathBuf::from).or_else(|| {
+    let env_root = env
+        .env_path
+        .as_ref()
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
         site_packages
             .as_ref()
             .and_then(|site| env_root_from_site_packages(site))

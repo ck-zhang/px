@@ -448,7 +448,7 @@ fn update_tool_state(root: &Path, site_path: &Path, env_id: &str) -> Result<()> 
             serde_json::Value::String(site_path.display().to_string()),
         );
         env.insert("id".into(), serde_json::Value::String(env_id.to_string()));
-        env.insert("env_path".into(), serde_json::Value::String(String::new()));
+        env.remove("env_path");
     }
     let mut buf = serde_json::to_vec_pretty(&value)?;
     buf.push(b'\n');

@@ -34,11 +34,21 @@ pub fn emit_output(
     info: CommandInfo,
     outcome: &ExecutionOutcome,
 ) -> Result<i32> {
-    let code = match outcome.status {
+    let mut code = match outcome.status {
         CommandStatus::Ok => 0,
         CommandStatus::UserError => 1,
         CommandStatus::Failure => 2,
     };
+    if matches!(info.group, CommandGroup::Run | CommandGroup::Test) {
+        if let Some(exit_code) = outcome
+            .details
+            .as_object()
+            .and_then(|map| map.get("code"))
+            .and_then(Value::as_i64)
+        {
+            code = i32::try_from(exit_code).unwrap_or(code);
+        }
+    }
 
     let style = Style::new(opts.no_color, atty::is(Stream::Stdout));
 
