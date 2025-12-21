@@ -10,7 +10,6 @@ use std::io::Read;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tempfile::TempDir;
 use tracing::debug;
 
 use super::cas_env::{

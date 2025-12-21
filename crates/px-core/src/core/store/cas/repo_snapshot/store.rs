@@ -3,6 +3,7 @@ use super::errors::{repo_snapshot_user_error, RepoSnapshotIssue};
 use super::keys::repo_snapshot_lookup_key;
 use super::resolve::{px_online_enabled, resolve_repo_snapshot_spec, ResolvedRepoLocator};
 use super::RepoSnapshotSpec;
+use crate::core::fs::PxTempDir;
 
 impl ContentAddressableStore {
     /// Ensure a deterministic, commit-pinned repository snapshot exists in the CAS.
@@ -40,8 +41,9 @@ impl ContentAddressableStore {
                     commit = %resolved.header.commit,
                     "repo-snapshot creating snapshot via git archive"
                 );
-                let temp =
-                    tempdir().context("failed to create temp directory for repo snapshot")?;
+                let work_root = self.root.join(TMP_DIR).join("repo-snapshot-work");
+                let temp = PxTempDir::new_in(&work_root, "repo-snapshot-")
+                    .context("failed to create temp directory for repo snapshot")?;
                 let checkout_root = temp.path().join("repo");
                 fs::create_dir_all(&checkout_root)?;
 
@@ -124,8 +126,9 @@ impl ContentAddressableStore {
                     commit = %resolved.header.commit,
                     "repo-snapshot creating snapshot via git fetch"
                 );
-                let temp =
-                    tempdir().context("failed to create temp directory for repo snapshot")?;
+                let work_root = self.root.join(TMP_DIR).join("repo-snapshot-work");
+                let temp = PxTempDir::new_in(&work_root, "repo-snapshot-")
+                    .context("failed to create temp directory for repo snapshot")?;
                 let checkout_root = temp.path().join("repo");
                 fs::create_dir_all(&checkout_root)?;
 

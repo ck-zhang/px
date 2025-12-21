@@ -161,15 +161,25 @@ fn project_sync_outcome(ctx: &CommandContext, frozen: bool) -> Result<ExecutionO
     match outcome.state {
         InstallState::Installed => {
             refresh_project_site(&snapshot, ctx)?;
+            details["env_refreshed"] = json!(!state.env_clean);
             Ok(ExecutionOutcome::success(
-                format!("wrote {}", outcome.lockfile),
+                if state.env_clean {
+                    format!("wrote {}", outcome.lockfile)
+                } else {
+                    format!("wrote {} and refreshed the environment", outcome.lockfile)
+                },
                 details,
             ))
         }
         InstallState::UpToDate => {
             refresh_project_site(&snapshot, ctx)?;
+            details["env_refreshed"] = json!(!state.env_clean);
             Ok(ExecutionOutcome::success(
-                "px.lock already up to date".to_string(),
+                if state.env_clean {
+                    "px.lock already up to date".to_string()
+                } else {
+                    "px.lock already up to date (environment refreshed)".to_string()
+                },
                 details,
             ))
         }

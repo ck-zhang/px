@@ -6,8 +6,8 @@ use std::process::{Command, Stdio};
 use anyhow::Result;
 use serde_json::json;
 use tar::Archive;
-use tempfile::TempDir;
 
+use crate::core::fs::PxTempDir;
 use crate::core::runtime::facade::compute_lock_hash_bytes;
 use crate::{CommandContext, ExecutionOutcome};
 use px_domain::api::detect_lock_drift;
@@ -83,9 +83,10 @@ pub(crate) fn git_repo_root() -> Result<PathBuf, ExecutionOutcome> {
 }
 
 pub(crate) fn materialize_ref_tree(
+    ctx: &CommandContext,
     repo_root: &Path,
     git_ref: &str,
-) -> Result<TempDir, ExecutionOutcome> {
+) -> Result<PxTempDir, ExecutionOutcome> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_root)
@@ -94,7 +95,8 @@ pub(crate) fn materialize_ref_tree(
         .output();
     match output {
         Ok(output) if output.status.success() => {
-            let temp = tempfile::tempdir().map_err(|err| {
+            let root = ctx.cache().path.join("tmp").join("ref-tree");
+            let temp = PxTempDir::new_in(&root, "ref-tree-").map_err(|err| {
                 ExecutionOutcome::failure(
                     "failed to create temp directory for git-ref execution",
                     json!({ "error": err.to_string() }),

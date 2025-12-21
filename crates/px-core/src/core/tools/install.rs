@@ -355,6 +355,28 @@ fn finalize_tool_environment(
     Ok(site_path)
 }
 
+/// Rebuild a tool environment using its existing `px.lock`.
+///
+/// This is used as a best-effort self-heal when the tool metadata exists but the cached env has
+/// been deleted or corrupted.
+pub(crate) fn repair_tool_env_from_lock(
+    ctx: &CommandContext,
+    tool_root: &Path,
+    runtime: &runtime_manager::RuntimeSelection,
+) -> Result<()> {
+    let snapshot = px_domain::api::ProjectSnapshot::read_from(tool_root)?;
+    if !snapshot.lock_path.exists() {
+        return Err(anyhow!(
+            "tool lockfile missing at {}; reinstall with `px tool install {}`",
+            snapshot.lock_path.display(),
+            snapshot.name
+        ));
+    }
+    refresh_project_site(&snapshot, ctx)?;
+    let _ = finalize_tool_environment(tool_root, &snapshot, runtime)?;
+    Ok(())
+}
+
 pub(crate) fn ensure_tool_site_bin(site_dir: &Path) -> Result<()> {
     let Some(env_root) = site_dir.parent() else {
         return Ok(());

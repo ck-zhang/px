@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::core::runtime::facade::{persist_project_state, StoredEnvironment, StoredPython, StoredRuntime};
 use crate::python_sys::detect_interpreter_tags;
 
 pub(super) const CONSOLE_SCRIPT_DISPATCH: &str = r#"
@@ -230,12 +231,38 @@ pub(super) fn prepare_cas_native_run_context(
         }
         ExecutionOutcome::failure("failed to materialize CAS profile sys.path", details)
     })?;
+    #[derive(Serialize)]
+    struct NativeEnvManifest {
+        profile_oid: String,
+        runtime_oid: String,
+        packages: Vec<crate::store::cas::ProfilePackage>,
+        #[serde(default)]
+        sys_path_order: Vec<String>,
+    }
+    let mut manifest_json = serde_json::to_vec_pretty(&NativeEnvManifest {
+        profile_oid: cas_profile.profile_oid.clone(),
+        runtime_oid: cas_profile.header.runtime_oid.clone(),
+        packages: cas_profile.header.packages.clone(),
+        sys_path_order: cas_profile.header.sys_path_order.clone(),
+    })
+    .map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to encode CAS-native environment manifest",
+            json!({
+                "reason": "cas_native_manifest_encode_failed",
+                "profile_oid": cas_profile.profile_oid.clone(),
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    manifest_json.push(b'\n');
     let site_dir = ensure_cas_native_site_dir(
         &ctx.cache().path,
         &cas_profile.profile_oid,
         &site_key,
         &runtime.version,
         &sys_path_entries,
+        &manifest_json,
     )
     .map_err(|err| {
         ExecutionOutcome::failure(
@@ -272,7 +299,7 @@ pub(super) fn prepare_cas_native_run_context(
             }),
         ));
     }
-    let paths = build_pythonpath(ctx.fs(), project_root, Some(site_dir)).map_err(|err| {
+    let paths = build_pythonpath(ctx.fs(), project_root, Some(site_dir.clone())).map_err(|err| {
         ExecutionOutcome::failure(
             "failed to assemble PYTHONPATH for native CAS execution",
             json!({ "error": err.to_string() }),
@@ -312,6 +339,44 @@ pub(super) fn prepare_cas_native_run_context(
         pyc_cache_prefix,
         px_options: snapshot.px_options.clone(),
     };
+    let state_has_env = crate::load_project_state(ctx.fs(), &snapshot.root)
+        .ok()
+        .and_then(|state| state.current_env)
+        .is_some_and(|env| {
+            let site = env.site_packages.trim();
+            !site.is_empty() && std::path::Path::new(site).exists()
+        });
+    if !state_has_env {
+        let site_packages = crate::site_packages_dir(&site_dir, &runtime.version);
+        let env_state = StoredEnvironment {
+            id: cas_profile.profile_oid.clone(),
+            lock_id: lock_id.clone(),
+            platform: runtime.platform.clone(),
+            site_packages: site_packages.display().to_string(),
+            env_path: Some(site_dir.display().to_string()),
+            profile_oid: Some(cas_profile.profile_oid.clone()),
+            python: StoredPython {
+                path: site_dir.join("bin").join("python").display().to_string(),
+                version: runtime.version.clone(),
+            },
+        };
+        let runtime_state = StoredRuntime {
+            path: cas_profile.runtime_path.display().to_string(),
+            version: runtime.version.clone(),
+            platform: runtime.platform.clone(),
+        };
+        if let Err(err) = persist_project_state(ctx.fs(), &snapshot.root, env_state, runtime_state) {
+            return Err(ExecutionOutcome::failure(
+                "failed to persist project state",
+                json!({
+                    "reason": "state_persist_failed",
+                    "state": snapshot.root.join(".px").join("state.json").display().to_string(),
+                    "error": err.to_string(),
+                    "hint": "Ensure the project directory is writable, then retry.",
+                }),
+            ));
+        }
+    }
     Ok(CasNativeRunContext {
         py_ctx,
         profile_oid: cas_profile.profile_oid,
@@ -464,12 +529,38 @@ pub(super) fn prepare_cas_native_workspace_run_context(
         }
         ExecutionOutcome::failure("failed to materialize CAS profile sys.path", details)
     })?;
+    #[derive(Serialize)]
+    struct NativeEnvManifest {
+        profile_oid: String,
+        runtime_oid: String,
+        packages: Vec<crate::store::cas::ProfilePackage>,
+        #[serde(default)]
+        sys_path_order: Vec<String>,
+    }
+    let mut manifest_json = serde_json::to_vec_pretty(&NativeEnvManifest {
+        profile_oid: cas_profile.profile_oid.clone(),
+        runtime_oid: cas_profile.header.runtime_oid.clone(),
+        packages: cas_profile.header.packages.clone(),
+        sys_path_order: cas_profile.header.sys_path_order.clone(),
+    })
+    .map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to encode CAS-native environment manifest",
+            json!({
+                "reason": "cas_native_manifest_encode_failed",
+                "profile_oid": cas_profile.profile_oid.clone(),
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+    manifest_json.push(b'\n');
     let site_dir = ensure_cas_native_site_dir(
         &ctx.cache().path,
         &cas_profile.profile_oid,
         &site_key,
         &runtime.version,
         &sys_path_entries,
+        &manifest_json,
     )
     .map_err(|err| {
         ExecutionOutcome::failure(
@@ -752,6 +843,7 @@ fn ensure_cas_native_site_dir(
     site_key: &str,
     runtime_version: &str,
     sys_path_entries: &[PathBuf],
+    manifest_json: &[u8],
 ) -> Result<PathBuf> {
     let site_dir = cache_root
         .join("native")
@@ -784,6 +876,7 @@ fn ensure_cas_native_site_dir(
         site_packages.join("sitecustomize.py"),
         crate::SITE_CUSTOMIZE.as_bytes(),
     )?;
+    fs::write(temp_root.join("manifest.json"), manifest_json)?;
 
     let backup_root = site_dir.with_extension("backup");
     if backup_root.exists() {

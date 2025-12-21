@@ -51,7 +51,7 @@ Prefer the flags above for interactive use; env vars remain for CI/automation or
 * `PX_FORCE_SDIST=1` – prefer building from sdists even when wheels exist.
 * `PX_INDEX_URL` (or `PIP_INDEX_URL`/`PIP_EXTRA_INDEX_URL`) – override package index URLs used for resolution.
 * `PX_DOWNLOADS` – max concurrent artifact downloads (clamped 1–16; defaults to available CPUs).
-* `PX_PROGRESS=0` – disable spinners/progress lines even on TTYs.
+* `PX_PROGRESS` – set `0` to disable spinners/progress lines; set `1` to force-enable. Default: enabled only on TTY stderr and when `CI` is not truthy.
 
 ### Runtimes and paths
 

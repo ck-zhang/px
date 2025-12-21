@@ -1,5 +1,6 @@
 // Moved from `run/mod.rs` to keep git-ref execution code cohesive.
 use super::*;
+use crate::core::fs::PxTempDir;
 
 struct CommitRunContext {
     py_ctx: PythonContext,
@@ -9,7 +10,7 @@ struct CommitRunContext {
     profile_oid: String,
     env_root: PathBuf,
     site_packages: Option<PathBuf>,
-    _temp_guard: Option<TempDir>,
+    _temp_guard: Option<PxTempDir>,
 }
 
 pub(super) fn run_project_at_ref(
@@ -248,7 +249,7 @@ fn commit_project_context(
             ))
         }
     };
-    let archive = materialize_ref_tree(repo_root, git_ref)?;
+    let archive = materialize_ref_tree(ctx, repo_root, git_ref)?;
     let project_root_at_ref = archive.path().join(&rel_root);
     let manifest_rel = rel_root.join("pyproject.toml");
     let manifest_path = project_root_at_ref.join("pyproject.toml");
@@ -427,7 +428,7 @@ fn commit_workspace_context(
             ))
         }
     };
-    let archive = materialize_ref_tree(repo_root, git_ref)?;
+    let archive = materialize_ref_tree(ctx, repo_root, git_ref)?;
     let archive_root = archive.path().to_path_buf();
     let workspace_root_at_ref = archive_root.join(&workspace_rel);
     let workspace_manifest_rel = workspace_rel.join("pyproject.toml");

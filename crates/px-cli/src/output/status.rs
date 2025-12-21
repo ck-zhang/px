@@ -466,12 +466,34 @@ fn workspace_env_issue_line(env: Option<&px_core::EnvStatus>) -> String {
 
 fn next_line(payload: &StatusPayload) -> String {
     match payload.next_action.kind {
-        px_core::NextActionKind::Sync => {
-            "Run `px sync` to update px.lock and rebuild the environment.".to_string()
-        }
-        px_core::NextActionKind::SyncWorkspace => {
-            "Run `px sync` at the workspace root to update px.workspace.lock and the workspace environment.".to_string()
-        }
+        px_core::NextActionKind::Sync => payload
+            .project
+            .as_ref()
+            .map(|project| {
+                if !project.lock_exists {
+                    "Run `px sync` to generate px.lock and build the environment.".to_string()
+                } else if project.state == "NeedsEnv" {
+                    "Run `px sync` to rebuild the environment from px.lock.".to_string()
+                } else {
+                    "Run `px sync` to update px.lock and rebuild the environment.".to_string()
+                }
+            })
+            .unwrap_or_else(|| "Run `px sync` to reconcile px.lock and the environment.".to_string()),
+        px_core::NextActionKind::SyncWorkspace => payload
+            .workspace
+            .as_ref()
+            .map(|workspace| {
+                if !workspace.lock_exists {
+                    "Run `px sync` at the workspace root to generate px.workspace.lock and build the workspace environment.".to_string()
+                } else if workspace.state == "WNeedsEnv" {
+                    "Run `px sync` at the workspace root to rebuild the workspace environment from px.workspace.lock.".to_string()
+                } else {
+                    "Run `px sync` at the workspace root to update px.workspace.lock and the workspace environment.".to_string()
+                }
+            })
+            .unwrap_or_else(|| {
+                "Run `px sync` at the workspace root to reconcile px.workspace.lock and the workspace environment.".to_string()
+            }),
         px_core::NextActionKind::Init => {
             "Run `px init` to start a new px project here.".to_string()
         }

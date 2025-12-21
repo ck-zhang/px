@@ -860,6 +860,116 @@ fn project_status_reports_missing_lock() {
 }
 
 #[test]
+fn project_status_missing_lock_guides_generating_lock() {
+    let _guard = test_env_guard();
+    let (_tmp, project) = prepare_fixture("status-missing-lock-guidance");
+    let lock = project.join("px.lock");
+    fs::remove_file(&lock).expect("remove px.lock");
+
+    let Some(python) = find_python() else {
+        eprintln!("skipping status guidance test (python binary not found)");
+        return;
+    };
+    let assert = px_cmd()
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .arg("status")
+        .assert()
+        .failure();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("generate px.lock"),
+        "status output should recommend generating px.lock when missing: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("update px.lock"),
+        "status output should not talk about updating a missing lock: {stdout:?}"
+    );
+}
+
+#[test]
+fn project_update_missing_lock_guides_generating_lock() {
+    let _guard = test_env_guard();
+    let (_tmp, project) = prepare_fixture("update-missing-lock-guidance");
+    let lock = project.join("px.lock");
+    fs::remove_file(&lock).expect("remove px.lock");
+
+    let Some(python) = find_python() else {
+        eprintln!("skipping update guidance test (python binary not found)");
+        return;
+    };
+    let assert = px_cmd()
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["--json", "update"])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(payload["details"]["reason"], "missing_lock");
+    let hint = payload["details"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("generate px.lock"),
+        "update hint should direct users to generate px.lock: {hint:?}"
+    );
+    assert!(
+        !hint.contains("update px.lock"),
+        "update hint should not talk about updating a missing lock: {hint:?}"
+    );
+}
+
+#[test]
+fn sync_mentions_environment_refresh_when_lock_is_unchanged() {
+    let _guard = test_env_guard();
+    let (_tmp, project) = prepare_fixture("sync-env-refresh-output");
+    let Some(python) = find_python() else {
+        eprintln!("skipping sync output test (python binary not found)");
+        return;
+    };
+
+    px_cmd()
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .env_remove("PX_NO_ENSUREPIP")
+        .args(["--json", "sync"])
+        .assert()
+        .success();
+
+    let state_path = project.join(".px").join("state.json");
+    let state: Value = serde_json::from_str(&fs::read_to_string(&state_path).expect("read state"))
+        .expect("parse state");
+    let site = state["current_env"]["site_packages"]
+        .as_str()
+        .expect("site path");
+    let site_path = Path::new(site);
+    if site_path.exists() {
+        if let Some(env_root) = site_path.ancestors().nth(3) {
+            fs::remove_dir_all(env_root).ok();
+        }
+    }
+
+    let assert = px_cmd()
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .env_remove("PX_NO_ENSUREPIP")
+        .args(["--json", "sync"])
+        .assert()
+        .success();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(
+        payload["details"]["env_refreshed"],
+        Value::Bool(true),
+        "expected sync to report an env refresh when env was missing"
+    );
+    let message = payload["message"].as_str().unwrap_or_default();
+    assert!(
+        message.to_ascii_lowercase().contains("environment refreshed"),
+        "expected sync output to mention environment refresh, got {message:?}"
+    );
+}
+
+#[test]
 fn project_status_detects_manifest_drift() {
     let _guard = test_env_guard();
     let (_tmp, project) = prepare_fixture("status-drift");

@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use px_domain::api::{LockSnapshot, LockedArtifact};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tempfile::TempDir;
+use crate::core::fs::PxTempDir;
 use toml_edit::{DocumentMut, Item};
 
 use crate::core::runtime::artifacts::archive_source_dir_for_sdist;
@@ -253,7 +253,7 @@ pub(crate) fn ensure_profile_manifest(
                 } else {
                     ensure_wheel_dist(&wheel_path, &source_header.sha256)?
                 };
-                let (stage_guard, staging_root) = stage_pkg_build(&dist)?;
+                let (stage_guard, staging_root) = stage_pkg_build(cache_root, &dist)?;
                 let archive = archive_dir_canonical(&staging_root)?;
                 drop(stage_guard);
                 let payload = ObjectPayload::PkgBuild {
@@ -610,7 +610,7 @@ fn ensure_project_pkg_build(
     let pkg_oid = match store.lookup_key(ObjectKind::PkgBuild, &pkg_key)? {
         Some(existing) => existing,
         None => {
-            let (stage_guard, staging_root) = stage_pkg_build(&dist_dir)?;
+            let (stage_guard, staging_root) = stage_pkg_build(cache_root, &dist_dir)?;
             let archive = archive_dir_canonical(&staging_root)?;
             drop(stage_guard);
             let payload = ObjectPayload::PkgBuild {
@@ -710,8 +710,9 @@ fn ensure_cached_wheel(
     Ok(artifact.wheel_path)
 }
 
-fn stage_pkg_build(dist_dir: &Path) -> Result<(TempDir, PathBuf)> {
-    let staging = TempDir::new()?;
+fn stage_pkg_build(cache_root: &Path, dist_dir: &Path) -> Result<(PxTempDir, PathBuf)> {
+    let tmp_root = cache_root.join("tmp").join("pkg-build");
+    let staging = PxTempDir::new_in(&tmp_root, "pkg-build-")?;
     let root = staging.path().join("pkg");
     fs::create_dir_all(&root)?;
     let site_dir = root.join("site-packages");

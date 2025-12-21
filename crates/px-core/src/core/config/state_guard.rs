@@ -33,7 +33,7 @@ impl StateViolation {
                 let hint = if command == "sync" {
                     "Run `px sync` without --frozen to generate px.lock before syncing.".to_string()
                 } else {
-                    format!("Run `px sync` before `px {command}`.")
+                    format!("Run `px sync` to generate px.lock before `px {command}`.")
                 };
                 base["hint"] = json!(hint);
                 base["code"] = json!("PX120");

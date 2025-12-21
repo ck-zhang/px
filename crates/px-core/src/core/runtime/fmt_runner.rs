@@ -13,7 +13,7 @@ use crate::{
     progress::ProgressSuspendGuard,
     tools::{
         disable_proxy_env, ensure_tool_env_scripts, load_installed_tool, tool_install,
-        ToolInstallRequest, MIN_PYTHON_REQUIREMENT,
+        repair_tool_env_from_lock, ToolInstallRequest, MIN_PYTHON_REQUIREMENT,
     },
     CommandContext, CommandStatus, ExecutionOutcome, InstallUserError,
 };
@@ -160,6 +160,12 @@ fn prepare_tool_run(
     kind: QualityKind,
     tool: &QualityTool,
 ) -> Result<PreparedToolRun, ExecutionOutcome> {
+    let install_request = ToolInstallRequest {
+        name: tool.install_name().to_string(),
+        spec: tool.requirement_spec(),
+        python: tool_install_python_override(),
+        entry: Some(tool.module.clone()),
+    };
     let descriptor = match load_installed_tool(tool.install_name()) {
         Ok(desc) => desc,
         Err(_) => {
@@ -170,14 +176,8 @@ fn prepare_tool_run(
                     tool_install_display(tool)
                 );
             }
-            let request = ToolInstallRequest {
-                name: tool.install_name().to_string(),
-                spec: tool.requirement_spec(),
-                python: tool_install_python_override(),
-                entry: Some(tool.module.clone()),
-            };
             let _suspend = ProgressSuspendGuard::new();
-            let outcome = match tool_install(env.ctx, &request) {
+            let outcome = match tool_install(env.ctx, &install_request) {
                 Ok(outcome) => outcome,
                 Err(err) => match err.downcast::<InstallUserError>() {
                     Ok(user) => {
@@ -251,7 +251,7 @@ fn prepare_tool_run(
         }
     };
 
-    let snapshot = ProjectSnapshot::read_from(&descriptor.root).map_err(|err| {
+    let mut snapshot = ProjectSnapshot::read_from(&descriptor.root).map_err(|err| {
         ExecutionOutcome::failure(
             "failed to read tool metadata",
             json!({
@@ -274,30 +274,112 @@ fn prepare_tool_run(
     })?;
 
     if let Err(err) = ensure_project_environment_synced(env.ctx, &snapshot) {
-        return match err.downcast::<InstallUserError>() {
-            Ok(user) => Err(ExecutionOutcome::user_error(
-                format!(
-                    "px {}: tool '{}' is not ready",
-                    kind.section_name(),
-                    descriptor.name
-                ),
-                json!({
-                    "tool": descriptor.name,
-                    "module": tool.module,
-                    "config_source": env.config.source.as_str(),
-                    "details": user.details,
-                    "hint": tool.install_command(),
-                }),
-            )),
-            Err(other) => Err(ExecutionOutcome::failure(
-                "failed to prepare tool environment",
-                json!({
-                    "tool": descriptor.name,
-                    "root": descriptor.root.display().to_string(),
-                    "error": other.to_string(),
-                }),
-            )),
-        };
+        match err.downcast::<InstallUserError>() {
+            Ok(user) => {
+                let _suspend = ProgressSuspendGuard::new();
+                if snapshot.lock_path.exists() {
+                    if let Err(err) = repair_tool_env_from_lock(env.ctx, &descriptor.root, &runtime_selection) {
+                        return Err(ExecutionOutcome::user_error(
+                            format!(
+                                "px {}: tool '{}' is not ready",
+                                kind.section_name(),
+                                descriptor.name
+                            ),
+                            json!({
+                                "tool": descriptor.name,
+                                "module": tool.module,
+                                "config_source": env.config.source.as_str(),
+                                "details": user.details,
+                                "error": err.to_string(),
+                                "hint": tool.install_command(),
+                            }),
+                        ));
+                    }
+                } else {
+                    let outcome = match tool_install(env.ctx, &install_request) {
+                        Ok(outcome) => outcome,
+                        Err(err) => match err.downcast::<InstallUserError>() {
+                            Ok(user) => {
+                                return Err(ExecutionOutcome::user_error(user.message, user.details));
+                            }
+                            Err(other) => {
+                                return Err(ExecutionOutcome::failure(
+                                    format!(
+                                        "px {}: failed to repair tool environment",
+                                        kind.section_name()
+                                    ),
+                                    json!({
+                                        "tool": descriptor.name,
+                                        "module": tool.module,
+                                        "error": other.to_string(),
+                                        "config_source": env.config.source.as_str(),
+                                    }),
+                                ));
+                            }
+                        },
+                    };
+                    if outcome.status != CommandStatus::Ok {
+                        return Err(outcome);
+                    }
+                    snapshot = ProjectSnapshot::read_from(&descriptor.root).map_err(|err| {
+                        ExecutionOutcome::failure(
+                            "failed to read tool metadata",
+                            json!({
+                                "tool": descriptor.name,
+                                "root": descriptor.root.display().to_string(),
+                                "error": err.to_string(),
+                            }),
+                        )
+                    })?;
+                }
+                ensure_tool_env_scripts(&descriptor.root).map_err(|err| {
+                    ExecutionOutcome::failure(
+                        "failed to prepare tool environment scripts",
+                        json!({
+                            "tool": descriptor.name,
+                            "root": descriptor.root.display().to_string(),
+                            "error": err.to_string(),
+                        }),
+                    )
+                })?;
+                if let Err(err) = ensure_project_environment_synced(env.ctx, &snapshot) {
+                    return match err.downcast::<InstallUserError>() {
+                        Ok(user) => Err(ExecutionOutcome::user_error(
+                            format!(
+                                "px {}: tool '{}' is not ready",
+                                kind.section_name(),
+                                descriptor.name
+                            ),
+                            json!({
+                                "tool": descriptor.name,
+                                "module": tool.module,
+                                "config_source": env.config.source.as_str(),
+                                "details": user.details,
+                                "hint": tool.install_command(),
+                            }),
+                        )),
+                        Err(other) => Err(ExecutionOutcome::failure(
+                            "failed to prepare tool environment",
+                            json!({
+                                "tool": descriptor.name,
+                                "root": descriptor.root.display().to_string(),
+                                "error": other.to_string(),
+                            }),
+                        )),
+                    };
+                }
+            }
+            Err(other) => {
+                return Err(ExecutionOutcome::failure(
+                    "failed to prepare tool environment",
+                    json!({
+                        "tool": descriptor.name,
+                        "root": descriptor.root.display().to_string(),
+                        "error": other.to_string(),
+                    }),
+                ));
+            }
+        }
     }
 
     let paths = build_pythonpath(env.ctx.fs(), &descriptor.root, None).map_err(|err| {

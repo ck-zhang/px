@@ -33,7 +33,7 @@ For a fixed px version, runtime set, platform, and index configuration, the foll
 
 5. **Non-TTY output and `--json`**
 
-   * No interactive spinners or frame-based progress when stderr is non-TTY or `--json` is set.
+   * No interactive spinners or frame-based progress when stderr is non-TTY, when `CI=1`, or when `--json` is set.
    * Output is line-oriented or structured JSON with stable shapes and ordering.
 
 6. **Error codes and shapes**

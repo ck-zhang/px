@@ -406,6 +406,112 @@ fn tool_install_then_run_is_immediately_ready() {
     );
 }
 
+#[test]
+fn tool_run_repairs_deleted_environment_offline() {
+    if !require_online() {
+        return;
+    }
+    let info = system_python_info();
+
+    let registry_dir = tempdir().expect("runtime registry dir");
+    let registry = registry_dir.path().join("runtimes.json");
+    let cache_dir = tempdir().expect("cache dir");
+    let store_dir = cache_dir.path().join("store");
+    let envs_dir = cache_dir.path().join("envs");
+    fs::create_dir_all(&store_dir).expect("create store dir");
+    fs::create_dir_all(&envs_dir).expect("create envs dir");
+    let tools_dir = tempdir().expect("tools dir");
+    let tool_store = tempdir().expect("tool store dir");
+
+    cargo_bin_cmd!("px")
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .env("PX_CACHE_PATH", cache_dir.path())
+        .env("PX_STORE_PATH", &store_dir)
+        .env("PX_ENVS_PATH", &envs_dir)
+        .env("PX_TOOLS_DIR", tools_dir.path())
+        .env("PX_TOOL_STORE", tool_store.path())
+        .args([
+            "python",
+            "install",
+            &info.channel,
+            "--path",
+            &info.executable,
+            "--default",
+        ])
+        .assert()
+        .success();
+
+    cargo_bin_cmd!("px")
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .env("PX_CACHE_PATH", cache_dir.path())
+        .env("PX_STORE_PATH", &store_dir)
+        .env("PX_ENVS_PATH", &envs_dir)
+        .env("PX_TOOLS_DIR", tools_dir.path())
+        .env("PX_TOOL_STORE", tool_store.path())
+        .env_remove("PX_NO_ENSUREPIP")
+        .args(["tool", "install", "ruff"])
+        .assert()
+        .success();
+
+    let home_dir = tempdir().expect("home dir");
+    let assert = cargo_bin_cmd!("px")
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .env("PX_CACHE_PATH", cache_dir.path())
+        .env("PX_STORE_PATH", &store_dir)
+        .env("PX_ENVS_PATH", &envs_dir)
+        .env("PX_TOOLS_DIR", tools_dir.path())
+        .env("PX_TOOL_STORE", tool_store.path())
+        .env_remove("PX_RUNTIME_PYTHON")
+        .env_remove("PX_NO_ENSUREPIP")
+        .env("HOME", home_dir.path())
+        .args(["--json", "tool", "run", "ruff", "--", "--version"])
+        .assert()
+        .success();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+
+    let state_path = tools_dir.path().join("ruff").join(".px").join("state.json");
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).expect("read tool state"))
+            .expect("parse tool state");
+    let site = state["current_env"]["site_packages"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!site.trim().is_empty(), "tool state must include site_packages");
+    let site_path = std::path::Path::new(&site);
+    let env_root = site_path
+        .parent()
+        .expect("site_packages should have a parent directory");
+    fs::remove_dir_all(env_root).expect("delete tool env root");
+
+    let assert = cargo_bin_cmd!("px")
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .env("PX_CACHE_PATH", cache_dir.path())
+        .env("PX_STORE_PATH", &store_dir)
+        .env("PX_ENVS_PATH", &envs_dir)
+        .env("PX_TOOLS_DIR", tools_dir.path())
+        .env("PX_TOOL_STORE", tool_store.path())
+        .env_remove("PX_RUNTIME_PYTHON")
+        .env_remove("PX_NO_ENSUREPIP")
+        .env("PX_ONLINE", "0")
+        .env("PX_INDEX_URL", "http://127.0.0.1:9/simple")
+        .env("PIP_INDEX_URL", "http://127.0.0.1:9/simple")
+        .env("HOME", home_dir.path())
+        .args(["--json", "tool", "run", "ruff", "--", "--version"])
+        .assert()
+        .success();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    let message = payload["message"].as_str().unwrap_or_default();
+    assert!(
+        message.to_ascii_lowercase().contains("ruff"),
+        "expected tool to run after repair, got {message:?}"
+    );
+}
+
 fn write_minimal_tool_manifest(root: &std::path::Path, name: &str) {
     let pyproject = root.join("pyproject.toml");
     let contents = format!(

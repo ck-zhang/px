@@ -7,7 +7,10 @@ use super::outcome::{mark_reporter_rendered, missing_pytest_outcome, test_failur
 use crate::{
     build_pythonpath,
     progress::ProgressSuspendGuard,
-    tools::{load_installed_tool, tool_install, ToolInstallRequest},
+    tools::{
+        load_installed_tool, repair_tool_env_from_lock, resolve_runtime, tool_install,
+        ToolInstallRequest,
+    },
     CommandStatus, InstallUserError,
 };
 
@@ -103,6 +106,15 @@ fn ensure_pytest_tool(
     if let Ok(tool) = load_installed_tool("pytest") {
         if tool_env_has_pytest(ctx, py_ctx, &tool.root) {
             return Ok(tool.root);
+        }
+        if tool.root.join("px.lock").exists() {
+            if let Ok(runtime_selection) = resolve_runtime(Some(&py_ctx.python)) {
+                if repair_tool_env_from_lock(ctx, &tool.root, &runtime_selection).is_ok()
+                    && tool_env_has_pytest(ctx, py_ctx, &tool.root)
+                {
+                    return Ok(tool.root);
+                }
+            }
         }
     }
     if should_announce_tool_install(ctx) {

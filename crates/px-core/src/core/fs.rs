@@ -1,7 +1,135 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{anyhow, Context, Result};
+
+/// Best-effort recursive chmod for paths that may have been hardened read-only.
+#[cfg(unix)]
+pub(crate) fn make_writable_recursive(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if meta.file_type().is_symlink() {
+        return;
+    }
+    let mode = if meta.is_dir() { 0o755 } else { 0o644 };
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
+    if meta.is_dir() {
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                make_writable_recursive(&entry.path());
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn make_writable_recursive(path: &Path) {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if meta.file_type().is_symlink() {
+        return;
+    }
+    let mut perms = meta.permissions();
+    if perms.readonly() {
+        perms.set_readonly(false);
+        let _ = fs::set_permissions(path, perms);
+    }
+    if meta.is_dir() {
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                make_writable_recursive(&entry.path());
+            }
+        }
+    }
+}
+
+pub(crate) fn remove_dir_all_writable(path: &Path) -> Result<()> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("failed to stat {}", path.display())),
+    };
+    if meta.file_type().is_symlink() {
+        fs::remove_file(path)
+            .with_context(|| format!("failed to remove symlink {}", path.display()))?;
+        return Ok(());
+    }
+    make_writable_recursive(path);
+    fs::remove_dir_all(path).with_context(|| format!("failed to remove {}", path.display()))?;
+    Ok(())
+}
+
+pub(crate) struct PxTempDir {
+    inner: Option<tempfile::TempDir>,
+    path: PathBuf,
+}
+
+impl PxTempDir {
+    pub(crate) fn new_in(root: &Path, prefix: &str) -> Result<Self> {
+        fs::create_dir_all(root).with_context(|| format!("failed to create {}", root.display()))?;
+        prune_stale_tempdirs(root, prefix, Duration::from_secs(24 * 60 * 60));
+        let dir = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(root)
+            .with_context(|| format!("failed to create temp dir under {}", root.display()))?;
+        let path = dir.path().to_path_buf();
+        Ok(Self {
+            inner: Some(dir),
+            path,
+        })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for PxTempDir {
+    fn drop(&mut self) {
+        let Some(dir) = self.inner.take() else {
+            return;
+        };
+        let path = dir.keep();
+        let _ = remove_dir_all_writable(&path);
+    }
+}
+
+fn prune_stale_tempdirs(root: &Path, prefix: &str, max_age: Duration) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let Some(modified) = meta.modified().ok() else {
+            continue;
+        };
+        let age = now.duration_since(modified).unwrap_or_default();
+        if age < max_age {
+            continue;
+        }
+        let _ = remove_dir_all_writable(&entry.path());
+    }
+}
 
 fn remove_path_for_replace(path: &Path) -> Result<()> {
     let meta = match fs::symlink_metadata(path) {
@@ -176,6 +304,20 @@ pub(crate) fn python_install_root(python_exe: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn px_tempdir_cleans_read_only_children() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let dir = PxTempDir::new_in(root.path(), "px-test-temp-").expect("create px tempdir");
+        let path = dir.path().to_path_buf();
+        let nested = dir.path().join("nested");
+        std::fs::create_dir_all(&nested).expect("nested dir");
+        std::fs::write(nested.join("file.txt"), b"hello").expect("write file");
+
+        crate::store::cas::make_read_only_recursive(&path).expect("harden perms");
+        drop(dir);
+        assert!(!path.exists(), "temp dir should be deleted even when read-only");
+    }
 
     #[test]
     fn replace_dir_link_tolerates_concurrent_replace() {

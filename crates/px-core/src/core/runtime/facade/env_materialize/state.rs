@@ -1,7 +1,7 @@
 // state.json persistence + helpers.
 use super::*;
 
-pub(super) fn persist_project_state(
+pub(crate) fn persist_project_state(
     filesystem: &dyn effects::FileSystem,
     project_root: &Path,
     env: StoredEnvironment,

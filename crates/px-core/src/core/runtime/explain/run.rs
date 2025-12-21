@@ -362,7 +362,7 @@ fn plan_run_at_ref(
             json!({ "error": err.to_string() }),
         )
     })?;
-    let archive = materialize_ref_tree(&repo_root, git_ref)?;
+    let archive = materialize_ref_tree(ctx, &repo_root, git_ref)?;
     let archive_root = archive.path().to_path_buf();
 
     match scope {

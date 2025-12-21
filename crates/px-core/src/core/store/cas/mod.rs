@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use tar::{Archive, Header};
+#[cfg(test)]
 use tempfile::tempdir;
 use tracing::{debug, warn};
 const OBJECTS_DIR: &str = "objects";

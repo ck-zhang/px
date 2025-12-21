@@ -210,6 +210,65 @@ fn test_repairs_missing_env_in_dev_mode() {
     );
 }
 
+#[test]
+fn run_recreates_project_state_after_deletion() {
+    let _guard = test_env_guard();
+    let (_tmp, project) = prepare_fixture("run-recreate-state");
+    let Some(python) = find_python() else {
+        eprintln!("skipping state recreate test (python binary not found)");
+        return;
+    };
+
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["run", "python", "-c", "print('FIRST')"])
+        .assert()
+        .success();
+
+    let state_path = project.join(".px").join("state.json");
+    assert!(state_path.exists(), "expected initial state.json to exist");
+
+    fs::remove_dir_all(project.join(".px")).ok();
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["--json", "status"])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    assert_eq!(
+        payload["project"]["state"], "NeedsEnv",
+        "expected status to report missing env after deleting .px"
+    );
+
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["run", "python", "-c", "print('SECOND')"])
+        .assert()
+        .success();
+    assert!(
+        state_path.exists(),
+        "px run should recreate .px/state.json after deletion"
+    );
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["--json", "status"])
+        .assert()
+        .success();
+    let payload = parse_json(&assert);
+    let state = payload["project"]["state"].as_str().unwrap_or_default();
+    assert!(
+        state == "Consistent" || state == "InitializedEmpty",
+        "expected status to be healthy after self-heal, got {state:?}"
+    );
+    assert_eq!(payload["env"]["status"], "clean");
+}
+
 #[cfg(not(windows))]
 #[test]
 fn sandbox_run_requires_consistent_env() {

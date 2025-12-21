@@ -7,7 +7,79 @@ use std::time::{Duration, Instant};
 pub(crate) fn progress_enabled() -> bool {
     match env::var("PX_PROGRESS") {
         Ok(value) => value != "0",
-        Err(_) => io::stderr().is_terminal(),
+        Err(_) => {
+            if env_flag_enabled("CI") {
+                return false;
+            }
+            io::stderr().is_terminal()
+        }
+    }
+}
+
+fn env_flag_enabled(key: &str) -> bool {
+    let Ok(raw) = env::var(key) else {
+        return false;
+    };
+    let value = raw.trim();
+    !(value.is_empty()
+        || value == "0"
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("no")
+        || value.eq_ignore_ascii_case("off"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = env::var_os(key);
+            env::set_var(key, value);
+            Self { key, prev }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let prev = env::var_os(key);
+            env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.prev.as_ref() {
+                Some(value) => env::set_var(self.key, value),
+                None => env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn progress_enabled_defaults_off_in_ci_but_can_be_overridden() {
+        let _ci = EnvVarGuard::set("CI", "1");
+        let _px = EnvVarGuard::unset("PX_PROGRESS");
+        assert!(
+            !progress_enabled(),
+            "progress should be disabled by default under CI"
+        );
+
+        let _px = EnvVarGuard::set("PX_PROGRESS", "1");
+        assert!(
+            progress_enabled(),
+            "PX_PROGRESS=1 should override CI default"
+        );
+
+        let _px = EnvVarGuard::set("PX_PROGRESS", "0");
+        assert!(
+            !progress_enabled(),
+            "PX_PROGRESS=0 should disable progress explicitly"
+        );
     }
 }
 

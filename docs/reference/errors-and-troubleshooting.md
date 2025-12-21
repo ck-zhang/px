@@ -44,7 +44,7 @@ Under `CI=1` or explicit `--frozen`:
 
 ## Non-TTY and structured output
 
-If stderr is not a TTY or `--json` is set:
+If stderr is not a TTY, `CI=1` is set, or `--json` is set (override with `PX_PROGRESS=1`):
 
 * No spinners, progress bars, or frame-based animations.
 * Progress is line-oriented logs or structured events inside `--json`.

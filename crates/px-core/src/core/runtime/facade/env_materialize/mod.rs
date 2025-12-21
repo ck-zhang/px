@@ -66,6 +66,7 @@ pub(crate) use runtime::{detect_runtime_metadata, prepare_project_runtime, Runti
 pub(crate) use site::{select_python_from_site, site_packages_dir};
 pub(super) use state::resolve_project_site;
 pub(crate) use state::{load_project_state, StoredEnvironment, StoredPython, StoredRuntime};
+pub(crate) use state::persist_project_state;
 
 #[cfg(test)]
 pub(super) use editable::load_editable_project_metadata;
@@ -89,8 +90,6 @@ pub(super) use wheel::{
 
 #[cfg(not(windows))]
 use site::install_python_link;
-use state::persist_project_state;
-
 #[cfg(test)]
 pub use test_support::materialize_project_site;
 

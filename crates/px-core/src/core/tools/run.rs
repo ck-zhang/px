@@ -13,6 +13,7 @@ use px_domain::api::{load_lockfile_optional, ProjectSnapshot};
 use super::install::{ensure_tool_env_scripts, ensure_tool_site_bin, resolve_runtime};
 use super::metadata::read_metadata;
 use super::paths::{normalize_tool_name, tool_root_dir};
+use super::repair_tool_env_from_lock;
 
 #[derive(Clone, Debug)]
 pub struct ToolRunRequest {
@@ -26,6 +27,14 @@ pub struct ToolRunRequest {
 /// # Errors
 /// Returns an error if the tool metadata is missing or the invocation fails.
 pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<ExecutionOutcome> {
+    tool_run_inner(ctx, request, true)
+}
+
+fn tool_run_inner(
+    ctx: &CommandContext,
+    request: &ToolRunRequest,
+    allow_repair: bool,
+) -> Result<ExecutionOutcome> {
     let normalized = normalize_tool_name(&request.name);
     if normalized.is_empty() {
         return Ok(ExecutionOutcome::user_error(
@@ -61,6 +70,12 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
     let runtime_selection = resolve_runtime(Some(&metadata.runtime_version))?;
     env::set_var("PX_RUNTIME_PYTHON", &runtime_selection.record.path);
     if let Err(err) = ensure_tool_env_scripts(&tool_root) {
+        if allow_repair
+            && snapshot.lock_path.exists()
+            && repair_tool_env_from_lock(ctx, &tool_root, &runtime_selection).is_ok()
+        {
+            return tool_run_inner(ctx, request, false);
+        }
         return Ok(ExecutionOutcome::user_error(
             format!("tool '{normalized}' is not ready"),
             json!({
@@ -75,6 +90,22 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
         match err.downcast::<InstallUserError>() {
             Ok(user) => {
                 if !legacy_tool_env_is_ready(ctx, &snapshot) {
+                    let reason = user
+                        .details
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let can_repair = allow_repair
+                        && snapshot.lock_path.exists()
+                        && matches!(
+                            reason,
+                            "missing_env" | "env_outdated" | "invalid_state" | "runtime_mismatch"
+                        );
+                    if can_repair
+                        && repair_tool_env_from_lock(ctx, &tool_root, &runtime_selection).is_ok()
+                    {
+                        return tool_run_inner(ctx, request, false);
+                    }
                     let mut details = match user.details {
                         Value::Object(map) => map,
                         other => {

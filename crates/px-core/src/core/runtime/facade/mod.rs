@@ -36,8 +36,8 @@ pub(crate) use context::{
     python_context_with_mode, EnvGuard, EnvironmentIssue, EnvironmentSyncReport, PythonContext,
 };
 pub(crate) use env_materialize::{
-    detect_runtime_metadata, load_project_state, prepare_project_runtime, refresh_project_site,
-    select_python_from_site, site_packages_dir, write_project_metadata_stub,
+    detect_runtime_metadata, load_project_state, persist_project_state, prepare_project_runtime,
+    refresh_project_site, select_python_from_site, site_packages_dir, write_project_metadata_stub,
     write_python_environment_markers, RuntimeMetadata, StoredEnvironment, StoredPython,
     StoredRuntime, SITE_CUSTOMIZE,
 };

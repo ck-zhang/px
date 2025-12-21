@@ -43,6 +43,10 @@ fn main() -> Result<()> {
         // Suppress spinners/progress when JSON output is requested.
         env::set_var("PX_PROGRESS", "0");
     }
+    if cli.quiet {
+        // Quiet implies no spinners/progress noise.
+        env::set_var("PX_PROGRESS", "0");
+    }
     apply_env_overrides(&cli);
     let global = GlobalOptions {
         quiet: cli.quiet,

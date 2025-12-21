@@ -516,6 +516,21 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
         Ok(report) => report,
         Err(outcome) => return Ok(outcome),
     };
+    if let Some(ref fallback) = cas_native_fallback {
+        let needs_materialized_scripts = matches!(
+            fallback.reason,
+            CasNativeFallbackReason::AmbiguousConsoleScript
+                | CasNativeFallbackReason::ConsoleScriptIndexFailed
+        );
+        if needs_materialized_scripts && !strict && state_report.env_clean {
+            if let Err(err) = crate::refresh_project_site(&snapshot, ctx) {
+                return match err.downcast::<crate::InstallUserError>() {
+                    Ok(user) => Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                    Err(other) => Err(other),
+                };
+            }
+        }
+    }
     let guard = match guard_for_execution(strict, &snapshot, &state_report, "run") {
         Ok(guard) => guard,
         Err(outcome) => return Ok(outcome),

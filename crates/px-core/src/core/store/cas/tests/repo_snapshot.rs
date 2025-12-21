@@ -204,6 +204,60 @@ fn repo_snapshot_preserves_symlinks_and_exec_bits() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+#[serial]
+fn repo_snapshot_ignores_unwritable_tmpdir() -> Result<()> {
+    if !git_available() {
+        eprintln!("skipping repo_snapshot_ignores_unwritable_tmpdir (git missing)");
+        return Ok(());
+    }
+
+    let (_temp, store) = new_store()?;
+    let repo_tmp = tempdir()?;
+    let repo_root = repo_tmp.path().join("repo");
+    fs::create_dir_all(&repo_root)?;
+    init_git_repo(&repo_root)?;
+
+    fs::write(repo_root.join("data.txt"), b"payload")?;
+    git_ok(&repo_root, &["add", "."])?;
+    git_ok(&repo_root, &["commit", "-m", "c1"])?;
+    let commit = git(&repo_root, &["rev-parse", "HEAD"])?;
+
+    let locator = format!(
+        "git+{}",
+        Url::from_file_path(repo_root.canonicalize()?)
+            .expect("file url")
+            .as_str()
+    );
+    let spec = RepoSnapshotSpec::parse(&format!("{locator}@{commit}"))?;
+
+    let blocked = repo_tmp.path().join("blocked-tmp");
+    fs::create_dir_all(&blocked)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&blocked)?.permissions();
+        perms.set_mode(0o555);
+        fs::set_permissions(&blocked, perms)?;
+    }
+    let _tmp = EnvVarGuard::set("TMPDIR", blocked.to_string_lossy().as_ref());
+
+    let oid = store.ensure_repo_snapshot(&spec)?;
+    assert!(
+        !oid.trim().is_empty(),
+        "expected non-empty repo snapshot oid"
+    );
+
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&blocked)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&blocked, perms)?;
+    }
+
+    Ok(())
+}
+
 #[test]
 #[serial]
 fn repo_snapshot_offline_fails_for_remote_when_missing() -> Result<()> {
