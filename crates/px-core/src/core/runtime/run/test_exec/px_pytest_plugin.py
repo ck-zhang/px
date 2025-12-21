@@ -18,7 +18,14 @@ class PxTerminalReporter:
         self._current_file = None
         self.failures = []
         self.collection_errors = []
-        self.stats = {"passed": 0, "failed": 0, "skipped": 0, "error": 0, "xfailed": 0, "xpassed": 0}
+        self.stats = {
+            "passed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "error": 0,
+            "xfailed": 0,
+            "xpassed": 0,
+        }
         self.exitstatus = 0
         self.spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         self.spinner_index = 0
@@ -31,7 +38,11 @@ class PxTerminalReporter:
         py_ver = platform.python_version()
         root = str(self.config.rootpath)
         cfg = self.config.inifile or "auto-detected"
-        self._tw.line(f"px test  •  Python {py_ver}  •  pytest {pytest.__version__}", cyan=True, bold=True)
+        self._tw.line(
+            f"px test  •  Python {py_ver}  •  pytest {pytest.__version__}",
+            cyan=True,
+            bold=True,
+        )
         self._tw.line(f"root:   {root}")
         self._tw.line(f"config: {cfg}")
         self.collection_start = time.time()
@@ -41,18 +52,24 @@ class PxTerminalReporter:
         self.collected = len(session.items)
         files = {str(item.fspath) for item in session.items}
         self.files = sorted(files)
-        self.collection_duration = time.time() - (self.collection_start or self.session_start)
+        self.collection_duration = time.time() - (
+            self.collection_start or self.session_start
+        )
         label = "tests" if self.collected != 1 else "test"
         file_label = "files" if len(self.files) != 1 else "file"
         self._spinner_active = False
         self._clear_spinner(newline=True)
-        self._tw.line(f"collected {self.collected} {label} from {len(self.files)} {file_label} in {self.collection_duration:.2f}s")
+        self._tw.line(
+            f"collected {self.collected} {label} from {len(self.files)} {file_label} in {self.collection_duration:.2f}s"
+        )
         self._tw.line("")
 
     def pytest_collectreport(self, report):
         if report.failed:
             self.stats["error"] += 1
-            summary = getattr(report, "longreprtext", "") or getattr(report, "longrepr", "")
+            summary = getattr(report, "longreprtext", "") or getattr(
+                report, "longrepr", ""
+            )
             self.collection_errors.append((str(report.fspath), str(summary)))
         self._render_progress(note="collecting")
 
@@ -136,7 +153,9 @@ class PxTerminalReporter:
             self._render_single_failure(idx, report)
 
     def _render_collection_errors(self):
-        self._tw.line(f"COLLECTION ERRORS ({len(self.collection_errors)})", red=True, bold=True)
+        self._tw.line(
+            f"COLLECTION ERRORS ({len(self.collection_errors)})", red=True, bold=True
+        )
         self._tw.line("-" * 19)
         for idx, (path, summary) in enumerate(self.collection_errors, start=1):
             self._tw.line("")
@@ -174,7 +193,9 @@ class PxTerminalReporter:
         status_label = "✓ PASSED" if exitstatus == 0 else "✗ FAILED"
         status_color = {"green": exitstatus == 0, "red": exitstatus != 0, "bold": True}
         self._tw.line("")
-        self._tw.line(f"RESULT   {status_label} (exit code {exitstatus})", **status_color)
+        self._tw.line(
+            f"RESULT   {status_label} (exit code {exitstatus})", **status_color
+        )
         self._tw.line(f"TOTAL    {total} tests in {duration:.2f}s")
         self._tw.line(f"PASSED   {self.stats['passed']}")
         self._tw.line(f"FAILED   {self.stats['failed']}")
@@ -232,7 +253,12 @@ class PxTerminalReporter:
                 summary = f"Expected {expected} to be raised, but none was."
             elif "assert" in lowered and "==" in summary:
                 parts = summary.split("==", 1)
-                left = parts[0].replace("AssertionError:", "").replace("assert", "", 1).strip()
+                left = (
+                    parts[0]
+                    .replace("AssertionError:", "")
+                    .replace("assert", "", 1)
+                    .strip()
+                )
                 right = parts[1].strip()
                 summary = f"Expected: {right}"
                 if left:

@@ -12,8 +12,8 @@ use crate::{
     manifest_snapshot, missing_project_outcome, outcome_from_output,
     progress::ProgressSuspendGuard,
     tools::{
-        disable_proxy_env, load_installed_tool, tool_install, ToolInstallRequest,
-        MIN_PYTHON_REQUIREMENT,
+        disable_proxy_env, ensure_tool_env_scripts, load_installed_tool, tool_install,
+        ToolInstallRequest, MIN_PYTHON_REQUIREMENT,
     },
     CommandContext, CommandStatus, ExecutionOutcome, InstallUserError,
 };
@@ -254,6 +254,17 @@ fn prepare_tool_run(
     let snapshot = ProjectSnapshot::read_from(&descriptor.root).map_err(|err| {
         ExecutionOutcome::failure(
             "failed to read tool metadata",
+            json!({
+                "tool": descriptor.name,
+                "root": descriptor.root.display().to_string(),
+                "error": err.to_string(),
+            }),
+        )
+    })?;
+
+    ensure_tool_env_scripts(&descriptor.root).map_err(|err| {
+        ExecutionOutcome::failure(
+            "failed to prepare tool environment scripts",
             json!({
                 "tool": descriptor.name,
                 "root": descriptor.root.display().to_string(),

@@ -205,6 +205,10 @@ where
                     ),
                 ))
             } else {
+                let issues: Vec<String> = err
+                    .chain()
+                    .map(std::string::ToString::to_string)
+                    .collect();
                 Ok((
                     info,
                     px_core::ExecutionOutcome::failure(
@@ -212,6 +216,7 @@ where
                         serde_json::json!({
                             "reason": "internal_error",
                             "error": err.to_string(),
+                            "issues": issues,
                             "hint": "Re-run with `--debug` for more detail, or open an issue if this persists.",
                         }),
                     ),

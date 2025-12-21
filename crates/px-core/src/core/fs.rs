@@ -13,7 +13,18 @@ fn remove_path_for_replace(path: &Path) -> Result<()> {
 
     if file_type.is_symlink() {
         fs::remove_file(path)
-            .or_else(|_| fs::remove_dir(path))
+            .or_else(|err| {
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    return Ok(());
+                }
+                fs::remove_dir(path).or_else(|dir_err| {
+                    if dir_err.kind() == std::io::ErrorKind::NotFound {
+                        Ok(())
+                    } else {
+                        Err(dir_err)
+                    }
+                })
+            })
             .with_context(|| format!("failed to remove symlink {}", path.display()))?;
         return Ok(());
     }
@@ -53,21 +64,33 @@ pub(crate) fn replace_dir_link(target: &Path, link: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
-        symlink(target, link).with_context(|| {
-            format!(
-                "failed to create symlink {} -> {}",
-                link.display(),
-                target.display()
-            )
-        })?;
+        match symlink(target, link) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed to create symlink {} -> {}",
+                        link.display(),
+                        target.display()
+                    )
+                });
+            }
+        }
         Ok(())
     }
 
     #[cfg(windows)]
     {
         use std::os::windows::fs::symlink_dir;
-        if symlink_dir(target, link).is_ok() {
-            return Ok(());
+        match symlink_dir(target, link) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(_) => {
+                if fs::symlink_metadata(link).is_ok() {
+                    return Ok(());
+                }
+            }
         }
 
         let link_str = link
@@ -91,6 +114,9 @@ pub(crate) fn replace_dir_link(target: &Path, link: &Path) -> Result<()> {
             .output()
             .with_context(|| "failed to invoke cmd.exe for mklink")?;
         if output.status.success() {
+            return Ok(());
+        }
+        if fs::symlink_metadata(link).is_ok() {
             return Ok(());
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -144,4 +170,43 @@ pub(crate) fn python_install_root(python_exe: &Path) -> Option<PathBuf> {
     }
 
     Some(parent.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn replace_dir_link_tolerates_concurrent_replace() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp.path().join("target");
+        std::fs::create_dir_all(&target).expect("target dir");
+        let link = temp.path().join("link");
+
+        replace_dir_link(&target, &link).expect("initial link");
+
+        for _ in 0..25 {
+            let barrier = Arc::new(Barrier::new(3));
+            let target_a = target.clone();
+            let link_a = link.clone();
+            let barrier_a = barrier.clone();
+            let a = std::thread::spawn(move || {
+                barrier_a.wait();
+                replace_dir_link(&target_a, &link_a)
+            });
+
+            let target_b = target.clone();
+            let link_b = link.clone();
+            let barrier_b = barrier.clone();
+            let b = std::thread::spawn(move || {
+                barrier_b.wait();
+                replace_dir_link(&target_b, &link_b)
+            });
+
+            barrier.wait();
+            a.join().expect("thread a").expect("replace a");
+            b.join().expect("thread b").expect("replace b");
+        }
+    }
 }

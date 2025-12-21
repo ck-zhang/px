@@ -21,6 +21,7 @@ fn fmt_auto_installs_tool_and_preserves_manifest() {
 
     let tools_dir = tempdir().expect("tools dir");
     let store_dir = tempdir().expect("store dir");
+    let home_dir = tempdir().expect("home dir");
     let candidates = ["python3.12", "python3", "python"];
     let python = candidates.iter().find_map(|candidate| {
         Command::new(candidate)
@@ -37,6 +38,7 @@ fn fmt_auto_installs_tool_and_preserves_manifest() {
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
+        .env("HOME", home_dir.path())
         .env("PX_RUNTIME_PYTHON", &python)
         .env("PX_TOOLS_DIR", tools_dir.path())
         .env("PX_TOOL_STORE", store_dir.path())

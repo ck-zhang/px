@@ -344,10 +344,126 @@ fn finalize_tool_environment(
     if site_path.exists() {
         fs::remove_dir_all(&site_path)?;
     }
+    let bin_path = env_root.join("bin");
+    if bin_path.exists() {
+        fs::remove_dir_all(&bin_path)?;
+    }
     copy_dir_contents(&source_site, &site_path)?;
+    ensure_tool_site_bin(&site_path)?;
     update_tool_state(root, &site_path, &env_id)?;
     let _ = fs::remove_dir_all(root.join(".px").join("site"));
     Ok(site_path)
+}
+
+pub(crate) fn ensure_tool_site_bin(site_dir: &Path) -> Result<()> {
+    let Some(env_root) = site_dir.parent() else {
+        return Ok(());
+    };
+    let legacy_bin = site_dir.join("bin");
+    if legacy_bin.exists() {
+        let _ = fs::remove_dir_all(&legacy_bin).or_else(|_| fs::remove_file(&legacy_bin));
+    }
+    let bin_dir = env_root.join("bin");
+    let pth_path = site_dir.join("px.pth");
+    if !pth_path.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(&bin_dir)?;
+    let contents = fs::read_to_string(&pth_path)?;
+    let mut pkg_roots = Vec::new();
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(trimmed);
+        let root = match path.file_name().and_then(|name| name.to_str()) {
+            Some("site-packages") => path.parent().map(PathBuf::from).unwrap_or(path),
+            _ => path,
+        };
+        pkg_roots.push(root);
+    }
+    for root in pkg_roots {
+        let pkg_bin = root.join("bin");
+        if !pkg_bin.exists() {
+            continue;
+        }
+        let mut entries: Vec<PathBuf> = fs::read_dir(&pkg_bin)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_ok_and(|ty| !ty.is_dir()))
+            .map(|entry| entry.path())
+            .collect();
+        entries.sort();
+        for src in entries {
+            let Some(name) = src.file_name() else {
+                continue;
+            };
+            let dest = bin_dir.join(name);
+            link_tool_bin_entry(&src, &dest)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_tool_env_scripts(tool_root: &Path) -> Result<()> {
+    let state_path = tool_root.join(".px").join("state.json");
+    let contents = match fs::read_to_string(&state_path) {
+        Ok(contents) => contents,
+        Err(_) => return Ok(()),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&contents) {
+        Ok(value) => value,
+        Err(_) => return Ok(()),
+    };
+    let Some(site) = value
+        .get("current_env")
+        .and_then(|env| env.get("site_packages"))
+        .and_then(|path| path.as_str())
+    else {
+        return Ok(());
+    };
+    if site.trim().is_empty() {
+        return Ok(());
+    }
+    ensure_tool_site_bin(Path::new(site))
+}
+
+fn link_tool_bin_entry(src: &Path, dest: &Path) -> Result<()> {
+    if dest.exists() {
+        let _ = fs::remove_file(dest).or_else(|_| fs::remove_dir_all(dest));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        match symlink(src, dest) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(_) => {}
+        }
+    }
+
+    match fs::hard_link(src, dest) {
+        Ok(()) => return Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(_) => {}
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::symlink_file;
+        match symlink_file(src, dest) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(_) => {}
+        }
+    }
+
+    match fs::copy(src, dest) {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 fn collect_console_scripts(site_dir: &Path) -> Result<std::collections::BTreeMap<String, String>> {

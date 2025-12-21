@@ -240,8 +240,10 @@ fn registry_path_detail() -> Option<String> {
 }
 
 fn runtime_registry_error(err: anyhow::Error) -> ExecutionOutcome {
+    let issues: Vec<String> = err.chain().map(std::string::ToString::to_string).collect();
     let mut details = json!({
         "error": err.to_string(),
+        "issues": issues,
     });
     if let Some(path) = registry_path_detail() {
         details["registry"] = Value::String(path);
@@ -253,7 +255,11 @@ fn runtime_registry_error(err: anyhow::Error) -> ExecutionOutcome {
 }
 
 fn runtime_install_error(err: anyhow::Error) -> ExecutionOutcome {
-    let mut details = json!({ "error": err.to_string() });
+    let issues: Vec<String> = err.chain().map(std::string::ToString::to_string).collect();
+    let mut details = json!({
+        "error": err.to_string(),
+        "issues": issues,
+    });
     if let Some(path) = registry_path_detail() {
         details["registry"] = Value::String(path);
     }

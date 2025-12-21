@@ -10,7 +10,7 @@ use crate::{
 };
 use px_domain::api::{load_lockfile_optional, ProjectSnapshot};
 
-use super::install::resolve_runtime;
+use super::install::{ensure_tool_env_scripts, ensure_tool_site_bin, resolve_runtime};
 use super::metadata::read_metadata;
 use super::paths::{normalize_tool_name, tool_root_dir};
 
@@ -60,6 +60,17 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
     };
     let runtime_selection = resolve_runtime(Some(&metadata.runtime_version))?;
     env::set_var("PX_RUNTIME_PYTHON", &runtime_selection.record.path);
+    if let Err(err) = ensure_tool_env_scripts(&tool_root) {
+        return Ok(ExecutionOutcome::user_error(
+            format!("tool '{normalized}' is not ready"),
+            json!({
+                "reason": "tool_env_unavailable",
+                "tool": normalized,
+                "error": err.to_string(),
+                "hint": format!("run `px tool install {normalized}` to rebuild the tool environment"),
+            }),
+        ));
+    }
     if let Err(err) = ensure_project_environment_synced(ctx, &snapshot) {
         match err.downcast::<InstallUserError>() {
             Ok(user) => {
@@ -97,6 +108,19 @@ pub fn tool_run(ctx: &CommandContext, request: &ToolRunRequest) -> Result<Execut
         .current_env
         .as_ref()
         .and_then(|env| env.profile_oid.clone().or_else(|| Some(env.id.clone())));
+    if let Some(env) = state.current_env.as_ref() {
+        if let Err(err) = ensure_tool_site_bin(std::path::Path::new(&env.site_packages)) {
+            return Ok(ExecutionOutcome::user_error(
+                format!("tool '{normalized}' is not ready"),
+                json!({
+                    "reason": "tool_env_unavailable",
+                    "tool": normalized,
+                    "error": err.to_string(),
+                    "hint": format!("run `px tool install {normalized}` to rebuild the tool environment"),
+                }),
+            ));
+        }
+    }
     let pyc_cache_prefix = if env::var_os("PYTHONPYCACHEPREFIX").is_some() {
         None
     } else if let Some(oid) = profile_oid.as_deref() {

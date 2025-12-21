@@ -1,9 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use serde_json::json;
-use toml_edit::DocumentMut;
 use walkdir::WalkDir;
 
 use crate::{
@@ -126,35 +125,89 @@ fn build_with_uv(
     ctx.fs()
         .create_dir_all(out_dir)
         .with_context(|| format!("creating output directory at {}", out_dir.display()))?;
-    ensure_package_stub(&py_ctx.project_root)?;
-    uv::build_distributions(&py_ctx.project_root, targets, out_dir)
+    let build_root = prepare_build_root(py_ctx, out_dir)?;
+    uv::build_distributions(build_root.path(), targets, out_dir)
 }
 
-fn ensure_package_stub(project_root: &Path) -> Result<()> {
-    let pyproject_path = project_root.join("pyproject.toml");
-    let contents = fs::read_to_string(&pyproject_path)
-        .with_context(|| format!("reading {}", pyproject_path.display()))?;
-    let doc: DocumentMut = contents.parse()?;
-    let name = doc["project"]["name"]
-        .as_str()
-        .ok_or_else(|| anyhow!("pyproject missing [project].name"))?
-        .to_string();
-    let package = name.replace('-', "_");
-    let src_root = project_root.join("src");
-    let module_dir = src_root.join(&package);
-    let existing_package = project_root.join(&package);
-    if !module_dir.exists() && existing_package.exists() {
-        copy_package_tree(&existing_package, &module_dir)?;
+struct BuildRoot {
+    path: PathBuf,
+    _temp: Option<tempfile::TempDir>,
+}
+
+impl BuildRoot {
+    fn path(&self) -> &Path {
+        &self.path
     }
+}
+
+fn prepare_build_root(py_ctx: &PythonContext, out_dir: &Path) -> Result<BuildRoot> {
+    let package = py_ctx.project_name.replace('-', "_");
+    let expected_init = py_ctx
+        .project_root
+        .join("src")
+        .join(&package)
+        .join("__init__.py");
+    if expected_init.exists() {
+        return Ok(BuildRoot {
+            path: py_ctx.project_root.clone(),
+            _temp: None,
+        });
+    }
+
+    let temp = tempfile::Builder::new()
+        .prefix(".px-build-")
+        .tempdir_in(out_dir)
+        .context("creating build staging directory")?;
+    let root = temp.path().to_path_buf();
+
+    for filename in [
+        "pyproject.toml",
+        "setup.cfg",
+        "setup.py",
+        "MANIFEST.in",
+        "README.md",
+        "README.rst",
+        "README.txt",
+        "LICENSE",
+        "LICENSE.txt",
+    ] {
+        let src = py_ctx.project_root.join(filename);
+        if src.exists() {
+            fs::copy(&src, root.join(filename))
+                .with_context(|| format!("copying {} into build staging root", src.display()))?;
+        }
+    }
+
+    let src_dir = py_ctx.project_root.join("src");
+    if src_dir.exists() {
+        copy_tree(&src_dir, &root.join("src"))
+            .with_context(|| format!("copying {} into build staging root", src_dir.display()))?;
+    }
+
+    let module_dir = root.join("src").join(&package);
+    let existing_package = py_ctx.project_root.join(&package);
+    if !module_dir.exists() && existing_package.exists() {
+        copy_tree(&existing_package, &module_dir).with_context(|| {
+            format!(
+                "copying {} into build staging root",
+                existing_package.display()
+            )
+        })?;
+    }
+
     fs::create_dir_all(&module_dir)?;
     let init_py = module_dir.join("__init__.py");
     if !init_py.exists() {
         fs::write(&init_py, b"")?;
     }
-    Ok(())
+
+    Ok(BuildRoot {
+        path: root,
+        _temp: Some(temp),
+    })
 }
 
-fn copy_package_tree(from: &Path, to: &Path) -> Result<()> {
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     for entry in WalkDir::new(from) {
         let entry = entry?;
         let path = entry.path();
@@ -170,4 +223,61 @@ fn copy_package_tree(from: &Path, to: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use px_domain::api::PxOptions;
+
+    #[test]
+    fn prepare_build_root_stages_stub_without_touching_project() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("proj");
+        fs::create_dir_all(&project_root).expect("project root");
+        fs::write(project_root.join("pyproject.toml"), "[project]\nname = \"proj\"\n")
+            .expect("pyproject");
+        let out_dir = project_root.join("dist");
+        fs::create_dir_all(&out_dir).expect("dist");
+
+        let py_ctx = PythonContext {
+            state_root: project_root.clone(),
+            project_root: project_root.clone(),
+            project_name: "proj".to_string(),
+            python: String::new(),
+            pythonpath: String::new(),
+            allowed_paths: vec![project_root.clone()],
+            site_bin: None,
+            pep582_bin: Vec::new(),
+            pyc_cache_prefix: None,
+            px_options: PxOptions::default(),
+        };
+
+        assert!(
+            !project_root.join("src").exists(),
+            "fixture should not create src/"
+        );
+
+        let build_root = prepare_build_root(&py_ctx, &out_dir).expect("build root");
+        let staged_path = build_root.path().to_path_buf();
+        assert_ne!(
+            staged_path, project_root,
+            "expected staging build root when module is missing"
+        );
+
+        assert!(
+            !project_root.join("src").exists(),
+            "prepare_build_root must not create src/ in the project"
+        );
+        assert!(
+            staged_path.join("src").join("proj").join("__init__.py").exists(),
+            "staged build root should contain a stub package"
+        );
+
+        drop(build_root);
+        assert!(
+            !staged_path.exists(),
+            "staging directory should be cleaned up"
+        );
+    }
 }

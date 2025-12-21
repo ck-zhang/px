@@ -330,7 +330,21 @@ fn tool_install_then_run_is_immediately_ready() {
         .assert()
         .success();
 
-    cargo_bin_cmd!("px")
+    let lock_contents = fs::read_to_string(tools_dir.path().join("ruff").join("px.lock"))
+        .expect("read tool lock");
+    let expected = lock_contents
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("specifier = \"ruff=="))
+        .and_then(|suffix| suffix.split('"').next())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !expected.is_empty(),
+        "expected ruff to be pinned in tool lock"
+    );
+
+    let home_dir = tempdir().expect("home dir");
+    let assert = cargo_bin_cmd!("px")
         .env("PX_RUNTIME_REGISTRY", &registry)
         .env("PX_CACHE_PATH", cache_dir.path())
         .env("PX_STORE_PATH", &store_dir)
@@ -339,9 +353,18 @@ fn tool_install_then_run_is_immediately_ready() {
         .env("PX_TOOL_STORE", tool_store.path())
         .env_remove("PX_RUNTIME_PYTHON")
         .env_remove("PX_NO_ENSUREPIP")
-        .args(["tool", "run", "ruff", "--", "--version"])
+        .env("HOME", home_dir.path())
+        .args(["--json", "tool", "run", "ruff", "--", "--version"])
         .assert()
         .success();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    let message = payload["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(&expected),
+        "expected tool run to execute pinned ruff=={expected}, got {message:?}"
+    );
 
     let state_path = tools_dir.path().join("ruff").join(".px").join("state.json");
     let state: serde_json::Value =
