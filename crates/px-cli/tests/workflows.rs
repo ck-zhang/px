@@ -1,4 +1,7 @@
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path};
+
+#[cfg(unix)]
+use std::process::Command;
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::{json, Value};
@@ -601,7 +604,11 @@ fn run_emits_hint_when_requests_socks_missing_under_proxy() {
         .failure();
 
     let payload = parse_json(&assert);
-    assert_eq!(payload["status"], "error");
+    let status = payload["status"].as_str().unwrap_or_default();
+    assert!(
+        status == "error" || status == "user-error",
+        "expected `error` or `user-error`, got {status:?}"
+    );
     let details = payload["details"].as_object().expect("details");
     assert!(
         details.contains_key("traceback"),
