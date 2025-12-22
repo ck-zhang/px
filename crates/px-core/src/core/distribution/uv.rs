@@ -130,11 +130,18 @@ impl UvPublishSession {
         let registry = DisplaySafeUrl::from_str(registry).context("parsing registry upload URL")?;
         let px_agent = format!("px/{PX_VERSION}");
         let timeout = Duration::from_secs(60);
-        let http_client = reqwest::Client::builder()
+        let keep_proxies = std::env::var("PX_KEEP_PROXIES")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let builder = reqwest::Client::builder()
             .user_agent(px_agent)
-            .timeout(timeout)
-            .build()
-            .context("building px HTTP client")?;
+            .timeout(timeout);
+        let builder = if keep_proxies {
+            builder
+        } else {
+            builder.no_proxy()
+        };
+        let http_client = builder.build().context("building px HTTP client")?;
 
         let base_builder = BaseClientBuilder::default()
             .connectivity(Connectivity::Online)

@@ -559,11 +559,18 @@ fn select_sdist<'a>(files: &'a [PypiFile], specifier: &str) -> Result<&'a PypiFi
 }
 
 pub(crate) fn build_http_client() -> Result<Client> {
-    Client::builder()
+    let keep_proxies = std::env::var("PX_KEEP_PROXIES")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let builder = Client::builder()
         .user_agent(format!("px/{PX_VERSION}"))
-        .timeout(Duration::from_secs(60))
-        .build()
-        .context("failed to build HTTP client")
+        .timeout(Duration::from_secs(60));
+    let builder = if keep_proxies {
+        builder
+    } else {
+        builder.no_proxy()
+    };
+    builder.build().context("failed to build HTTP client")
 }
 
 pub(crate) fn fetch_release(

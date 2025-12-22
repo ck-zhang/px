@@ -230,11 +230,18 @@ pub fn compute_sha256(path: &Path) -> Result<String> {
 }
 
 pub fn http_client() -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
+    let keep_proxies = std::env::var("PX_KEEP_PROXIES")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let builder = reqwest::blocking::Client::builder()
         .user_agent(USER_AGENT)
-        .timeout(HTTP_TIMEOUT)
-        .build()
-        .context("failed to build http client")
+        .timeout(HTTP_TIMEOUT);
+    let builder = if keep_proxies {
+        builder
+    } else {
+        builder.no_proxy()
+    };
+    builder.build().context("failed to build http client")
 }
 
 pub fn download_with_retry(dest: &Path, request: &ArtifactRequest<'_>) -> Result<CachedWheelFile> {
