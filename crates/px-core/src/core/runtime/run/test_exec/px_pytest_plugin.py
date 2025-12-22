@@ -8,8 +8,9 @@ from _pytest._io.terminalwriter import TerminalWriter
 class PxTerminalReporter:
     def __init__(self, config):
         self.config = config
+        self.is_tty = sys.stdout.isatty()
         self._tw = TerminalWriter(file=sys.stdout)
-        self._tw.hasmarkup = True
+        self._tw.hasmarkup = self.is_tty
         self.session_start = time.time()
         self.collection_start = None
         self.collection_duration = 0.0
@@ -30,7 +31,7 @@ class PxTerminalReporter:
         self.spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         self.spinner_index = 0
         self.last_progress_len = 0
-        self._spinner_active = True
+        self._spinner_active = self.is_tty
 
     def pytest_sessionstart(self, session):
         import platform
@@ -108,6 +109,8 @@ class PxTerminalReporter:
 
     # --- rendering helpers ---
     def _render_progress(self, note="", force=False):
+        if not self.is_tty:
+            return
         if not force and not self._spinner_active:
             return
         total = self.collected or "?"
@@ -130,6 +133,8 @@ class PxTerminalReporter:
         self.last_progress_len = len(line)
 
     def _clear_spinner(self, newline: bool = False):
+        if not self.is_tty:
+            return
         if self.last_progress_len:
             end = "\n" if newline else "\r"
             sys.stdout.write("\r" + " " * self.last_progress_len + end)
@@ -272,7 +277,7 @@ class PxTerminalReporter:
 
 
 def pytest_configure(config):
-    config.option.color = "yes"
+    config.option.color = "yes" if sys.stdout.isatty() else "no"
     pm = config.pluginmanager
     reporter = PxTerminalReporter(config)
     default = pm.getplugin("terminalreporter")

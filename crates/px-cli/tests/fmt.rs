@@ -49,12 +49,15 @@ fn fmt_auto_installs_tool_and_preserves_manifest() {
 
     let payload = parse_json(&assert);
     assert_eq!(payload["status"], "ok");
+    assert!(
+        !project.join(".ruff_cache").exists(),
+        "px fmt should keep ruff cache under .px/ to avoid polluting the project root"
+    );
 
     let state_path = tools_dir.path().join("ruff").join(".px").join("state.json");
-    let state: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(&state_path).expect("read ruff tool state"),
-    )
-    .expect("parse ruff tool state");
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).expect("read ruff tool state"))
+            .expect("parse ruff tool state");
     let env_state = state
         .get("current_env")
         .and_then(|value| value.as_object())
@@ -113,5 +116,47 @@ fn fmt_accepts_json_flag_on_subcommand() {
     assert!(
         status == "ok" || status == "user-error",
         "fmt with --json should emit structured status, got {status}"
+    );
+}
+
+#[test]
+fn fmt_frozen_refuses_to_auto_install_tools() {
+    let _guard = test_env_guard();
+    let (_tmp, project) = prepare_fixture("fmt-missing-tool-frozen");
+
+    let tools_dir = tempdir().expect("tools dir");
+    let store_dir = tempdir().expect("store dir");
+    let home_dir = tempdir().expect("home dir");
+    let candidates = ["python3.12", "python3", "python"];
+    let python = candidates.iter().find_map(|candidate| {
+        Command::new(candidate)
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|_| candidate.to_string())
+    });
+    let Some(python) = python else {
+        eprintln!("skipping fmt frozen test (python binary not found)");
+        return;
+    };
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("HOME", home_dir.path())
+        .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_TOOLS_DIR", tools_dir.path())
+        .env("PX_TOOL_STORE", store_dir.path())
+        .args(["--offline", "--json", "fmt", "--frozen"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(payload["details"]["reason"], "missing_tool");
+    let hint = payload["details"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("--frozen"),
+        "expected hint to explain frozen mode behavior: {hint:?}"
     );
 }

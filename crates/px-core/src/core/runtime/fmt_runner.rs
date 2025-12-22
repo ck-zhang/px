@@ -12,8 +12,8 @@ use crate::{
     manifest_snapshot, missing_project_outcome, outcome_from_output,
     progress::ProgressSuspendGuard,
     tools::{
-        disable_proxy_env, ensure_tool_env_scripts, load_installed_tool, tool_install,
-        repair_tool_env_from_lock, ToolInstallRequest, MIN_PYTHON_REQUIREMENT,
+        disable_proxy_env, ensure_tool_env_scripts, load_installed_tool, repair_tool_env_from_lock,
+        tool_install, ToolInstallRequest, MIN_PYTHON_REQUIREMENT,
     },
     CommandContext, CommandStatus, ExecutionOutcome, InstallUserError,
 };
@@ -94,7 +94,7 @@ fn execute_quality_tool(
     tool: &QualityTool,
 ) -> Result<ToolRun> {
     let python_args = tool.python_args(&request.args);
-    let prepared = match prepare_tool_run(env, kind, tool) {
+    let prepared = match prepare_tool_run(env, kind, request, tool) {
         Ok(prepared) => prepared,
         Err(outcome) => return Ok(ToolRun::Outcome(outcome)),
     };
@@ -158,6 +158,7 @@ struct PreparedToolRun {
 fn prepare_tool_run(
     env: &QualityToolEnv<'_, '_>,
     kind: QualityKind,
+    request: &FmtRequest,
     tool: &QualityTool,
 ) -> Result<PreparedToolRun, ExecutionOutcome> {
     let install_request = ToolInstallRequest {
@@ -169,6 +170,26 @@ fn prepare_tool_run(
     let descriptor = match load_installed_tool(tool.install_name()) {
         Ok(desc) => desc,
         Err(_) => {
+            if request.frozen {
+                return Err(ExecutionOutcome::user_error(
+                    format!(
+                        "px {}: tool '{}' is not installed",
+                        kind.section_name(),
+                        tool.display_name()
+                    ),
+                    json!({
+                        "reason": "missing_tool",
+                        "tool": tool.display_name(),
+                        "module": tool.module,
+                        "config_source": env.config.source.as_str(),
+                        "pyproject": env.pyproject.display().to_string(),
+                        "recommendation": {
+                            "command": tool.install_command(),
+                        },
+                        "hint": "Re-run without --frozen to allow px to auto-install missing tools.",
+                    }),
+                ));
+            }
             if should_announce_tool_install(env.ctx) {
                 eprintln!(
                     "px {}: installing {}",
@@ -276,9 +297,28 @@ fn prepare_tool_run(
     if let Err(err) = ensure_project_environment_synced(env.ctx, &snapshot) {
         match err.downcast::<InstallUserError>() {
             Ok(user) => {
+                if request.frozen {
+                    return Err(ExecutionOutcome::user_error(
+                        format!(
+                            "px {}: tool '{}' is not ready",
+                            kind.section_name(),
+                            descriptor.name
+                        ),
+                        json!({
+                            "reason": "tool_not_ready",
+                            "tool": descriptor.name,
+                            "module": tool.module,
+                            "config_source": env.config.source.as_str(),
+                            "details": user.details,
+                            "hint": tool.install_command(),
+                        }),
+                    ));
+                }
                 let _suspend = ProgressSuspendGuard::new();
                 if snapshot.lock_path.exists() {
-                    if let Err(err) = repair_tool_env_from_lock(env.ctx, &descriptor.root, &runtime_selection) {
+                    if let Err(err) =
+                        repair_tool_env_from_lock(env.ctx, &descriptor.root, &runtime_selection)
+                    {
                         return Err(ExecutionOutcome::user_error(
                             format!(
                                 "px {}: tool '{}' is not ready",
@@ -300,7 +340,10 @@ fn prepare_tool_run(
                         Ok(outcome) => outcome,
                         Err(err) => match err.downcast::<InstallUserError>() {
                             Ok(user) => {
-                                return Err(ExecutionOutcome::user_error(user.message, user.details));
+                                return Err(ExecutionOutcome::user_error(
+                                    user.message,
+                                    user.details,
+                                ));
                             }
                             Err(other) => {
                                 return Err(ExecutionOutcome::failure(
@@ -429,6 +472,10 @@ fn prepare_tool_run(
         ),
         ("PX_COMMAND_JSON".into(), env.env_payload.to_string()),
     ];
+    if tool.module == "ruff" {
+        let cache_dir = env.project_root.join(".px").join("ruff-cache");
+        envs.push(("RUFF_CACHE_DIR".into(), cache_dir.display().to_string()));
+    }
     disable_proxy_env(&mut envs);
 
     Ok(PreparedToolRun {

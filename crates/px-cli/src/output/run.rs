@@ -23,7 +23,7 @@ pub(super) fn handle_run_output(
     match outcome.status {
         CommandStatus::Ok => {
             if is_passthrough(&outcome.details) {
-                if !outcome.message.is_empty() {
+                if !opts.quiet && !outcome.message.is_empty() {
                     println!("{}", outcome.message);
                 }
             } else if opts.verbose > 0 || opts.debug || opts.trace {

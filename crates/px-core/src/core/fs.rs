@@ -316,7 +316,10 @@ mod tests {
 
         crate::store::cas::make_read_only_recursive(&path).expect("harden perms");
         drop(dir);
-        assert!(!path.exists(), "temp dir should be deleted even when read-only");
+        assert!(
+            !path.exists(),
+            "temp dir should be deleted even when read-only"
+        );
     }
 
     #[test]

@@ -67,7 +67,12 @@ fn tool_run_inner(
             ))
         }
     };
-    let runtime_selection = resolve_runtime(Some(&metadata.runtime_version))?;
+    let runtime_selection = if !metadata.runtime_path.trim().is_empty() {
+        resolve_runtime(Some(&metadata.runtime_path))
+            .or_else(|_| resolve_runtime(Some(&metadata.runtime_version)))?
+    } else {
+        resolve_runtime(Some(&metadata.runtime_version))?
+    };
     env::set_var("PX_RUNTIME_PYTHON", &runtime_selection.record.path);
     if let Err(err) = ensure_tool_env_scripts(&tool_root) {
         if allow_repair

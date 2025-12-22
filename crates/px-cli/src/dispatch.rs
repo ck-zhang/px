@@ -205,10 +205,8 @@ where
                     ),
                 ))
             } else {
-                let issues: Vec<String> = err
-                    .chain()
-                    .map(std::string::ToString::to_string)
-                    .collect();
+                let issues: Vec<String> =
+                    err.chain().map(std::string::ToString::to_string).collect();
                 Ok((
                     info,
                     px_core::ExecutionOutcome::failure(

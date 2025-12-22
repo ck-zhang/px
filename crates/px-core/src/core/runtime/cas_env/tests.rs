@@ -63,6 +63,64 @@ fn runtime_archive_captures_full_tree() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn runtime_archive_ignores_scripts_dir_from_probe() -> Result<()> {
+    let temp = tempdir()?;
+    let root = temp.path().join("runtime");
+    let bin = root.join("bin");
+    let lib = root.join("lib/python3.11");
+    let include = root.join("include");
+    let tools = root.join("tools");
+    fs::create_dir_all(&bin)?;
+    fs::create_dir_all(&lib)?;
+    fs::create_dir_all(&include)?;
+    fs::create_dir_all(&tools)?;
+
+    let python = bin.join("python");
+    let payload = serde_json::json!({
+        "executable": python.display().to_string(),
+        "stdlib": lib.display().to_string(),
+        "platstdlib": lib.display().to_string(),
+        "include": include.display().to_string(),
+        "scripts": tools.display().to_string(),
+    });
+    let shim = format!("#!/bin/sh\ncat <<'JSON'\n{}\nJSON\n", payload.to_string());
+    fs::write(&python, shim)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&python, fs::Permissions::from_mode(0o755))?;
+    }
+
+    fs::write(lib.join("stdlib.py"), b"# stdlib")?;
+    fs::write(include.join("Python.h"), b"// header")?;
+    fs::write(tools.join("junk"), b"junk")?;
+
+    let runtime_meta = RuntimeMetadata {
+        path: python.display().to_string(),
+        version: "3.11.0".to_string(),
+        platform: "linux".to_string(),
+    };
+    let archive = runtime::runtime_archive(&runtime_meta)?;
+    let decoder = GzDecoder::new(&archive[..]);
+    let mut tar = Archive::new(decoder);
+    let mut seen = Vec::new();
+    for entry in tar.entries()? {
+        let entry = entry?;
+        seen.push(entry.path()?.into_owned());
+    }
+    assert!(
+        seen.contains(&PathBuf::from("bin/python")),
+        "interpreter should be captured"
+    );
+    assert!(
+        !seen.contains(&PathBuf::from("tools/junk")),
+        "runtime archive should not include sysconfig scripts dir"
+    );
+    Ok(())
+}
+
 #[cfg(not(windows))]
 #[test]
 fn python_shim_carries_runtime_site_and_home() -> Result<()> {

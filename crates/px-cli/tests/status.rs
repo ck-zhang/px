@@ -67,6 +67,9 @@ fn project_status_json_consistent() {
         .assert()
         .success();
     let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["message"], "px status: project status");
+    assert_eq!(payload["details"]["context"]["kind"], "project");
     assert_eq!(payload["context"]["kind"], "project");
     let state = payload["project"]["state"]
         .as_str()
@@ -131,6 +134,25 @@ fn project_status_detects_manifest_drift() {
     assert_eq!(payload["project"]["state"], "NeedsLock");
     assert_eq!(payload["next_action"]["kind"], "sync");
     assert_eq!(payload["env"]["status"], "stale");
+}
+
+#[test]
+fn project_status_json_includes_envelope_fields_without_network() {
+    let _guard = test_env_guard();
+    let (_tmp, root) = common::prepare_fixture("status-json-envelope");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
+        .args(["--json", "status"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(payload["message"], "px status: project status");
+    assert_eq!(payload["context"]["kind"], "project");
+    assert_eq!(payload["details"]["context"]["kind"], "project");
 }
 
 #[test]
@@ -358,10 +380,30 @@ fn status_reports_missing_project() {
         .args(["status"])
         .assert()
         .failure();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("PX001"),
-        "missing project error should carry PX001 code: {stdout:?}"
+        stderr.contains("PX001"),
+        "missing project error should carry PX001 code on stderr: {stderr:?}"
+    );
+}
+
+#[test]
+fn quiet_mode_still_emits_errors_on_stderr() {
+    let _guard = test_env_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(temp.path())
+        .args(["--quiet", "status"])
+        .assert()
+        .failure();
+    assert!(
+        assert.get_output().stdout.is_empty(),
+        "quiet mode should not write human output to stdout"
+    );
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("PX001"),
+        "quiet mode should still emit errors on stderr: {stderr:?}"
     );
 }
 

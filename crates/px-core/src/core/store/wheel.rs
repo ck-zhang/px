@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
 
 use anyhow::{anyhow, Context, Result};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
@@ -14,6 +15,7 @@ use super::{
     ArtifactRequest, CachedArtifact, CachedWheelFile, WheelUnpackMetadata, HTTP_TIMEOUT,
     USER_AGENT, WHEEL_MARKER_NAME,
 };
+use crate::InstallUserError;
 use std::borrow::Cow;
 
 /// Ensure the requested wheel is available within the cache.
@@ -236,6 +238,23 @@ pub fn http_client() -> Result<reqwest::blocking::Client> {
 }
 
 pub fn download_with_retry(dest: &Path, request: &ArtifactRequest<'_>) -> Result<CachedWheelFile> {
+    if std::env::var("PX_ONLINE").ok().is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off" | ""
+        )
+    }) {
+        return Err(InstallUserError::new(
+            "PX_ONLINE=1 required to download packages",
+            json!({
+                "reason": "offline",
+                "url": request.url,
+                "filename": request.filename,
+                "hint": "Re-run with --online / set PX_ONLINE=1, or populate the cache while online.",
+            }),
+        )
+        .into());
+    }
     let mut last_err = None;
     for _ in 0..super::DOWNLOAD_ATTEMPTS {
         match download_once(dest, request) {

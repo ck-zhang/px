@@ -114,7 +114,26 @@ fn github_test_locator_override() -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    Some(format!("git+file://{trimmed}"))
+    if trimmed.starts_with("git+") {
+        return Some(trimmed.to_string());
+    }
+    if trimmed.starts_with("file://")
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+    {
+        return Some(format!("git+{trimmed}"));
+    }
+
+    let path = PathBuf::from(trimmed);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let url = url::Url::from_directory_path(&absolute)
+        .or_else(|()| url::Url::from_file_path(&absolute))
+        .ok()?;
+    Some(format!("git+{url}"))
 }
 
 fn github_locator(org: &str, repo: &str) -> String {

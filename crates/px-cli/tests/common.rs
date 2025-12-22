@@ -452,6 +452,25 @@ pub fn require_online() -> bool {
 }
 
 #[must_use]
+pub fn git_file_locator(path: &Path) -> String {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    let mut normalized = abs.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        let bytes = normalized.as_bytes();
+        if bytes.len() >= 2 && bytes[1] == b':' {
+            normalized = format!("/{normalized}");
+        }
+    }
+    format!("git+file://{normalized}")
+}
+
+#[must_use]
 /// Retrieves the cached artifact path for the specified dependency.
 ///
 /// # Panics

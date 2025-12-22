@@ -521,6 +521,26 @@ fn resolver_failure_details(err: &anyhow::Error) -> Value {
     let message = err.to_string();
     let mut issues = vec![message.clone()];
     issues.extend(err.chain().skip(1).map(std::string::ToString::to_string));
+    let offline = std::env::var("PX_ONLINE").ok().is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off" | ""
+        )
+    });
+    let lowered = message.to_ascii_lowercase();
+    if offline
+        && (lowered.contains("network connectivity is disabled")
+            || lowered.contains("network was disabled")
+            || lowered.contains("network is disabled")
+            || lowered.contains("offline"))
+    {
+        return json!({
+            "reason": "offline",
+            "issues": issues,
+            "hint": "PX_ONLINE=1 required for dependency resolution; rerun with --online or populate the cache while online.",
+            "code": diag_commands::SYNC,
+        });
+    }
     let details = json!({
         "reason": "resolve_failed",
         "issues": issues,

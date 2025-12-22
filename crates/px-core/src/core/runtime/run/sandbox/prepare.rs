@@ -86,10 +86,10 @@ pub(in super::super) fn prepare_project_sandbox(
         .filter(|path| !path.trim().is_empty())
         .map(PathBuf::from)
         .or_else(|| {
-        site_packages
-            .as_ref()
-            .and_then(|site| env_root_from_site_packages(site))
-    });
+            site_packages
+                .as_ref()
+                .and_then(|site| env_root_from_site_packages(site))
+        });
     let env_root = match env_root {
         Some(root) => root,
         None => {

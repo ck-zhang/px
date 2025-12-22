@@ -50,31 +50,44 @@ pub fn emit_output(
         }
     }
 
-    let style = Style::new(opts.no_color, atty::is(Stream::Stdout));
+    let style_out = Style::new(opts.no_color, atty::is(Stream::Stdout));
+    let style_err = Style::new(opts.no_color, atty::is(Stream::Stderr));
 
     if info.group == CommandGroup::Status {
         if let Ok(payload) = serde_json::from_value::<StatusPayload>(outcome.details.clone()) {
             let render = status_opts.unwrap_or_default();
-            return status::emit_status_output(opts, &style, render, &payload, code);
+            return status::emit_status_output(opts, &style_out, render, &payload, code);
         }
     }
 
     if opts.json || subcommand_json {
         let payload = px_core::to_json_response(info, outcome, code);
         println!("{}", serde_json::to_string_pretty(&payload)?);
-    } else if !opts.quiet {
+    } else {
         if info.group == CommandGroup::Explain && matches!(outcome.status, CommandStatus::Ok) {
-            println!("{}", outcome.message);
+            if !opts.quiet {
+                println!("{}", outcome.message);
+            }
             return Ok(code);
         }
-        if run::handle_run_output(opts, &style, info, outcome) {
+
+        if run::handle_run_output(opts, &style_out, info, outcome) {
             return Ok(code);
         }
-        if let Some(note) = details::autosync_note_from_details(&outcome.details) {
-            let line = format!("px {}: {}", info.name, note);
-            println!("{}", style.info(&line));
+
+        if !opts.quiet {
+            if let Some(note) = details::autosync_note_from_details(&outcome.details) {
+                let line = format!("px {}: {}", info.name, note);
+                println!("{}", style_out.info(&line));
+            }
         }
-        let migrate_table = migrate::render_migrate_table(&style, info, &outcome.details);
+
+        let migrate_table = if opts.quiet {
+            None
+        } else {
+            migrate::render_migrate_table(&style_out, info, &outcome.details)
+        };
+
         let reporter_rendered = outcome
             .details
             .as_object()
@@ -84,86 +97,96 @@ pub fn emit_output(
         if info.group == CommandGroup::Test && reporter_rendered {
             return Ok(code);
         }
+
         if info.group == CommandGroup::Test
             && outcome.status == CommandStatus::Failure
-            && failure::render_test_failure(&style, info, outcome)
+            && failure::render_test_failure(&style_out, info, outcome)
         {
             if let Some(table) = migrate_table {
                 println!("{table}");
             }
             return Ok(code);
         }
-        if let CommandStatus::Ok = outcome.status {
-            if details::is_passthrough(&outcome.details) {
-                println!("{}", outcome.message);
-            } else {
-                let message = px_core::format_status_message(info, &outcome.message);
-                println!("{}", style.status(&outcome.status, &message));
-                let mut hint_emitted = false;
-                if let Some(trace) = details::traceback_from_details(&style, &outcome.details) {
-                    println!("{}", trace.body);
-                    if let Some(line) = trace.hint_line {
-                        println!("{line}");
-                        hint_emitted = true;
+
+        match outcome.status {
+            CommandStatus::Ok => {
+                if opts.quiet {
+                    return Ok(code);
+                }
+                if details::is_passthrough(&outcome.details) {
+                    println!("{}", outcome.message);
+                } else {
+                    let message = px_core::format_status_message(info, &outcome.message);
+                    println!("{}", style_out.status(&outcome.status, &message));
+                    let mut hint_emitted = false;
+                    if let Some(trace) =
+                        details::traceback_from_details(&style_out, &outcome.details)
+                    {
+                        println!("{}", trace.body);
+                        if let Some(line) = trace.hint_line {
+                            println!("{line}");
+                            hint_emitted = true;
+                        }
+                    }
+                    if !hint_emitted {
+                        if let Some(hint) = details::hint_from_details(&outcome.details) {
+                            let hint_line = format!("Tip: {hint}");
+                            println!("{}", style_out.info(&hint_line));
+                        }
                     }
                 }
-                if !hint_emitted {
-                    if let Some(hint) = details::hint_from_details(&outcome.details) {
-                        let hint_line = format!("Tip: {hint}");
-                        println!("{}", style.info(&hint_line));
+            }
+            CommandStatus::UserError | CommandStatus::Failure => {
+                let trace = details::traceback_from_details(&style_err, &outcome.details);
+                if info.group == CommandGroup::Test
+                    && outcome
+                        .details
+                        .as_object()
+                        .and_then(|map| map.get("suppress_cli_frame"))
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                {
+                    return Ok(code);
+                }
+                let header = format!("{}  {}", failure::error_code(info), outcome.message);
+                eprintln!("{}", style_err.error_header(&header));
+                eprintln!();
+                eprintln!("Why:");
+                for reason in failure::collect_why_bullets(&outcome.details, &outcome.message) {
+                    eprintln!("  • {reason}");
+                }
+                let fixes = failure::collect_fix_bullets(&outcome.details);
+                if !fixes.is_empty() {
+                    eprintln!();
+                    eprintln!("Fix:");
+                    for fix in fixes {
+                        eprintln!("{}", style_err.fix_bullet(&format!("  • {fix}")));
                     }
                 }
-            }
-        } else {
-            let trace = details::traceback_from_details(&style, &outcome.details);
-            if info.group == CommandGroup::Test
-                && outcome
-                    .details
-                    .as_object()
-                    .and_then(|map| map.get("suppress_cli_frame"))
-                    .and_then(Value::as_bool)
-                    == Some(true)
-            {
-                return Ok(code);
-            }
-            let header = format!("{}  {}", failure::error_code(info), outcome.message);
-            println!("{}", style.error_header(&header));
-            println!();
-            println!("Why:");
-            for reason in failure::collect_why_bullets(&outcome.details, &outcome.message) {
-                println!("  • {reason}");
-            }
-            let fixes = failure::collect_fix_bullets(&outcome.details);
-            if !fixes.is_empty() {
-                println!();
-                println!("Fix:");
-                for fix in fixes {
-                    println!("{}", style.fix_bullet(&format!("  • {fix}")));
+                let stdout = details::output_from_details(&outcome.details, "stdout");
+                let stderr = details::output_from_details(&outcome.details, "stderr");
+                if let Some(stdout) = stdout {
+                    eprintln!();
+                    eprintln!("stdout:");
+                    eprintln!("{stdout}");
+                }
+                if let Some(trace) = trace.as_ref() {
+                    eprintln!();
+                    eprintln!("{}", trace.body);
+                    if let Some(line) = trace.hint_line.as_ref() {
+                        eprintln!("{line}");
+                    }
+                } else if let Some(stderr) = stderr {
+                    if !stderr.trim().is_empty() {
+                        eprintln!();
+                        eprintln!("stderr:");
+                        eprintln!("{stderr}");
+                    }
+                }
+                if let Some(table) = migrate_table {
+                    eprintln!("{table}");
                 }
             }
-            let stdout = details::output_from_details(&outcome.details, "stdout");
-            let stderr = details::output_from_details(&outcome.details, "stderr");
-            if let Some(stdout) = stdout {
-                println!();
-                println!("stdout:");
-                println!("{stdout}");
-            }
-            if let Some(trace) = trace.as_ref() {
-                println!();
-                println!("{}", trace.body);
-                if let Some(line) = trace.hint_line.as_ref() {
-                    println!("{line}");
-                }
-            } else if let Some(stderr) = stderr {
-                if !stderr.trim().is_empty() {
-                    println!();
-                    println!("stderr:");
-                    println!("{stderr}");
-                }
-            }
-        }
-        if let Some(table) = migrate_table {
-            println!("{table}");
         }
     }
 

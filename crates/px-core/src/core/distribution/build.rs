@@ -235,8 +235,11 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let project_root = temp.path().join("proj");
         fs::create_dir_all(&project_root).expect("project root");
-        fs::write(project_root.join("pyproject.toml"), "[project]\nname = \"proj\"\n")
-            .expect("pyproject");
+        fs::write(
+            project_root.join("pyproject.toml"),
+            "[project]\nname = \"proj\"\n",
+        )
+        .expect("pyproject");
         let out_dir = project_root.join("dist");
         fs::create_dir_all(&out_dir).expect("dist");
 
@@ -270,7 +273,11 @@ mod tests {
             "prepare_build_root must not create src/ in the project"
         );
         assert!(
-            staged_path.join("src").join("proj").join("__init__.py").exists(),
+            staged_path
+                .join("src")
+                .join("proj")
+                .join("__init__.py")
+                .exists(),
             "staged build root should contain a stub package"
         );
 

@@ -6,6 +6,8 @@ px supports Linux, macOS, and Windows.
 
 ## Quick start (single project)
 
+If `px init` reports `python runtime unavailable`, register a runtime first (e.g. `px python install 3.12`, or `px python install 3.12 --path /path/to/python3.12`).
+
 1. From your project root, run `px init` to create `pyproject.toml`, `px.lock`, and `.px/`.
 2. Declare dependencies with `px add <pkg>...`.
 3. Materialize or refresh the env with `px sync` (auto-resolves if needed).

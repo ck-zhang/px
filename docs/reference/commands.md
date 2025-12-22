@@ -74,7 +74,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 * **Behavior**:
 
   * Create/update `pyproject.toml` with minimal `[project]` and `[tool.px]`.
-  * Choose a runtime satisfying `requires-python` (prefer px-managed; otherwise process Python if compatible).
+  * Choose a registered runtime satisfying `requires-python` (see `px python install`).
   * Create an empty `px.lock` for the chosen runtime.
   * Materialize a global env under `~/.px/envs/<profile_oid>` matching `px.lock` and update the local pointer at `.px/envs/current`.
 
@@ -239,7 +239,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
   * Does not resolve or update `px.lock`; does not rebuild project env in dev or CI.
   * May modify code via invoked tools.
 
-* **Missing tools**: auto-install into the tool store.
+* **Missing tools**: auto-install into the tool store (unless `--frozen`, which refuses auto-install/repair).
 * **Tool env health**: tool envs are verified before execution; if a tool reports “not ready”, rebuild it with `px tool install <tool>`.
 * **Postconditions**: project manifest/lock/env unchanged; tool envs may be created/updated.
 

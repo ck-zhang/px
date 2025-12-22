@@ -10,8 +10,8 @@ pub use install::{tool_install, tool_upgrade, ToolInstallRequest, ToolUpgradeReq
 pub use list_remove::{tool_list, tool_remove, ToolListRequest, ToolRemoveRequest};
 pub use run::{tool_run, ToolRunRequest};
 
-pub(crate) use metadata::{load_installed_tool, MIN_PYTHON_REQUIREMENT};
 pub(crate) use install::ensure_tool_env_scripts;
 pub(crate) use install::repair_tool_env_from_lock;
 pub(crate) use install::resolve_runtime;
+pub(crate) use metadata::{load_installed_tool, MIN_PYTHON_REQUIREMENT};
 pub(crate) use run::disable_proxy_env;

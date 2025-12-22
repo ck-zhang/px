@@ -572,6 +572,24 @@ pub(crate) fn fetch_release(
     version: &str,
     specifier: &str,
 ) -> Result<PypiReleaseResponse> {
+    if std::env::var("PX_ONLINE").ok().is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off" | ""
+        )
+    }) {
+        return Err(InstallUserError::new(
+            "PX_ONLINE=1 required to query PyPI",
+            json!({
+                "reason": "offline",
+                "package": normalized,
+                "version": version,
+                "specifier": specifier,
+                "hint": "Re-run with --online / set PX_ONLINE=1, or prefetch artifacts while online.",
+            }),
+        )
+        .into());
+    }
     let url = format!("{PYPI_BASE_URL}/{normalized}/{version}/json");
     let mut last_json_error = None;
     let mut last_send_error = None;

@@ -23,7 +23,7 @@ use crate::workspace::{
     discover_workspace_scope, workspace_add, workspace_remove, workspace_update,
 };
 
-use super::{ensure_mutation_allowed, evaluate_project_state};
+use super::{ensure_mutation_allowed, evaluate_project_state, ProjectLock};
 
 #[derive(Clone, Debug)]
 pub struct ProjectAddRequest {
@@ -69,6 +69,9 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
     }
 
     let snapshot = manifest_snapshot()?;
+    let Some(_lock) = ProjectLock::try_acquire(&snapshot.root)? else {
+        return Ok(project_locked_outcome("add"));
+    };
     let state_report = evaluate_project_state(ctx, &snapshot)?;
     if let Err(outcome) = ensure_mutation_allowed(&snapshot, &state_report, MutationCommand::Add) {
         return Ok(outcome);
@@ -170,6 +173,9 @@ pub fn project_remove(
     }
 
     let snapshot = manifest_snapshot()?;
+    let Some(_lock) = ProjectLock::try_acquire(&snapshot.root)? else {
+        return Ok(project_locked_outcome("remove"));
+    };
     let state_report = evaluate_project_state(ctx, &snapshot)?;
     if let Err(outcome) = ensure_mutation_allowed(&snapshot, &state_report, MutationCommand::Remove)
     {
@@ -263,6 +269,9 @@ pub fn project_update(
     }
 
     let snapshot = manifest_snapshot()?;
+    let Some(_lock) = ProjectLock::try_acquire(&snapshot.root)? else {
+        return Ok(project_locked_outcome("update"));
+    };
     let state_report = evaluate_project_state(ctx, &snapshot)?;
     if let Err(outcome) = ensure_mutation_allowed(&snapshot, &state_report, MutationCommand::Update)
     {
@@ -485,6 +494,16 @@ enum LoosenOutcome {
     Modified(String),
     AlreadyLoose,
     Unsupported,
+}
+
+fn project_locked_outcome(action: &str) -> ExecutionOutcome {
+    ExecutionOutcome::user_error(
+        format!("px {action}: another px command is already running for this project"),
+        json!({
+            "reason": "project_locked",
+            "hint": "Wait for the other px command to finish, then retry.",
+        }),
+    )
 }
 
 fn loosen_dependency_spec(spec: &str) -> Result<LoosenOutcome> {

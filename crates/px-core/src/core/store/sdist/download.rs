@@ -4,11 +4,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use hex;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use super::super::SdistRequest;
 use super::super::{http_client, DOWNLOAD_ATTEMPTS};
+use crate::InstallUserError;
 
 pub(super) fn download_sdist(request: &SdistRequest<'_>) -> Result<(NamedTempFile, String)> {
     if request.url.starts_with("file://") || Path::new(request.url).exists() {
@@ -32,6 +34,24 @@ pub(super) fn download_sdist(request: &SdistRequest<'_>) -> Result<(NamedTempFil
         }
         let sha256 = hex::encode(hasher.finalize());
         return Ok((tmp, sha256));
+    }
+
+    if std::env::var("PX_ONLINE").ok().is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off" | ""
+        )
+    }) {
+        return Err(InstallUserError::new(
+            "PX_ONLINE=1 required to download packages",
+            json!({
+                "reason": "offline",
+                "url": request.url,
+                "filename": request.filename,
+                "hint": "Re-run with --online / set PX_ONLINE=1, or populate the cache while online.",
+            }),
+        )
+        .into());
     }
 
     let mut last_err = None;

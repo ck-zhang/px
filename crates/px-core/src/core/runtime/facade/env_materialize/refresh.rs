@@ -235,7 +235,7 @@ pub(in super::super) fn project_site_env(
     Ok(envs)
 }
 
-fn ensure_project_pip(
+pub(crate) fn ensure_project_pip(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
     site_dir: &Path,
@@ -486,6 +486,55 @@ pub(in super::super) fn module_available(
     Ok(output.code == 0)
 }
 
+fn cached_seed_wheel(
+    cache_root: &Path,
+    name: &str,
+    version: &str,
+    preferred_suffix: Option<&str>,
+) -> Result<Option<PathBuf>> {
+    let dir = cache_root.join("wheels").join(name).join(version);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    let mut wheels = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let Ok(ty) = entry.file_type() else {
+            continue;
+        };
+        if !ty.is_file() {
+            continue;
+        }
+        if !path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("whl"))
+        {
+            continue;
+        }
+        wheels.push(path);
+    }
+    wheels.sort();
+    if wheels.is_empty() {
+        return Ok(None);
+    }
+    if let Some(suffix) = preferred_suffix {
+        if let Some(found) = wheels.iter().find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(suffix))
+        }) {
+            return Ok(Some(found.clone()));
+        }
+    }
+    Ok(wheels.into_iter().next())
+}
+
 fn ensure_setuptools_seed(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
@@ -495,6 +544,72 @@ fn ensure_setuptools_seed(
 ) -> Result<()> {
     if module_available(ctx, snapshot, env_python, envs, "setuptools")? {
         return Ok(());
+    }
+
+    if !ctx.is_online() {
+        let wheel_path = cached_seed_wheel(
+            &ctx.cache().path,
+            "setuptools",
+            SETUPTOOLS_SEED_VERSION,
+            Some("py3-none-any.whl"),
+        )?
+        .ok_or_else(|| {
+            InstallUserError::new(
+                "PX_ONLINE=1 required to seed setuptools in the px environment",
+                json!({
+                    "package": "setuptools",
+                    "version": SETUPTOOLS_SEED_VERSION,
+                    "reason": "offline",
+                    "hint": "rerun with --online / set PX_ONLINE=1 to populate the wheel cache",
+                }),
+            )
+        })?;
+        let output = ctx.python_runtime().run_command(
+            env_python
+                .to_str()
+                .ok_or_else(|| anyhow!("invalid python path"))?,
+            &[
+                "-m".to_string(),
+                "pip".to_string(),
+                "install".to_string(),
+                "--no-deps".to_string(),
+                "--no-index".to_string(),
+                "--disable-pip-version-check".to_string(),
+                "--no-compile".to_string(),
+                "--no-warn-script-location".to_string(),
+                "--target".to_string(),
+                site_packages.display().to_string(),
+                wheel_path.display().to_string(),
+            ],
+            envs,
+            &snapshot.root,
+        )?;
+        if output.code != 0 {
+            return Err(InstallUserError::new(
+                "failed to seed setuptools in the px environment (offline)",
+                json!({
+                    "package": "setuptools",
+                    "version": SETUPTOOLS_SEED_VERSION,
+                    "reason": "offline",
+                    "stdout": output.stdout,
+                    "stderr": output.stderr,
+                }),
+            )
+            .into());
+        }
+        if module_available(ctx, snapshot, env_python, envs, "setuptools")? {
+            return Ok(());
+        }
+        return Err(InstallUserError::new(
+            "setuptools seed did not install correctly",
+            json!({
+                "package": "setuptools",
+                "version": SETUPTOOLS_SEED_VERSION,
+                "reason": "offline",
+                "hint": "rerun with network access to refresh the environment",
+            }),
+        )
+        .into());
     }
 
     let release = ctx
@@ -830,6 +945,69 @@ pub(in super::super) fn ensure_uv_seed(
         || module_available(ctx, snapshot, env_python, envs, "uv").unwrap_or(false)
     {
         return Ok(());
+    }
+
+    if !ctx.is_online() {
+        let wheel_path = cached_seed_wheel(&ctx.cache().path, "uv", UV_SEED_VERSION, None)?
+            .ok_or_else(|| {
+                InstallUserError::new(
+                    "PX_ONLINE=1 required to seed uv in the px environment",
+                    json!({
+                        "package": "uv",
+                        "version": UV_SEED_VERSION,
+                        "reason": "offline",
+                        "hint": "rerun with --online / set PX_ONLINE=1 to populate the wheel cache",
+                    }),
+                )
+            })?;
+        let output = ctx.python_runtime().run_command(
+            env_python
+                .to_str()
+                .ok_or_else(|| anyhow!("invalid python path"))?,
+            &[
+                "-m".into(),
+                "pip".into(),
+                "install".into(),
+                "--no-deps".into(),
+                "--no-index".into(),
+                "--disable-pip-version-check".into(),
+                "--no-compile".into(),
+                "--no-warn-script-location".into(),
+                "--prefix".into(),
+                site_dir.display().to_string(),
+                wheel_path.display().to_string(),
+            ],
+            envs,
+            &snapshot.root,
+        )?;
+        if output.code != 0 {
+            return Err(InstallUserError::new(
+                "failed to seed uv in the px environment (offline)",
+                json!({
+                    "package": "uv",
+                    "version": UV_SEED_VERSION,
+                    "reason": "offline",
+                    "stdout": output.stdout,
+                    "stderr": output.stderr,
+                }),
+            )
+            .into());
+        }
+        if has_uv_cli(site_dir)
+            || module_available(ctx, snapshot, env_python, envs, "uv").unwrap_or(false)
+        {
+            return Ok(());
+        }
+        return Err(InstallUserError::new(
+            "uv seed did not install correctly",
+            json!({
+                "package": "uv",
+                "version": UV_SEED_VERSION,
+                "reason": "offline",
+                "hint": "rerun with network access to refresh the environment",
+            }),
+        )
+        .into());
     }
 
     let release = ctx

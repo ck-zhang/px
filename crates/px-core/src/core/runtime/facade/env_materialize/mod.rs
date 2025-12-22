@@ -61,12 +61,13 @@ mod test_support;
 mod wheel;
 
 pub(crate) use markers::write_python_environment_markers;
+pub(crate) use refresh::ensure_project_pip;
 pub(crate) use refresh::refresh_project_site;
 pub(crate) use runtime::{detect_runtime_metadata, prepare_project_runtime, RuntimeMetadata};
 pub(crate) use site::{select_python_from_site, site_packages_dir};
+pub(crate) use state::persist_project_state;
 pub(super) use state::resolve_project_site;
 pub(crate) use state::{load_project_state, StoredEnvironment, StoredPython, StoredRuntime};
-pub(crate) use state::persist_project_state;
 
 #[cfg(test)]
 pub(super) use editable::load_editable_project_metadata;

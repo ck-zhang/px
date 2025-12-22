@@ -1,6 +1,8 @@
 use super::*;
 
-use crate::core::runtime::facade::{persist_project_state, StoredEnvironment, StoredPython, StoredRuntime};
+use crate::core::runtime::facade::{
+    ensure_project_pip, persist_project_state, StoredEnvironment, StoredPython, StoredRuntime,
+};
 use crate::python_sys::detect_interpreter_tags;
 
 pub(super) const CONSOLE_SCRIPT_DISPATCH: &str = r#"
@@ -299,12 +301,31 @@ pub(super) fn prepare_cas_native_run_context(
             }),
         ));
     }
-    let paths = build_pythonpath(ctx.fs(), project_root, Some(site_dir.clone())).map_err(|err| {
-        ExecutionOutcome::failure(
-            "failed to assemble PYTHONPATH for native CAS execution",
-            json!({ "error": err.to_string() }),
-        )
-    })?;
+
+    if let Err(err) = ensure_project_pip(
+        ctx,
+        snapshot,
+        &site_dir,
+        &runtime,
+        &cas_profile.runtime_path,
+    ) {
+        return Err(ExecutionOutcome::failure(
+            "failed to prepare native execution site",
+            json!({
+                "reason": "cas_native_site_setup_failed",
+                "error": err.to_string(),
+                "profile_oid": cas_profile.profile_oid,
+                "hint": "Re-run with --debug for more detail, or run `px sync` to rebuild the environment.",
+            }),
+        ));
+    }
+    let paths =
+        build_pythonpath(ctx.fs(), project_root, Some(site_dir.clone())).map_err(|err| {
+            ExecutionOutcome::failure(
+                "failed to assemble PYTHONPATH for native CAS execution",
+                json!({ "error": err.to_string() }),
+            )
+        })?;
 
     let pyc_cache_prefix = if env::var_os("PYTHONPYCACHEPREFIX").is_some() {
         None
@@ -365,7 +386,8 @@ pub(super) fn prepare_cas_native_run_context(
             version: runtime.version.clone(),
             platform: runtime.platform.clone(),
         };
-        if let Err(err) = persist_project_state(ctx.fs(), &snapshot.root, env_state, runtime_state) {
+        if let Err(err) = persist_project_state(ctx.fs(), &snapshot.root, env_state, runtime_state)
+        {
             return Err(ExecutionOutcome::failure(
                 "failed to persist project state",
                 json!({
@@ -851,6 +873,20 @@ fn ensure_cas_native_site_dir(
         .join(profile_oid)
         .join("sites")
         .join(site_key);
+    let site_packages = crate::site_packages_dir(&site_dir, runtime_version);
+    if site_dir.exists() {
+        let manifest_path = site_dir.join("manifest.json");
+        if let Ok(existing) = fs::read(&manifest_path) {
+            let ok = existing == manifest_json
+                && site_dir.join("px.pth").exists()
+                && site_dir.join("sitecustomize.py").exists()
+                && site_packages.join("px.pth").exists()
+                && site_packages.join("sitecustomize.py").exists();
+            if ok {
+                return Ok(site_dir);
+            }
+        }
+    }
     let temp_root = site_dir.with_extension("partial");
     if temp_root.exists() {
         let _ = fs::remove_dir_all(&temp_root);

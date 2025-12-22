@@ -171,7 +171,7 @@ fn run_url_github_blob_pinned_works_and_does_not_touch_cwd() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&caller)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_TEST_GITHUB_FILE_REPO", repo.display().to_string())
+        .env("PX_TEST_GITHUB_FILE_REPO", common::git_file_locator(&repo))
         .env_remove("CI")
         .args(["run", &url])
         .assert()
@@ -231,19 +231,19 @@ fn run_url_requires_pin_by_default_and_prints_fix() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&caller)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_TEST_GITHUB_FILE_REPO", repo.display().to_string())
+        .env("PX_TEST_GITHUB_FILE_REPO", common::git_file_locator(&repo))
         .env_remove("CI")
         .args(["run", url])
         .assert()
         .failure();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("unpinned URL refused"),
-        "expected pinned-by-default URL error, got {stdout:?}"
+        stderr.contains("unpinned URL refused"),
+        "expected pinned-by-default URL error, got {stderr:?}"
     );
     assert!(
-        stdout.contains("Fix:") && stdout.contains("--allow-floating"),
-        "expected Fix guidance for allow-floating, got {stdout:?}"
+        stderr.contains("Fix:") && stderr.contains("--allow-floating"),
+        "expected Fix guidance for allow-floating, got {stderr:?}"
     );
 }
 
@@ -281,7 +281,7 @@ fn run_url_floating_is_refused_in_ci_and_frozen_even_with_allow_floating() {
     cargo_bin_cmd!("px")
         .current_dir(&caller)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_TEST_GITHUB_FILE_REPO", repo.display().to_string())
+        .env("PX_TEST_GITHUB_FILE_REPO", common::git_file_locator(&repo))
         .env("CI", "1")
         .args(["run", "--allow-floating", url])
         .assert()
@@ -290,7 +290,7 @@ fn run_url_floating_is_refused_in_ci_and_frozen_even_with_allow_floating() {
     cargo_bin_cmd!("px")
         .current_dir(&caller)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_TEST_GITHUB_FILE_REPO", repo.display().to_string())
+        .env("PX_TEST_GITHUB_FILE_REPO", common::git_file_locator(&repo))
         .env_remove("CI")
         .args(["run", "--frozen", "--allow-floating", url])
         .assert()
@@ -332,22 +332,22 @@ fn run_url_offline_requires_cached_snapshot() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&caller)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_TEST_GITHUB_FILE_REPO", repo.display().to_string())
+        .env("PX_TEST_GITHUB_FILE_REPO", common::git_file_locator(&repo))
         .env_remove("CI")
         .args(["--offline", "run", &url])
         .assert()
         .failure();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("repo snapshot is not cached"),
-        "expected offline cache miss error, got {stdout:?}"
+        stderr.contains("repo snapshot is not cached"),
+        "expected offline cache miss error, got {stderr:?}"
     );
 
     // Populate cache online.
     cargo_bin_cmd!("px")
         .current_dir(&caller)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_TEST_GITHUB_FILE_REPO", repo.display().to_string())
+        .env("PX_TEST_GITHUB_FILE_REPO", common::git_file_locator(&repo))
         .env_remove("CI")
         .args(["run", &url])
         .assert()
@@ -360,7 +360,7 @@ fn run_url_offline_requires_cached_snapshot() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&caller)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_TEST_GITHUB_FILE_REPO", repo.display().to_string())
+        .env("PX_TEST_GITHUB_FILE_REPO", common::git_file_locator(&repo))
         .env_remove("CI")
         .args(["--offline", "run", &url])
         .assert()
@@ -428,7 +428,7 @@ fn run_url_sys_path_parity_supports_src_layout_like_local_console_script() {
         .env("PX_RUNTIME_PYTHON", &python)
         .env(
             "PX_TEST_GITHUB_FILE_REPO",
-            remote_repo.display().to_string(),
+            common::git_file_locator(&remote_repo),
         )
         .env_remove("CI")
         .args(["run", &url])
@@ -475,7 +475,7 @@ fn run_url_repo_tree_pinned_infers_console_script_entrypoint() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&caller)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_TEST_GITHUB_FILE_REPO", repo.display().to_string())
+        .env("PX_TEST_GITHUB_FILE_REPO", common::git_file_locator(&repo))
         .env_remove("CI")
         .args(["run", &url])
         .assert()
@@ -547,19 +547,19 @@ fn run_url_repo_tree_requires_explicit_entrypoint_when_ambiguous() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&caller)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_TEST_GITHUB_FILE_REPO", repo.display().to_string())
+        .env("PX_TEST_GITHUB_FILE_REPO", common::git_file_locator(&repo))
         .env_remove("CI")
         .args(["run", &url])
         .assert()
         .failure();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("multiple console scripts"),
-        "expected ambiguity error, got {stdout:?}"
+        stderr.contains("multiple console scripts"),
+        "expected ambiguity error, got {stderr:?}"
     );
     assert!(
-        stdout.contains("Specify one explicitly"),
-        "expected hint to specify an entrypoint, got {stdout:?}"
+        stderr.contains("Specify one explicitly"),
+        "expected hint to specify an entrypoint, got {stderr:?}"
     );
 }
 
@@ -610,7 +610,7 @@ fn run_url_repo_tree_allows_explicit_entrypoint_arg() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&caller)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_TEST_GITHUB_FILE_REPO", repo.display().to_string())
+        .env("PX_TEST_GITHUB_FILE_REPO", common::git_file_locator(&repo))
         .env_remove("CI")
         .args(["run", &url, "demo2"])
         .assert()
@@ -656,21 +656,21 @@ fn run_url_repo_tree_offline_requires_cached_snapshot() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&caller)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_TEST_GITHUB_FILE_REPO", repo.display().to_string())
+        .env("PX_TEST_GITHUB_FILE_REPO", common::git_file_locator(&repo))
         .env_remove("CI")
         .args(["--offline", "run", &url, "demo"])
         .assert()
         .failure();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("repo snapshot is not cached"),
-        "expected offline cache miss error, got {stdout:?}"
+        stderr.contains("repo snapshot is not cached"),
+        "expected offline cache miss error, got {stderr:?}"
     );
 
     cargo_bin_cmd!("px")
         .current_dir(&caller)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_TEST_GITHUB_FILE_REPO", repo.display().to_string())
+        .env("PX_TEST_GITHUB_FILE_REPO", common::git_file_locator(&repo))
         .env_remove("CI")
         .args(["run", &url, "demo"])
         .assert()
@@ -682,7 +682,7 @@ fn run_url_repo_tree_offline_requires_cached_snapshot() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&caller)
         .env("PX_RUNTIME_PYTHON", &python)
-        .env("PX_TEST_GITHUB_FILE_REPO", repo.display().to_string())
+        .env("PX_TEST_GITHUB_FILE_REPO", common::git_file_locator(&repo))
         .env_remove("CI")
         .args(["--offline", "run", &url, "demo"])
         .assert()

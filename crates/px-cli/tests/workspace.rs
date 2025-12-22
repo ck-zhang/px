@@ -170,7 +170,10 @@ exit 0
         .success();
     let payload = parse_json(&status);
 
-    assert_eq!(payload["workspace"]["env_clean"], serde_json::Value::Bool(true));
+    assert_eq!(
+        payload["workspace"]["env_clean"],
+        serde_json::Value::Bool(true)
+    );
     assert_eq!(payload["workspace"]["env_issue"], serde_json::Value::Null);
 }
 

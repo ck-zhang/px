@@ -157,6 +157,14 @@ fn px_test_streams_and_summarizes_runner_output() {
         "px reporter header should be present: {combined:?}"
     );
     assert!(
+        !combined.contains("\x1b["),
+        "px reporter should suppress ANSI escape codes when stdout is not a TTY: {combined:?}"
+    );
+    assert!(
+        !combined.contains('\r'),
+        "px reporter should avoid carriage-return spinners when stdout is not a TTY: {combined:?}"
+    );
+    assert!(
         status.success(),
         "px test should succeed, stdout: {combined:?}, stderr: {remaining_err:?}"
     );
@@ -167,6 +175,14 @@ fn px_test_streams_and_summarizes_runner_output() {
     assert!(
         combined.contains("RESULT"),
         "px test summary should be present in stdout: {combined:?}"
+    );
+    assert!(
+        !project.join(".pytest_cache").exists(),
+        "px test should keep pytest cache under .px/ to avoid polluting the project root"
+    );
+    assert!(
+        project.join(".px").join("pytest-cache").exists(),
+        "px test should create a cache dir under .px/ when running pytest"
     );
 
     fs::write(

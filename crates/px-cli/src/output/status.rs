@@ -3,6 +3,7 @@ use std::path::Path;
 use color_eyre::Result;
 use px_core::api as px_core;
 use px_core::{CommandStatus, StatusPayload};
+use serde_json::Value;
 
 use crate::style::Style;
 
@@ -19,7 +20,25 @@ pub(super) fn emit_status_output(
         return Ok(code);
     }
     if opts.json {
-        println!("{}", serde_json::to_string_pretty(payload)?);
+        let details = serde_json::to_value(payload)?;
+        let mut envelope = details.clone();
+        if let Value::Object(map) = &mut envelope {
+            let status = match code {
+                0 => "ok",
+                1 => "user-error",
+                _ => "error",
+            };
+            let message = match payload.context.kind {
+                px_core::StatusContextKind::Project => "px status: project status",
+                px_core::StatusContextKind::Workspace
+                | px_core::StatusContextKind::WorkspaceMember => "px status: workspace status",
+                px_core::StatusContextKind::None => "px status: no project",
+            };
+            map.insert("status".to_string(), Value::String(status.to_string()));
+            map.insert("message".to_string(), Value::String(message.to_string()));
+            map.insert("details".to_string(), details);
+        }
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
         return Ok(code);
     }
     if render.brief {

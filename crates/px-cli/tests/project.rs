@@ -130,12 +130,12 @@ fn project_init_refuses_when_pyproject_exists() {
         .assert()
         .failure();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("PX101") && stdout.contains("project already initialized"),
-        "expected polite refusal, got {stdout:?}"
+        stderr.contains("PX101") && stderr.contains("project already initialized"),
+        "expected polite refusal, got {stderr:?}"
     );
-    assert!(stdout.contains("Fix:"), "expected remediation guidance");
+    assert!(stderr.contains("Fix:"), "expected remediation guidance");
 }
 
 #[test]
@@ -154,19 +154,19 @@ fn project_init_reports_orphaned_lockfile() {
         .assert()
         .failure();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("px.lock found but pyproject.toml is missing"),
-        "expected missing manifest warning, got {stdout:?}"
+        stderr.contains("px.lock found but pyproject.toml is missing"),
+        "expected missing manifest warning, got {stderr:?}"
     );
     assert!(
-        stdout.contains("px.lock"),
-        "should mention existing px.lock: {stdout:?}"
+        stderr.contains("px.lock"),
+        "should mention existing px.lock: {stderr:?}"
     );
-    let lower = stdout.to_ascii_lowercase();
+    let lower = stderr.to_ascii_lowercase();
     assert!(
         lower.contains("restore pyproject.toml") || lower.contains("restore"),
-        "expected remediation about restoring/removing artifacts: {stdout:?}"
+        "expected remediation about restoring/removing artifacts: {stderr:?}"
     );
 }
 
@@ -189,10 +189,10 @@ fn project_init_cleans_up_when_runtime_missing() {
         .assert()
         .failure();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("python runtime unavailable"),
-        "expected runtime error message, got {stdout:?}"
+        stderr.contains("python runtime unavailable"),
+        "expected runtime error message, got {stderr:?}"
     );
     assert!(
         !project_dir.join("pyproject.toml").exists(),
@@ -629,14 +629,14 @@ fn project_remove_requires_direct_dependency() {
         .assert()
         .failure();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("PX111") && stdout.contains("package is not a direct dependency"),
-        "expected a clear error when removing unknown packages, got {stdout:?}"
+        stderr.contains("PX111") && stderr.contains("package is not a direct dependency"),
+        "expected a clear error when removing unknown packages, got {stderr:?}"
     );
     assert!(
-        stdout.contains("px why"),
-        "expected hint to mention px why, got {stdout:?}"
+        stderr.contains("px why"),
+        "expected hint to mention px why, got {stderr:?}"
     );
 }
 
@@ -650,7 +650,7 @@ fn px_commands_require_project_root() {
         .assert()
         .failure();
 
-    let stderr = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
         stderr.contains("No px project found. Run `px init` in your project directory first."),
         "expected root error, got output: {stderr:?}"
@@ -694,10 +694,10 @@ fn missing_project_hint_recommends_migrate_when_pyproject_exists() {
         .arg("status")
         .assert()
         .failure();
-    let stdout = String::from_utf8(human.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(human.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("px migrate"),
-        "human output should recommend px migrate when pyproject exists without px metadata: {stdout:?}"
+        stderr.contains("px migrate"),
+        "human output should recommend px migrate when pyproject exists without px metadata: {stderr:?}"
     );
 }
 
@@ -727,10 +727,10 @@ fn all_project_commands_surface_missing_project_errors() {
             .args(args)
             .assert()
             .failure();
-        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
         assert!(
-            stdout.contains(message),
-            "expected missing-project message for {args:?}, got {stdout:?}"
+            stderr.contains(message),
+            "expected missing-project message for {args:?}, got {stderr:?}"
         );
     }
 
@@ -964,7 +964,9 @@ fn sync_mentions_environment_refresh_when_lock_is_unchanged() {
     );
     let message = payload["message"].as_str().unwrap_or_default();
     assert!(
-        message.to_ascii_lowercase().contains("environment refreshed"),
+        message
+            .to_ascii_lowercase()
+            .contains("environment refreshed"),
         "expected sync output to mention environment refresh, got {message:?}"
     );
 }

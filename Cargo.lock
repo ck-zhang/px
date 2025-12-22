@@ -3067,6 +3067,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "color-eyre",
+ "fs4",
  "px-core",
  "px-domain",
  "serde",

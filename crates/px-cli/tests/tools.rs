@@ -122,8 +122,12 @@ fn tool_run_requires_lock_and_env() {
     let tool_root = tools_dir.path().join("ruff");
     std::fs::create_dir_all(&tool_root).expect("tool root");
 
+    let Some(info) = system_python_info() else {
+        eprintln!("skipping tool run test (python binary not found)");
+        return;
+    };
     write_minimal_tool_manifest(&tool_root, "ruff");
-    write_tool_metadata(&tool_root, "ruff");
+    write_tool_metadata(&tool_root, "ruff", &info);
 
     let assert = cargo_bin_cmd!("px")
         .env("PX_TOOLS_DIR", tools_dir.path())
@@ -171,7 +175,10 @@ fn tool_run_executes_happy_path_environment() {
     .expect("write echo module");
     std::fs::write(module_dir.join("__init__.py"), b"").expect("init file");
 
-    let info = system_python_info();
+    let Some(info) = system_python_info() else {
+        eprintln!("skipping tool run test (python binary not found)");
+        return;
+    };
     let lock_id = "test-lock-hash";
 
     write_minimal_tool_manifest(&tool_root, "ruff");
@@ -240,7 +247,10 @@ fn tool_run_without_args_honors_json_flag() {
     .expect("write echo module");
     std::fs::write(module_dir.join("__init__.py"), b"").expect("init file");
 
-    let info = system_python_info();
+    let Some(info) = system_python_info() else {
+        eprintln!("skipping tool json test (python binary not found)");
+        return;
+    };
     let lock_id = "test-lock-hash";
 
     write_minimal_tool_manifest(&tool_root, "ruff");
@@ -284,11 +294,75 @@ fn tool_run_without_args_honors_json_flag() {
 }
 
 #[test]
+fn tool_run_falls_back_to_recorded_runtime_path_when_registry_missing() {
+    let tools_dir = tempdir().expect("tools dir");
+    let tool_store = tempdir().expect("tool store dir");
+    let cache_dir = tempdir().expect("cache dir");
+    let store_dir = cache_dir.path().join("store");
+    let envs_dir = cache_dir.path().join("envs");
+    fs::create_dir_all(&store_dir).expect("create store dir");
+    fs::create_dir_all(&envs_dir).expect("create envs dir");
+    let registry_dir = tempdir().expect("runtime registry dir");
+    let registry = registry_dir.path().join("runtimes.json");
+
+    let tool_root = tools_dir.path().join("ruff");
+    let site_dir = tool_root.join(".px").join("site");
+    std::fs::create_dir_all(&site_dir).expect("site dir");
+
+    let module_dir = site_dir.join("tool_pkg");
+    std::fs::create_dir_all(&module_dir).expect("module dir");
+    std::fs::write(
+        module_dir.join("echo.py"),
+        "def main():\n    print('TOOL_OK')\n    return 0\n\nif __name__ == '__main__':\n    raise SystemExit(main())\n",
+    )
+    .expect("write echo module");
+    std::fs::write(module_dir.join("__init__.py"), b"").expect("init file");
+
+    let Some(info) = system_python_info() else {
+        eprintln!("skipping tool runtime fallback test (python binary not found)");
+        return;
+    };
+    let lock_id = "test-lock-hash";
+
+    write_minimal_tool_manifest(&tool_root, "ruff");
+    write_tool_lockfile(&tool_root, "ruff", lock_id, ">=3.8");
+    write_tool_state(&tool_root, lock_id, &site_dir, &info);
+    write_tool_metadata_with_entry(&tool_root, "ruff", "tool_pkg.echo", &info);
+
+    let home_dir = tempdir().expect("home dir");
+    let assert = cargo_bin_cmd!("px")
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .env("PX_CACHE_PATH", cache_dir.path())
+        .env("PX_STORE_PATH", &store_dir)
+        .env("PX_ENVS_PATH", &envs_dir)
+        .env("PX_TOOLS_DIR", tools_dir.path())
+        .env("PX_TOOL_STORE", tool_store.path())
+        .env("HOME", home_dir.path())
+        .args(["--json", "tool", "run", "ruff", "--", "hello"])
+        .assert()
+        .success();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    let stdout = payload["details"]["stdout"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        stdout.contains("TOOL_OK"),
+        "tool run should execute seeded module via recorded runtime path, got {stdout:?}"
+    );
+}
+
+#[test]
 fn tool_install_then_run_is_immediately_ready() {
     if !require_online() {
         return;
     }
-    let info = system_python_info();
+    let Some(info) = system_python_info() else {
+        eprintln!("skipping tool install test (python binary not found)");
+        return;
+    };
 
     let registry_dir = tempdir().expect("runtime registry dir");
     let registry = registry_dir.path().join("runtimes.json");
@@ -330,8 +404,8 @@ fn tool_install_then_run_is_immediately_ready() {
         .assert()
         .success();
 
-    let lock_contents = fs::read_to_string(tools_dir.path().join("ruff").join("px.lock"))
-        .expect("read tool lock");
+    let lock_contents =
+        fs::read_to_string(tools_dir.path().join("ruff").join("px.lock")).expect("read tool lock");
     let expected = lock_contents
         .lines()
         .find_map(|line| line.trim().strip_prefix("specifier = \"ruff=="))
@@ -411,7 +485,10 @@ fn tool_run_repairs_deleted_environment_offline() {
     if !require_online() {
         return;
     }
-    let info = system_python_info();
+    let Some(info) = system_python_info() else {
+        eprintln!("skipping tool repair test (python binary not found)");
+        return;
+    };
 
     let registry_dir = tempdir().expect("runtime registry dir");
     let registry = registry_dir.path().join("runtimes.json");
@@ -479,7 +556,10 @@ fn tool_run_repairs_deleted_environment_offline() {
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(!site.trim().is_empty(), "tool state must include site_packages");
+    assert!(
+        !site.trim().is_empty(),
+        "tool state must include site_packages"
+    );
     let site_path = std::path::Path::new(&site);
     let env_root = site_path
         .parent()
@@ -527,8 +607,7 @@ dependencies = []
     std::fs::write(pyproject, contents).expect("write pyproject");
 }
 
-fn write_tool_metadata(root: &std::path::Path, name: &str) {
-    let info = system_python_info();
+fn write_tool_metadata(root: &std::path::Path, name: &str, info: &PythonInfo) {
     let metadata = json!({
         "name": name,
         "spec": name,
@@ -613,26 +692,29 @@ struct PythonInfo {
     platform: String,
 }
 
-fn system_python_info() -> PythonInfo {
-    let output = Command::new("python3")
+fn system_python_info() -> Option<PythonInfo> {
+    let python = common::find_python()?;
+    let output = Command::new(&python)
         .arg("-c")
         .arg("import json,platform,sys,sysconfig;print(json.dumps({'v':platform.python_version(),'exe':sys.executable,'plat':sysconfig.get_platform().replace('-', '_')}))")
         .output()
-        .expect("inspect python");
-    let parsed: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("parse python inspection");
-    let version = parsed["v"].as_str().unwrap_or("3.11.0").to_string();
-    let executable = parsed["exe"].as_str().unwrap_or("python3").to_string();
-    let platform = parsed["plat"].as_str().unwrap_or("any").to_string();
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let version = parsed["v"].as_str()?.to_string();
+    let executable = parsed["exe"].as_str()?.to_string();
+    let platform = parsed["plat"].as_str()?.to_string();
     let mut parts = version.split('.').take(2).collect::<Vec<_>>();
     if parts.len() < 2 {
         parts = vec![&version, "0"];
     }
     let channel = format!("{}.{}", parts[0], parts[1]);
-    PythonInfo {
+    Some(PythonInfo {
         channel,
         version,
         executable,
         platform,
-    }
+    })
 }

@@ -122,7 +122,6 @@ paths = {
     "stdlib": sysconfig.get_path("stdlib"),
     "platstdlib": sysconfig.get_path("platstdlib"),
     "include": sysconfig.get_config_var("INCLUDEPY"),
-    "scripts": sysconfig.get_path("scripts"),
 }
 print(json.dumps(paths))
 "#;
@@ -134,7 +133,6 @@ print(json.dumps(paths))
                     value.get("stdlib"),
                     value.get("platstdlib"),
                     value.get("include"),
-                    value.get("scripts"),
                 ];
                 for entry in entries.into_iter().flatten() {
                     if let Some(s) = entry.as_str() {

@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
+    env,
     path::Path,
     path::PathBuf,
     str::FromStr,
@@ -38,6 +39,16 @@ use uv_types::{BuildIsolation, EmptyInstalledPackages, HashStrategy};
 use uv_workspace::{DiscoveryOptions, MemberDiscovery, ProjectWorkspace, WorkspaceCache};
 
 use crate::project::manifest::dependency_name;
+
+fn px_is_online() -> bool {
+    match env::var("PX_ONLINE") {
+        Ok(value) => {
+            let lowered = value.to_ascii_lowercase();
+            !matches!(lowered.as_str(), "0" | "false" | "no" | "off" | "")
+        }
+        Err(_) => true,
+    }
+}
 
 pub fn resolve(request: &ResolveRequest) -> Result<Vec<ResolvedSpecifier>> {
     if request.requirements.is_empty() {
@@ -107,7 +118,12 @@ async fn resolve_with_uv(request: &ResolveRequest) -> Result<Vec<ResolvedSpecifi
     let sources = SourceStrategy::default();
     let concurrency = Concurrency::default();
 
-    let client = RegistryClientBuilder::new(BaseClientBuilder::default(), cache.clone()).build();
+    let base_builder = BaseClientBuilder::default().connectivity(if px_is_online() {
+        uv_client::Connectivity::Online
+    } else {
+        uv_client::Connectivity::Offline
+    });
+    let client = RegistryClientBuilder::new(base_builder, cache.clone()).build();
     let build_context = BuildDispatch::new(
         &client,
         &cache,

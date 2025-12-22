@@ -239,10 +239,10 @@ fn run_defaults_to_first_project_script() {
         .assert()
         .failure();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("px run requires a target"),
-        "expected missing-target error, got {stdout:?}"
+        stderr.contains("px run requires a target"),
+        "expected missing-target error, got {stderr:?}"
     );
 }
 
@@ -346,10 +346,10 @@ fn run_respects_explicit_entry_even_with_other_defaults() {
         .assert()
         .failure();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("px run requires a target"),
-        "expected missing-target error, got {stdout:?}"
+        stderr.contains("px run requires a target"),
+        "expected missing-target error, got {stderr:?}"
     );
 }
 
@@ -363,10 +363,10 @@ fn run_forwards_args_to_default_entry_when_no_entry_passed() {
         .arg("run")
         .assert()
         .failure();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("px run requires a target"),
-        "expected missing-target error, got {stdout:?}"
+        stderr.contains("px run requires a target"),
+        "expected missing-target error, got {stderr:?}"
     );
 }
 

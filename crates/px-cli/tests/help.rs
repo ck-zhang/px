@@ -9,7 +9,7 @@ fn help_output(args: &[&str]) -> String {
 fn run_help_mentions_usage_and_examples() {
     let output = help_output(&["run", "--help"]);
     assert!(
-        output.contains("Run scripts/tasks with auto-sync unless --frozen or CI=1."),
+        output.contains("auto-repair the env from px.lock unless --frozen or CI=1"),
         "run help missing updated about: {output}"
     );
     assert!(

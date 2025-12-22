@@ -18,13 +18,13 @@ pub const PX_BEFORE_HELP: &str = concat!(
     "  add / remove     Declare or drop dependencies; px.lock and the env stay in sync.\n",
     "  sync             Reconcile the environment with px.lock (use --frozen in CI).\n",
     "  update           Resolve newer pins, rewrite px.lock, then sync the env.\n",
-    "  run              Execute scripts/tasks; auto-sync unless --frozen or CI=1.\n",
-    "  test             Run tests with the same auto-sync rules as `px run`.\n\n",
+    "  run              Execute scripts/tasks; auto-repair the env from px.lock unless --frozen or CI=1.\n",
+    "  test             Run tests with the same auto-repair rules as `px run`.\n\n",
     "\x1b[1;36mEssentials\x1b[0m\n",
     "  status           Check whether pyproject, px.lock, and the env still agree.\n",
     "  explain          Inspect what px would execute (no execution).\n",
     "  why              Explain why a dependency is present.\n",
-    "  fmt              Run formatters/linters/cleanup tools inside the px environment.\n",
+    "  fmt              Run formatters/linters/cleanup tools via px-managed tool environments.\n",
     "  build            Produce sdists/wheels from the px-managed environment.\n",
     "  publish          Upload previously built artifacts (dry-run by default; use --upload to push).\n",
     "  pack image       Freeze the current env + sandbox config into an OCI image.\n",
@@ -129,17 +129,17 @@ pub enum CommandGroupCli {
     )]
     Update(SpecArgs),
     #[command(
-        about = "Run scripts/tasks with auto-sync unless --frozen or CI=1. Also supports https://... URL targets and gh:/git+ run-by-reference forms.",
+        about = "Run scripts/tasks; auto-repair the env from px.lock unless --frozen or CI=1. Also supports https://... URL targets and gh:/git+ run-by-reference forms.",
         override_usage = "px run <TARGET> [ARG...]"
     )]
     Run(RunArgs),
     #[command(
-        about = "Run tests with the same auto-sync rules as px run.",
+        about = "Run tests with the same auto-repair rules as px run.",
         override_usage = "px test [-- <TEST_ARG>...]"
     )]
     Test(TestArgs),
     #[command(
-        about = "Run configured formatters inside the px environment.",
+        about = "Run configured formatters/linters via px-managed tool environments.",
         override_usage = "px fmt [-- <ARG>...]"
     )]
     Fmt(FmtArgs),
@@ -477,7 +477,7 @@ pub struct TestArgs {
 pub struct FmtArgs {
     #[arg(
         long,
-        help = "Fail if px.lock is missing or the environment is out of sync"
+        help = "Fail if required tools are missing or not ready (no auto-install/repair)"
     )]
     pub frozen: bool,
     #[arg(long, help = "Emit {status,message,details} JSON envelopes")]

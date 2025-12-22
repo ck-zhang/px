@@ -202,11 +202,12 @@ pub(in crate::core::runtime::run) fn build_pytest_invocation(
     super::super::set_env_pair(&mut envs, "PYTHONNOUSERSITE", "1".into());
 
     let mut defaults = default_pytest_flags(reporter);
-    if py_ctx.project_root != py_ctx.state_root {
-        let cache_dir = py_ctx.state_root.join(".px").join("pytest-cache");
-        append_allowed_paths(&mut envs, &cache_dir);
-        defaults.extend_from_slice(&["--cache-dir".to_string(), cache_dir.display().to_string()]);
-    }
+    let cache_dir = py_ctx.state_root.join(".px").join("pytest-cache");
+    append_allowed_paths(&mut envs, &cache_dir);
+    defaults.extend_from_slice(&[
+        "-o".to_string(),
+        format!("cache_dir={}", cache_dir.display()),
+    ]);
     if let TestReporter::Px = reporter {
         let plugin_path = ensure_px_pytest_plugin(ctx, py_ctx)?;
         let plugin_dir = plugin_path

@@ -105,7 +105,7 @@ fn run_by_reference_pinned_git_file_works_and_offline_hits_cache() {
     let script = write_script(&repo, &requires);
     let commit = commit_all(&repo, "add script");
 
-    let locator = format!("git+file://{}", repo.display());
+    let locator = common::git_file_locator(&repo);
     let target = format!("{locator}@{commit}:scripts/hello.py");
 
     let caller = temp.path().join("caller");
@@ -197,7 +197,7 @@ fn run_by_reference_relative_imports_work_from_snapshot_root() {
     );
     let commit = commit_all(&repo, "add importable module");
 
-    let locator = format!("git+file://{}", repo.display());
+    let locator = common::git_file_locator(&repo);
     let target = format!("{locator}@{commit}:scripts/hello.py");
 
     let caller = temp.path().join("caller");
@@ -239,7 +239,7 @@ fn run_by_reference_missing_script_path_error_is_clean() {
     fs::write(repo.join("README.md"), "hello").expect("write readme");
     let commit = commit_all(&repo, "initial");
 
-    let locator = format!("git+file://{}", repo.display());
+    let locator = common::git_file_locator(&repo);
     let target = format!("{locator}@{commit}:does/not/exist.py");
 
     let caller = temp.path().join("caller");
@@ -252,14 +252,14 @@ fn run_by_reference_missing_script_path_error_is_clean() {
         .args(["run", &target])
         .assert()
         .failure();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("script path does not exist in snapshot"),
-        "expected clean missing script path error, got {stdout:?}"
+        stderr.contains("script path does not exist in snapshot"),
+        "expected clean missing script path error, got {stderr:?}"
     );
     assert!(
-        stdout.contains("check the path after ':' exists"),
-        "expected actionable hint, got {stdout:?}"
+        stderr.contains("check the path after ':' exists"),
+        "expected actionable hint, got {stderr:?}"
     );
 }
 
@@ -289,7 +289,7 @@ fn run_by_reference_offline_missing_snapshot_fails() {
     write_script(&repo, &requires);
     let commit = commit_all(&repo, "add script");
 
-    let locator = format!("git+file://{}", repo.display());
+    let locator = common::git_file_locator(&repo);
     let target = format!("{locator}@{commit}:scripts/hello.py");
 
     let caller = temp.path().join("caller");
@@ -302,10 +302,10 @@ fn run_by_reference_offline_missing_snapshot_fails() {
         .args(["--offline", "run", &target])
         .assert()
         .failure();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("repo snapshot is not cached"),
-        "expected offline cache miss error, got {stdout:?}"
+        stderr.contains("repo snapshot is not cached"),
+        "expected offline cache miss error, got {stderr:?}"
     );
 }
 
@@ -335,7 +335,7 @@ fn run_by_reference_floating_ref_rules() {
     write_script(&repo, &requires);
     let _commit = commit_all(&repo, "add script");
 
-    let locator = format!("git+file://{}", repo.display());
+    let locator = common::git_file_locator(&repo);
     let floating = format!("{locator}:scripts/hello.py");
 
     let caller = temp.path().join("caller");
@@ -348,10 +348,10 @@ fn run_by_reference_floating_ref_rules() {
         .args(["run", &floating])
         .assert()
         .failure();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("pinned commit") || stdout.contains("--allow-floating"),
-        "expected pinned-by-default error, got {stdout:?}"
+        stderr.contains("pinned commit") || stderr.contains("--allow-floating"),
+        "expected pinned-by-default error, got {stderr:?}"
     );
 
     cargo_bin_cmd!("px")
@@ -406,7 +406,7 @@ fn run_by_reference_short_sha_is_rejected_by_default_but_resolves_with_allow_flo
     let commit = commit_all(&repo, "add script");
     let short = &commit[..8];
 
-    let locator = format!("git+file://{}", repo.display());
+    let locator = common::git_file_locator(&repo);
     let target = format!("{locator}@{short}:scripts/hello.py");
 
     let caller = temp.path().join("caller");
@@ -419,10 +419,10 @@ fn run_by_reference_short_sha_is_rejected_by_default_but_resolves_with_allow_flo
         .args(["run", &target])
         .assert()
         .failure();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("full commit SHA"),
-        "expected full SHA guidance, got {stdout:?}"
+        stderr.contains("full commit SHA"),
+        "expected full SHA guidance, got {stderr:?}"
     );
 
     let assert = cargo_bin_cmd!("px")
@@ -460,13 +460,13 @@ fn run_by_reference_rejects_credentials_in_locator_without_leaking() {
         .args(["run", target])
         .assert()
         .failure();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("credentials"),
-        "expected credential error, got {stdout:?}"
+        stderr.contains("credentials"),
+        "expected credential error, got {stderr:?}"
     );
     assert!(
-        !stdout.contains("supersecret"),
-        "must not leak credentials, got {stdout:?}"
+        !stderr.contains("supersecret"),
+        "must not leak credentials, got {stderr:?}"
     );
 }
