@@ -10,6 +10,28 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::tempdir;
 
+struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
+        let prev = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
 fn write_member(root: &Path, rel: &str, name: &str) -> ProjectSnapshot {
     let member_root = root.join(rel);
     fs::create_dir_all(&member_root).unwrap();
@@ -232,28 +254,6 @@ fn workspace_status_reports_missing_env() {
 
 #[test]
 fn workspace_status_reports_consistent() {
-    struct EnvVarGuard {
-        key: &'static str,
-        prev: Option<std::ffi::OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
-            let prev = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, prev }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-
     let tmp = tempdir().unwrap();
     let root = tmp.path();
     write_workspace(root);
@@ -281,6 +281,11 @@ fn workspace_state_detects_runtime_mismatch() {
     let workspace = load_workspace(root);
     let lock_id = write_lock(&workspace);
     write_env_state_with_runtime(&workspace, &lock_id, "0.0", "any");
+
+    let python = which::which("python3")
+        .or_else(|_| which::which("python"))
+        .expect("locate python");
+    let _python_guard = EnvVarGuard::set("PX_RUNTIME_PYTHON", python.as_os_str());
 
     let ctx = command_context();
     let report = evaluate_workspace_state(&ctx, &workspace).unwrap();
