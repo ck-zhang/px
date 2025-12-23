@@ -559,9 +559,7 @@ fn select_sdist<'a>(files: &'a [PypiFile], specifier: &str) -> Result<&'a PypiFi
 }
 
 pub(crate) fn build_http_client() -> Result<Client> {
-    let keep_proxies = std::env::var("PX_KEEP_PROXIES")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let keep_proxies = crate::core::net::keep_proxies();
     let builder = Client::builder()
         .user_agent(format!("px/{PX_VERSION}"))
         .timeout(Duration::from_secs(60));

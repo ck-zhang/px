@@ -6,6 +6,7 @@
 pub mod config;
 pub mod distribution;
 pub(crate) mod fs;
+pub(crate) mod net;
 pub mod migration;
 pub mod project;
 pub mod python;

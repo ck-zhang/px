@@ -230,9 +230,7 @@ pub fn compute_sha256(path: &Path) -> Result<String> {
 }
 
 pub fn http_client() -> Result<reqwest::blocking::Client> {
-    let keep_proxies = std::env::var("PX_KEEP_PROXIES")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let keep_proxies = crate::core::net::keep_proxies();
     let builder = reqwest::blocking::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(HTTP_TIMEOUT);

@@ -131,9 +131,7 @@ pub(in super::super) fn ensure_project_wheel_scripts(
     } else {
         PathBuf::from(&runtime.path)
     };
-    let keep_proxies = env::var("PX_KEEP_PROXIES")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let keep_proxies = crate::core::net::keep_proxies();
     let builder = builder_identity_for_runtime(runtime)?;
     let build_hash = project_build_hash(
         runtime,
