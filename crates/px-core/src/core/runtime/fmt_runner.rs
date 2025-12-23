@@ -2,6 +2,7 @@ use std::{env, io::IsTerminal, path::Path};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
+use walkdir::WalkDir;
 
 use super::fmt_plan::{
     load_quality_tools, missing_module_error, QualityConfigSource, QualityKind, QualityTool,
@@ -62,6 +63,12 @@ fn run_quality_command(
     if config.tools.is_empty() {
         return Ok(no_tools_configured_outcome(kind, &pyproject));
     }
+    if kind == QualityKind::Fmt {
+        if let Some(outcome) = fmt_noop_outcome(&snapshot.root, &pyproject, &config, request, kind)
+        {
+            return Ok(outcome);
+        }
+    }
 
     let env_payload = json!({
         "tool": kind.section_name(),
@@ -84,7 +91,124 @@ fn run_quality_command(
     }
 
     let details = build_success_details(&runs, &pyproject, &config, kind, request);
-    Ok(ExecutionOutcome::success(kind.success_message(), details))
+    let message = match kind {
+        QualityKind::Fmt => fmt_success_message(&runs, &config),
+    };
+    Ok(ExecutionOutcome::success(message, details))
+}
+
+fn fmt_noop_outcome(
+    project_root: &Path,
+    pyproject: &Path,
+    config: &QualityToolConfig,
+    request: &FmtRequest,
+    kind: QualityKind,
+) -> Option<ExecutionOutcome> {
+    if !request.args.is_empty() {
+        return None;
+    }
+    let tool = config.tools.first()?;
+    if config.tools.len() != 1 || tool.module != "ruff" || tool.args != ["format"] {
+        return None;
+    }
+    if project_has_python_sources(project_root) {
+        return None;
+    }
+    let details = build_success_details(&[], pyproject, config, kind, request);
+    Some(ExecutionOutcome::success("nothing to format", details))
+}
+
+fn project_has_python_sources(project_root: &Path) -> bool {
+    fn ignored_dir(name: &str) -> bool {
+        matches!(
+            name,
+            ".git"
+                | ".hg"
+                | ".svn"
+                | ".px"
+                | ".venv"
+                | "venv"
+                | "dist"
+                | "build"
+                | "target"
+                | "node_modules"
+                | "__pycache__"
+        )
+    }
+
+    let walker = WalkDir::new(project_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            if entry.depth() == 0 {
+                return true;
+            }
+            let name = entry.file_name().to_string_lossy();
+            !(entry.file_type().is_dir() && ignored_dir(&name))
+        });
+
+    for entry in walker {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Some(ext) = entry.path().extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
+        if matches!(ext, "py" | "pyi" | "pyw") {
+            return true;
+        }
+    }
+    false
+}
+
+fn fmt_success_message(runs: &[QualityRunRecord], config: &QualityToolConfig) -> String {
+    let tool = match (config.tools.len(), runs.len()) {
+        (1, 1) => Some((&config.tools[0], &runs[0])),
+        _ => None,
+    };
+    let Some((tool, run)) = tool else {
+        return QualityKind::Fmt.success_message().to_string();
+    };
+    if tool.module != "ruff" || tool.args != ["format"] {
+        return QualityKind::Fmt.success_message().to_string();
+    }
+    let combined = format!("{}{}", run.stdout, run.stderr);
+    let Some((reformatted, unchanged)) = parse_ruff_format_summary(&combined) else {
+        return QualityKind::Fmt.success_message().to_string();
+    };
+    match (reformatted, unchanged) {
+        (0, 0) => "nothing to format".to_string(),
+        (0, _) => "already formatted".to_string(),
+        _ => QualityKind::Fmt.success_message().to_string(),
+    }
+}
+
+fn parse_ruff_format_summary(output: &str) -> Option<(u64, u64)> {
+    let lower = output.to_ascii_lowercase();
+    let reformatted_idx = lower.find("reformatted")?;
+    let unchanged_idx = lower.find("left unchanged")?;
+    let reformatted = parse_number_before(&lower, reformatted_idx)?;
+    let unchanged = parse_number_before(&lower, unchanged_idx)?;
+    Some((reformatted, unchanged))
+}
+
+fn parse_number_before(haystack: &str, idx: usize) -> Option<u64> {
+    let bytes = haystack.as_bytes();
+    let mut cursor = idx.min(bytes.len());
+    while cursor > 0 && !bytes[cursor - 1].is_ascii_digit() {
+        cursor -= 1;
+    }
+    if cursor == 0 {
+        return None;
+    }
+    let mut start = cursor;
+    while start > 0 && bytes[start - 1].is_ascii_digit() {
+        start -= 1;
+    }
+    haystack[start..cursor].parse().ok()
 }
 
 fn execute_quality_tool(
