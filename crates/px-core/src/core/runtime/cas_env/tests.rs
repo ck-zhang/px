@@ -2,10 +2,12 @@ use std::{borrow::Cow, collections::BTreeMap, env, fs, path::PathBuf};
 
 #[cfg(unix)]
 use std::process::Command;
+#[cfg(unix)]
 use std::sync::Arc;
 
 use anyhow::Result;
 use flate2::read::GzDecoder;
+#[cfg(unix)]
 use px_domain::api::LockSnapshot;
 use px_domain::api::{DependencyGroupSource, PxOptions};
 use serde_json::Value;
@@ -13,6 +15,7 @@ use tar::Archive;
 use tempfile::tempdir;
 
 use crate::core::runtime::facade::RuntimeMetadata;
+#[cfg(unix)]
 use crate::{api::GlobalOptions, api::SystemEffects, CommandContext};
 use crate::store::cas::{
     archive_dir_canonical, global_store, ObjectPayload, PkgBuildHeader, ProfileHeader,

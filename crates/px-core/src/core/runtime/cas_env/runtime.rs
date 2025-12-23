@@ -158,11 +158,10 @@ print(json.dumps(paths))
     Ok(paths)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn runtime_archive_excludes_site_packages() -> Result<()> {
         let interpreter = which::which("python3")
