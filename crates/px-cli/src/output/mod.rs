@@ -76,9 +76,26 @@ pub fn emit_output(
         }
 
         if !opts.quiet {
+            if info.group == CommandGroup::Init
+                && matches!(outcome.status, CommandStatus::Ok)
+                && !details::is_passthrough(&outcome.details)
+            {
+                if let Some(note) = details::gitignore_note_from_details(&outcome.details) {
+                    let line = format!("px {}: {}", info.name, note);
+                    println!("{}", style_out.info(&line));
+                }
+            }
             if info.group == CommandGroup::Add && matches!(outcome.status, CommandStatus::Ok) {
                 for change in details::manifest_change_lines_from_details(&outcome.details) {
                     let line = format!("px {}: {}", info.name, change);
+                    println!("{}", style_out.info(&line));
+                }
+            }
+            if matches!(outcome.status, CommandStatus::Ok) {
+                for preview in
+                    details::dry_run_preview_lines_from_details(&outcome.details, opts.verbose)
+                {
+                    let line = format!("px {}: {}", info.name, preview);
                     println!("{}", style_out.info(&line));
                 }
             }
@@ -140,6 +157,9 @@ pub fn emit_output(
                             println!("{}", style_out.info(&hint_line));
                         }
                     }
+                }
+                if let Some(table) = migrate_table {
+                    println!("{table}");
                 }
             }
             CommandStatus::UserError | CommandStatus::Failure => {

@@ -137,11 +137,15 @@ pub fn current_project_root() -> Result<PathBuf> {
 }
 
 pub fn missing_project_guidance() -> Result<MissingProjectGuidance> {
-    let hint = if discover_nearest_pyproject()?.is_some() {
-        "Run `px migrate --apply` in your project directory first.".to_string()
-    } else {
-        "Run `px init` in your project directory first.".to_string()
-    };
+    if discover_nearest_pyproject()?.is_some() {
+        let hint = "This looks like an existing project. Run `px migrate`.".to_string();
+        return Ok(MissingProjectGuidance {
+            message: format!("No px project found. {hint}"),
+            hint,
+        });
+    }
+
+    let hint = "Run `px init` in your project directory first.".to_string();
     Ok(MissingProjectGuidance {
         message: format!("No px project found. {hint}"),
         hint,

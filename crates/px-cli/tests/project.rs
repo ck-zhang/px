@@ -1,4 +1,8 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::Path,
+    process::Command,
+};
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::{json, Value};
@@ -12,6 +16,42 @@ use common::{parse_json, prepare_fixture, require_online, test_env_guard};
 fn px_cmd() -> assert_cmd::Command {
     common::ensure_test_store_env();
     cargo_bin_cmd!("px")
+}
+
+fn git_available() -> bool {
+    Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+fn git(repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("git command");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn init_git_repo(repo: &Path) {
+    git(repo, &["init"]);
+    git(repo, &["config", "user.email", "px-test@example.invalid"]);
+    git(repo, &["config", "user.name", "px test"]);
+}
+
+fn commit_all(repo: &Path, message: &str) -> String {
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-m", message]);
+    git(repo, &["rev-parse", "HEAD"])
 }
 
 #[test]
@@ -112,6 +152,102 @@ fn project_init_infers_package_name_from_directory() {
 
     let name = read_project_name(project_dir.join("pyproject.toml"));
     assert_eq!(name, "fancy_app");
+}
+
+#[test]
+fn project_init_git_repo_adds_px_to_gitignore_and_prints_message() {
+    let _guard = test_env_guard();
+    if !git_available() {
+        eprintln!("skipping gitignore init test (git not available)");
+        return;
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("gitignore_added");
+    fs::create_dir_all(&project_dir).expect("create project dir");
+    init_git_repo(&project_dir);
+
+    let assert = px_cmd()
+        .current_dir(&project_dir)
+        .env_remove("PX_NO_ENSUREPIP")
+        .arg("init")
+        .assert()
+        .success();
+
+    let gitignore = project_dir.join(".gitignore");
+    assert!(gitignore.exists(), ".gitignore should be created in a git repo");
+    let contents = fs::read_to_string(&gitignore).expect("read .gitignore");
+    assert!(
+        contents.lines().any(|line| line.trim() == ".px/"),
+        "expected .px/ entry in .gitignore, got:\n{contents}"
+    );
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("Added .px/ to .gitignore") && stdout.contains("machine-local"),
+        "expected gitignore confirmation message, got {stdout:?}"
+    );
+}
+
+#[test]
+fn project_init_git_repo_does_not_duplicate_px_gitignore_entry() {
+    let _guard = test_env_guard();
+    if !git_available() {
+        eprintln!("skipping gitignore init test (git not available)");
+        return;
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("gitignore_idempotent");
+    fs::create_dir_all(&project_dir).expect("create project dir");
+    init_git_repo(&project_dir);
+    fs::write(project_dir.join(".gitignore"), ".px/\n").expect("write .gitignore");
+    let _head = commit_all(&project_dir, "seed gitignore");
+
+    let assert = px_cmd()
+        .current_dir(&project_dir)
+        .env_remove("PX_NO_ENSUREPIP")
+        .arg("init")
+        .assert()
+        .success();
+
+    let contents = fs::read_to_string(project_dir.join(".gitignore")).expect("read .gitignore");
+    let px_entries = contents.lines().filter(|line| line.trim() == ".px/").count();
+    assert_eq!(
+        px_entries, 1,
+        "expected single .px/ entry, got:\n{contents}"
+    );
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains(".px/ is already ignored by .gitignore"),
+        "expected idempotency message, got {stdout:?}"
+    );
+}
+
+#[test]
+fn project_init_non_git_repo_does_not_write_gitignore() {
+    let _guard = test_env_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("no_gitignore");
+    fs::create_dir_all(&project_dir).expect("create project dir");
+
+    let assert = px_cmd()
+        .current_dir(&project_dir)
+        .env_remove("PX_NO_ENSUREPIP")
+        .arg("init")
+        .assert()
+        .success();
+
+    assert!(
+        !project_dir.join(".gitignore").exists(),
+        ".gitignore should not be created outside a git repo"
+    );
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        !stdout.contains("Added .px/ to .gitignore"),
+        "unexpected gitignore message outside a git repo: {stdout:?}"
+    );
 }
 
 #[test]
@@ -945,8 +1081,16 @@ fn missing_project_hint_recommends_migrate_when_pyproject_exists() {
         "expected migrate suggestion in message when pyproject exists without px metadata: {message:?}"
     );
     assert!(
+        message.contains("existing project"),
+        "expected existing-project phrasing in message: {message:?}"
+    );
+    assert!(
         hint.contains("px migrate"),
         "expected migrate hint when pyproject exists without px metadata: {hint:?}"
+    );
+    assert!(
+        hint.contains("existing project"),
+        "expected existing-project phrasing in hint: {hint:?}"
     );
 
     let human = px_cmd()
@@ -958,6 +1102,66 @@ fn missing_project_hint_recommends_migrate_when_pyproject_exists() {
     assert!(
         stderr.contains("px migrate"),
         "human output should recommend px migrate when pyproject exists without px metadata: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("existing project"),
+        "human output should mention this is an existing project: {stderr:?}"
+    );
+}
+
+#[test]
+fn init_refuses_and_recommends_migrate_when_pyproject_exists_without_px_metadata() {
+    let _guard = test_env_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        temp.path().join("pyproject.toml"),
+        "[project]\nname = \"demo\"\nversion = \"0.0.1\"\n",
+    )
+    .expect("write pyproject");
+
+    let assert = px_cmd().current_dir(temp.path()).arg("init").assert().failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("px migrate"),
+        "expected px init to recommend px migrate: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("existing project"),
+        "expected px init to describe existing-project onboarding: {stderr:?}"
+    );
+    assert!(
+        !temp.path().join("px.lock").exists(),
+        "px init should not write px.lock when refusing to adopt an existing project"
+    );
+    assert!(
+        !temp.path().join(".px").exists(),
+        "px init should not create .px/ when refusing to adopt an existing project"
+    );
+}
+
+#[test]
+fn other_commands_recommend_migrate_when_pyproject_exists_without_px_metadata() {
+    let _guard = test_env_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        temp.path().join("pyproject.toml"),
+        "[project]\nname = \"demo\"\nversion = \"0.0.1\"\n",
+    )
+    .expect("write pyproject");
+
+    let assert = px_cmd()
+        .current_dir(temp.path())
+        .args(["add", "requests==2.32.3"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("px migrate"),
+        "expected px add to recommend px migrate: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("existing project"),
+        "expected px add to describe existing-project onboarding: {stderr:?}"
     );
 }
 

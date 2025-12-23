@@ -20,7 +20,7 @@ Workspace and project roots may coincide, but they are conceptually separate.
 1. Starting from CWD, walk upward until you find a workspace root.
 2. If found and CWD is inside a listed member project, that project is workspace-governed: project commands use the workspace state machine.
 3. Otherwise, walk upward to find a project root (no workspace above).
-4. If none is found: `No px project found. Run "px init" in your project directory first.` (or `px migrate --apply` when a non-px `pyproject.toml` already exists).
+4. If none is found: `No px project found. Run "px init" in your project directory first.` (or `px migrate` when a non-px `pyproject.toml` already exists).
 
 **Workspace-level discovery**
 
@@ -111,6 +111,7 @@ Two lockfile types:
 
   * Authoritative description of that project’s environment when the project is not governed by a workspace.
   * Exact versions, hashes, markers, index URLs, platform tags.
+  * Portable and commit-safe: contains no absolute paths, usernames, or local cache layout.
   * A fingerprint of `[project].dependencies` (and any px-specific dep config, including `[tool.px].manage-command` and `[tool.px].plugin-imports`).
 
 * **Workspace lockfile** – `px.workspace.lock` in a workspace root:

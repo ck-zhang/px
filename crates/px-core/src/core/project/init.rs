@@ -56,10 +56,12 @@ pub fn project_init(
         }
     }
 
+    let git_changes = ctx.git().worktree_changes(&root)?;
+    let in_git_repo = git_changes.is_some();
     if !request.force {
-        if let Some(changes) = ctx.git().worktree_changes(&root)? {
+        if let Some(changes) = git_changes.as_ref() {
             if !changes.is_empty() {
-                return Ok(dirty_worktree_response(&changes));
+                return Ok(dirty_worktree_response(changes));
             }
         }
     }
@@ -151,6 +153,27 @@ pub fn project_init(
         "project_root": root.display().to_string(),
         "lockfile": snapshot.lock_path.display().to_string(),
     });
+    if in_git_repo {
+        let gitignore = ensure_px_gitignored(&root);
+        match gitignore {
+            Ok(result) => {
+                details["gitignore"] = json!({
+                    "pattern": ".px/",
+                    "action": result.action.as_str(),
+                    "note": result.note,
+                });
+            }
+            Err(err) => {
+                details["gitignore"] = json!({
+                    "pattern": ".px/",
+                    "action": "failed",
+                    "note": format!(
+                        "Unable to update .gitignore (px state under .px/ is machine-local; ignore it before committing): {err}"
+                    ),
+                });
+            }
+        }
+    }
     if inferred && !pyproject_preexisting {
         details["inferred_package"] = Value::Bool(true);
         details["hint"] = Value::String(
@@ -162,6 +185,73 @@ pub fn project_init(
         format!("initialized project {actual_name}"),
         details,
     ))
+}
+
+struct GitignorePxResult {
+    action: GitignorePxAction,
+    note: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GitignorePxAction {
+    Added,
+    AlreadyPresent,
+}
+
+impl GitignorePxAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            GitignorePxAction::Added => "added",
+            GitignorePxAction::AlreadyPresent => "already-present",
+        }
+    }
+}
+
+fn ensure_px_gitignored(root: &Path) -> Result<GitignorePxResult> {
+    fn gitignore_ignores_px(contents: &str) -> bool {
+        contents.lines().any(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return false;
+            }
+            let pattern = trimmed.split_whitespace().next().unwrap_or_default();
+            if pattern.starts_with('!') {
+                return false;
+            }
+            matches!(pattern, ".px" | ".px/" | "/.px" | "/.px/")
+                || pattern.starts_with(".px/")
+                || pattern.starts_with("/.px/")
+        })
+    }
+
+    let gitignore_path = root.join(".gitignore");
+    let existing = if gitignore_path.exists() {
+        fs::read_to_string(&gitignore_path)
+            .with_context(|| format!("failed to read {}", gitignore_path.display()))?
+    } else {
+        String::new()
+    };
+    if gitignore_ignores_px(&existing) {
+        return Ok(GitignorePxResult {
+            action: GitignorePxAction::AlreadyPresent,
+            note: ".px/ is already ignored by .gitignore (px state under .px/ is machine-local and should not be committed)"
+                .to_string(),
+        });
+    }
+
+    let mut next = existing;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(".px/\n");
+    fs::write(&gitignore_path, next.as_bytes())
+        .with_context(|| format!("failed to write {}", gitignore_path.display()))?;
+
+    Ok(GitignorePxResult {
+        action: GitignorePxAction::Added,
+        note: "Added .px/ to .gitignore (px state under .px/ is machine-local and should not be committed)"
+            .to_string(),
+    })
 }
 
 fn missing_runtime_outcome(version: &str) -> ExecutionOutcome {
@@ -208,6 +298,7 @@ fn resolve_python_requirement_arg(raw: Option<&str>) -> String {
 
 #[derive(Debug)]
 enum InitConflict {
+    ExistingProject,
     OtherTool(String),
     ExistingDependencies,
 }
@@ -215,19 +306,27 @@ enum InitConflict {
 impl InitConflict {
     fn into_outcome(self, pyproject_path: &Path) -> ExecutionOutcome {
         match self {
+            InitConflict::ExistingProject => ExecutionOutcome::user_error(
+                "This looks like an existing project. Run `px migrate`.",
+                json!({
+                    "pyproject": pyproject_path.display().to_string(),
+                    "reason": "existing_project",
+                    "hint": "This looks like an existing project. Run `px migrate`.",
+                }),
+            ),
             InitConflict::OtherTool(tool) => ExecutionOutcome::user_error(
-                format!("pyproject managed by {tool}; run `px migrate --apply` to adopt px"),
+                format!("pyproject managed by {tool}; run `px migrate` to adopt px"),
                 json!({
                     "pyproject": pyproject_path.display().to_string(),
                     "tool": tool,
-                    "hint": "Run `px migrate --apply` to convert this project to px.",
+                    "hint": "This looks like an existing project. Run `px migrate`.",
                 }),
             ),
             InitConflict::ExistingDependencies => ExecutionOutcome::user_error(
-                "pyproject already declares dependencies",
+                "pyproject already declares dependencies; run `px migrate`",
                 json!({
                     "pyproject": pyproject_path.display().to_string(),
-                    "hint": "Run `px migrate --apply` to import existing dependencies into px.",
+                    "hint": "This looks like an existing project. Run `px migrate`.",
                 }),
             ),
         }
@@ -242,6 +341,13 @@ fn detect_init_conflict(pyproject_path: &Path) -> Result<Option<InitConflict>> {
     }
     if project_dependencies_declared(&doc) {
         return Ok(Some(InitConflict::ExistingDependencies));
+    }
+    if doc.get("tool")
+        .and_then(Item::as_table)
+        .and_then(|tool| tool.get("px"))
+        .is_none()
+    {
+        return Ok(Some(InitConflict::ExistingProject));
     }
     Ok(None)
 }

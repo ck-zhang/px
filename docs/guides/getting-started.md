@@ -14,14 +14,14 @@ If no runtime is registered, `px init` prompts to install a default runtime (TTY
 2. Declare dependencies with `px add <pkg>...`.
 3. Materialize or refresh the env with `px sync` (auto-resolves if needed).
 4. Run code or tests with `px run <target>` or `px test`; formatting via `px fmt`.
-5. Commit `pyproject.toml`, `px.lock`, and source; `.px/` stays untracked.
+5. Commit `pyproject.toml`, `px.lock`, and source; `.px/` is machine-local state and should not be committed (`px init` adds `.px/` to `.gitignore` when inside a git repo).
 
 ## What px manages
 
 * **Runtime** – a Python interpreter px knows about; chosen deterministically from `[tool.px].python`, `[project].requires-python`, or px default.
 * **Manifest** – direct dependencies in `pyproject.toml`. By default, px pins direct deps in-place (e.g. `requests==2.32.5`) so the manifest itself is deterministic and reviewable.
-* **Lockfile** – `px.lock`, generated only by px; don’t edit by hand. It records the full resolved graph (including transitive deps) plus artifact identity (hashes/URLs), and the env is built from it.
-* **Env** – project-local pointer at `.px/envs/current` to a global env materialization under `~/.px/envs/<profile_oid>` (tied to the lock and runtime).
+* **Lockfile** – `px.lock`, generated only by px; don’t edit by hand. It records the full resolved graph (including transitive deps) plus artifact identity (hashes/URLs), and the env is built from it. `px.lock` is portable and commit-safe: it contains no absolute paths, usernames, or local cache layout.
+* **Env** – project-local pointer at `.px/envs/current` to a global env materialization under `~/.px/envs/<profile_oid>` (tied to the lock and runtime). `.px/` is machine-local and is not meant for source control.
 
 ## Pinning model (manifest + lock)
 

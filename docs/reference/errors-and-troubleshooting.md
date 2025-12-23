@@ -59,7 +59,7 @@ Applies to all commands that show progress (resolver, env build, tool install, e
 
 ## Troubleshooting (error codes → required transitions)
 
-* `missing_project` (`PX001`): run `px init` in your project directory (or `px migrate --apply` if you already have a non-px `pyproject.toml`).
+* `missing_project` (`PX001`): run `px init` in an empty directory, or if you already have `pyproject.toml`, run `px migrate`.
 * `missing_lock` (`PX120`): run `px sync` (without `--frozen`) to create or refresh `px.lock`.
 * `lock_drift` (`PX120`): run `px sync` to realign `px.lock` with the manifest/runtime; frozen commands must refuse.
 * `missing_env` / `env_outdated` (`PX201`): run `px sync` to (re)build the relevant project/workspace env; `--frozen` refuses to repair.
