@@ -5,76 +5,16 @@ pub(crate) fn refresh_project_site(
     snapshot: &ManifestSnapshot,
     ctx: &CommandContext,
 ) -> Result<()> {
-    fn lock_dependency_versions(lock: &px_domain::api::LockSnapshot) -> HashMap<String, String> {
-        let mut versions = HashMap::new();
-        for spec in &lock.dependencies {
-            let head = spec.split(';').next().unwrap_or(spec).trim();
-            if let Some((name_part, ver_part)) = head.split_once("==") {
-                let name = dependency_name(name_part).to_ascii_lowercase();
-                let version = ver_part.trim().to_string();
-                versions.entry(name).or_insert(version);
-            }
-        }
-        if let Some(graph) = &lock.graph {
-            for node in &graph.nodes {
-                versions
-                    .entry(node.name.to_ascii_lowercase())
-                    .or_insert(node.version.clone());
-            }
-        }
-        versions
-    }
-
     let previous_env = load_project_state(ctx.fs(), &snapshot.root)
         .ok()
         .and_then(|state| state.current_env);
     let _ = prepare_project_runtime(snapshot)?;
-    let mut lock = load_lockfile_optional(&snapshot.lock_path)?.ok_or_else(|| {
+    let lock = load_lockfile_optional(&snapshot.lock_path)?.ok_or_else(|| {
         anyhow!(
             "px sync: lockfile missing at {}",
             snapshot.lock_path.display()
         )
     })?;
-    let cache_versions = lock_dependency_versions(&lock);
-    let mut cached_path_updates: HashMap<String, String> = HashMap::new();
-    for dep in lock.resolved.iter_mut() {
-        let Some(artifact) = dep.artifact.as_mut() else {
-            continue;
-        };
-        if artifact
-            .build_options_hash
-            .to_ascii_lowercase()
-            .contains("native-libs")
-        {
-            continue;
-        }
-        if artifact.filename.is_empty() || artifact.sha256.is_empty() {
-            continue;
-        }
-        let existing_valid = if artifact.cached_path.is_empty() {
-            false
-        } else {
-            let existing = Path::new(&artifact.cached_path);
-            crate::store::validate_existing(existing, &artifact.sha256)
-                .ok()
-                .flatten()
-                .is_some()
-        };
-        if existing_valid {
-            continue;
-        }
-        let Some(version) = cache_versions.get(&dependency_name(&dep.name).to_ascii_lowercase())
-        else {
-            continue;
-        };
-        let dest =
-            crate::store::wheel_path(&ctx.cache().path, &dep.name, version, &artifact.filename);
-        let dest_str = dest.display().to_string();
-        if artifact.cached_path != dest_str {
-            artifact.cached_path = dest_str.clone();
-            cached_path_updates.insert(dep.name.to_ascii_lowercase(), dest_str);
-        }
-    }
     let runtime = detect_runtime_metadata(ctx, snapshot)?;
     let lock_id = match lock.lock_id.clone() {
         Some(value) => value,
@@ -85,36 +25,6 @@ pub(crate) fn refresh_project_site(
         owner_id: project_env_owner_id(&snapshot.root, &lock_id, &runtime.version)?,
     };
     let cas_profile = ensure_profile_env(ctx, snapshot, &lock, &runtime, &env_owner)?;
-
-    if !cached_path_updates.is_empty() {
-        let contents = fs::read_to_string(&snapshot.lock_path)?;
-        let mut doc: DocumentMut = contents.parse()?;
-        if let Some(tables) = doc
-            .get_mut("dependencies")
-            .and_then(Item::as_array_of_tables_mut)
-        {
-            for table in tables.iter_mut() {
-                let specifier = table
-                    .get("specifier")
-                    .and_then(Item::as_str)
-                    .unwrap_or_default();
-                let name = table
-                    .get("name")
-                    .and_then(Item::as_str)
-                    .map(std::string::ToString::to_string)
-                    .unwrap_or_else(|| dependency_name(specifier));
-                let lookup = name.to_ascii_lowercase();
-                let Some(updated) = cached_path_updates.get(&lookup) else {
-                    continue;
-                };
-                let Some(artifact) = table.get_mut("artifact").and_then(Item::as_table_mut) else {
-                    continue;
-                };
-                artifact.insert("cached_path", Item::Value(TomlValue::from(updated.clone())));
-            }
-            fs::write(&snapshot.lock_path, doc.to_string())?;
-        }
-    }
     write_project_metadata_stub(snapshot, &cas_profile.env_path, ctx.fs())?;
     let env_python = write_python_environment_markers(
         &cas_profile.env_path,

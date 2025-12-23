@@ -9,7 +9,6 @@ pub struct LockedArtifact {
     pub url: String,
     pub sha256: String,
     pub size: u64,
-    pub cached_path: String,
     pub python_tag: String,
     pub abi_tag: String,
     pub platform_tag: String,

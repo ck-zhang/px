@@ -245,7 +245,12 @@ pub(crate) fn install_snapshot(
                 )
             })?;
         }
-        let resolved = resolve_pins(ctx, &pins, ctx.config().resolver.force_sdist)?;
+        let resolved = resolve_pins(
+            ctx,
+            &snapshot.root,
+            &pins,
+            ctx.config().resolver.force_sdist,
+        )?;
         let contents = render_lockfile(&snapshot, &resolved, PX_VERSION)?;
         fs::write(&snapshot.lock_path, contents)?;
         Ok(InstallOutcome {

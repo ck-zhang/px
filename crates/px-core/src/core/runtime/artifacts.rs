@@ -261,6 +261,7 @@ pub(crate) fn archive_source_dir_for_sdist(source_dir: &Path, prefix: &str) -> R
 
 pub(crate) fn resolve_pins(
     ctx: &CommandContext,
+    source_root: &Path,
     pins: &[PinSpec],
     force_sdist: bool,
 ) -> Result<Vec<ResolvedDependency>> {
@@ -272,6 +273,7 @@ pub(crate) fn resolve_pins(
     let tags = Arc::new(detect_interpreter_tags(&python)?);
     let cache = ctx.cache().clone();
     let effects = ctx.shared_effects();
+    let source_root = source_root.to_path_buf();
 
     let progress = ProgressReporter::bar("Downloading artifacts", pins.len());
     let worker_count = download_concurrency(pins.len());
@@ -290,10 +292,20 @@ pub(crate) fn resolve_pins(
         let effects = effects.clone();
         let cache = cache.clone();
         let python = python.clone();
+        let source_root = source_root.clone();
         let tags = Arc::clone(&tags);
         thread::spawn(move || {
             let pypi = effects.pypi();
             let cache_store = effects.cache();
+            let download_ctx = DownloadArtifactContext {
+                pypi,
+                cache_store,
+                cache: &cache,
+                python: &python,
+                tags: tags.as_ref(),
+                source_root: &source_root,
+                force_sdist,
+            };
             loop {
                 let pin = {
                     let guard = work_rx.lock().expect("lock job receiver");
@@ -303,15 +315,7 @@ pub(crate) fn resolve_pins(
                     }
                 };
 
-                let outcome = download_artifact(
-                    pypi,
-                    cache_store,
-                    &cache,
-                    &python,
-                    tags.as_ref(),
-                    pin,
-                    force_sdist,
-                );
+                let outcome = download_artifact(&download_ctx, pin);
                 if result_tx.send(outcome).is_err() {
                     break;
                 }
@@ -333,26 +337,29 @@ pub(crate) fn resolve_pins(
     Ok(resolved)
 }
 
-fn download_artifact(
-    pypi: &dyn effects::PypiClient,
-    cache_store: &dyn effects::CacheStore,
-    cache: &CacheLocation,
-    python: &str,
-    tags: &InterpreterTags,
-    pin: PinSpec,
+struct DownloadArtifactContext<'a> {
+    pypi: &'a dyn effects::PypiClient,
+    cache_store: &'a dyn effects::CacheStore,
+    cache: &'a CacheLocation,
+    python: &'a str,
+    tags: &'a InterpreterTags,
+    source_root: &'a Path,
     force_sdist: bool,
-) -> Result<ResolvedDependency> {
-    let builder = builder_identity_from_tags(tags);
-    let default_build_hash = wheel_build_options_hash(python)?;
+}
+
+fn download_artifact(ctx: &DownloadArtifactContext<'_>, pin: PinSpec) -> Result<ResolvedDependency> {
+    let builder = builder_identity_from_tags(ctx.tags);
+    let default_build_hash = wheel_build_options_hash(ctx.python)?;
     let artifact = match pin.source.as_ref() {
         Some(ResolvedDistSource::Directory { path }) => build_wheel_via_directory(
-            cache_store,
-            cache,
+            ctx.cache_store,
+            ctx.cache,
             &pin,
-            python,
+            ctx.python,
             &default_build_hash,
             &builder.builder_id,
-            &cache.path,
+            &ctx.cache.path,
+            ctx.source_root,
             path,
         )?,
         Some(other) => {
@@ -367,20 +374,22 @@ fn download_artifact(
             .into())
         }
         None => {
-            let release = pypi.fetch_release(&pin.normalized, &pin.version, &pin.specifier)?;
-            if force_sdist {
+            let release = ctx
+                .pypi
+                .fetch_release(&pin.normalized, &pin.version, &pin.specifier)?;
+            if ctx.force_sdist {
                 build_wheel_via_sdist(
-                    cache_store,
-                    cache,
+                    ctx.cache_store,
+                    ctx.cache,
                     &release,
                     &pin,
-                    python,
+                    ctx.python,
                     &default_build_hash,
                     &builder.builder_id,
-                    &cache.path,
+                    &ctx.cache.path,
                 )?
             } else {
-                match select_wheel(&release.urls, tags, &pin.specifier) {
+                match select_wheel(&release.urls, ctx.tags, &pin.specifier) {
                     Ok(wheel) => {
                         let request = ArtifactRequest {
                             name: &pin.normalized,
@@ -389,29 +398,28 @@ fn download_artifact(
                             url: &wheel.url,
                             sha256: &wheel.sha256,
                         };
-                        let cached = cache_store.cache_wheel(&cache.path, &request)?;
+                        let cached = ctx.cache_store.cache_wheel(&ctx.cache.path, &request)?;
                         LockedArtifact {
                             filename: wheel.filename.clone(),
                             url: wheel.url.clone(),
                             sha256: wheel.sha256.clone(),
                             size: cached.size,
-                            cached_path: cached.wheel_path.display().to_string(),
                             python_tag: wheel.python_tag.clone(),
                             abi_tag: wheel.abi_tag.clone(),
                             platform_tag: wheel.platform_tag.clone(),
-                            build_options_hash: default_build_hash.clone(),
+                            build_options_hash: String::new(),
                             is_direct_url: false,
                         }
                     }
                     Err(_) => build_wheel_via_sdist(
-                        cache_store,
-                        cache,
+                        ctx.cache_store,
+                        ctx.cache,
                         &release,
                         &pin,
-                        python,
+                        ctx.python,
                         &default_build_hash,
                         &builder.builder_id,
-                        &cache.path,
+                        &ctx.cache.path,
                     )?,
                 }
             }
@@ -439,6 +447,7 @@ fn build_wheel_via_directory(
     default_build_hash: &str,
     builder_id: &str,
     builder_root: &Path,
+    source_root: &Path,
     source_dir: &Path,
 ) -> Result<LockedArtifact> {
     if !source_dir.exists() {
@@ -486,12 +495,33 @@ fn build_wheel_via_directory(
     } else {
         built.build_options_hash.clone()
     };
+    let url = match source_dir.strip_prefix(source_root) {
+        Ok(rel) => {
+            let rendered = rel.to_string_lossy().replace('\\', "/");
+            if rendered.is_empty() {
+                ".".to_string()
+            } else {
+                rendered
+            }
+        }
+        Err(_) => {
+            return Err(InstallUserError::new(
+                "dependency source directory is outside the project/workspace root",
+                json!({
+                    "specifier": pin.specifier,
+                    "path": source_dir.display().to_string(),
+                    "root": source_root.display().to_string(),
+                    "hint": "Move the dependency under the project/workspace root or use a registry URL.",
+                }),
+            )
+            .into())
+        }
+    };
     Ok(LockedArtifact {
         filename: built.filename,
-        url: source_dir.display().to_string(),
+        url,
         sha256: built.sha256,
         size: built.size,
-        cached_path: built.cached_path.display().to_string(),
         python_tag: built.python_tag,
         abi_tag: built.abi_tag,
         platform_tag: built.platform_tag,
@@ -536,7 +566,6 @@ fn build_wheel_via_sdist(
         url: built.url,
         sha256: built.sha256,
         size: built.size,
-        cached_path: built.cached_path.display().to_string(),
         python_tag: built.python_tag,
         abi_tag: built.abi_tag,
         platform_tag: built.platform_tag,
@@ -1179,14 +1208,24 @@ mod tests {
         };
 
         let pin = parse_exact_pin("demo==1.0.0")?;
-        let resolved = download_artifact(&pypi, &cache_store, &cache, &python, &tags, pin, false)?;
+        let download_ctx = DownloadArtifactContext {
+            pypi: &pypi,
+            cache_store: &cache_store,
+            cache: &cache,
+            python: &python,
+            tags: &tags,
+            source_root: cache_dir.path(),
+            force_sdist: false,
+        };
+        let resolved = download_artifact(&download_ctx, pin)?;
 
         assert_eq!(wheel_calls.load(Ordering::SeqCst), 1);
         assert_eq!(resolved.artifact.filename, wheel_filename);
+        let expected_wheel_path = cache_dir.path().join(&resolved.artifact.filename);
         assert!(
-            PathBuf::from(&resolved.artifact.cached_path).exists(),
+            expected_wheel_path.exists(),
             "expected cached wheel to exist at {}",
-            resolved.artifact.cached_path
+            expected_wheel_path.display()
         );
 
         Ok(())

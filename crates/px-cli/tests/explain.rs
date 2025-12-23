@@ -116,7 +116,6 @@ struct LockEntry {
     name: String,
     version: String,
     filename: String,
-    cached_path: String,
     sha256: String,
     size: u64,
 }
@@ -147,7 +146,6 @@ fn write_lock(root: &Path, project_name: &str, python_req: &str, deps: &[LockEnt
         ));
         buf.push_str(&format!("sha256 = \"{}\"\n", dep.sha256));
         buf.push_str(&format!("size = {}\n", dep.size));
-        buf.push_str(&format!("cached_path = \"{}\"\n", dep.cached_path));
         buf.push_str("python_tag = \"py3\"\nabi_tag = \"none\"\nplatform_tag = \"any\"\n\n");
     }
 
@@ -198,6 +196,18 @@ fn build_wheel(
     let sha256 = meta["sha256"].as_str().expect("sha256").to_string();
     let size = meta["size"].as_u64().expect("size");
     (sha256, size)
+}
+
+fn cache_root() -> PathBuf {
+    PathBuf::from(env::var("PX_CACHE_PATH").expect("PX_CACHE_PATH"))
+}
+
+fn cache_wheel_path(name: &str, version: &str, filename: &str) -> PathBuf {
+    cache_root()
+        .join("wheels")
+        .join(name)
+        .join(version)
+        .join(filename)
 }
 
 fn snapshot_paths(root: &Path) -> Vec<String> {
@@ -344,10 +354,12 @@ fn explain_entrypoint_reports_provider_and_target() {
         .expect("tempdir");
     let project = temp.path().join("proj");
     fs::create_dir_all(&project).expect("create project dir");
-    let artifacts = project.join("artifacts");
-    fs::create_dir_all(&artifacts).expect("artifacts dir");
 
-    let wheel = artifacts.join("hello_console-0.1.0-py3-none-any.whl");
+    let wheel = cache_wheel_path(
+        "hello_console",
+        "0.1.0",
+        "hello_console-0.1.0-py3-none-any.whl",
+    );
     let (sha256, size) = build_wheel(
         &python,
         &wheel,
@@ -373,7 +385,6 @@ fn explain_entrypoint_reports_provider_and_target() {
                 .expect("wheel filename")
                 .to_string_lossy()
                 .to_string(),
-            cached_path: "artifacts/hello_console-0.1.0-py3-none-any.whl".to_string(),
             sha256,
             size,
         }],
@@ -434,10 +445,8 @@ fn explain_entrypoint_reports_conflicts_deterministically() {
         .expect("tempdir");
     let project = temp.path().join("proj");
     fs::create_dir_all(&project).expect("create project dir");
-    let artifacts = project.join("artifacts");
-    fs::create_dir_all(&artifacts).expect("artifacts dir");
 
-    let wheel_a = artifacts.join("aaa_console-0.1.0-py3-none-any.whl");
+    let wheel_a = cache_wheel_path("aaa_console", "0.1.0", "aaa_console-0.1.0-py3-none-any.whl");
     let (sha256_a, size_a) = build_wheel(
         &python,
         &wheel_a,
@@ -445,7 +454,7 @@ fn explain_entrypoint_reports_conflicts_deterministically() {
         "0.1.0",
         vec![("dupe", "aaa_console:main")],
     );
-    let wheel_b = artifacts.join("bbb_console-0.1.0-py3-none-any.whl");
+    let wheel_b = cache_wheel_path("bbb_console", "0.1.0", "bbb_console-0.1.0-py3-none-any.whl");
     let (sha256_b, size_b) = build_wheel(
         &python,
         &wheel_b,
@@ -476,7 +485,6 @@ fn explain_entrypoint_reports_conflicts_deterministically() {
                     .expect("wheel filename")
                     .to_string_lossy()
                     .to_string(),
-                cached_path: "artifacts/aaa_console-0.1.0-py3-none-any.whl".to_string(),
                 sha256: sha256_a,
                 size: size_a,
             },
@@ -488,7 +496,6 @@ fn explain_entrypoint_reports_conflicts_deterministically() {
                     .expect("wheel filename")
                     .to_string_lossy()
                     .to_string(),
-                cached_path: "artifacts/bbb_console-0.1.0-py3-none-any.whl".to_string(),
                 sha256: sha256_b,
                 size: size_b,
             },

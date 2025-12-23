@@ -2,7 +2,6 @@ version = 1
 
 [metadata]
 px_version = "0.1.0"
-created_at = "2025-11-27T11:47:17.62969954Z"
 mode = "p0-pinned"
 manifest_fingerprint = "2838da4467b85c6e6f67355fc3fa7c216562c042b38910144021cd2b13c8d072"
 lock_id = "b0e3d49bac8025c47d3794eaf7e54f74d8b21d357aead0bd433a14e810b4c07f"

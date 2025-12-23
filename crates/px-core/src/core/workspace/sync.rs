@@ -102,7 +102,12 @@ fn resolve_workspace(ctx: &CommandContext, workspace: &WorkspaceSnapshot) -> Res
                     json!({ "error": other.to_string() }),
                 ),
             })?;
-    let resolved_deps = resolve_pins(ctx, &resolved.pins, ctx.config().resolver.force_sdist)?;
+    let resolved_deps = resolve_pins(
+        ctx,
+        &workspace.config.root,
+        &resolved.pins,
+        ctx.config().resolver.force_sdist,
+    )?;
     let workspace_lock = build_workspace_lock(workspace, &resolved_deps);
     let contents = px_domain::api::render_lockfile_with_workspace(
         &workspace.lock_snapshot(),

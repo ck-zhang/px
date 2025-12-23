@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{bail, Result};
@@ -10,7 +9,7 @@ use serde_json::Value;
 use crate::project::snapshot::ProjectSnapshot;
 
 use super::spec::{
-    compute_file_sha256, dependency_name, spec_map, strip_wrapping_quotes, version_from_specifier,
+    dependency_name, spec_map, strip_wrapping_quotes, version_from_specifier,
 };
 use super::types::{
     LockPrefetchSpec, LockSnapshot, LockedArtifact, ResolvedDependency, LOCK_MODE_PINNED,
@@ -230,59 +229,14 @@ pub fn verify_locked_artifacts(lock: &LockSnapshot) -> Vec<String> {
         let Some(artifact) = &dep.artifact else {
             continue;
         };
-        if artifact
-            .build_options_hash
-            .to_ascii_lowercase()
-            .contains("native-libs")
-        {
-            // Native-builder artifacts are rebuilt on demand, so we don't treat
-            // cache drift as a hard failure during verification.
-            continue;
+        if artifact.filename.is_empty() {
+            issues.push(format!("dependency `{}` missing artifact filename in lock", dep.name));
         }
-        if artifact.cached_path.is_empty() {
-            issues.push(format!(
-                "dependency `{}` missing cached_path in lock",
-                dep.name
-            ));
-            continue;
+        if artifact.url.is_empty() {
+            issues.push(format!("dependency `{}` missing artifact url in lock", dep.name));
         }
-        let path = PathBuf::from(&artifact.cached_path);
-        if !path.exists() {
-            issues.push(format!(
-                "artifact for `{}` missing at {}",
-                dep.name,
-                path.display()
-            ));
-            continue;
-        }
-        match compute_file_sha256(&path) {
-            Ok(actual) if actual == artifact.sha256 => {}
-            Ok(actual) => {
-                issues.push(format!(
-                    "artifact for `{}` has sha256 {} but lock expects {}",
-                    dep.name, actual, artifact.sha256
-                ));
-                continue;
-            }
-            Err(err) => {
-                issues.push(format!(
-                    "unable to hash `{}` at {}: {}",
-                    dep.name,
-                    path.display(),
-                    err
-                ));
-                continue;
-            }
-        }
-        if let Ok(meta) = std::fs::metadata(&path) {
-            if meta.len() != artifact.size {
-                issues.push(format!(
-                    "artifact for `{}` size mismatch (have {}, lock {})",
-                    dep.name,
-                    meta.len(),
-                    artifact.size
-                ));
-            }
+        if artifact.sha256.is_empty() {
+            issues.push(format!("dependency `{}` missing artifact sha256 in lock", dep.name));
         }
     }
     issues
@@ -465,6 +419,8 @@ impl LockDiffReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
     use crate::api::{DependencyGroupSource, ProjectSnapshot};
     use crate::lockfile::types::{LockSnapshot, LOCK_MODE_PINNED, LOCK_VERSION};
 

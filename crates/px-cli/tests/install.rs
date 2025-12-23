@@ -1,9 +1,11 @@
 use std::{
+    env,
     fs,
     path::{Path, PathBuf},
 };
 
 use assert_cmd::cargo::cargo_bin_cmd;
+use px_domain::api::normalize_dist_name;
 use toml_edit::DocumentMut;
 
 mod common;
@@ -85,12 +87,36 @@ fn install_pinned_fetches_artifact() {
     assert_eq!(dep["specifier"].as_str(), Some("packaging==24.1"));
 
     let artifact = dep["artifact"].as_table().expect("artifact table");
-    let cached_path = artifact["cached_path"].as_str().expect("cached path");
-    assert!(PathBuf::from(cached_path).exists());
+    assert!(
+        artifact.get("cached_path").is_none(),
+        "px.lock should not include cached_path"
+    );
     assert!(artifact["sha256"].as_str().is_some());
-    assert!(std::path::Path::new(artifact["filename"].as_str().unwrap())
+    let filename = artifact["filename"].as_str().expect("filename");
+    assert!(std::path::Path::new(filename)
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("whl")));
+    let specifier = dep["specifier"].as_str().expect("specifier");
+    let (_, version) = specifier
+        .split_once("==")
+        .expect("expected pinned dependency specifier");
+    let version = version
+        .split(';')
+        .next()
+        .unwrap_or(version)
+        .trim()
+        .to_string();
+    let cache_root = PathBuf::from(env::var("PX_CACHE_PATH").expect("PX_CACHE_PATH"));
+    let cached_path = cache_root
+        .join("wheels")
+        .join(normalize_dist_name(dep["name"].as_str().expect("name")))
+        .join(version)
+        .join(filename);
+    assert!(
+        cached_path.exists(),
+        "expected cached wheel at {}",
+        cached_path.display()
+    );
 
     cargo_bin_cmd!("px")
         .current_dir(&project_root)

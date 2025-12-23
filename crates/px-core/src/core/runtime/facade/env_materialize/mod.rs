@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs::{self, File};
 use std::io::Read;
@@ -9,7 +9,7 @@ use std::str::FromStr;
 
 use crate::context::CommandContext;
 use crate::core::runtime as effects;
-use crate::core::runtime::artifacts::{dependency_name, select_wheel};
+use crate::core::runtime::artifacts::select_wheel;
 use crate::core::runtime::builder::{builder_identity_for_python, builder_identity_for_runtime};
 #[cfg(not(windows))]
 use crate::core::runtime::cas_env::copy_tree;
@@ -34,7 +34,7 @@ use px_domain::api::{canonicalize_package_name, load_lockfile_optional};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
+use toml_edit::{DocumentMut, Item, Table};
 use tracing::warn;
 use url::Url;
 

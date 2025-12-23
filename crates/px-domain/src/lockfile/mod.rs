@@ -48,7 +48,6 @@ mod tests {
                 url: "https://example.invalid/demo.whl".into(),
                 sha256: "deadbeef".into(),
                 size: 4,
-                cached_path: String::new(),
                 python_tag: "py3".into(),
                 abi_tag: "none".into(),
                 platform_tag: "any".into(),
@@ -69,6 +68,114 @@ mod tests {
         let parsed: types::LockSnapshot = io::parse_lock_snapshot(&toml.parse()?);
         assert_eq!(parsed.dependencies.len(), 1);
         assert_eq!(parsed.version, types::LOCK_VERSION);
+        Ok(())
+    }
+
+    #[test]
+    fn lockfile_is_deterministic_across_project_paths() -> anyhow::Result<()> {
+        let dir_a = tempdir()?;
+        let dir_b = tempdir()?;
+        let pyproject = r#"[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["demo==1.0.0"]
+
+[tool.px]
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#;
+        std::fs::write(dir_a.path().join("pyproject.toml"), pyproject)?;
+        std::fs::write(dir_b.path().join("pyproject.toml"), pyproject)?;
+        let snapshot_a = ProjectSnapshot::read_from(dir_a.path())?;
+        let snapshot_b = ProjectSnapshot::read_from(dir_b.path())?;
+        assert_eq!(snapshot_a.manifest_fingerprint, snapshot_b.manifest_fingerprint);
+
+        let lock_a = io::render_lockfile(&snapshot_a, &resolved(), "0.1.0")?;
+        let lock_b = io::render_lockfile(&snapshot_b, &resolved(), "0.1.0")?;
+
+        assert_eq!(lock_a, lock_b);
+        assert!(
+            !lock_a.contains(&dir_a.path().display().to_string()),
+            "lock should not include project root paths"
+        );
+        assert!(
+            !lock_a.contains(&dir_b.path().display().to_string()),
+            "lock should not include project root paths"
+        );
+        assert!(
+            !lock_a.contains("created_at"),
+            "lock should not include timestamps"
+        );
+        assert!(
+            !lock_a.contains("cached_path"),
+            "lock should not include local cache paths"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lockfile_rerender_ignores_cached_path_field() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let snapshot = sample_snapshot(dir.path());
+
+        let lock_contents = |cached_path: &str| {
+            format!(
+                r#"version = 1
+
+[metadata]
+px_version = "0.1.0"
+created_at = "2025-01-01T00:00:00Z"
+mode = "p0-pinned"
+manifest_fingerprint = "demo-fingerprint"
+lock_id = "lock-demo"
+
+[project]
+name = "demo"
+
+[python]
+requirement = ">=3.11"
+
+[[dependencies]]
+name = "numpy"
+specifier = "numpy==2.3.5"
+direct = true
+
+[dependencies.artifact]
+filename = "numpy-2.3.5-py3-none-any.whl"
+url = "https://example.invalid/numpy.whl"
+sha256 = "deadbeef"
+size = 1
+cached_path = "{cached_path}"
+"#
+            )
+        };
+
+        let lock_a_path = "/tmp/numpy.whl";
+        let lock_b_path = "/Users/alice/Library/Caches/numpy.whl";
+        let parsed_a = io::parse_lockfile(&lock_contents(lock_a_path))?;
+        let parsed_b = io::parse_lockfile(&lock_contents(lock_b_path))?;
+
+        let rendered_a =
+            io::render_lockfile(&snapshot, &analysis::collect_resolved_dependencies(&parsed_a), "0.1.0")?;
+        let rendered_b =
+            io::render_lockfile(&snapshot, &analysis::collect_resolved_dependencies(&parsed_b), "0.1.0")?;
+
+        assert_eq!(rendered_a, rendered_b);
+        assert!(
+            !rendered_a.contains("cached_path"),
+            "rerendered lock should not include cached_path"
+        );
+        assert!(
+            !rendered_a.contains(lock_a_path),
+            "rerendered lock should drop cached_path value"
+        );
+        assert!(
+            !rendered_a.contains(lock_b_path),
+            "rerendered lock should drop cached_path value"
+        );
         Ok(())
     }
 
@@ -102,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_locked_artifacts_checks_hash() -> anyhow::Result<()> {
+    fn verify_locked_artifacts_requires_metadata() -> anyhow::Result<()> {
         let dir = tempdir()?;
         let wheel = dir.path().join("demo.whl");
         std::fs::write(&wheel, b"demo")?;
@@ -122,7 +229,6 @@ mod tests {
                     url: "https://example.invalid/demo.whl".into(),
                     sha256: spec::compute_file_sha256(&wheel)?,
                     size: 4,
-                    cached_path: wheel.display().to_string(),
                     python_tag: "py3".into(),
                     abi_tag: "none".into(),
                     platform_tag: "any".into(),

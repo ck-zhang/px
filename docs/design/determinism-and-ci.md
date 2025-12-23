@@ -21,6 +21,7 @@ For a fixed px version, runtime set, platform, and index configuration, the foll
 2. **Lockfile generation**
 
    * Given manifest, runtime, platform, and index configuration, the resolver must produce the same `px.lock` (including ordering, `mfingerprint`, and lock ID).
+   * Lockfiles are portable and diff-stable: no timestamps, absolute paths, usernames, or local cache layout are recorded.
 
 3. **Environment materialization**
 

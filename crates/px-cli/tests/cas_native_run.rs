@@ -118,7 +118,6 @@ struct LockEntry {
     name: String,
     version: String,
     filename: String,
-    cached_path: String,
     sha256: String,
     size: u64,
 }
@@ -149,7 +148,6 @@ fn write_lock(root: &Path, project_name: &str, python_req: &str, deps: &[LockEnt
         ));
         buf.push_str(&format!("sha256 = \"{}\"\n", dep.sha256));
         buf.push_str(&format!("size = {}\n", dep.size));
-        buf.push_str(&format!("cached_path = \"{}\"\n", dep.cached_path));
         buf.push_str("python_tag = \"py3\"\nabi_tag = \"none\"\nplatform_tag = \"any\"\n\n");
     }
 
@@ -203,6 +201,18 @@ fn build_wheel(
     (sha256, size)
 }
 
+fn cache_root() -> PathBuf {
+    PathBuf::from(env::var("PX_CACHE_PATH").expect("PX_CACHE_PATH"))
+}
+
+fn cache_wheel_path(name: &str, version: &str, filename: &str) -> PathBuf {
+    cache_root()
+        .join("wheels")
+        .join(name)
+        .join(version)
+        .join(filename)
+}
+
 fn envs_dir() -> PathBuf {
     PathBuf::from(env::var("PX_ENVS_PATH").expect("PX_ENVS_PATH"))
 }
@@ -248,10 +258,12 @@ fn cas_native_runs_console_script_without_env_materialization() {
         .tempdir()
         .expect("tempdir");
     let project = temp.path();
-    let artifacts = project.join("artifacts");
-    fs::create_dir_all(&artifacts).expect("artifacts dir");
 
-    let wheel = artifacts.join("hello_console-0.1.0-py3-none-any.whl");
+    let wheel = cache_wheel_path(
+        "hello_console",
+        "0.1.0",
+        "hello_console-0.1.0-py3-none-any.whl",
+    );
     let (sha256, size) = build_wheel(
         &python,
         &wheel,
@@ -283,7 +295,6 @@ fn cas_native_runs_console_script_without_env_materialization() {
                 .expect("wheel filename")
                 .to_string_lossy()
                 .to_string(),
-            cached_path: "artifacts/hello_console-0.1.0-py3-none-any.whl".to_string(),
             sha256,
             size,
         }],
@@ -321,10 +332,12 @@ fn cas_native_python_minus_s_can_import_profile_deps() {
         .tempdir()
         .expect("tempdir");
     let project = temp.path();
-    let artifacts = project.join("artifacts");
-    fs::create_dir_all(&artifacts).expect("artifacts dir");
 
-    let wheel = artifacts.join("hello_console-0.1.0-py3-none-any.whl");
+    let wheel = cache_wheel_path(
+        "hello_console",
+        "0.1.0",
+        "hello_console-0.1.0-py3-none-any.whl",
+    );
     let (sha256, size) = build_wheel(
         &python,
         &wheel,
@@ -356,7 +369,6 @@ fn cas_native_python_minus_s_can_import_profile_deps() {
                 .expect("wheel filename")
                 .to_string_lossy()
                 .to_string(),
-            cached_path: "artifacts/hello_console-0.1.0-py3-none-any.whl".to_string(),
             sha256,
             size,
         }],
@@ -401,10 +413,8 @@ fn cas_native_generates_setuptools_scm_version_file_before_run() {
         .tempdir()
         .expect("tempdir");
     let project = temp.path();
-    let artifacts = project.join("artifacts");
-    fs::create_dir_all(&artifacts).expect("artifacts dir");
 
-    let wheel = artifacts.join("packaging-99.0.0-py3-none-any.whl");
+    let wheel = cache_wheel_path("packaging", "99.0.0", "packaging-99.0.0-py3-none-any.whl");
     let (sha256, size) = build_wheel(
         &python,
         &wheel,
@@ -452,7 +462,6 @@ fn cas_native_generates_setuptools_scm_version_file_before_run() {
                 .expect("wheel filename")
                 .to_string_lossy()
                 .to_string(),
-            cached_path: "artifacts/packaging-99.0.0-py3-none-any.whl".to_string(),
             sha256,
             size,
         }],
@@ -569,7 +578,7 @@ PyMODINIT_FUNC PyInit_native_ext(void) {
         .expect("compile extension");
     assert!(status.success(), "failed to compile extension module");
 
-    let wheel = artifacts.join("native_ext-0.1.0-py3-none-any.whl");
+    let wheel = cache_wheel_path("native_ext", "0.1.0", "native_ext-0.1.0-py3-none-any.whl");
     let (sha256, size) = build_wheel(
         &python,
         &wheel,
@@ -601,7 +610,6 @@ PyMODINIT_FUNC PyInit_native_ext(void) {
                 .expect("wheel filename")
                 .to_string_lossy()
                 .to_string(),
-            cached_path: "artifacts/native_ext-0.1.0-py3-none-any.whl".to_string(),
             sha256,
             size,
         }],
@@ -645,10 +653,7 @@ fn cas_native_falls_back_on_duplicate_console_scripts() {
         .tempdir()
         .expect("tempdir");
     let project = temp.path();
-    let artifacts = project.join("artifacts");
-    fs::create_dir_all(&artifacts).expect("artifacts dir");
-
-    let wheel_a = artifacts.join("dupe_a-0.1.0-py3-none-any.whl");
+    let wheel_a = cache_wheel_path("dupe_a", "0.1.0", "dupe_a-0.1.0-py3-none-any.whl");
     let (sha_a, size_a) = build_wheel(
         &python,
         &wheel_a,
@@ -661,7 +666,7 @@ fn cas_native_falls_back_on_duplicate_console_scripts() {
         })],
         vec![("dupe", "dupe_a:main")],
     );
-    let wheel_b = artifacts.join("dupe_b-0.1.0-py3-none-any.whl");
+    let wheel_b = cache_wheel_path("dupe_b", "0.1.0", "dupe_b-0.1.0-py3-none-any.whl");
     let (sha_b, size_b) = build_wheel(
         &python,
         &wheel_b,
@@ -694,7 +699,6 @@ fn cas_native_falls_back_on_duplicate_console_scripts() {
                     .expect("wheel filename")
                     .to_string_lossy()
                     .to_string(),
-                cached_path: "artifacts/dupe_a-0.1.0-py3-none-any.whl".to_string(),
                 sha256: sha_a,
                 size: size_a,
             },
@@ -706,7 +710,6 @@ fn cas_native_falls_back_on_duplicate_console_scripts() {
                     .expect("wheel filename")
                     .to_string_lossy()
                     .to_string(),
-                cached_path: "artifacts/dupe_b-0.1.0-py3-none-any.whl".to_string(),
                 sha256: sha_b,
                 size: size_b,
             },
@@ -754,10 +757,8 @@ fn cas_native_fallback_is_silent_without_verbose() {
         .tempdir()
         .expect("tempdir");
     let project = temp.path();
-    let artifacts = project.join("artifacts");
-    fs::create_dir_all(&artifacts).expect("artifacts dir");
 
-    let wheel_a = artifacts.join("dupe_a-0.1.0-py3-none-any.whl");
+    let wheel_a = cache_wheel_path("dupe_a", "0.1.0", "dupe_a-0.1.0-py3-none-any.whl");
     let (sha_a, size_a) = build_wheel(
         &python,
         &wheel_a,
@@ -770,7 +771,7 @@ fn cas_native_fallback_is_silent_without_verbose() {
         })],
         vec![("dupe", "dupe_a:main")],
     );
-    let wheel_b = artifacts.join("dupe_b-0.1.0-py3-none-any.whl");
+    let wheel_b = cache_wheel_path("dupe_b", "0.1.0", "dupe_b-0.1.0-py3-none-any.whl");
     let (sha_b, size_b) = build_wheel(
         &python,
         &wheel_b,
@@ -803,7 +804,6 @@ fn cas_native_fallback_is_silent_without_verbose() {
                     .expect("wheel filename")
                     .to_string_lossy()
                     .to_string(),
-                cached_path: "artifacts/dupe_a-0.1.0-py3-none-any.whl".to_string(),
                 sha256: sha_a,
                 size: size_a,
             },
@@ -815,7 +815,6 @@ fn cas_native_fallback_is_silent_without_verbose() {
                     .expect("wheel filename")
                     .to_string_lossy()
                     .to_string(),
-                cached_path: "artifacts/dupe_b-0.1.0-py3-none-any.whl".to_string(),
                 sha256: sha_b,
                 size: size_b,
             },
@@ -850,7 +849,7 @@ fn cas_native_fallback_is_silent_without_verbose() {
 }
 
 #[test]
-fn sync_repairs_stale_cached_paths_and_run_succeeds() {
+fn sync_does_not_rewrite_lock_due_to_local_cache_layout() {
     let _guard = test_env_guard();
     reset_test_store_env();
     ensure_test_store_env();
@@ -864,8 +863,8 @@ fn sync_repairs_stale_cached_paths_and_run_succeeds() {
         .expect("tempdir");
     let project = temp.path();
 
-    let cache_root = PathBuf::from(env::var("PX_CACHE_PATH").expect("PX_CACHE_PATH"));
-    let cached_wheel = cache_root
+    let cache_root_path = PathBuf::from(env::var("PX_CACHE_PATH").expect("PX_CACHE_PATH"));
+    let cached_wheel = cache_root_path
         .join("wheels")
         .join("hello_console")
         .join("0.1.0")
@@ -901,11 +900,11 @@ fn sync_repairs_stale_cached_paths_and_run_succeeds() {
                 .expect("wheel filename")
                 .to_string_lossy()
                 .to_string(),
-            cached_path: "artifacts/stale-hello_console-0.1.0.whl".to_string(),
             sha256,
             size,
         }],
     );
+    let before_lock = fs::read_to_string(project.join("px.lock")).expect("read px.lock");
 
     assert_envs_empty("before sync");
     cargo_bin_cmd!("px")
@@ -918,9 +917,16 @@ fn sync_repairs_stale_cached_paths_and_run_succeeds() {
 
     let lock_text = fs::read_to_string(project.join("px.lock")).expect("read px.lock");
     assert!(
-        lock_text.contains(&cached_wheel.display().to_string()),
-        "px sync should repair cached_path to point at {}",
-        cached_wheel.display()
+        lock_text == before_lock,
+        "px sync should not rewrite px.lock based on local cache state"
+    );
+    assert!(
+        !lock_text.contains("cached_path ="),
+        "px.lock should not include cached_path fields"
+    );
+    assert!(
+        !lock_text.contains(&cache_root_path.display().to_string()),
+        "px.lock should not include local cache paths"
     );
 
     cargo_bin_cmd!("px")

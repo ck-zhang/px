@@ -3,27 +3,60 @@ use super::*;
 
 #[cfg(test)]
 pub fn materialize_project_site(
+    cache_root: &Path,
     site_dir: &Path,
     site_packages: &Path,
     lock: &LockSnapshot,
     python: Option<&Path>,
     fs: &dyn effects::FileSystem,
 ) -> Result<()> {
+    fn dependency_versions(lock: &LockSnapshot) -> std::collections::HashMap<String, String> {
+        let mut versions = std::collections::HashMap::new();
+        for spec in &lock.dependencies {
+            let head = spec.split(';').next().unwrap_or(spec).trim();
+            if let Some((name_part, ver_part)) = head.split_once("==") {
+                let name = crate::core::runtime::artifacts::dependency_name(name_part)
+                    .to_ascii_lowercase();
+                let version = ver_part.trim().to_string();
+                versions.entry(name).or_insert(version);
+            }
+        }
+        if let Some(graph) = &lock.graph {
+            for node in &graph.nodes {
+                versions
+                    .entry(node.name.to_ascii_lowercase())
+                    .or_insert(node.version.clone());
+            }
+        }
+        versions
+    }
+
+    fn inferred_version_from_filename(filename: &str) -> String {
+        let parts: Vec<&str> = filename.trim_end_matches(".whl").split('-').collect();
+        if parts.len() >= 2 {
+            parts[1].to_string()
+        } else {
+            "unknown".to_string()
+        }
+    }
+
     fs.create_dir_all(site_dir)?;
     fs.create_dir_all(site_packages)?;
     let pth_path = site_dir.join("px.pth");
     let pth_copy_path = site_packages.join("px.pth");
     let bin_dir = site_dir.join("bin");
     fs.create_dir_all(&bin_dir)?;
+    let versions = dependency_versions(lock);
     let mut entries = Vec::new();
     for dep in &lock.resolved {
         let Some(artifact) = &dep.artifact else {
             continue;
         };
-        if artifact.cached_path.is_empty() {
-            continue;
-        }
-        let wheel_path = PathBuf::from(&artifact.cached_path);
+        let version = versions
+            .get(&dep.name.to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_else(|| inferred_version_from_filename(&artifact.filename));
+        let wheel_path = crate::store::wheel_path(cache_root, &dep.name, &version, &artifact.filename);
         if !wheel_path.exists() {
             continue;
         }

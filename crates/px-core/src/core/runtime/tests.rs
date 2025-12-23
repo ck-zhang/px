@@ -295,9 +295,10 @@ fn parse_exact_pin_handles_extras_and_markers() {
 fn materialize_project_site_writes_cached_paths() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path();
-    let cache_dir = root.join("cache");
-    fs::create_dir_all(&cache_dir).expect("cache dir");
-    let wheel = cache_dir.join("demo-1.0.0.whl");
+    let cache_root = root.join("cache");
+    fs::create_dir_all(&cache_root).expect("cache dir");
+    let wheel = crate::store::wheel_path(&cache_root, "demo", "1.0.0", "demo.whl");
+    fs::create_dir_all(wheel.parent().expect("wheel parent")).expect("wheel parent");
     fs::write(&wheel, b"demo").expect("wheel stub");
     let dist_dir = wheel.with_extension("dist");
     fs::create_dir_all(&dist_dir).expect("dist dir");
@@ -324,7 +325,7 @@ fn materialize_project_site_writes_cached_paths() {
         python_requirement: Some(">=3.11".into()),
         manifest_fingerprint: Some("demo-fingerprint".into()),
         lock_id: Some("lock-demo".into()),
-        dependencies: Vec::new(),
+        dependencies: vec!["demo==1.0.0".into()],
         mode: Some("p0-pinned".into()),
         resolved: vec![LockedDependency {
             name: "demo".into(),
@@ -334,7 +335,6 @@ fn materialize_project_site_writes_cached_paths() {
                 url: "https://example.invalid/demo.whl".into(),
                 sha256: "abc123".into(),
                 size: 4,
-                cached_path: wheel.display().to_string(),
                 python_tag: "py3".into(),
                 abi_tag: "none".into(),
                 platform_tag: "any".into(),
@@ -356,7 +356,7 @@ fn materialize_project_site_writes_cached_paths() {
         .join("test-env")
         .join("site");
     let site_packages = site_packages_dir(&site_dir, "3.11.0");
-    materialize_project_site(&site_dir, &site_packages, &lock, None, effects.fs())
+    materialize_project_site(&cache_root, &site_dir, &site_packages, &lock, None, effects.fs())
         .expect("materialize site");
 
     let pxpth = site_dir.join("px.pth");
@@ -384,6 +384,8 @@ fn materialize_project_site_writes_cached_paths() {
 fn materialize_project_site_skips_missing_artifacts() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path();
+    let cache_root = root.join("cache");
+    fs::create_dir_all(&cache_root).expect("cache dir");
     let snapshot = ManifestSnapshot {
         root: root.to_path_buf(),
         manifest_path: root.join("pyproject.toml"),
@@ -406,7 +408,7 @@ fn materialize_project_site_skips_missing_artifacts() {
         python_requirement: Some(">=3.11".into()),
         manifest_fingerprint: Some("demo-fingerprint".into()),
         lock_id: Some("lock-demo".into()),
-        dependencies: Vec::new(),
+        dependencies: vec!["missing==0.0.0".into()],
         mode: Some("p0-pinned".into()),
         resolved: vec![LockedDependency {
             name: "missing".into(),
@@ -416,7 +418,6 @@ fn materialize_project_site_skips_missing_artifacts() {
                 url: "https://example.invalid/missing.whl".into(),
                 sha256: "deadbeef".into(),
                 size: 0,
-                cached_path: root.join("nope").display().to_string(),
                 python_tag: "py3".into(),
                 abi_tag: "none".into(),
                 platform_tag: "any".into(),
@@ -438,7 +439,7 @@ fn materialize_project_site_skips_missing_artifacts() {
         .join("test-env")
         .join("site");
     let site_packages = site_packages_dir(&site_dir, "3.11.0");
-    materialize_project_site(&site_dir, &site_packages, &lock, None, effects.fs())
+    materialize_project_site(&cache_root, &site_dir, &site_packages, &lock, None, effects.fs())
         .expect("materialize site with gap");
     let pxpth = site_dir.join("px.pth");
     assert!(pxpth.exists(), "px.pth should still be created");

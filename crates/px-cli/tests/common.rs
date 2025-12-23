@@ -10,12 +10,13 @@ use std::{
 };
 
 use assert_cmd::{assert::Assert, cargo::cargo_bin_cmd};
+use px_domain::api::normalize_dist_name;
 use serde_json::Value;
 use std::cell::RefCell;
 use std::env;
 use std::sync::OnceLock;
 use tempfile::TempDir;
-use toml_edit::DocumentMut;
+use toml_edit::{DocumentMut, Item};
 
 thread_local! {
     static TEST_CACHE: RefCell<Option<TempDir>> = const { RefCell::new(None) };
@@ -505,7 +506,17 @@ pub fn git_file_locator(path: &Path) -> String {
 ///
 /// # Panics
 /// Panics if the lockfile cannot be read or the dependency entry is missing.
-pub fn artifact_from_lock(project_root: &Path, name: &str) -> PathBuf {
+pub fn artifact_from_lock(project_root: &Path, name: &str, cache_root: &Path) -> PathBuf {
+    fn pinned_version(specifier: &str) -> Option<String> {
+        let (_, version) = specifier.split_once("==")?;
+        let version = version.split(';').next().unwrap_or(version).trim();
+        if version.is_empty() {
+            None
+        } else {
+            Some(version.to_string())
+        }
+    }
+
     let lock = project_root.join("px.lock");
     let contents = fs::read_to_string(&lock).expect("read lock");
     let doc: DocumentMut = contents.parse().expect("valid lock");
@@ -514,12 +525,21 @@ pub fn artifact_from_lock(project_root: &Path, name: &str) -> PathBuf {
         .expect("deps table");
     let entry = deps
         .iter()
-        .find(|table| table.get("name").and_then(toml_edit::Item::as_str) == Some(name))
+        .find(|table| table.get("name").and_then(Item::as_str) == Some(name))
         .expect("dependency entry");
+    let specifier = entry
+        .get("specifier")
+        .and_then(Item::as_str)
+        .unwrap_or_default();
+    let version = pinned_version(specifier).expect("pinned version");
     let artifact = entry["artifact"].as_table().expect("artifact table");
-    let path = artifact
-        .get("cached_path")
-        .and_then(toml_edit::Item::as_str)
-        .expect("cached path");
-    PathBuf::from(path)
+    let filename = artifact
+        .get("filename")
+        .and_then(Item::as_str)
+        .expect("artifact filename");
+    cache_root
+        .join("wheels")
+        .join(normalize_dist_name(name))
+        .join(version)
+        .join(filename)
 }

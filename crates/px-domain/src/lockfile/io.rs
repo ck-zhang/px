@@ -56,10 +56,6 @@ pub fn render_lockfile_with_workspace(
 
     let mut metadata = Table::new();
     metadata.insert("px_version", Item::Value(TomlValue::from(px_version)));
-    metadata.insert(
-        "created_at",
-        Item::Value(TomlValue::from(current_timestamp()?)),
-    );
     metadata.insert("mode", Item::Value(TomlValue::from(LOCK_MODE_PINNED)));
     metadata.insert(
         "manifest_fingerprint",
@@ -172,10 +168,6 @@ pub fn render_lockfile_v2(
 
     let mut metadata = Table::new();
     metadata.insert("px_version", Item::Value(TomlValue::from(px_version)));
-    metadata.insert(
-        "created_at",
-        Item::Value(TomlValue::from(current_timestamp()?)),
-    );
     metadata.insert("mode", Item::Value(TomlValue::from(LOCK_MODE_PINNED)));
     let manifest_fingerprint = lock
         .manifest_fingerprint
@@ -362,10 +354,6 @@ fn render_artifact(artifact: &LockedArtifact) -> Table {
     );
     let size_value = i64::try_from(artifact.size).unwrap_or(i64::MAX);
     table.insert("size", Item::Value(TomlValue::from(size_value)));
-    table.insert(
-        "cached_path",
-        Item::Value(TomlValue::from(artifact.cached_path.clone())),
-    );
     table.insert(
         "python_tag",
         Item::Value(TomlValue::from(artifact.python_tag.clone())),
@@ -602,11 +590,6 @@ fn parse_artifact_table(table: &Table) -> Option<LockedArtifact> {
         .and_then(Item::as_integer)
         .and_then(|value| u64::try_from(value).ok())
         .unwrap_or(0);
-    let cached_path = table
-        .get("cached_path")
-        .and_then(Item::as_str)
-        .unwrap_or_default()
-        .to_string();
     let mut python_tag = table
         .get("python_tag")
         .and_then(Item::as_str)
@@ -651,7 +634,6 @@ fn parse_artifact_table(table: &Table) -> Option<LockedArtifact> {
         url,
         sha256,
         size,
-        cached_path,
         python_tag,
         abi_tag,
         platform_tag,
@@ -787,6 +769,4 @@ fn normalized_from_graph(graph: &LockGraphSnapshot) -> (Vec<String>, Vec<LockedD
     (dependencies, resolved)
 }
 
-fn current_timestamp() -> Result<String> {
-    Ok(time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?)
-}
+// Intentionally omit timestamps to keep lockfiles deterministic.

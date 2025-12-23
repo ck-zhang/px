@@ -32,7 +32,7 @@ fn force_sdist_build_writes_cache_and_lock() {
 
     run_force_sdist_install(&project, cache.path());
 
-    let artifact_path = artifact_from_lock(&project, "packaging");
+    let artifact_path = artifact_from_lock(&project, "packaging", cache.path());
     assert!(
         artifact_path.exists(),
         "cached artifact should exist at {artifact_path:?}"

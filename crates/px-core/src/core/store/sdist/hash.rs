@@ -33,7 +33,11 @@ pub(crate) fn compute_build_options_hash(python_path: &str, method: BuildMethod)
     let fingerprint = BuildOptionsFingerprint {
         python,
         method,
-        env: build_env_fingerprint(),
+        env: if method == BuildMethod::BuilderWheel {
+            BTreeMap::new()
+        } else {
+            build_env_fingerprint()
+        },
     };
     let bytes = serde_json::to_vec(&fingerprint)?;
     Ok(hex::encode(Sha256::digest(bytes)))

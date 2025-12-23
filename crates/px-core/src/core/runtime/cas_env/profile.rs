@@ -8,7 +8,7 @@ use std::{
 
 use crate::core::fs::PxTempDir;
 use anyhow::{anyhow, Result};
-use px_domain::api::{LockSnapshot, LockedArtifact};
+use px_domain::api::LockSnapshot;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, Item};
@@ -260,10 +260,8 @@ pub(crate) fn ensure_profile_manifest(
             source_header.sha256 = built.source_sha256.clone();
             builder_dist = Some(built.dist_path.clone());
             built.cached_path
-        } else if !artifact.cached_path.is_empty() && Path::new(&artifact.cached_path).exists() {
-            PathBuf::from(&artifact.cached_path)
         } else {
-            ensure_cached_wheel(cache_root, &source_header, artifact)?
+            ensure_cached_wheel(cache_root, &source_header)?
         };
         let source_key = source_lookup_key(&source_header);
         let source_oid = match store.lookup_key(ObjectKind::Source, &source_key)? {
@@ -727,14 +725,7 @@ fn inferred_version_from_filename(filename: &str) -> String {
 fn ensure_cached_wheel(
     cache_root: &Path,
     header: &SourceHeader,
-    artifact: &LockedArtifact,
 ) -> Result<PathBuf> {
-    if !artifact.cached_path.is_empty() {
-        let cached = PathBuf::from(&artifact.cached_path);
-        if cached.exists() {
-            return Ok(cached);
-        }
-    }
     let dest = wheel_path(cache_root, &header.name, &header.version, &header.filename);
     if dest.exists() {
         return Ok(dest);
