@@ -314,8 +314,15 @@ fn build_errors_when_project_has_no_module() {
     );
     let hint = payload["details"]["hint"].as_str().unwrap_or_default();
     assert!(
-        hint.contains("__init__.py") || hint.contains("tool.uv.build-backend"),
-        "expected hint to mention package layout/config, got {hint:?}"
+        !hint.to_ascii_lowercase().contains("uv"),
+        "hint should not mention unrelated tools, got {hint:?}"
+    );
+    assert!(
+        hint.contains("__init__.py")
+            && hint.contains("src layout")
+            && hint.contains("flat layout")
+            && hint.contains("build backend"),
+        "expected px build hint to describe package layout + backend config, got {hint:?}"
     );
 }
 
