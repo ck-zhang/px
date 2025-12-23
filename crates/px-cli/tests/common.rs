@@ -45,6 +45,7 @@ pub fn reset_test_store_env() {
         "PX_TOOLS_DIR",
         "PX_ONLINE",
         "PX_FORCE_SDIST",
+        "PX_RUNTIME_REGISTRY",
         "PX_RUNTIME_PYTHON",
         "PX_KEEP_PROXIES",
         "PX_INDEX_URL",
@@ -86,6 +87,7 @@ pub fn ensure_test_store_env() {
         let store = cache.join("store");
         let envs = cache.join("envs");
         let tools = cache.join("tools");
+        let runtime_registry = cache.join("runtimes.json");
         let _ = fs::create_dir_all(&store);
         let _ = fs::create_dir_all(&envs);
         let _ = fs::create_dir_all(&tools);
@@ -93,11 +95,30 @@ pub fn ensure_test_store_env() {
         env::set_var("PX_STORE_PATH", store);
         env::set_var("PX_ENVS_PATH", envs);
         env::set_var("PX_TOOLS_DIR", tools);
+        env::set_var("PX_RUNTIME_REGISTRY", &runtime_registry);
         env::set_var("PX_NO_ENSUREPIP", "1");
         env::set_var("PX_RUNTIME_HOST_ONLY", "1");
         if env::var_os("PX_RUNTIME_PYTHON").is_none() {
             if let Some(python) = find_python() {
                 env::set_var("PX_RUNTIME_PYTHON", python);
+            }
+        }
+        if let Some(python) = env::var("PX_RUNTIME_PYTHON").ok() {
+            if let Some((executable, channel, full_version)) =
+                detect_host_python_details(&python)
+            {
+                let payload = serde_json::json!({
+                    "runtimes": [{
+                        "version": channel,
+                        "full_version": full_version,
+                        "path": executable,
+                        "default": true,
+                    }],
+                });
+                let _ = fs::write(
+                    &runtime_registry,
+                    serde_json::to_string_pretty(&payload).unwrap() + "\n",
+                );
             }
         }
         env::set_var("PX_SYSTEM_DEPS_MODE", "offline");
@@ -237,10 +258,14 @@ pub fn find_python() -> Option<String> {
 }
 
 pub fn detect_host_python(python: &str) -> Option<(String, String)> {
-    const INSPECT_SCRIPT: &str = "import json, sys; print(json.dumps({'major': sys.version_info[0], 'minor': sys.version_info[1], 'executable': sys.executable}))";
+    detect_host_python_details(python).map(|(executable, channel, _)| (executable, channel))
+}
+
+pub fn detect_host_python_details(python: &str) -> Option<(String, String, String)> {
+    const INSPECT_SCRIPT_FULL: &str = "import json, platform, sys; print(json.dumps({'major': sys.version_info[0], 'minor': sys.version_info[1], 'version': platform.python_version(), 'executable': sys.executable}))";
     let output = Command::new(python)
         .arg("-c")
-        .arg(INSPECT_SCRIPT)
+        .arg(INSPECT_SCRIPT_FULL)
         .output()
         .ok()?;
     if !output.status.success() {
@@ -251,7 +276,12 @@ pub fn detect_host_python(python: &str) -> Option<(String, String)> {
     let major = payload.get("major")?.as_u64()?;
     let minor = payload.get("minor")?.as_u64()?;
     let channel = format!("{major}.{minor}");
-    Some((executable, channel))
+    let version = payload
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or(channel.as_str())
+        .to_string();
+    Some((executable, channel, version))
 }
 
 pub fn fake_sandbox_backend(dir: &Path) -> io::Result<(PathBuf, PathBuf)> {

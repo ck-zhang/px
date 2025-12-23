@@ -173,9 +173,6 @@ fn project_init_reports_orphaned_lockfile() {
 #[test]
 fn project_init_cleans_up_when_runtime_missing() {
     let _guard = test_env_guard();
-    if !require_online() {
-        return;
-    }
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path().join("no_runtime");
     fs::create_dir_all(&project_dir).expect("create project dir");
@@ -191,8 +188,12 @@ fn project_init_cleans_up_when_runtime_missing() {
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stderr.contains("python runtime unavailable"),
-        "expected runtime error message, got {stderr:?}"
+        stderr.contains("no px-managed Python runtime found"),
+        "expected runtime guidance, got {stderr:?}"
+    );
+    assert!(
+        stderr.contains("px python install 3.12"),
+        "expected install command guidance, got {stderr:?}"
     );
     assert!(
         !project_dir.join("pyproject.toml").exists(),
@@ -206,6 +207,217 @@ fn project_init_cleans_up_when_runtime_missing() {
         !project_dir.join(".px").exists(),
         ".px directory should not be created when init fails"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn project_init_prompts_to_install_runtime_on_tty() {
+    use std::fs::File;
+    use std::io::Read;
+    use std::net::TcpListener;
+    use std::process::{Command, Stdio};
+    use std::thread;
+
+    use flate2::{write::GzEncoder, Compression};
+    use tar::{Builder, EntryType, Header};
+
+    let _guard = test_env_guard();
+    common::ensure_test_store_env();
+
+    if Command::new("script").arg("--help").output().is_err() {
+        eprintln!("skipping tty init test (script not available)");
+        return;
+    }
+
+    let Some(python) = common::find_python() else {
+        eprintln!("skipping tty init test (python not found)");
+        return;
+    };
+    let Some((python_exe, channel, _full_version)) =
+        common::detect_host_python_details(&python)
+    else {
+        eprintln!("skipping tty init test (unable to inspect python)");
+        return;
+    };
+    let Some((major, minor)) = channel.split_once('.') else {
+        eprintln!("skipping tty init test (unexpected python channel {channel})");
+        return;
+    };
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("tty_init");
+    fs::create_dir_all(&project_dir).expect("create project dir");
+    let registry = temp.path().join("runtimes.json");
+
+    let tarball = temp.path().join("python.tar.gz");
+    let wrapper_path = format!("cpython-{channel}/bin/python{major}.{minor}");
+    {
+        let python_bytes = fs::read(&python_exe).expect("read python");
+        let stdlib_parent = python_stdlib_parent(&python_exe).expect("stdlib parent");
+        let lib_dir = stdlib_parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("stdlib dir name");
+        let tar_gz = File::create(&tarball).expect("create tarball");
+        let encoder = GzEncoder::new(tar_gz, Compression::default());
+        let mut builder = Builder::new(encoder);
+        let mut header = Header::new_gnu();
+        header.set_size(python_bytes.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, wrapper_path, python_bytes.as_slice())
+            .expect("append python");
+        let mut link = Header::new_gnu();
+        link.set_entry_type(EntryType::Symlink);
+        link.set_size(0);
+        link.set_mode(0o777);
+        builder
+            .append_link(
+                &mut link,
+                format!("cpython-{channel}/{lib_dir}"),
+                stdlib_parent,
+            )
+            .expect("append lib symlink");
+        builder.finish().expect("finish tar");
+        builder
+            .into_inner()
+            .expect("finish tar writer")
+            .finish()
+            .expect("finish gzip");
+    }
+
+    let mut tar_bytes = Vec::new();
+    File::open(&tarball)
+        .expect("open tarball")
+        .read_to_end(&mut tar_bytes)
+        .expect("read tarball");
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind http listener");
+    let port = listener.local_addr().expect("listener addr").port();
+    let handle = thread::spawn(move || {
+        for stream in listener.incoming().take(1) {
+            let Ok(stream) = stream else {
+                break;
+            };
+            let _ = respond_tarball(stream, &tar_bytes);
+        }
+    });
+
+    let manifest = temp.path().join("python-downloads.json");
+    let asset_url = format!("http://127.0.0.1:{port}/python.tar.gz");
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let libc = if os == "linux" { "gnu" } else { "none" };
+    let manifest_payload = json!({
+        "test-runtime": {
+            "name": "cpython",
+            "arch": { "family": arch },
+            "os": os,
+            "libc": libc,
+            "major": major.parse::<u8>().expect("major"),
+            "minor": minor.parse::<u8>().expect("minor"),
+            "patch": 0,
+            "url": asset_url,
+            "prerelease": "",
+            "variant": "",
+            "build": "0",
+        }
+    });
+    fs::write(
+        &manifest,
+        serde_json::to_string_pretty(&manifest_payload).unwrap() + "\n",
+    )
+    .expect("write manifest");
+
+    let px = std::path::PathBuf::from(env!("CARGO_BIN_EXE_px"));
+    let command = format!(
+        "cd '{}' && '{}' init --py {}",
+        project_dir.display(),
+        px.display(),
+        channel
+    );
+    let mut cmd = Command::new("script");
+    cmd.arg("-q")
+        .arg("-e")
+        .arg("-c")
+        .arg(command)
+        .arg("/dev/null")
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .env("PX_PYTHON_DOWNLOADS_URL", &manifest)
+        .env_remove("PX_NO_ENSUREPIP")
+        .env_remove("CI")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn script");
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin
+            .write_all(b"Y\n")
+            .expect("write confirmation");
+    }
+    let output = child.wait_with_output().expect("wait");
+    assert!(
+        output.status.success(),
+        "expected init to succeed, stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains(&format!(
+            "No px-managed Python runtime found. Install Python {channel} now? (Y/n)"
+        )),
+        "expected runtime install prompt, got {combined:?}"
+    );
+    assert!(
+        project_dir.join("pyproject.toml").exists(),
+        "pyproject.toml should be created after init"
+    );
+    assert!(
+        project_dir.join("px.lock").exists(),
+        "px.lock should be created after init"
+    );
+
+    let _ = handle.join();
+}
+
+#[cfg(unix)]
+fn python_stdlib_parent(python: &str) -> Option<std::path::PathBuf> {
+    const SCRIPT: &str =
+        "import json, sysconfig; print(json.dumps({'stdlib': sysconfig.get_path('stdlib')}))";
+    let output = std::process::Command::new(python)
+        .arg("-c")
+        .arg(SCRIPT)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let stdlib = payload.get("stdlib")?.as_str()?;
+    std::path::Path::new(stdlib).parent().map(ToOwned::to_owned)
+}
+
+#[cfg(unix)]
+fn respond_tarball(mut stream: std::net::TcpStream, payload: &[u8]) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+
+    let mut buf = [0_u8; 1024];
+    let _ = stream.read(&mut buf)?;
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        payload.len()
+    );
+    stream.write_all(header.as_bytes())?;
+    stream.write_all(payload)?;
+    Ok(())
 }
 
 #[test]
