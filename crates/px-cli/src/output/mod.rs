@@ -148,7 +148,11 @@ pub fn emit_output(
                 {
                     return Ok(code);
                 }
-                let header = format!("{}  {}", failure::error_code(info), outcome.message);
+                let header = format!(
+                    "{}  {}",
+                    failure::error_code(info, &outcome.details),
+                    outcome.message
+                );
                 eprintln!("{}", style_err.error_header(&header));
                 eprintln!();
                 eprintln!("Why:");

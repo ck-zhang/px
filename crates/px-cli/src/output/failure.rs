@@ -36,7 +36,19 @@ pub(super) fn render_test_failure(
     true
 }
 
-pub(super) fn error_code(info: CommandInfo) -> &'static str {
+pub(super) fn error_code(info: CommandInfo, details: &Value) -> String {
+    if let Some(code) = details
+        .as_object()
+        .and_then(|map| map.get("code"))
+        .and_then(Value::as_str)
+        .filter(|code| code.starts_with("PX"))
+    {
+        return code.to_string();
+    }
+    default_error_code(info).to_string()
+}
+
+fn default_error_code(info: CommandInfo) -> &'static str {
     match info.group {
         CommandGroup::Init => diag_commands::INIT,
         CommandGroup::Add => diag_commands::ADD,

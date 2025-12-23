@@ -38,7 +38,7 @@ fn init_help_lists_examples() {
 fn build_help_mentions_skip_tests_example() {
     let output = help_output(&["build", "--help"]);
     assert!(
-        output.contains("Build sdists/wheels using the px env (prep for px publish)."),
+        output.contains("Build sdists/wheels from project sources (prep for px publish)."),
         "build about missing: {output}"
     );
 }
@@ -62,5 +62,48 @@ fn top_level_help_mentions_debug_flag() {
     assert!(
         output.contains("--debug"),
         "global help should surface the --debug flag: {output}"
+    );
+}
+
+#[test]
+fn sync_help_mentions_lock_resolution_and_flag_help() {
+    let output = help_output(&["sync", "--help"]);
+    assert!(
+        output.contains("Resolve (if needed) and sync env from lock"),
+        "sync help should describe dev-mode lock/env behavior: {output}"
+    );
+    assert!(
+        output.contains("--dry-run") && output.contains("Preview changes without writing files"),
+        "sync help should describe --dry-run behavior: {output}"
+    );
+    assert!(
+        output.contains("--frozen") && output.contains("do not resolve dependencies"),
+        "sync help should describe --frozen behavior: {output}"
+    );
+}
+
+#[test]
+fn force_flag_is_init_only() {
+    let init = help_output(&["init", "--help"]);
+    assert!(
+        init.contains("\n      --force "),
+        "init help should include the --force flag: {init}"
+    );
+
+    for cmd in ["add", "remove", "sync", "build", "update"] {
+        let output = help_output(&[cmd, "--help"]);
+        assert!(
+            !output.contains("\n      --force "),
+            "{cmd} should not accept a standalone --force flag: {output}"
+        );
+    }
+}
+
+#[test]
+fn top_level_help_describes_build_sources() {
+    let output = help_output(&["--help"]);
+    assert!(
+        output.contains("build            Build sdists/wheels from project sources."),
+        "top-level help should describe build accurately: {output}"
     );
 }

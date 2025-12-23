@@ -27,6 +27,50 @@ fn find_python() -> Option<String> {
 }
 
 #[test]
+fn px_test_no_tests_is_non_failing_in_dev() {
+    if !require_online() {
+        return;
+    }
+    let _guard = common::test_env_guard();
+    let (_tmp, project) = common::init_empty_project("test-no-tests-dev");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env_remove("CI")
+        .args(["test"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("NO TESTS"),
+        "expected no-tests summary, got stdout: {stdout:?}"
+    );
+}
+
+#[test]
+fn px_test_no_tests_is_strict_in_ci() {
+    if !require_online() {
+        return;
+    }
+    let _guard = common::test_env_guard();
+    let (_tmp, project) = common::init_empty_project("test-no-tests-ci");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("CI", "1")
+        .args(["test"])
+        .assert()
+        .code(5);
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("exit code 5"),
+        "expected strict no-tests exit code in stdout: {stdout:?}"
+    );
+}
+
+#[test]
 fn px_test_streams_and_summarizes_runner_output() {
     if !require_online() {
         return;

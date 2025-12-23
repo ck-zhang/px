@@ -268,7 +268,7 @@ fn project_init_request_from_args(args: &InitArgs) -> ProjectInitRequest {
         package: args.package.clone(),
         python: args.py.clone(),
         dry_run: args.common.dry_run,
-        force: args.common.force,
+        force: args.force,
     }
 }
 

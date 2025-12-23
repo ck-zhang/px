@@ -16,7 +16,7 @@ pub const PX_BEFORE_HELP: &str = concat!(
     "\x1b[1;36mCore workflow\x1b[0m\n",
     "  init             Start a px project; writes pyproject.toml, px.lock, and .px/.\n",
     "  add / remove     Declare or drop dependencies; px.lock and the env stay in sync.\n",
-    "  sync             Reconcile the environment with px.lock (use --frozen in CI).\n",
+    "  sync             Resolve (if needed) and sync env from lock (use --frozen in CI).\n",
     "  update           Resolve newer pins, rewrite px.lock, then sync the env.\n",
     "  run              Execute scripts/tasks; auto-repair the env from px.lock unless --frozen or CI=1.\n",
     "  test             Run tests with the same auto-repair rules as `px run`.\n\n",
@@ -25,7 +25,7 @@ pub const PX_BEFORE_HELP: &str = concat!(
     "  explain          Inspect what px would execute (no execution).\n",
     "  why              Explain why a dependency is present.\n",
     "  fmt              Run formatters/linters/cleanup tools via px-managed tool environments.\n",
-    "  build            Produce sdists/wheels from the px-managed environment.\n",
+    "  build            Build sdists/wheels from project sources.\n",
     "  publish          Upload previously built artifacts (dry-run by default; use --upload to push).\n",
     "  pack image       Freeze the current env + sandbox config into an OCI image.\n",
     "  pack app         Build a portable .pxapp bundle runnable via `px run <file>.pxapp`.\n",
@@ -119,7 +119,7 @@ pub enum CommandGroupCli {
     )]
     Remove(SpecArgs),
     #[command(
-        about = "Sync the project environment from px.lock (run after clone or drift).",
+        about = "Resolve (if needed) and sync env from lock (run after clone or drift).",
         override_usage = "px sync [--frozen]"
     )]
     Sync(SyncArgs),
@@ -129,12 +129,12 @@ pub enum CommandGroupCli {
     )]
     Update(SpecArgs),
     #[command(
-        about = "Run scripts/tasks; auto-repair the env from px.lock unless --frozen or CI=1. Also supports https://... URL targets and gh:/git+ run-by-reference forms.",
+        about = "Run scripts/tasks; auto-repair the env from px.lock unless --frozen or CI=1. Also supports https://... URL targets and gh:/git+ run-by-reference forms. Exit code matches the target process.",
         override_usage = "px run <TARGET> [ARG...]"
     )]
     Run(RunArgs),
     #[command(
-        about = "Run tests with the same auto-repair rules as px run.",
+        about = "Run tests with the same auto-repair rules as px run. Exit code matches the test runner (except: no tests collected is ok outside CI/--frozen).",
         override_usage = "px test [-- <TEST_ARG>...]"
     )]
     Test(TestArgs),
@@ -148,7 +148,7 @@ pub enum CommandGroupCli {
     #[command(about = "Explain what px would execute (read-only).", subcommand)]
     Explain(ExplainCommand),
     #[command(
-        about = "Build sdists/wheels using the px env (prep for px publish).",
+        about = "Build sdists/wheels from project sources (prep for px publish).",
         override_usage = "px build [sdist|wheel|both] [--out DIR]"
     )]
     Build(BuildArgs),
@@ -216,7 +216,7 @@ pub enum PythonCommand {
     Info,
     #[command(about = "Register a Python interpreter for px to use.")]
     Install(PythonInstallArgs),
-    #[command(about = "Record the runtime version for the current project.")]
+    #[command(about = "Select a runtime for the current project/workspace and sync lock/env.")]
     Use(PythonUseArgs),
 }
 
@@ -339,10 +339,8 @@ pub struct MigrateArgs {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct CommonFlags {
-    #[arg(long)]
+    #[arg(long, help = "Preview changes without writing files or building envs")]
     pub dry_run: bool,
-    #[arg(long)]
-    pub force: bool,
 }
 
 #[derive(Args, Debug)]
@@ -355,8 +353,13 @@ pub struct InitArgs {
         help = "Package module name (defaults to sanitized directory name)"
     )]
     pub package: Option<String>,
-    #[arg(long = "py")]
+    #[arg(long = "py", value_name = "VERSION", help = "Python version requirement (e.g. 3.11)")]
     pub py: Option<String>,
+    #[arg(
+        long,
+        help = "Bypass the dirty-worktree guard when scaffolding a project"
+    )]
+    pub force: bool,
 }
 
 #[derive(Args, Debug)]
@@ -379,7 +382,10 @@ pub struct WhyArgs {
 pub struct SyncArgs {
     #[command(flatten)]
     pub common: CommonFlags,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Fail if px.lock is missing or out of date (do not resolve dependencies)"
+    )]
     pub frozen: bool,
 }
 
@@ -557,7 +563,11 @@ pub struct BuildArgs {
     pub common: CommonFlags,
     #[arg(value_enum, default_value_t = BuildFormat::Both)]
     pub format: BuildFormat,
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Write artifacts to this directory (default: dist/)"
+    )]
     pub out: Option<PathBuf>,
 }
 
@@ -639,8 +649,12 @@ pub struct PublishArgs {
         conflicts_with = "dry_run"
     )]
     pub upload: bool,
-    #[arg(long)]
+    #[arg(long, value_name = "NAME", help = "Registry name or upload URL (default: pypi)")]
     pub registry: Option<String>,
-    #[arg(long = "token-env")]
+    #[arg(
+        long = "token-env",
+        value_name = "VAR",
+        help = "Environment variable containing the registry token (default: PX_PUBLISH_TOKEN)"
+    )]
     pub token_env: Option<String>,
 }

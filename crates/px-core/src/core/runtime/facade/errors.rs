@@ -11,13 +11,19 @@ pub fn missing_project_outcome() -> ExecutionOutcome {
         message: MISSING_PROJECT_MESSAGE.to_string(),
         hint: MISSING_PROJECT_HINT.to_string(),
     });
-    ExecutionOutcome::user_error(
-        guidance.message.clone(),
-        json!({
-            "reason": "missing_project",
-            "hint": guidance.hint,
-        }),
-    )
+    let searched = std::env::current_dir()
+        .ok()
+        .map(|dir| dir.display().to_string());
+    let mut details = json!({
+        "code": "PX001",
+        "reason": "missing_project",
+        "issues": ["No pyproject.toml with [tool.px] and no px.lock found in parent directories."],
+        "hint": guidance.hint,
+    });
+    if let (Some(searched), Some(map)) = (searched, details.as_object_mut()) {
+        map.insert("searched".to_string(), Value::String(searched));
+    }
+    ExecutionOutcome::user_error(guidance.message.clone(), details)
 }
 
 pub fn is_missing_project_error(err: &anyhow::Error) -> bool {

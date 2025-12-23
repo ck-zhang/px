@@ -282,11 +282,10 @@ fn missing_project_status(cwd: &Path) -> ExecutionOutcome {
         "code": "PX001",
         "reason": "missing_project",
         "searched": cwd.display().to_string(),
-        "why": ["No pyproject.toml with [tool.px] and no px.lock found in parent directories."],
-        "fix": [guidance.hint.clone()],
+        "issues": ["No pyproject.toml with [tool.px] and no px.lock found in parent directories."],
         "hint": guidance.hint,
     });
-    ExecutionOutcome::user_error(format!("PX001  {}", guidance.message), details)
+    ExecutionOutcome::user_error(guidance.message, details)
 }
 
 pub(crate) fn issue_id_for(message: &str) -> String {

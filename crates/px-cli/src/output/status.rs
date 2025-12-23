@@ -235,20 +235,17 @@ fn format_status_default(style: &Style, payload: &StatusPayload) -> Vec<String> 
                     }
                     if payload.context.member_path.is_none() {
                         lines.push(String::new());
+                        let example = workspace
+                            .members
+                            .first()
+                            .map(|member| member.path.as_str())
+                            .unwrap_or("apps/a");
                         lines.push(kv(
-                            "note:",
-                            "Current directory is not part of any workspace member.",
+                            "tip:",
+                            &format!(
+                                "Run `px status` inside a workspace member (e.g. `{example}`) for project-level status."
+                            ),
                             pad,
-                        ));
-                        lines.push(format!(
-                            "{:pad$}  • run `px status` at a member path, or",
-                            "",
-                            pad = pad
-                        ));
-                        lines.push(format!(
-                            "{:pad$}  • add this directory as a member in [tool.px.workspace].members.",
-                            "",
-                            pad = pad
                         ));
                     }
                 }
@@ -299,7 +296,7 @@ fn label_width(payload: &StatusPayload) -> usize {
             ]);
         }
         px_core::StatusContextKind::Workspace => {
-            labels.extend(["workspace:", "workspace state:", "members:", "note:"]);
+            labels.extend(["workspace:", "workspace state:", "members:", "tip:"]);
         }
         px_core::StatusContextKind::None => {}
     }
