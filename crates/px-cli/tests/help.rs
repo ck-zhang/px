@@ -35,6 +35,15 @@ fn init_help_lists_examples() {
 }
 
 #[test]
+fn add_help_mentions_manifest_pinning() {
+    let output = help_output(&["add", "--help"]);
+    assert!(
+        output.to_ascii_lowercase().contains("pins direct") && output.contains("pyproject.toml"),
+        "add help should mention manifest pinning, got: {output}"
+    );
+}
+
+#[test]
 fn build_help_mentions_skip_tests_example() {
     let output = help_output(&["build", "--help"]);
     assert!(

@@ -678,6 +678,54 @@ fn project_add_inserts_dependency() {
 }
 
 #[test]
+fn project_add_autopins_and_reports_manifest_change() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    scaffold_demo(&temp, "demo_add_autopin");
+    let project_dir = temp.path();
+
+    let assert = px_cmd()
+        .current_dir(project_dir)
+        .args(["add", "requests"])
+        .assert()
+        .success();
+
+    let lock_path = project_dir.join("px.lock");
+    let lock: DocumentMut = fs::read_to_string(&lock_path)
+        .expect("read lockfile")
+        .parse()
+        .expect("parse lockfile");
+    let deps = lock["dependencies"]
+        .as_array_of_tables()
+        .expect("dependencies array");
+    let requests = deps
+        .iter()
+        .find(|entry| entry.get("name").and_then(toml_edit::Item::as_str) == Some("requests"))
+        .expect("requests dependency in lock");
+    let specifier = requests
+        .get("specifier")
+        .and_then(toml_edit::Item::as_str)
+        .expect("requests specifier");
+
+    let deps = read_dependencies(project_dir.join("pyproject.toml"));
+    assert!(
+        deps.iter().any(|dep| dep == specifier),
+        "pyproject.toml should contain pinned spec {specifier:?}; deps={deps:?}"
+    );
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout utf8");
+    assert!(
+        stdout.contains(&format!(
+            "px add: pyproject.toml: requests -> {specifier}"
+        )),
+        "expected px add to show manifest pin change, got {stdout:?}"
+    );
+}
+
+#[test]
 fn project_add_dry_run_leaves_project_unchanged() {
     let _guard = test_env_guard();
     if !require_online() {
