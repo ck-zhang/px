@@ -1403,8 +1403,9 @@ build-backend = "setuptools.build_meta"
         fs::write(
             &wrapper,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = \"-m\" ] && [ \"$2\" = \"ensurepip\" ]; then echo ensurepip >> \"{}\"; exit 17; fi\nexec \"{}\" \"$@\"\n",
+                "#!/bin/sh\nif [ \"$1\" = \"-m\" ] && [ \"$2\" = \"ensurepip\" ]; then echo ensurepip >> \"{}\"; exit 17; fi\nexport PX_PYTHON=\"{}\"\nexec \"{}\" \"$@\"\n",
                 log_path.display(),
+                python_path,
                 python_path,
             ),
         )?;
