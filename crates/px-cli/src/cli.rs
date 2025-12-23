@@ -34,6 +34,10 @@ pub const PX_BEFORE_HELP: &str = concat!(
     "  tool             Install and run px-managed global tools.\n",
     "  python           Manage px Python runtimes (list/install/use/info).\n",
     "  completions      Print shell completion snippet (optional, one-time setup).\n",
+    "\n",
+    "\x1b[1;36mOutput\x1b[0m\n",
+    "  Progress spinners show only when stderr is a TTY (force-enable with PX_PROGRESS=1).\n",
+    "  In CI/non-TTY, output is intentionally quiet/line-oriented; use -v/-vv or --json for more detail.\n",
 );
 
 #[derive(Parser, Debug)]

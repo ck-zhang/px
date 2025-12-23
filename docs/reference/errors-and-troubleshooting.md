@@ -45,6 +45,10 @@ Under `CI=1` or explicit `--frozen`:
 
 ## Non-TTY and structured output
 
+On interactive TTY stderr, px shows spinners/progress during long phases (resolve, env build, tool install).
+When stderr is not a TTY (piped output, most CI logs), px intentionally disables frame-based progress so output stays clean and stable.
+Use `-v/-vv` for more detail, `--json` for structured output, or set `PX_PROGRESS=1` to force-enable spinners when you really want them.
+
 If stderr is not a TTY, `CI=1` is set, or `--json` is set (override with `PX_PROGRESS=1`):
 
 * No spinners, progress bars, or frame-based animations.

@@ -8,7 +8,7 @@ Rule of thumb: user-facing behavior should be a CLI flag first; env vars stay as
 * `-v/--verbose` (repeatable) – increase logging; `-vv` reaches trace.
 * `--trace` – force trace logging even without `-v`.
 * `--debug` – enable debug output and full tracebacks.
-* `--json` – emit `{status,message,details}` JSON envelopes (for `px fmt`, `px fmt --json` is an equivalent shortcut). Commands that normally attach stdio will run non-interactively so stdout stays machine-readable.
+* `--json` – emit `{status,message,details}` JSON envelopes (for `px fmt`, `px fmt --json` is an equivalent shortcut). Commands that normally attach stdio will run non-interactively so stdout stays machine-readable. `--json` also disables spinners/progress animations so output stays stable.
 * `--no-color` – disable colored output.
 * `--offline` / `--online` – force network mode for this run (sets `PX_ONLINE`).
 * `--force-sdist` / `--prefer-wheels` – pick sdists vs wheels when both exist (sets `PX_FORCE_SDIST`).
@@ -51,7 +51,7 @@ Prefer the flags above for interactive use; env vars remain for CI/automation or
 * `PX_FORCE_SDIST=1` – prefer building from sdists even when wheels exist.
 * `PX_INDEX_URL` (or `PIP_INDEX_URL`/`PIP_EXTRA_INDEX_URL`) – override package index URLs used for resolution.
 * `PX_DOWNLOADS` – max concurrent artifact downloads (clamped 1–16; defaults to available CPUs).
-* `PX_PROGRESS` – set `0` to disable spinners/progress lines; set `1` to force-enable. Default: enabled only on TTY stderr and when `CI` is not truthy.
+* `PX_PROGRESS` – set `0` to disable spinners/progress; set `1` to force-enable (even in CI/non-TTY). Default: enabled only when stderr is a TTY and `CI` is not truthy.
 * `PX_KEEP_PROXIES` – control proxy use for px’s own HTTP requests and build subprocesses. Default: enabled when `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` are set. Set `PX_KEEP_PROXIES=0` to ignore proxy env vars.
 
 ### Runtimes and paths
