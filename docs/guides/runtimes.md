@@ -6,9 +6,10 @@ px manages Python interpreters explicitly so projects and tools run against know
 
 Order of precedence (deterministic):
 
-1. `[tool.px].python` in `pyproject.toml`
-2. `[project].requires-python` (PEP 621)
-3. px default runtime
+1. `[tool.px.workspace].python` in the workspace root `pyproject.toml` (when inside a workspace)
+2. `[tool.px].python` in `pyproject.toml`
+3. `[project].requires-python` (PEP 621)
+4. px default runtime
 
 If no available runtime satisfies constraints, commands fail with a clear message and suggest installing one. px does not fall back to arbitrary system interpreters once a project is under px management.
 
@@ -16,7 +17,7 @@ If no available runtime satisfies constraints, commands fail with a clear messag
 
 * List known runtimes: `px python list`
 * Install a runtime: `px python install 3.11`
-* Pin runtime for current project: `px python use 3.11` (writes `[tool.px].python`; next `px sync` rebuilds env)
+* Pin runtime: `px python use 3.11` (writes `[tool.px].python` or `[tool.px.workspace].python` and syncs lock/env)
 * Inspect active runtimes: `px python info`
 
 ## Tips

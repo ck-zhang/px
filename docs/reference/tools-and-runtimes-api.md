@@ -63,9 +63,10 @@ A **runtime** is a Python interpreter that px can discover, select for a project
 
 Deterministic precedence:
 
-1. `[tool.px].python` (explicit per-project setting, e.g. `"3.11"`).
-2. `[project].requires-python` (PEP 621).
-3. px default runtime.
+1. `[tool.px.workspace].python` in the workspace root `pyproject.toml` (when inside a workspace).
+2. `[tool.px].python` (explicit per-project setting, e.g. `"3.11"`).
+3. `[project].requires-python` (PEP 621).
+4. px default runtime.
 
 If no available runtime satisfies constraints, commands must fail with a clear explanation and suggest `px python install`. px must not fall back to arbitrary system interpreters outside its runtime registry once a project is under px management.
 
@@ -73,5 +74,5 @@ If no available runtime satisfies constraints, commands must fail with a clear e
 
 * `px python list` – show runtimes px knows, with version and path.
 * `px python install <version>` – download/install CPython release (implementation detail) under `~/.px/runtimes/...` and register it.
-* `px python use <version>` – record runtime choice in `[tool.px].python` for the current project; next `px sync` rebuilds env for that runtime.
+* `px python use <version>` – record runtime choice and sync lock/env (writes `[tool.px].python` or `[tool.px.workspace].python`).
 * `px python info` – show details about the active runtime for the current project and default tool runtime.

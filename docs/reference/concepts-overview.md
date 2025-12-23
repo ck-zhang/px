@@ -47,6 +47,6 @@ Tools are isolated from projects and from each other. Upgrading Python or changi
 * **Content-addressable store** – artifacts and env materialization rely on a digest-keyed store; see [Content-Addressable Store](../design/content-addressable-store.md) for layout and invariants.
 * **Determinism** – given the same inputs, px chooses the same runtimes, lockfiles, envs, and command resolution paths.
 * **Sandbox as a derived layer** – sandbox images are derived from env profiles plus a small manifest; they never mutate project/workspace state and stay optional for workflows that need system packages or deployable images.
-* **Smooth UX, explicit mutation** – mutating operations are explicit (`init`, `add`, `remove`, `sync`, `update`, `tool install/upgrade/remove`); reader commands never change manifests or lockfiles.
+* **Smooth UX, explicit mutation** – mutating operations are explicit (`init`, `add`, `remove`, `sync`, `update`, `python use`, `tool install/upgrade/remove`); reader commands never change manifests or lockfiles.
 
 See [Determinism and CI](../design/determinism-and-ci.md) for deeper rationale and CI rules, and [Non-goals](../design/non-goals.md) for boundaries.

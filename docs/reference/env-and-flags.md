@@ -16,7 +16,7 @@ Rule of thumb: user-facing behavior should be a CLI flag first; env vars stay as
 ## Shared command flags to remember
 
 * `--dry-run` – preview changes without writing files or building envs (init/add/remove/update/sync/build/publish).
-* `--frozen` – fail instead of repairing drift (sync/run/test/fmt); `CI=1` has the same “frozen” effect for run/test.
+* `--frozen` – fail instead of repairing drift (sync/run/test/fmt); `CI=1` has the same “frozen” effect for run/test and makes `px python use` validation-only.
 * `--force` – currently only meaningful for `px init`; bypasses the dirty-worktree guard when scaffolding a project.
 * `--interactive` / `--non-interactive` – force stdio mode for `px run`; otherwise px chooses based on the target.
 
@@ -52,6 +52,7 @@ Prefer the flags above for interactive use; env vars remain for CI/automation or
 * `PX_INDEX_URL` (or `PIP_INDEX_URL`/`PIP_EXTRA_INDEX_URL`) – override package index URLs used for resolution.
 * `PX_DOWNLOADS` – max concurrent artifact downloads (clamped 1–16; defaults to available CPUs).
 * `PX_PROGRESS` – set `0` to disable spinners/progress lines; set `1` to force-enable. Default: enabled only on TTY stderr and when `CI` is not truthy.
+* `PX_KEEP_PROXIES` – control proxy use for px’s own HTTP requests and build subprocesses. Default: enabled when `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` are set. Set `PX_KEEP_PROXIES=0` to ignore proxy env vars.
 
 ### Runtimes and paths
 
@@ -70,7 +71,11 @@ Prefer the flags above for interactive use; env vars remain for CI/automation or
 ### Dependency selection and execution behavior
 
 * `PX_GROUPS` – add extra dependency groups at runtime; comma/semicolon/whitespace separated, PEP 503-normalized.
-* `CI=1` – treat `px run`/`px test` as frozen (no auto-repair of env/lock drift).
+* `CI=1` – treat `px run`/`px test` as frozen (no auto-repair of env/lock drift) and make `px python use` validation-only (no implicit edits).
 * `PX_TOOL_PASSTHROUGH=1` – force `px tool run` to attach stdio even when forwarding args (default passthrough only when no args).
 * `PX_TEST_REPORTER=pytest` – use pytest’s native reporter for `px test` instead of px’s default summary.
 * `PX_PUBLISH_TOKEN` – default token env var consumed by `px publish` (override name via `--token-env`).
+
+### Diagnostics
+
+* `PX_TIMINGS=1` – emit structured timing logs (`px_timing`, `elapsed_ms`) to help profile px hot paths.

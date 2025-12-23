@@ -22,7 +22,7 @@ Environments (E/WE) are **thin projections** over the CAS:
 
 linked from project/workspace-local pointers (e.g. `<root>/.px/envs/current`).
 
-These projections are **immutable** from the user’s point of view: they are content-addressable materializations of a profile and runtime. User-initiated `pip install` cannot mutate them; dependency changes must flow through px (`px add/remove/update/sync`) so new artifacts are built into CAS and re-materialized. Envs are never “activated” directly—the supported entry points are `px run`, `px test`, and `px fmt`.
+These projections are **immutable** from the user’s point of view: they are content-addressable materializations of a profile and runtime. User-initiated `pip install` cannot mutate them; dependency changes must flow through px (`px add/remove/update/sync`), and runtime changes flow through `px python use`, so new artifacts are built into CAS and re-materialized. Envs are never “activated” directly—the supported entry points are `px run`, `px test`, and `px fmt`.
 
 px supports two execution modes over the same profile:
 

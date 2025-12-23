@@ -30,7 +30,7 @@ For a quick inventory of CLI flags and environment toggles, see [Env Vars and Fl
 
 * `px python list`    – List runtimes px knows about.
 * `px python install` – Install a new runtime (e.g. 3.11).
-* `px python use`     – Select runtime for the current project.
+* `px python use`     – Select runtime and sync lock/env (workspace-aware).
 * `px python info`    – Show details about current runtime(s).
 
 ### Shell integration
@@ -190,7 +190,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 
 * Same consistency semantics as `px run`. Prefers CAS-native execution and falls back to a materialized env when needed. Prefers project-provided runners like `tests/runtests.py` (or `runtests.py`) and otherwise runs `pytest` inside the project env (auto-installs pytest into the tool store when missing).
 * `pytest` runs with `PYTHONNOUSERSITE=1` to avoid importing user-site packages/plugins (keeps results deterministic and prevents surprise plugin breakage).
-* **Exit code**: px exits with the test runner’s exit code.
+* **Exit code**: matches the test runner; outside CI/`--frozen`, “no tests collected” is treated as success (exit 0).
 * Supports `--sandbox` with the same sandbox definition/resolution rules as `px run`; working tree is bind-mounted for live code.
 * `--at <git-ref>` mirrors `px run --at …`, using the manifest + lock at that ref with frozen semantics (no re-resolution; fail if lock is missing or drifted).
 * `--ephemeral` / `--try` mirrors `px run --ephemeral`: derive a cached env from `pyproject.toml` / `requirements.txt` without adopting the directory (no `.px/` or `px.lock` writes). In `CI=1` or `--frozen`, dependencies must be fully pinned.
@@ -278,4 +278,4 @@ When a workspace root is detected above CWD and CWD is inside a member project, 
 * `px run` / `px test` (member) – prefers CAS-native execution from the workspace profile (no persistent env directory required). If a materialized env is needed for compatibility or `--sandbox`, px builds/reuses the workspace env from the workspace lock. In CI, lock drift is still a hard error; `--sandbox` continues to require a consistent workspace env.
 * `px pack image` (workspace root or member) – requires workspace `Consistent`; builds/reuses sandbox image from workspace env + `[tool.px.sandbox]`; copies workspace member code into the image; no workspace writes.
 * `px pack app` (workspace root or member) – requires workspace `Consistent`; writes a `.pxapp` bundle from workspace env + `[tool.px.sandbox]`; copies workspace member code into the bundle; no workspace writes.
-* `px status` – at workspace root: report workspace state plus member manifest health; in a member: report workspace state and whether that member manifest is included; under the workspace root but outside members: emit a note about the non-member path.
+* `px status` – at workspace root (and other non-member dirs): report workspace state plus member manifest health and show a tip to run inside a member for project-level status; in a member: report workspace state and whether that member manifest is included.

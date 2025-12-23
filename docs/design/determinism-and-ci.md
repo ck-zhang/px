@@ -6,7 +6,7 @@ px behavior is built around two parallel state machines (project and workspace) 
 
 * **Two parallel state machines, same shape** – each project and workspace is described by Manifest/Lock/Env artifacts and a small state machine; commands are transitions over these machines. If a workspace governs a project, the workspace machine is authoritative for deps/env.
 * **Determinism** – given the same project/workspace, runtimes, and configuration, px must make the same decisions: same runtime, same lockfile(s), same env(s), same command resolution.
-* **Smooth UX, explicit mutation** – mutating operations are explicit (`init`, `add`, `remove`, `sync`, `update`, workspace sync/update, `tool install/upgrade/remove`). Reader commands (`run`, `test`, `fmt`, `status`, `why`) never change manifests or locks and have tightly bounded behavior when they repair envs.
+* **Smooth UX, explicit mutation** – mutating operations are explicit (`init`, `add`, `remove`, `sync`, `update`, `python use`, workspace sync/update, `tool install/upgrade/remove`). Reader commands (`run`, `test`, `fmt`, `status`, `why`) never change manifests or locks and have tightly bounded behavior when they repair envs.
 
 ## Deterministic surfaces
 
@@ -58,6 +58,7 @@ For a fixed px version, runtime set, platform, and index configuration, the foll
 
 * Under `CI=1` or `--frozen`, px never re-resolves locks.
 * `px run` / `px test` / `px fmt` do not rebuild project/workspace envs; they check consistency and fail if broken (for run/test) or run tools in isolation (`fmt`).
+* Under `CI=1`, `px python use` is validation-only: it never edits manifests/locks/envs.
 * No prompts or implicit mutations. Output must be non-interactive; follow the non-TTY rules above.
 
 Native builds in CI always run inside the same px-managed builders as on developer machines; px never uses ad-hoc host compilers or user-managed conda envs for producing `pkg-build` artifacts.

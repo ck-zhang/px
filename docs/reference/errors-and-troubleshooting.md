@@ -40,6 +40,7 @@ Under `CI=1` or explicit `--frozen`:
 * No prompts.
 * No auto-resolution.
 * `px run` / `px test` / `px fmt` do not rebuild project/workspace envs; they just check consistency and fail if broken (for `run`/`test`) or run tools in isolation (`fmt`).
+* Under `CI=1`, `px python use` is validation-only: it never edits manifests/locks/envs; fix runtime/lock drift locally and commit the updated lock(s).
 * `px run --ephemeral` / `px test --ephemeral` refuse unless all detected dependencies are fully pinned (`==` / `===`). Fix by pinning specs (e.g. `requests==2.32.3`) or adopt the directory with `px migrate --apply`.
 
 ## Non-TTY and structured output
@@ -54,10 +55,11 @@ Applies to all commands that show progress (resolver, env build, tool install, e
 
 ## Troubleshooting (error codes → required transitions)
 
+* `missing_project` (`PX001`): run `px init` in your project directory (or `px migrate --apply` if you already have a non-px `pyproject.toml`).
 * `missing_lock` (`PX120`): run `px sync` (without `--frozen`) to create or refresh `px.lock`.
 * `lock_drift` (`PX120`): run `px sync` to realign `px.lock` with the manifest/runtime; frozen commands must refuse.
 * `missing_env` / `env_outdated` (`PX201`): run `px sync` to (re)build the relevant project/workspace env; `--frozen` refuses to repair.
-* `runtime_mismatch`: run `px sync` after activating the desired Python, or pin `[tool.px].python`.
+* `runtime_mismatch`: if you meant to change runtimes, run `px python use <version>` (writes runtime selection and syncs lock/env); otherwise run `px sync` to rebuild the env for the currently-selected runtime.
 * `invalid_state`: delete or repair `.px/state.json` and retry; state is validated and rewritten atomically.
 * `pyc_cache_unwritable`: px could not create the Python bytecode cache directory; ensure `~/.px/cache` (or `PX_CACHE_PATH`) is writable and retry. If bytecode caches grow too large, it is always safe to delete `~/.px/cache/pyc`.
 * `ambiguous_console_script`: multiple dists provide the same `console_scripts` name; px typically falls back to a materialized env to pick a deterministic winner, but if fallback is unavailable, remove one of the conflicting deps (or run a specific module via `px run python -m <module>`).
