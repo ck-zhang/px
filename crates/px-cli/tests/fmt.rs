@@ -5,7 +5,10 @@ use tempfile::tempdir;
 
 mod common;
 
-use common::{parse_json, prepare_fixture, require_online, test_env_guard};
+use common::{
+    ensure_test_store_env, parse_json, prepare_fixture, require_online, reset_test_store_env,
+    test_env_guard, test_temp_root,
+};
 
 #[test]
 fn fmt_auto_installs_tool_and_preserves_manifest() {
@@ -158,5 +161,40 @@ fn fmt_frozen_refuses_to_auto_install_tools() {
     assert!(
         hint.contains("--frozen"),
         "expected hint to explain frozen mode behavior: {hint:?}"
+    );
+}
+
+#[test]
+fn fmt_empty_project_reports_nothing_to_format() {
+    let _guard = test_env_guard();
+    reset_test_store_env();
+    ensure_test_store_env();
+
+    let temp = tempfile::Builder::new()
+        .prefix("fmt-empty-project")
+        .tempdir_in(test_temp_root())
+        .expect("tempdir");
+    let project = temp.path();
+    fs::write(
+        project.join("pyproject.toml"),
+        r#"[project]
+name = "fmt-empty-project"
+version = "0.1.0"
+
+[tool.px]
+"#,
+    )
+    .expect("write pyproject");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(project)
+        .args(["fmt"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout utf8");
+    assert!(
+        stdout.to_ascii_lowercase().contains("nothing to format"),
+        "expected a no-op fmt message, got: {stdout:?}"
     );
 }
