@@ -74,7 +74,9 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 * **Behavior**:
 
   * Create/update `pyproject.toml` with minimal `[project]` and `[tool.px]`.
-  * Choose a registered runtime satisfying `requires-python` (see `px python install`).
+  * Require a px-registered Python runtime (see `px python install`); never fall back to system Python on PATH.
+    * If no runtime is registered: on a TTY, prompt to install a default runtime; in CI/non-TTY/`--json`, fail with a copy-pasteable `px python install <version>` fix.
+  * Choose a registered runtime satisfying `requires-python`.
   * Create an empty `px.lock` for the chosen runtime.
   * Materialize a global env under `~/.px/envs/<profile_oid>` matching `px.lock` and update the local pointer at `.px/envs/current`.
 

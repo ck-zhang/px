@@ -104,7 +104,7 @@ pub struct PxCli {
 #[derive(Subcommand, Debug)]
 pub enum CommandGroupCli {
     #[command(
-        about = "Start a px project: writes pyproject, px.lock, and an empty env.",
+        about = "Start a px project: writes pyproject, px.lock, and an empty env. If no px runtime is registered, prompts to install one on TTY (otherwise fails with guidance).",
         override_usage = "px init [--package NAME] [--py VERSION]"
     )]
     Init(InitArgs),
