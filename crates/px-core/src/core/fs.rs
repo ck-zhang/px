@@ -187,6 +187,59 @@ pub(crate) fn replace_dir_link(target: &Path, link: &Path) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
+
+    #[cfg(windows)]
+    fn is_permission_denied(err: &anyhow::Error) -> bool {
+        err.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::PermissionDenied)
+        })
+    }
+
+    #[cfg(windows)]
+    fn link_resolves_to_target(target: &Path, link: &Path) -> bool {
+        let Ok(target) = fs::canonicalize(target) else {
+            return false;
+        };
+        let Ok(link) = fs::canonicalize(link) else {
+            return false;
+        };
+        link == target
+    }
+
+    #[cfg(windows)]
+    {
+        const RETRIES_MS: &[u64] = &[0, 2, 5, 10, 20, 50, 100];
+        let mut last_error = None;
+        for delay_ms in RETRIES_MS {
+            if *delay_ms > 0 {
+                std::thread::sleep(Duration::from_millis(*delay_ms));
+            }
+            match remove_path_for_replace(link) {
+                Ok(()) => {
+                    last_error = None;
+                    break;
+                }
+                Err(err) if is_permission_denied(&err) => {
+                    if link_resolves_to_target(target, link) {
+                        return Ok(());
+                    }
+                    last_error = Some(err);
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        if let Some(err) = last_error {
+            if link_resolves_to_target(target, link) {
+                return Ok(());
+            }
+            return Err(err);
+        }
+    }
+
+    #[cfg(not(windows))]
     remove_path_for_replace(link)?;
 
     #[cfg(unix)]
