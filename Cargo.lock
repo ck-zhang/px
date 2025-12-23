@@ -3067,6 +3067,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "color-eyre",
+ "flate2",
  "fs4",
  "px-core",
  "px-domain",
@@ -3077,6 +3078,7 @@ dependencies = [
  "toml_edit 0.22.27",
  "tracing",
  "tracing-subscriber",
+ "zip 0.6.6",
 ]
 
 [[package]]

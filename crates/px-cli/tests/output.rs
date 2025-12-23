@@ -1,6 +1,11 @@
 use assert_cmd::cargo::cargo_bin_cmd;
+use flate2::read::GzDecoder;
 use serde_json::Value;
+use std::fs::File;
+use std::path::Path;
 use std::process::Command;
+use tar::Archive;
+use zip::ZipArchive;
 
 mod common;
 
@@ -12,7 +17,7 @@ fn output_build_produces_wheel_and_sdist() {
     if !require_online() {
         return;
     }
-    let (_tmp, project) = init_empty_project("output-build");
+    let (_tmp, project) = prepare_fixture("output-build");
     let (name, normalized, version) = project_identity(&project);
     let dist_dir = project.join("dist-artifacts");
     let dist_arg = dist_dir.to_string_lossy().to_string();
@@ -56,12 +61,82 @@ fn output_build_produces_wheel_and_sdist() {
 }
 
 #[test]
+fn build_outputs_do_not_synthesize_src_packages() {
+    let _guard = common::test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let (_tmp, project) = prepare_fixture("output-build-layout");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["--json", "build", "both"])
+        .assert()
+        .success();
+    let payload = parse_json(&assert);
+    let artifacts = payload["details"]["artifacts"]
+        .as_array()
+        .expect("artifacts array");
+    let (name, normalized, version) = project_identity(&project);
+
+    let mut wheel = None::<String>;
+    let mut sdist = None::<String>;
+    for entry in artifacts {
+        let Some(path) = entry
+            .as_object()
+            .and_then(|map| map.get("path"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        if path.ends_with(".whl") {
+            wheel = Some(path.to_string());
+        } else if path.ends_with(".tar.gz") {
+            sdist = Some(path.to_string());
+        }
+    }
+    let wheel = wheel.expect("wheel artifact path");
+    let sdist = sdist.expect("sdist artifact path");
+
+    let sdist_paths = tar_gz_paths(&project.join(&sdist));
+    let expected_module = format!("{normalized}/__init__.py");
+    let unexpected_module = format!("src/{normalized}/__init__.py");
+    assert!(
+        sdist_paths.iter().any(|path| path.ends_with(&expected_module)),
+        "sdist should contain {expected_module}, got {sdist_paths:?}"
+    );
+    assert!(
+        !sdist_paths
+            .iter()
+            .any(|path| path.ends_with(&unexpected_module)),
+        "sdist should not invent src layout ({unexpected_module})"
+    );
+
+    let wheel_paths = wheel_paths(&project.join(&wheel));
+    assert!(
+        wheel_paths.iter().any(|path| path == &expected_module),
+        "wheel should contain {expected_module}, got {wheel_paths:?}"
+    );
+    assert!(
+        !wheel_paths.iter().any(|path| path == &unexpected_module),
+        "wheel should not contain src layout entries"
+    );
+
+    assert!(
+        project
+            .join(format!("dist/{name}-{version}.tar.gz"))
+            .exists(),
+        "expected sdist to exist on disk"
+    );
+}
+
+#[test]
 fn publish_dry_run_reports_registry_and_artifacts() {
     let _guard = common::test_env_guard();
     if !require_online() {
         return;
     }
-    let (_tmp, project) = init_empty_project("output-publish-dry-run");
+    let (_tmp, project) = prepare_fixture("output-publish-dry-run");
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .args(["sync"])
@@ -98,7 +173,12 @@ fn publish_default_dry_run_does_not_require_token() {
     if !require_online() {
         return;
     }
-    let (_tmp, project) = init_empty_project("output-publish-default-dry-run");
+    let (_tmp, project) = prepare_fixture("output-publish-default-dry-run");
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["sync"])
+        .assert()
+        .success();
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .args(["build"])
@@ -123,7 +203,12 @@ fn publish_requires_token_when_uploading_online() {
     if !require_online() {
         return;
     }
-    let (_tmp, project) = init_empty_project("output-publish-token");
+    let (_tmp, project) = prepare_fixture("output-publish-token");
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["sync"])
+        .assert()
+        .success();
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .args(["build"])
@@ -207,12 +292,45 @@ fn build_dry_run_reports_empty_artifacts() {
 }
 
 #[test]
+fn build_errors_when_project_has_no_module() {
+    let _guard = common::test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let (_tmp, project) = init_empty_project("output-build-missing-module");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["--json", "build"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    let message = payload["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("no Python module"),
+        "expected missing module build error, got {message:?}"
+    );
+    let hint = payload["details"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("__init__.py") || hint.contains("tool.uv.build-backend"),
+        "expected hint to mention package layout/config, got {hint:?}"
+    );
+}
+
+#[test]
 fn publish_requires_online_flag_when_artifacts_exist() {
     let _guard = common::test_env_guard();
     if !require_online() {
         return;
     }
-    let (_tmp, project) = init_empty_project("output-publish-offline");
+    let (_tmp, project) = prepare_fixture("output-publish-offline");
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["sync"])
+        .assert()
+        .success();
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .args(["build"])
@@ -247,7 +365,12 @@ fn publish_rejects_empty_token_value() {
     if !require_online() {
         return;
     }
-    let (_tmp, project) = init_empty_project("output-publish-empty-token");
+    let (_tmp, project) = prepare_fixture("output-publish-empty-token");
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["sync"])
+        .assert()
+        .success();
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .args(["build"])
@@ -281,7 +404,7 @@ fn publish_dry_run_accepts_custom_registry_url() {
     if !require_online() {
         return;
     }
-    let (_tmp, project) = init_empty_project("output-publish-custom-registry");
+    let (_tmp, project) = prepare_fixture("output-publish-custom-registry");
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .args(["sync"])
@@ -325,12 +448,6 @@ fn built_wheel_is_installable_with_pip() {
         eprintln!("skipping wheel install test (python binary not found)");
         return;
     };
-    cargo_bin_cmd!("px")
-        .current_dir(&project)
-        .env("PX_RUNTIME_PYTHON", &python)
-        .args(["sync"])
-        .assert()
-        .success();
 
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
@@ -421,4 +538,33 @@ fn venv_binaries(root: &std::path::Path) -> (std::path::PathBuf, std::path::Path
         let pip = root.join("bin").join("pip");
         (python, pip)
     }
+}
+
+fn tar_gz_paths(path: &Path) -> Vec<String> {
+    let file = File::open(path).expect("open tar.gz");
+    let decoder = GzDecoder::new(file);
+    let mut archive = Archive::new(decoder);
+    let mut paths = Vec::new();
+    for entry in archive.entries().expect("tar entries") {
+        let entry = entry.expect("tar entry");
+        let path = entry
+            .path()
+            .expect("tar path")
+            .into_owned()
+            .to_string_lossy()
+            .replace('\\', "/");
+        paths.push(path);
+    }
+    paths
+}
+
+fn wheel_paths(path: &Path) -> Vec<String> {
+    let file = File::open(path).expect("open wheel");
+    let mut archive = ZipArchive::new(file).expect("zip archive");
+    let mut paths = Vec::new();
+    for idx in 0..archive.len() {
+        let entry = archive.by_index(idx).expect("zip entry");
+        paths.push(entry.name().to_string());
+    }
+    paths
 }

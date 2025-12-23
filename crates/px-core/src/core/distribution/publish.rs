@@ -2,7 +2,10 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 use tokio::runtime::Builder;
 
-use crate::{python_context, CommandContext, ExecutionOutcome, InstallUserError};
+use crate::{
+    is_missing_project_error, manifest_snapshot, missing_project_outcome, CommandContext,
+    ExecutionOutcome, InstallUserError, ManifestSnapshot, PythonContext,
+};
 
 use super::plan::{plan_publish, PublishPlanning, PublishRegistry, PublishRequest};
 use super::uv::{PublishUploadReport, UvPublishSession};
@@ -19,10 +22,16 @@ fn publish_project_outcome(
     ctx: &CommandContext,
     request: &PublishRequest,
 ) -> Result<ExecutionOutcome> {
-    let py_ctx = match python_context(ctx) {
-        Ok(py) => py,
-        Err(outcome) => return Ok(outcome),
+    let snapshot = match manifest_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            if is_missing_project_error(&err) {
+                return Ok(missing_project_outcome());
+            }
+            return Err(err);
+        }
     };
+    let py_ctx = publish_context(&snapshot);
     let plan = match plan_publish(ctx, &py_ctx, request)? {
         PublishPlanning::Plan(plan) => plan,
         PublishPlanning::Outcome(outcome) => return Ok(outcome),
@@ -70,6 +79,21 @@ fn publish_project_outcome(
 
     let message = publish_success_message(&plan.registry, &report);
     Ok(ExecutionOutcome::success(message, details))
+}
+
+fn publish_context(snapshot: &ManifestSnapshot) -> PythonContext {
+    PythonContext {
+        state_root: snapshot.root.clone(),
+        project_root: snapshot.root.clone(),
+        project_name: snapshot.name.clone(),
+        python: String::new(),
+        pythonpath: String::new(),
+        allowed_paths: vec![snapshot.root.clone()],
+        site_bin: None,
+        pep582_bin: Vec::new(),
+        pyc_cache_prefix: None,
+        px_options: snapshot.px_options.clone(),
+    }
 }
 
 fn publish_success_message(registry: &PublishRegistry, report: &PublishUploadReport) -> String {
