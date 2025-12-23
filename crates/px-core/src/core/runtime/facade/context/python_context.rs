@@ -91,26 +91,20 @@ impl PythonContext {
     }
 
     pub(crate) fn base_env(&self, command_args: &Value) -> Result<Vec<(String, String)>> {
-        let mut allowed_paths = self.allowed_paths.clone();
+        let mut joined_paths = self.allowed_paths.clone();
         if !self.pythonpath.is_empty() {
             for entry in env::split_paths(&self.pythonpath) {
-                if !allowed_paths.contains(&entry) {
-                    allowed_paths.push(entry);
+                if !joined_paths.contains(&entry) {
+                    joined_paths.push(entry);
                 }
             }
         }
-        let allowed = env::join_paths(&allowed_paths)
+        let joined = env::join_paths(&joined_paths)
             .context("allowed path contains invalid UTF-8")?
             .into_string()
             .map_err(|_| anyhow!("allowed path contains non-utf8 data"))?;
-        let mut python_paths: Vec<_> = env::split_paths(&allowed).collect();
-        if !self.pythonpath.is_empty() {
-            python_paths.extend(env::split_paths(&self.pythonpath));
-        }
-        let pythonpath = env::join_paths(&python_paths)
-            .context("failed to assemble PYTHONPATH")?
-            .into_string()
-            .map_err(|_| anyhow!("pythonpath contains non-utf8 data"))?;
+        let allowed = joined.clone();
+        let pythonpath = joined;
         let mut envs = vec![
             ("PYTHONPATH".into(), pythonpath),
             ("PYTHONUNBUFFERED".into(), "1".into()),
@@ -187,10 +181,6 @@ impl PythonContext {
         disable_proxy_env(&mut envs);
         Ok(envs)
     }
-}
-
-pub(crate) fn python_context(ctx: &CommandContext) -> Result<PythonContext, ExecutionOutcome> {
-    python_context_with_mode(ctx, EnvGuard::Strict).map(|(py, _)| py)
 }
 
 pub(crate) fn python_context_with_mode(

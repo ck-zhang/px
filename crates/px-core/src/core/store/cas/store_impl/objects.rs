@@ -9,14 +9,15 @@ impl ContentAddressableStore {
     /// Returns an error if the root cannot be created or the index schema
     /// cannot be initialized.
     pub fn new(root: Option<PathBuf>) -> Result<Self> {
-        let root = match root {
-            Some(path) => path,
-            None => default_root()?,
+        let (root, root_is_default) = match root {
+            Some(path) => (path, false),
+            None => (default_root()?, true),
         };
         let envs_root = default_envs_root_path()?;
         let store = Self {
             root,
             envs_root,
+            root_is_default,
             health: Arc::default(),
         };
         store.ensure_layout()?;

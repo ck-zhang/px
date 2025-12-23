@@ -30,6 +30,30 @@ impl ContentAddressableStore {
         Ok(None)
     }
 
+    pub(crate) fn lookup_key_fast(&self, kind: ObjectKind, key: &str) -> Result<Option<String>> {
+        self.ensure_layout()?;
+        let conn = self.connection()?;
+        let oid: Option<String> = conn
+            .query_row(
+                "SELECT oid FROM keys WHERE kind = ?1 AND lookup_key = ?2 LIMIT 1",
+                params![kind.as_str(), key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(oid) = oid else {
+            return Ok(None);
+        };
+        let path = self.object_path(&oid);
+        if path.exists() {
+            return Ok(Some(oid));
+        }
+        let _ = conn.execute(
+            "DELETE FROM keys WHERE kind = ?1 AND lookup_key = ?2",
+            params![kind.as_str(), key],
+        );
+        Ok(None)
+    }
+
     /// Record or update a deterministic lookup key for an object.
     pub fn record_key(&self, kind: ObjectKind, key: &str, oid: &str) -> Result<()> {
         self.ensure_layout()?;

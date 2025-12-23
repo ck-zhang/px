@@ -658,6 +658,9 @@ fn run_executable_cas_native(
     workdir: &Path,
     interactive: bool,
 ) -> Result<ExecutionOutcome> {
+    let _timing_run_executable =
+        crate::tooling::timings::TimingGuard::new("run_executable_cas_native");
+
     let display_program = program.to_string();
     let is_python_alias = is_python_alias_target(program);
     let initial_program = if is_python_alias {
@@ -806,6 +809,7 @@ fn run_executable_cas_native(
         envs,
         argv,
     };
+    let _timing_execute_plan = crate::tooling::timings::TimingGuard::new("execute_plan");
     let output = execute_plan(runner, &plan, interactive, needs_stdin)?;
     let mut details = json!({
         "mode": if uses_px_python { "passthrough" } else { "executable" },

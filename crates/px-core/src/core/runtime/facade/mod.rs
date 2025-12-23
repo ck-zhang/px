@@ -32,8 +32,8 @@ pub use env_materialize::materialize_project_site;
 pub(crate) use cas_native::{ensure_project_environment_synced, validate_cas_environment};
 pub(crate) use context::{
     attach_autosync_details, auto_sync_environment, build_pythonpath,
-    ensure_environment_with_guard, ensure_version_file, issue_from_details, python_context,
-    python_context_with_mode, EnvGuard, EnvironmentIssue, EnvironmentSyncReport, PythonContext,
+    ensure_environment_with_guard, ensure_version_file, issue_from_details, python_context_with_mode,
+    EnvGuard, EnvironmentIssue, EnvironmentSyncReport, PythonContext,
 };
 pub(crate) use env_materialize::{
     detect_runtime_metadata, ensure_project_pip, load_project_state, persist_project_state,

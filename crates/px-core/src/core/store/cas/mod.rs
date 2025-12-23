@@ -49,7 +49,7 @@ mod keys;
 mod repo_snapshot;
 mod store_impl;
 
-pub use archive::{archive_dir_canonical, archive_selected};
+pub use archive::{archive_dir_canonical, archive_selected_filtered};
 pub use gc::run_gc_with_env_policy;
 pub use keys::{pkg_build_lookup_key, source_lookup_key};
 pub use repo_snapshot::{
@@ -395,6 +395,7 @@ struct StoreHealth {
 pub struct ContentAddressableStore {
     root: PathBuf,
     envs_root: PathBuf,
+    root_is_default: bool,
     health: Arc<StoreHealth>,
 }
 
@@ -403,6 +404,7 @@ impl std::fmt::Debug for ContentAddressableStore {
         f.debug_struct("ContentAddressableStore")
             .field("root", &self.root)
             .field("envs_root", &self.envs_root)
+            .field("root_is_default", &self.root_is_default)
             .field(
                 "health_checked",
                 &self.health.permissions_checked.load(Ordering::Relaxed),
@@ -660,6 +662,7 @@ pub fn global_store() -> &'static ContentAddressableStore {
     #[cfg(test)]
     ensure_test_store_env();
     GLOBAL_STORE.get_or_init(|| {
+        let _timing = crate::tooling::timings::TimingGuard::new("global_store_init");
         let store = ContentAddressableStore::new(None).expect("CAS initialization");
         // Best-effort cleanup of leftover partials to keep the store tidy.
         let _ = store.sweep_partials();

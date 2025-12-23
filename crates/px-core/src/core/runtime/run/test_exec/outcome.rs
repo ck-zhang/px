@@ -29,6 +29,29 @@ pub(super) fn test_success(
     )
 }
 
+pub(super) fn test_no_tests(
+    runner: &str,
+    output: crate::RunOutput,
+    stream_runner: bool,
+    args: &[String],
+) -> ExecutionOutcome {
+    let runner_code = output.code;
+    ExecutionOutcome::success(
+        format!("{runner} ok (no tests collected)"),
+        json!({
+            "runner": runner,
+            "stdout": output.stdout,
+            "stderr": output.stderr,
+            "code": 0,
+            "runner_code": runner_code,
+            "args": args,
+            "streamed": stream_runner,
+            "reason": "no_tests",
+            "hint": "Add tests under `tests/` (or configure pytest testpaths) and rerun `px test`.",
+        }),
+    )
+}
+
 pub(super) fn test_failure(
     runner: &str,
     output: crate::RunOutput,

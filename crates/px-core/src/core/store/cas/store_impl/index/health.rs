@@ -2,6 +2,8 @@
 
 use super::super::super::*;
 
+const INTEGRITY_MARKER: &str = ".px-index-integrity";
+
 impl ContentAddressableStore {
     pub(in crate::core::store::cas) fn ensure_index_health(
         &self,
@@ -13,10 +15,14 @@ impl ContentAddressableStore {
             return Ok(());
         }
 
-        let require_integrity = force_integrity || !already_validated || index_missing;
+        let require_integrity =
+            force_integrity || index_missing || !self.integrity_marker_matches_px_version();
         match self.validate_index(require_integrity) {
             Ok(()) => {
                 self.health.index_validated.store(true, Ordering::SeqCst);
+                if require_integrity {
+                    let _ = self.write_integrity_marker();
+                }
                 Ok(())
             }
             Err(err) => {
@@ -42,9 +48,27 @@ impl ContentAddressableStore {
                     rebuild_err
                 })?;
                 self.health.index_validated.store(true, Ordering::SeqCst);
+                let _ = self.write_integrity_marker();
                 Ok(())
             }
         }
+    }
+
+    fn integrity_marker_path(&self) -> PathBuf {
+        self.root.join(INTEGRITY_MARKER)
+    }
+
+    fn integrity_marker_matches_px_version(&self) -> bool {
+        let path = self.integrity_marker_path();
+        fs::read_to_string(path)
+            .ok()
+            .is_some_and(|contents| contents.trim() == PX_VERSION)
+    }
+
+    fn write_integrity_marker(&self) -> Result<()> {
+        let path = self.integrity_marker_path();
+        fs::write(path, format!("{PX_VERSION}\n"))?;
+        Ok(())
     }
 
     fn validate_index(&self, integrity_check: bool) -> Result<()> {
@@ -65,6 +89,8 @@ impl ContentAddressableStore {
     }
 
     fn run_integrity_check(&self, conn: &Connection) -> Result<()> {
+        let _timing =
+            crate::tooling::timings::TimingGuard::new("cas_index_integrity_check");
         let mut stmt = conn.prepare("PRAGMA integrity_check")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {

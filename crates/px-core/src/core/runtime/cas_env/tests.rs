@@ -2,15 +2,18 @@ use std::{borrow::Cow, collections::BTreeMap, env, fs, path::PathBuf};
 
 #[cfg(unix)]
 use std::process::Command;
+use std::sync::Arc;
 
 use anyhow::Result;
 use flate2::read::GzDecoder;
+use px_domain::api::LockSnapshot;
 use px_domain::api::{DependencyGroupSource, PxOptions};
 use serde_json::Value;
 use tar::Archive;
 use tempfile::tempdir;
 
 use crate::core::runtime::facade::RuntimeMetadata;
+use crate::{api::GlobalOptions, api::SystemEffects, CommandContext};
 use crate::store::cas::{
     archive_dir_canonical, global_store, ObjectPayload, PkgBuildHeader, ProfileHeader,
     ProfilePackage, RuntimeHeader, MATERIALIZED_PKG_BUILDS_DIR,
@@ -117,6 +120,164 @@ fn runtime_archive_ignores_scripts_dir_from_probe() -> Result<()> {
     assert!(
         !seen.contains(&PathBuf::from("tools/junk")),
         "runtime archive should not include sysconfig scripts dir"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_profile_manifest_reuses_cached_runtime_archive() -> Result<()> {
+    let temp = tempdir()?;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = env::var_os(key);
+            env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = env::var_os(key);
+            env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.previous.take() {
+                env::set_var(self.key, prev);
+            } else {
+                env::remove_var(self.key);
+            }
+        }
+    }
+
+    let runtime_root = temp.path().join("runtime");
+    let bin = runtime_root.join("bin");
+    let lib = runtime_root.join("lib/python3.11");
+    let include = runtime_root.join("include");
+    fs::create_dir_all(&bin)?;
+    fs::create_dir_all(&lib)?;
+    fs::create_dir_all(&include)?;
+    fs::write(lib.join("stdlib.py"), b"# stdlib")?;
+    fs::write(include.join("Python.h"), b"// header")?;
+
+    let python = bin.join("python");
+    let payload = serde_json::json!({
+        "python": ["cp311", "py311", "py3"],
+        "abi": ["cp311", "abi3", "none"],
+        "platform": ["linux_x86_64", "any"],
+        "tags": [],
+        "executable": python.display().to_string(),
+        "stdlib": lib.display().to_string(),
+        "platstdlib": lib.display().to_string(),
+        "include": include.display().to_string(),
+    });
+    let shim = format!("#!/bin/sh\ncat <<'JSON'\n{}\nJSON\n", payload.to_string());
+    fs::write(&python, shim)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&python, fs::Permissions::from_mode(0o755))?;
+    }
+
+    let project_root = temp.path().join("project");
+    fs::create_dir_all(&project_root)?;
+    let manifest_path = project_root.join("pyproject.toml");
+    fs::write(
+        &manifest_path,
+        "[project]\nname = \"demo\"\nversion = \"0.1.0\"\nrequires-python = \">=3.11\"\n",
+    )?;
+
+    let cache_root = temp.path().join("cache");
+    let _cache_guard = EnvVarGuard::set("PX_CACHE_PATH", &cache_root);
+    let _host_only_guard = EnvVarGuard::remove("PX_RUNTIME_HOST_ONLY");
+
+    let global = GlobalOptions {
+        quiet: false,
+        verbose: 0,
+        trace: false,
+        debug: false,
+        json: false,
+    };
+    let ctx = CommandContext::new(&global, Arc::new(SystemEffects::new()))?;
+
+    let lock = LockSnapshot {
+        version: 1,
+        project_name: Some("demo".to_string()),
+        python_requirement: Some(">=3.11".to_string()),
+        manifest_fingerprint: Some("fp".to_string()),
+        lock_id: Some("id".to_string()),
+        dependencies: Vec::new(),
+        mode: Some("p0-pinned".to_string()),
+        resolved: Vec::new(),
+        graph: None,
+        workspace: None,
+    };
+    let snapshot = ManifestSnapshot {
+        root: project_root.clone(),
+        manifest_path: manifest_path.clone(),
+        lock_path: project_root.join("px.lock"),
+        name: "demo".to_string(),
+        python_requirement: ">=3.11".to_string(),
+        dependencies: Vec::new(),
+        dependency_groups: Vec::new(),
+        declared_dependency_groups: Vec::new(),
+        dependency_group_source: DependencyGroupSource::None,
+        group_dependencies: Vec::new(),
+        requirements: Vec::new(),
+        python_override: None,
+        px_options: PxOptions::default(),
+        manifest_fingerprint: "fp".to_string(),
+    };
+    let runtime_meta = RuntimeMetadata {
+        path: python.display().to_string(),
+        version: "3.11.0".to_string(),
+        platform: "linux".to_string(),
+    };
+    let env_owner = crate::store::cas::OwnerId {
+        owner_type: crate::store::cas::OwnerType::ProjectEnv,
+        owner_id: "demo".to_string(),
+    };
+
+    let first = profile::ensure_profile_manifest(&ctx, &snapshot, &lock, &runtime_meta, &env_owner)?;
+
+    struct PermissionGuard {
+        path: PathBuf,
+        previous: fs::Permissions,
+    }
+
+    impl Drop for PermissionGuard {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.path, self.previous.clone());
+        }
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+    let lib_meta = fs::metadata(&lib)?;
+    let include_meta = fs::metadata(&include)?;
+    let _lib_guard = PermissionGuard {
+        path: lib.clone(),
+        previous: lib_meta.permissions(),
+    };
+    let _include_guard = PermissionGuard {
+        path: include.clone(),
+        previous: include_meta.permissions(),
+    };
+    fs::set_permissions(&lib, fs::Permissions::from_mode(0o000))?;
+    fs::set_permissions(&include, fs::Permissions::from_mode(0o000))?;
+
+    let second = profile::ensure_profile_manifest(&ctx, &snapshot, &lock, &runtime_meta, &env_owner)?;
+
+    assert_eq!(
+        first.header.runtime_oid, second.header.runtime_oid,
+        "cached runtime oid should be reused"
     );
     Ok(())
 }

@@ -119,6 +119,40 @@ fn build_pythonpath_refuses_legacy_site_fallback() -> Result<()> {
 }
 
 #[test]
+fn build_pythonpath_skips_generated_trees_when_searching_code_generators() -> Result<()> {
+    let temp = tempdir()?;
+    let project_root = temp.path();
+    let site_dir = project_root.join("site");
+    fs::create_dir_all(&site_dir)?;
+
+    let root_generators = project_root.join("code_generators");
+    fs::create_dir_all(&root_generators)?;
+
+    let target_generators = project_root.join("target").join("code_generators");
+    fs::create_dir_all(&target_generators)?;
+
+    let node_modules_generators = project_root.join("node_modules").join("code_generators");
+    fs::create_dir_all(&node_modules_generators)?;
+
+    let effects = SystemEffects::new();
+    let paths = build_pythonpath(effects.fs(), project_root, Some(site_dir))?;
+
+    assert!(
+        paths.allowed_paths.contains(&root_generators),
+        "expected to include code_generators at project root"
+    );
+    assert!(
+        !paths.allowed_paths.contains(&target_generators),
+        "should skip scanning target/ for code_generators"
+    );
+    assert!(
+        !paths.allowed_paths.contains(&node_modules_generators),
+        "should skip scanning node_modules/ for code_generators"
+    );
+    Ok(())
+}
+
+#[test]
 fn project_paths_precede_local_site_packages() -> Result<()> {
     let temp = tempdir()?;
     let project_root = temp.path();

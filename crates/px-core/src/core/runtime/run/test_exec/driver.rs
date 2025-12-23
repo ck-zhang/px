@@ -304,6 +304,7 @@ pub(in crate::core::runtime::run) fn run_tests_for_context(
     sync_report: Option<crate::EnvironmentSyncReport>,
     workdir: &Path,
 ) -> Result<ExecutionOutcome> {
+    let strict = request.frozen || ctx.env_flag_enabled("CI");
     let command_args = json!({ "test_args": request.args });
     let (mut envs, _preflight) = build_env_with_preflight(ctx, py_ctx, &command_args)?;
     let stream_runner = !ctx.global.json;
@@ -335,6 +336,7 @@ pub(in crate::core::runtime::run) fn run_tests_for_context(
                 envs,
                 &request.args,
                 stream_runner,
+                strict,
                 allow_missing_pytest_fallback,
                 workdir,
             )?
@@ -352,6 +354,7 @@ pub(in crate::core::runtime::run) fn run_tests_for_context_cas_native(
     sync_report: Option<crate::EnvironmentSyncReport>,
     workdir: &Path,
 ) -> Result<ExecutionOutcome> {
+    let strict = request.frozen || ctx.env_flag_enabled("CI");
     let command_args = json!({ "test_args": request.args });
     let (mut envs, _preflight) = build_env_with_preflight(ctx, &native.py_ctx, &command_args)?;
     apply_runtime_python_home(&mut envs, &native.runtime_path);
@@ -386,6 +389,7 @@ pub(in crate::core::runtime::run) fn run_tests_for_context_cas_native(
                 envs,
                 &request.args,
                 stream_runner,
+                strict,
                 allow_missing_pytest_fallback,
                 workdir,
             )?

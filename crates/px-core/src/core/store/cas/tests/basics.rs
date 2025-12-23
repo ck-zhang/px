@@ -174,7 +174,7 @@ fn archive_dir_canonical_is_deterministic() -> Result<()> {
 }
 
 #[test]
-fn archive_selected_is_deterministic() -> Result<()> {
+fn archive_selected_filtered_is_deterministic() -> Result<()> {
     let temp = tempdir()?;
     let root = temp.path().join("tree");
     let nested = root.join("nested");
@@ -183,9 +183,9 @@ fn archive_selected_is_deterministic() -> Result<()> {
     fs::write(nested.join("b.txt"), b"there")?;
 
     let selection = vec![root.join("a.txt"), nested.clone()];
-    let first = archive_selected(&root, &selection)?;
+    let first = archive_selected_filtered(&root, &selection, |_| true)?;
     thread::sleep(Duration::from_secs(1));
-    let second = archive_selected(&root, &selection)?;
+    let second = archive_selected_filtered(&root, &selection, |_| true)?;
 
     assert_eq!(
         first, second,

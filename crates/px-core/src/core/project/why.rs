@@ -95,10 +95,16 @@ pub fn project_why(ctx: &CommandContext, request: &ProjectWhyRequest) -> Result<
     let entry = graph.packages.get(&target);
     if entry.is_none() {
         if implicit_base {
-            let reason = if target == "pip" {
-                "provided by the selected Python runtime (ensurepip)"
+            let (reason, hint) = if target == "pip" {
+                (
+                    "provided by the selected Python runtime (ensurepip)",
+                    "Run `px sync` to materialize the environment, then retry to see the installed version.",
+                )
             } else {
-                "seeded by px as a deterministic base layer"
+                (
+                    "seeded by px as a deterministic base layer when needed",
+                    "If you need setuptools available now, run `px add setuptools`, then retry.",
+                )
             };
             return Ok(ExecutionOutcome::success(
                 format!("{package} is an implicit base package ({reason})"),
@@ -110,7 +116,7 @@ pub fn project_why(ctx: &CommandContext, request: &ProjectWhyRequest) -> Result<
                     "chains": Vec::<Vec<String>>::new(),
                     "implicit": true,
                     "implicit_reason": reason,
-                    "hint": "Run `px sync` to materialize the environment, then retry to see the installed version.",
+                    "hint": hint,
                 }),
             ));
         }

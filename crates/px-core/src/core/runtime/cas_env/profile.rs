@@ -3,6 +3,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
+    time::UNIX_EPOCH,
 };
 
 use crate::core::fs::PxTempDir;
@@ -18,7 +19,7 @@ use crate::core::runtime::facade::RuntimeMetadata;
 use crate::store::cas::{
     archive_dir_canonical, global_store, pkg_build_lookup_key, source_lookup_key, LoadedObject,
     ObjectKind, ObjectPayload, OwnerId, OwnerType, PkgBuildHeader, ProfileHeader, ProfilePackage,
-    SourceHeader, MATERIALIZED_PKG_BUILDS_DIR,
+    SourceHeader, MATERIALIZED_PKG_BUILDS_DIR, MATERIALIZED_RUNTIMES_DIR,
 };
 use crate::store::{
     cache_wheel, ensure_sdist_build, ensure_wheel_dist, wheel_path, ArtifactRequest, SdistRequest,
@@ -75,6 +76,8 @@ pub(crate) fn ensure_profile_manifest(
     runtime: &RuntimeMetadata,
     env_owner: &OwnerId,
 ) -> Result<CasProfileManifest> {
+    let _timing = crate::tooling::timings::TimingGuard::new("ensure_profile_manifest");
+
     // Host-only escape hatch: when PX_RUNTIME_HOST_ONLY=1, skip archiving the
     // runtime into CAS and rely on the host interpreter path directly.
     let host_runtime_passthrough = env::var("PX_RUNTIME_HOST_ONLY")
@@ -85,31 +88,69 @@ pub(crate) fn ensure_profile_manifest(
     fs::create_dir_all(cache_root)?;
 
     let runtime_header = runtime_header(runtime)?;
-    let runtime_payload = ObjectPayload::Runtime {
-        header: runtime_header.clone(),
-        archive: Cow::Owned(if host_runtime_passthrough {
-            // Header-only runtime in host passthrough mode; bytes live outside CAS.
-            Vec::new()
-        } else {
-            runtime_archive(runtime)?
-        }),
+    let python_mtime = fs::metadata(&runtime.path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let python_size = fs::metadata(&runtime.path).map(|meta| meta.len()).unwrap_or(0);
+    let runtime_lookup_key = format!(
+        "runtime|v1|{}|{}|{}|{}|{}|{}|{}|{}",
+        hex::encode(Sha256::digest(runtime.path.as_bytes())),
+        runtime_header.version,
+        runtime_header.abi,
+        runtime_header.platform,
+        runtime_header.build_config_hash,
+        runtime_header.exe_path,
+        python_mtime,
+        python_size,
+    );
+    let runtime_oid = if host_runtime_passthrough {
+        let runtime_payload = ObjectPayload::Runtime {
+            header: runtime_header.clone(),
+            archive: Cow::Owned(Vec::new()),
+        };
+        store.store(&runtime_payload)?.oid
+    } else {
+        match store.lookup_key_fast(ObjectKind::Runtime, &runtime_lookup_key)? {
+            Some(oid) => oid,
+            None => {
+                let runtime_payload = ObjectPayload::Runtime {
+                    header: runtime_header.clone(),
+                    archive: Cow::Owned(runtime_archive(runtime)?),
+                };
+                let stored = store.store(&runtime_payload)?;
+                store.record_key(ObjectKind::Runtime, &runtime_lookup_key, &stored.oid)?;
+                stored.oid
+            }
+        }
     };
-    let runtime_obj = store.store(&runtime_payload)?;
     let runtime_exe = if host_runtime_passthrough {
         PathBuf::from(&runtime.path)
     } else {
-        let (runtime_header, runtime_archive) = match store.load(&runtime_obj.oid)? {
-            LoadedObject::Runtime {
-                header, archive, ..
-            } => (header, archive),
-            _ => {
-                return Err(anyhow!(
-                    "CAS object {} is not a runtime archive",
-                    runtime_obj.oid
-                ))
-            }
-        };
-        materialize_runtime_archive(&runtime_obj.oid, &runtime_header, &runtime_archive)?
+        let exe_rel = Path::new(&runtime_header.exe_path);
+        let exe_path = store
+            .root()
+            .join(MATERIALIZED_RUNTIMES_DIR)
+            .join(&runtime_oid)
+            .join(exe_rel);
+        if exe_path.exists() {
+            exe_path
+        } else {
+            let (runtime_header, runtime_archive) = match store.load(&runtime_oid)? {
+                LoadedObject::Runtime {
+                    header, archive, ..
+                } => (header, archive),
+                _ => {
+                    return Err(anyhow!(
+                        "CAS object {} is not a runtime archive",
+                        runtime_oid
+                    ))
+                }
+            };
+            materialize_runtime_archive(&runtime_oid, &runtime_header, &runtime_archive)?
+        }
     };
     let runtime_owner = OwnerId {
         owner_type: OwnerType::Runtime,
@@ -125,7 +166,7 @@ pub(crate) fn ensure_profile_manifest(
     };
     let _ = store.remove_owner_refs(&legacy_runtime_owner)?;
     let _ = store.remove_owner_refs(&runtime_owner)?;
-    let _ = store.add_ref(&runtime_owner, &runtime_obj.oid);
+    let _ = store.add_ref(&runtime_owner, &runtime_oid);
 
     let lookup_versions = dependency_versions(lock)?;
     let builder = builder_identity_for_runtime(runtime)?;
@@ -313,7 +354,7 @@ pub(crate) fn ensure_profile_manifest(
         env_vars.insert("LD_LIBRARY_PATH".to_string(), Value::String(joined));
     }
     let manifest = ProfileHeader {
-        runtime_oid: runtime_obj.oid.clone(),
+        runtime_oid,
         packages,
         sys_path_order,
         env_vars,

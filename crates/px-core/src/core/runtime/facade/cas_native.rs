@@ -169,7 +169,8 @@ pub(crate) fn ensure_project_environment_synced(
         Some(value) => value,
         None => compute_lock_hash(&lock_path)?,
     };
-    ensure_env_matches_lock(ctx, snapshot, &lock_id)
+    let setuptools_required = !lock.resolved.is_empty();
+    ensure_env_matches_lock(ctx, snapshot, &lock_id, setuptools_required)
 }
 
 #[derive(Deserialize)]
@@ -523,6 +524,7 @@ pub fn ensure_env_matches_lock(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
     lock_id: &str,
+    setuptools_required: bool,
 ) -> Result<()> {
     let state = match load_project_state(ctx.fs(), &snapshot.root) {
         Ok(state) => state,
@@ -606,7 +608,7 @@ pub fn ensure_env_matches_lock(
     }
 
     validate_cas_environment(&env)?;
-    ensure_packaging_seeds_present(ctx, snapshot, &env)?;
+    ensure_packaging_seeds_present(ctx, snapshot, &env, setuptools_required)?;
 
     Ok(())
 }
@@ -623,6 +625,7 @@ fn ensure_packaging_seeds_present(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
     env: &StoredEnvironment,
+    setuptools_required: bool,
 ) -> Result<()> {
     let env_root = env
         .env_path
@@ -640,7 +643,8 @@ fn ensure_packaging_seeds_present(
     };
     let env_python = PathBuf::from(&env.python.path);
     let envs = project_site_env(ctx, snapshot, &site_dir, &env_python)?;
-    let setuptools_ok = module_available(ctx, snapshot, &env_python, &envs, "setuptools")?;
+    let setuptools_ok = !setuptools_required
+        || module_available(ctx, snapshot, &env_python, &envs, "setuptools")?;
     let uv_needed = uv_seed_required(snapshot);
     let uv_ok = !uv_needed
         || has_uv_cli(&site_dir)
@@ -649,7 +653,7 @@ fn ensure_packaging_seeds_present(
     if setuptools_ok && uv_ok {
         return Ok(());
     }
-    if !setuptools_ok {
+    if setuptools_required && !setuptools_ok {
         return Err(InstallUserError::new(
             "environment missing baseline packaging support",
             json!({

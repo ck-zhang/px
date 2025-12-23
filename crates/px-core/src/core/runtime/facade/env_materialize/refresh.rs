@@ -122,7 +122,15 @@ pub(crate) fn refresh_project_site(
         &cas_profile.runtime_path,
         ctx.fs(),
     )?;
-    ensure_project_pip(ctx, snapshot, &cas_profile.env_path, &runtime, &env_python)?;
+    let setuptools_required = !lock.resolved.is_empty();
+    ensure_project_pip(
+        ctx,
+        snapshot,
+        &cas_profile.env_path,
+        &runtime,
+        &env_python,
+        setuptools_required,
+    )?;
     ensure_project_wheel_scripts(
         &ctx.cache().path,
         snapshot,
@@ -241,7 +249,10 @@ pub(crate) fn ensure_project_pip(
     site_dir: &Path,
     runtime: &RuntimeMetadata,
     env_python: &Path,
+    setuptools_required: bool,
 ) -> Result<()> {
+    let _timing = crate::tooling::timings::TimingGuard::new("ensure_project_pip");
+
     fn set_env_pair(envs: &mut Vec<(String, String)>, key: &str, value: String) {
         if let Some((_, existing)) = envs.iter_mut().find(|(k, _)| k == key) {
             *existing = value;
@@ -264,7 +275,6 @@ pub(crate) fn ensure_project_pip(
         sanitized
     }
 
-    #[cfg(windows)]
     fn bootstrap_pip_from_ensurepip_bundle(
         ctx: &CommandContext,
         snapshot: &ManifestSnapshot,
@@ -274,17 +284,42 @@ pub(crate) fn ensure_project_pip(
     ) -> Result<()> {
         let script = r#"
 import ensurepip
+import shutil
+import sys
 from pathlib import Path
+
+dest = Path(sys.argv[1])
+dest.mkdir(parents=True, exist_ok=True)
+
+def copy_wheel(src: str) -> None:
+    src_path = Path(src)
+    out = dest / src_path.name
+    shutil.copyfile(src_path, out)
+    print(str(out))
+
+ctx = getattr(ensurepip, "_get_pip_whl_path_ctx", None)
+if ctx is not None:
+    try:
+        with ctx() as wheel:
+            copy_wheel(str(wheel))
+            raise SystemExit(0)
+    except Exception:
+        pass
 
 bundled = Path(ensurepip.__file__).with_name("_bundled")
 candidates = sorted(bundled.glob("pip-*.whl"))
-print(str(candidates[0]) if candidates else "")
+if candidates:
+    copy_wheel(str(candidates[0]))
 "#;
         let output = ctx.python_runtime().run_command(
             env_python
                 .to_str()
                 .ok_or_else(|| anyhow!("invalid python path"))?,
-            &["-c".to_string(), script.trim().to_string()],
+            &[
+                "-c".to_string(),
+                script.trim().to_string(),
+                site_packages.display().to_string(),
+            ],
             envs,
             &snapshot.root,
         )?;
@@ -308,7 +343,9 @@ print(str(candidates[0]) if candidates else "")
                 "failed to unpack bundled pip wheel from {}",
                 wheel.display()
             )
-        })
+        })?;
+        let _ = ctx.fs().remove_file(wheel);
+        Ok(())
     }
 
     let debug_pip = std::env::var("PX_DEBUG_PIP").is_ok();
@@ -343,14 +380,21 @@ print(str(candidates[0]) if candidates else "")
         return Ok(());
     }
 
+    let pip_main_py = site_packages.join("pip").join("__main__.py").exists();
+    let setuptools_installed = site_packages.join("setuptools").exists();
+    if pip_entrypoints
+        && pip_installed
+        && pip_main_py
+        && (!setuptools_required || setuptools_installed)
+        && !uv_seed_required(snapshot)
+        && !uses_maturin_backend(&snapshot.manifest_path)?
+    {
+        return Ok(());
+    }
+
     let envs = project_site_env(ctx, snapshot, site_dir, env_python)?;
     let mut envs = envs;
-    {
-        #[cfg(windows)]
-        set_env_pair(&mut envs, "PX_PYTHON", env_python.display().to_string());
-        #[cfg(not(windows))]
-        set_env_pair(&mut envs, "PX_PYTHON", runtime.path.clone());
-    }
+    set_env_pair(&mut envs, "PX_PYTHON", env_python.display().to_string());
     let mut pip_main_available =
         module_available(ctx, snapshot, env_python, &envs, "pip.__main__")?;
 
@@ -377,7 +421,9 @@ print(str(candidates[0]) if candidates else "")
             )
             .into());
         }
-        ensure_setuptools_seed(ctx, snapshot, &site_packages, env_python, &envs)?;
+        if setuptools_required {
+            ensure_setuptools_seed(ctx, snapshot, &site_packages, env_python, &envs)?;
+        }
         ensure_uv_seed(ctx, snapshot, site_dir, env_python, &envs)?;
         ensure_build_tooling_seed(ctx, snapshot, &site_packages, env_python, &envs, runtime)?;
         return Ok(());
@@ -386,18 +432,20 @@ print(str(candidates[0]) if candidates else "")
     if !pip_entrypoints || !pip_main_available {
         if !pip_main_available {
             let bootstrap_envs = pip_bootstrap_env(&envs);
+            let bundle_result = bootstrap_pip_from_ensurepip_bundle(
+                ctx,
+                snapshot,
+                env_python,
+                &bootstrap_envs,
+                &site_packages,
+            );
             #[cfg(windows)]
-            {
-                bootstrap_pip_from_ensurepip_bundle(
-                    ctx,
-                    snapshot,
-                    env_python,
-                    &bootstrap_envs,
-                    &site_packages,
-                )?;
-            }
+            let bundle_result = bundle_result;
             #[cfg(not(windows))]
-            {
+            let bundle_result = bundle_result.or_else(|bundle_err| {
+                if debug_pip {
+                    eprintln!("ensurepip bundle bootstrap failed: {bundle_err}");
+                }
                 let output = ctx.python_runtime().run_command(
                     env_python
                         .to_str()
@@ -437,7 +485,9 @@ print(str(candidates[0]) if candidates else "")
                         output.stderr.trim()
                     );
                 }
-            }
+                Ok(())
+            });
+            bundle_result?;
         }
 
         link_runtime_pip(
@@ -458,7 +508,9 @@ print(str(candidates[0]) if candidates else "")
             bail!("failed to bootstrap pip in the px environment: pip not available");
         }
     }
-    ensure_setuptools_seed(ctx, snapshot, &site_packages, env_python, &envs)?;
+    if setuptools_required {
+        ensure_setuptools_seed(ctx, snapshot, &site_packages, env_python, &envs)?;
+    }
     ensure_uv_seed(ctx, snapshot, site_dir, env_python, &envs)?;
     ensure_build_tooling_seed(ctx, snapshot, &site_packages, env_python, &envs, runtime)?;
 
@@ -1366,11 +1418,84 @@ build-backend = "setuptools.build_meta"
 
         let global = GlobalOptions::default();
         let ctx = CommandContext::new(&global, Arc::new(SystemEffects::new()))?;
-        ensure_project_pip(&ctx, &snapshot, site_dir, &runtime, &wrapper)?;
+        ensure_project_pip(&ctx, &snapshot, site_dir, &runtime, &wrapper, true)?;
         assert!(
             !log_path.exists(),
             "ensurepip should not be invoked when pip.__main__ is already importable"
         );
+
+        for (key, value) in saved_env {
+            match value {
+                Some(prev) => env::set_var(key, prev),
+                None => env::remove_var(key),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_project_pip_skips_setuptools_seed_when_not_required() -> Result<()> {
+        let saved_env = vec![
+            ("PX_CACHE_PATH", env::var("PX_CACHE_PATH").ok()),
+            ("PX_STORE_PATH", env::var("PX_STORE_PATH").ok()),
+            ("PX_ENVS_PATH", env::var("PX_ENVS_PATH").ok()),
+            ("PX_NO_ENSUREPIP", env::var("PX_NO_ENSUREPIP").ok()),
+            ("PX_ONLINE", env::var("PX_ONLINE").ok()),
+        ];
+
+        env::remove_var("PX_NO_ENSUREPIP");
+        env::set_var("PX_ONLINE", "0");
+        let temp_env = tempfile::tempdir()?;
+        env::set_var("PX_CACHE_PATH", temp_env.path().join("cache"));
+        env::set_var("PX_STORE_PATH", temp_env.path().join("store"));
+        env::set_var("PX_ENVS_PATH", temp_env.path().join("envs"));
+
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path();
+        fs::write(
+            project_root.join("pyproject.toml"),
+            r#"[project]
+name = "pip-skip-setuptools"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+"#,
+        )?;
+        let snapshot = ManifestSnapshot::read_from(project_root)?;
+
+        let site_temp = tempfile::tempdir()?;
+        let site_dir = site_temp.path();
+        fs::create_dir_all(site_dir.join("bin"))?;
+        fs::write(site_dir.join("bin").join("pip"), "")?;
+
+        let runtime = system_python_runtime("any")?;
+        let site_packages = site_packages_dir(site_dir, &runtime.version);
+        fs::create_dir_all(&site_packages)?;
+
+        let tooling_root = project_root.join("tooling");
+        fs::create_dir_all(tooling_root.join("pip"))?;
+        fs::write(tooling_root.join("pip").join("__init__.py"), "")?;
+        fs::write(tooling_root.join("pip").join("__main__.py"), "")?;
+        fs::write(
+            site_dir.join("px.pth"),
+            format!("{}\n", tooling_root.display()),
+        )?;
+
+        let global = GlobalOptions::default();
+        let ctx = CommandContext::new(&global, Arc::new(SystemEffects::new()))?;
+        ensure_project_pip(
+            &ctx,
+            &snapshot,
+            site_dir,
+            &runtime,
+            Path::new(&runtime.path),
+            false,
+        )?;
 
         for (key, value) in saved_env {
             match value {
@@ -1675,6 +1800,7 @@ build-backend = "maturin"
             site_dir,
             &runtime,
             Path::new(&runtime.path),
+            true,
         )?;
 
         let envs = project_site_env(&ctx, &snapshot, site_dir, Path::new(&runtime.path))?;

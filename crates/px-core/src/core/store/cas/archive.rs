@@ -151,8 +151,12 @@ pub fn archive_dir_canonical(root: &Path) -> Result<Vec<u8>> {
     archive_dir_canonical_to_writer(root, Vec::new())
 }
 
-/// Archive a subset of paths under a shared root, skipping unreadable entries.
-pub fn archive_selected(root: &Path, paths: &[PathBuf]) -> Result<Vec<u8>> {
+/// Archive a subset of paths under a shared root, skipping unreadable entries and any entry
+/// rejected by `filter_entry`.
+pub fn archive_selected_filtered<F>(root: &Path, paths: &[PathBuf], mut filter_entry: F) -> Result<Vec<u8>>
+where
+    F: FnMut(&walkdir::DirEntry) -> bool,
+{
     use std::ffi::OsStr;
 
     let encoder = GzBuilder::new()
@@ -177,7 +181,7 @@ pub fn archive_selected(root: &Path, paths: &[PathBuf]) -> Result<Vec<u8>> {
         for entry in walkdir::WalkDir::new(base)
             .sort_by(|a, b| a.path().cmp(b.path()))
             .into_iter()
-            .filter_entry(|entry| entry.file_name() != OsStr::new(".git"))
+            .filter_entry(|entry| entry.file_name() != OsStr::new(".git") && filter_entry(entry))
         {
             let entry = match entry {
                 Ok(entry) => entry,

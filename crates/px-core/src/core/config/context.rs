@@ -49,6 +49,7 @@ impl<'a> CommandContext<'a> {
     /// # Errors
     /// Returns an error if the environment snapshot or configuration cannot be prepared.
     pub fn new(global: &'a GlobalOptions, effects: SharedEffects) -> Result<Self> {
+        let _timing = crate::tooling::timings::TimingGuard::new("command_context_new");
         let env = EnvSnapshot::capture();
         let config = Config::from_snapshot(&env, effects.cache())?;
         Ok(Self {

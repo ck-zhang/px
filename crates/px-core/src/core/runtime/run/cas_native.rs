@@ -302,12 +302,14 @@ pub(super) fn prepare_cas_native_run_context(
         ));
     }
 
+    let setuptools_required = !cas_profile.header.packages.is_empty();
     if let Err(err) = ensure_project_pip(
         ctx,
         snapshot,
         &site_dir,
         &runtime,
         &cas_profile.runtime_path,
+        setuptools_required,
     ) {
         return Err(ExecutionOutcome::failure(
             "failed to prepare native execution site",
@@ -818,6 +820,8 @@ fn incompatible_lock_artifacts(
 }
 
 fn materialize_profile_sys_path(header: &crate::store::cas::ProfileHeader) -> Result<Vec<PathBuf>> {
+    let _timing = crate::tooling::timings::TimingGuard::new("materialize_profile_sys_path");
+
     let store = crate::store::cas::global_store();
     let ordered: Vec<String> = if header.sys_path_order.is_empty() {
         header
@@ -835,11 +839,19 @@ fn materialize_profile_sys_path(header: &crate::store::cas::ProfileHeader) -> Re
         if !seen.insert(oid.to_string()) {
             return Ok(());
         }
-        let loaded = store.load(oid)?;
-        let crate::LoadedObject::PkgBuild { archive, .. } = loaded else {
-            bail!("CAS object {oid} is not a pkg-build archive");
+        let root = store
+            .root()
+            .join(crate::store::cas::MATERIALIZED_PKG_BUILDS_DIR)
+            .join(oid);
+        let root = if root.exists() {
+            root
+        } else {
+            let loaded = store.load(oid)?;
+            let crate::LoadedObject::PkgBuild { archive, .. } = loaded else {
+                bail!("CAS object {oid} is not a pkg-build archive");
+            };
+            materialize_pkg_archive(oid, &archive)?
         };
-        let root = materialize_pkg_archive(oid, &archive)?;
         let site = root.join("site-packages");
         if site.exists() {
             paths.push(site);

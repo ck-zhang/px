@@ -46,6 +46,32 @@ fn discover_code_generator_paths(
     project_root: &Path,
     max_depth: usize,
 ) -> Vec<PathBuf> {
+    let _timing = crate::tooling::timings::TimingGuard::new("discover_code_generators");
+
+    fn should_skip_dir(name: &str) -> bool {
+        matches!(
+            name,
+            ".git"
+                | ".px"
+                | "__pycache__"
+                | ".pytest_cache"
+                | ".mypy_cache"
+                | ".ruff_cache"
+                | "tests"
+                | "test"
+                | ".cache"
+                | ".venv"
+                | ".tox"
+                | "target"
+                | "dist"
+                | "build"
+                | "artifacts"
+                | "node_modules"
+                | ".idea"
+                | ".vscode"
+        )
+    }
+
     let mut extras = Vec::new();
     let mut stack = vec![(project_root.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
@@ -63,6 +89,12 @@ fn discover_code_generator_paths(
                 .is_some_and(|value| value == "code_generators")
             {
                 extras.push(path.clone());
+                continue;
+            }
+            if name
+                .to_str()
+                .is_some_and(should_skip_dir)
+            {
                 continue;
             }
             if depth < max_depth {
@@ -186,6 +218,8 @@ pub(crate) fn build_pythonpath(
     project_root: &Path,
     site_override: Option<PathBuf>,
 ) -> Result<PythonPathInfo> {
+    let _timing = crate::tooling::timings::TimingGuard::new("build_pythonpath");
+
     let site_dir = match site_override {
         Some(dir) => dir,
         None => resolve_project_site(fs, project_root)?,

@@ -468,7 +468,8 @@ fn pytest_plugin_path_is_on_env_vars() -> Result<()> {
         px_options: PxOptions::default(),
     };
     let envs = py_ctx.base_env(&json!({}))?;
-    let (envs, _cmd) = build_pytest_invocation(&ctx, &py_ctx, envs, &[], TestReporter::Px)?;
+    let (envs, _cmd) =
+        build_pytest_invocation(&ctx, &py_ctx, envs, &[], TestReporter::Px, false)?;
     let plugin_dir = temp.path().join(".px").join("plugins");
     let pythonpath = envs
         .iter()

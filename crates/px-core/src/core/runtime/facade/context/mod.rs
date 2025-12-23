@@ -11,7 +11,7 @@ pub use types::CommandGroup;
 pub(crate) use env_sync::{
     attach_autosync_details, auto_sync_environment, ensure_environment_with_guard,
 };
-pub(crate) use python_context::{python_context, python_context_with_mode};
+pub(crate) use python_context::python_context_with_mode;
 pub(crate) use pythonpath::build_pythonpath;
 pub(crate) use types::{
     issue_from_details, EnvGuard, EnvironmentIssue, EnvironmentSyncReport, PythonContext,

@@ -3,7 +3,9 @@ use std::io::IsTerminal;
 
 use super::builtin::run_builtin_tests;
 use super::env::{append_allowed_paths, append_pythonpath, run_python_command};
-use super::outcome::{mark_reporter_rendered, missing_pytest_outcome, test_failure, test_success};
+use super::outcome::{
+    mark_reporter_rendered, missing_pytest_outcome, test_failure, test_no_tests, test_success,
+};
 use crate::{
     build_pythonpath,
     progress::ProgressSuspendGuard,
@@ -32,11 +34,13 @@ pub(super) fn run_pytest_runner(
     envs: EnvPairs,
     test_args: &[String],
     stream_runner: bool,
+    strict: bool,
     allow_builtin_fallback: bool,
     workdir: &Path,
 ) -> Result<ExecutionOutcome> {
     let reporter = test_reporter_from_env();
-    let (mut envs, pytest_cmd) = build_pytest_invocation(ctx, py_ctx, envs, test_args, reporter)?;
+    let (mut envs, pytest_cmd) =
+        build_pytest_invocation(ctx, py_ctx, envs, test_args, reporter, strict)?;
     if let Err(outcome) = ensure_pytest_available(ctx, py_ctx, &mut envs) {
         if ctx.config().test.fallback_builtin || allow_builtin_fallback {
             return run_builtin_tests(ctx, runner, py_ctx, envs, stream_runner, workdir);
@@ -44,6 +48,9 @@ pub(super) fn run_pytest_runner(
         return Ok(outcome);
     }
     let output = run_python_command(runner, py_ctx, &pytest_cmd, &envs, stream_runner, workdir)?;
+    if output.code == 5 && !strict {
+        return Ok(test_no_tests("pytest", output, stream_runner, test_args));
+    }
     if output.code == 0 {
         let mut outcome = test_success("pytest", output, stream_runner, test_args);
         if let TestReporter::Px = reporter {
@@ -198,8 +205,14 @@ pub(in crate::core::runtime::run) fn build_pytest_invocation(
     mut envs: EnvPairs,
     test_args: &[String],
     reporter: TestReporter,
+    strict: bool,
 ) -> Result<(EnvPairs, Vec<String>)> {
     super::super::set_env_pair(&mut envs, "PYTHONNOUSERSITE", "1".into());
+    super::super::set_env_pair(
+        &mut envs,
+        "PX_TEST_STRICT",
+        if strict { "1" } else { "0" }.into(),
+    );
 
     let mut defaults = default_pytest_flags(reporter);
     let cache_dir = py_ctx.state_root.join(".px").join("pytest-cache");

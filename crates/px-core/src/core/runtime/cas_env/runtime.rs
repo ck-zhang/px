@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use tracing::debug;
 
 use crate::core::runtime::facade::RuntimeMetadata;
-use crate::store::cas::{archive_selected, RuntimeHeader};
+use crate::store::cas::{archive_selected_filtered, RuntimeHeader};
 
 pub(super) fn runtime_header(runtime: &RuntimeMetadata) -> Result<RuntimeHeader> {
     let tags = crate::python_sys::detect_interpreter_tags(&runtime.path)?;
@@ -89,7 +89,10 @@ pub(super) fn runtime_archive(runtime: &RuntimeMetadata) -> Result<Vec<u8>> {
     if include_paths.is_empty() {
         bail!("no runtime paths found to archive for {}", runtime.path);
     }
-    archive_selected(&root_dir, &include_paths)
+    archive_selected_filtered(&root_dir, &include_paths, |entry| {
+        let name = entry.file_name().to_str().unwrap_or_default();
+        !matches!(name, "site-packages" | "dist-packages" | "__pycache__")
+    })
 }
 
 fn runtime_config_hash(tags: &crate::python_sys::InterpreterTags) -> String {
@@ -153,4 +156,44 @@ print(json.dumps(paths))
         }
     }
     Ok(paths)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_archive_excludes_site_packages() -> Result<()> {
+        let interpreter = which::which("python3")
+            .or_else(|_| which::which("python"))
+            .map_err(|err| anyhow!("no system python found: {err}"))?;
+        let details = crate::runtime_manager::inspect_python(&interpreter)?;
+        let runtime = RuntimeMetadata {
+            path: details.executable,
+            version: details.full_version,
+            platform: "any".to_string(),
+        };
+        let bytes = runtime_archive(&runtime)?;
+        let decoder = flate2::read::GzDecoder::new(bytes.as_slice());
+        let mut archive = tar::Archive::new(decoder);
+        for entry in archive.entries()? {
+            let entry = entry?;
+            let path = entry.path()?;
+            let path = path.to_string_lossy();
+            assert!(
+                !path.contains("site-packages"),
+                "runtime archive should not include {path}"
+            );
+            assert!(
+                !path.contains("dist-packages"),
+                "runtime archive should not include {path}"
+            );
+            assert!(
+                !path.contains("__pycache__"),
+                "runtime archive should not include {path}"
+            );
+        }
+        Ok(())
+    }
 }

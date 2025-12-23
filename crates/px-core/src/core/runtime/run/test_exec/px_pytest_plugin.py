@@ -5,6 +5,14 @@ import pytest
 from _pytest._io.terminalwriter import TerminalWriter
 
 
+def _env_flag(key: str) -> bool:
+    value = os.environ.get(key, "").strip()
+    if not value:
+        return False
+    lowered = value.lower()
+    return lowered not in ("0", "false", "no", "off")
+
+
 class PxTerminalReporter:
     def __init__(self, config):
         self.config = config
@@ -28,6 +36,7 @@ class PxTerminalReporter:
             "xpassed": 0,
         }
         self.exitstatus = 0
+        self.no_tests = False
         self.spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         self.spinner_index = 0
         self.last_progress_len = 0
@@ -98,6 +107,11 @@ class PxTerminalReporter:
             self.failures.append(report)
 
     def pytest_sessionfinish(self, session, exitstatus):
+        strict = _env_flag("PX_TEST_STRICT") or _env_flag("CI")
+        self.no_tests = exitstatus == 5 and self.collected == 0 and not strict
+        if self.no_tests:
+            session.exitstatus = 0
+            exitstatus = 0
         self.exitstatus = exitstatus
         self._spinner_active = False
         self._clear_spinner(newline=True)
@@ -195,8 +209,12 @@ class PxTerminalReporter:
     def _render_summary(self, exitstatus):
         total = sum(self.stats.values())
         duration = time.time() - self.session_start
-        status_label = "✓ PASSED" if exitstatus == 0 else "✗ FAILED"
-        status_color = {"green": exitstatus == 0, "red": exitstatus != 0, "bold": True}
+        if self.no_tests:
+            status_label = "∙ NO TESTS"
+            status_color = {"yellow": True, "bold": True}
+        else:
+            status_label = "✓ PASSED" if exitstatus == 0 else "✗ FAILED"
+            status_color = {"green": exitstatus == 0, "red": exitstatus != 0, "bold": True}
         self._tw.line("")
         self._tw.line(
             f"RESULT   {status_label} (exit code {exitstatus})", **status_color
@@ -206,6 +224,12 @@ class PxTerminalReporter:
         self._tw.line(f"FAILED   {self.stats['failed']}")
         self._tw.line(f"SKIPPED  {self.stats['skipped']}")
         self._tw.line(f"ERRORS   {self.stats['error']}")
+        if self.no_tests:
+            self._tw.line("")
+            self._tw.line(
+                "Tip: add tests under `tests/` (CI/--frozen treats no tests collected as an error).",
+                cyan=True,
+            )
 
     # --- utility helpers ---
     def _status_icon(self, status):
