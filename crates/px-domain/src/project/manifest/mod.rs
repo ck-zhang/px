@@ -176,6 +176,45 @@ impl ManifestEditor {
         Ok(true)
     }
 
+    /// Update `[tool.px.workspace].python` with the requested version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the manifest cannot be written.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the TOML structure for `[tool]` or `[tool.px]` is invalid.
+    pub fn set_workspace_python(&mut self, version: &str) -> Result<bool> {
+        let tool_entry = self.doc.entry("tool").or_insert(Item::Table(Table::new()));
+        if !tool_entry.is_table() {
+            *tool_entry = Item::Table(Table::new());
+        }
+        let tool_table = tool_entry.as_table_mut().expect("tool table");
+        let px_entry = tool_table.entry("px").or_insert(Item::Table(Table::new()));
+        if !px_entry.is_table() {
+            *px_entry = Item::Table(Table::new());
+        }
+        let px_table = px_entry.as_table_mut().expect("px table");
+        let workspace_entry = px_table
+            .entry("workspace")
+            .or_insert(Item::Table(Table::new()));
+        if !workspace_entry.is_table() {
+            *workspace_entry = Item::Table(Table::new());
+        }
+        let workspace_table = workspace_entry.as_table_mut().expect("workspace table");
+        let current = workspace_table
+            .get("python")
+            .and_then(Item::as_value)
+            .and_then(|value| value.as_str());
+        if current == Some(version) {
+            return Ok(false);
+        }
+        workspace_table.insert("python", Item::Value(TomlValue::from(version)));
+        self.save()?;
+        Ok(true)
+    }
+
     fn save(&self) -> Result<()> {
         fs::write(&self.path, self.doc.to_string())?;
         Ok(())

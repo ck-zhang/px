@@ -17,6 +17,7 @@ fn python_install_and_use_records_runtime() {
     let registry = registry_dir.path().join("runtimes.json");
     cargo_bin_cmd!("px")
         .env("PX_RUNTIME_REGISTRY", registry.to_str().unwrap())
+        .env_remove("CI")
         .args([
             "python",
             "install",
@@ -45,6 +46,7 @@ fn python_install_and_use_records_runtime() {
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_RUNTIME_REGISTRY", registry.to_str().unwrap())
+        .env_remove("CI")
         .args(["python", "use", &channel])
         .assert()
         .success();
@@ -53,6 +55,14 @@ fn python_install_and_use_records_runtime() {
         contents.contains(&format!("python = \"{channel}\"")),
         "pyproject should record runtime: {contents}"
     );
+
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_REGISTRY", registry.to_str().unwrap())
+        .env_remove("CI")
+        .args(["run", "python", "-c", "print('hello from px')"])
+        .assert()
+        .success();
 }
 
 #[test]

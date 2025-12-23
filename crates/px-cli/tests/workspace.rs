@@ -79,6 +79,79 @@ fn workspace_sync_makes_status_env_clean() {
 }
 
 #[test]
+fn workspace_python_use_syncs_workspace_runtime() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let Some(python) = find_python() else {
+        eprintln!("skipping workspace python use test (python not found)");
+        return;
+    };
+    let Some((python_exe, channel)) = detect_host_python(&python) else {
+        eprintln!("skipping workspace python use test (unable to inspect python)");
+        return;
+    };
+    let (_temp, root) = prepare_named_fixture("workspace_basic", "workspace_python_use");
+    let member = root.join("apps/a");
+
+    let registry_dir = tempfile::tempdir().expect("registry dir");
+    let registry = registry_dir.path().join("runtimes.json");
+    cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .env_remove("CI")
+        .args([
+            "python",
+            "install",
+            &channel,
+            "--path",
+            &python_exe,
+            "--default",
+        ])
+        .assert()
+        .success();
+
+    cargo_bin_cmd!("px")
+        .current_dir(&member)
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .env_remove("CI")
+        .args(["python", "use", &channel])
+        .assert()
+        .success();
+
+    let root_doc: DocumentMut = fs::read_to_string(root.join("pyproject.toml"))
+        .expect("read workspace pyproject")
+        .parse()
+        .expect("parse workspace pyproject");
+    let workspace_python = root_doc["tool"]["px"]["workspace"]["python"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(workspace_python, channel);
+
+    let member_doc: DocumentMut = fs::read_to_string(member.join("pyproject.toml"))
+        .expect("read member pyproject")
+        .parse()
+        .expect("parse member pyproject");
+    assert!(
+        member_doc["tool"]["px"].as_table().and_then(|table| table.get("python")).is_none(),
+        "px python use in a workspace should not set per-member [tool.px].python"
+    );
+
+    let status = cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .env_remove("CI")
+        .args(["status", "--json"])
+        .assert()
+        .success();
+    let payload = parse_json(&status);
+    assert_eq!(payload["workspace"]["env_clean"], Value::Bool(true));
+    assert_eq!(payload["env"]["status"], Value::String("clean".into()));
+}
+
+#[test]
 #[cfg(not(windows))]
 fn workspace_status_does_not_depend_on_path_python() {
     let _guard = test_env_guard();

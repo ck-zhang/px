@@ -216,7 +216,16 @@ pub fn resolve_runtime(
     requirement: &str,
 ) -> Result<RuntimeSelection> {
     let specifiers = VersionSpecifiers::from_str(requirement)
-        .map_err(|err| anyhow!("invalid requires-python `{requirement}`: {err}"))?;
+        .or_else(|err| {
+            if let Ok(channel) = normalize_channel(requirement) {
+                let spec = format!("=={channel}.*");
+                VersionSpecifiers::from_str(&spec).map_err(|err| {
+                    anyhow!("invalid requires-python `{requirement}`: {err}")
+                })
+            } else {
+                Err(anyhow!("invalid requires-python `{requirement}`: {err}"))
+            }
+        })?;
     let registry = load_registry()?;
     let mut managed: Vec<RuntimeRecord> = Vec::new();
     let mut external: Vec<RuntimeRecord> = Vec::new();
