@@ -36,6 +36,33 @@ pub(super) fn autosync_note_from_details(details: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
+pub(super) fn manifest_change_lines_from_details(details: &Value) -> Vec<String> {
+    let Some(entries) = details
+        .as_object()
+        .and_then(|map| map.get("manifest_changes"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    for entry in entries {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        let Some(before) = obj.get("before").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(after) = obj.get("after").and_then(Value::as_str) else {
+            continue;
+        };
+        if before.trim().is_empty() || after.trim().is_empty() {
+            continue;
+        }
+        lines.push(format!("pyproject.toml: {before} -> {after}"));
+    }
+    lines
+}
+
 pub(super) fn is_passthrough(details: &Value) -> bool {
     details
         .as_object()

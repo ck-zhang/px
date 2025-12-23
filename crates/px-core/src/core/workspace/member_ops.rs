@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -7,8 +9,9 @@ use std::os::unix::fs::PermissionsExt;
 use anyhow::Result;
 use serde_json::json;
 
-use crate::{CommandContext, ExecutionOutcome};
+use crate::{dependency_name, CommandContext, ExecutionOutcome};
 use px_domain::api::ManifestEditor;
+use pep508_rs::{Requirement as PepRequirement, VersionOrUrl};
 
 use super::{workspace_sync, WorkspaceScope, WorkspaceSyncRequest};
 
@@ -51,6 +54,7 @@ pub fn workspace_add(
     let outcome = (|| -> Result<ExecutionOutcome> {
         let mut editor = ManifestEditor::open(&manifest_path)?;
         let report = editor.add_specs(&cleaned_specs)?;
+        let dependencies_before = editor.dependencies();
         if report.added.is_empty() && report.updated.is_empty() {
             needs_restore = request.dry_run;
             return Ok(ExecutionOutcome::success(
@@ -85,20 +89,81 @@ pub fn workspace_add(
             },
         )?;
         needs_restore = false;
+        let dependencies_after = ManifestEditor::open(&manifest_path)?.dependencies();
+        let manifest_changes =
+            pinned_manifest_changes(&report.added, &report.updated, &dependencies_before, &dependencies_after);
+        let mut details = json!({
+            "pyproject": manifest_path.display().to_string(),
+            "lockfile": workspace.lock_path.display().to_string(),
+            "added": report.added,
+            "updated": report.updated,
+        });
+        if !manifest_changes.is_empty() {
+            details["manifest_changes"] = json!(manifest_changes);
+        }
         Ok(ExecutionOutcome::success(
             "updated workspace dependencies",
-            json!({
-                "pyproject": manifest_path.display().to_string(),
-                "lockfile": workspace.lock_path.display().to_string(),
-                "added": report.added,
-                "updated": report.updated,
-            }),
+            details,
         ))
     })();
     if needs_restore {
         backup.restore()?;
     }
     outcome
+}
+
+fn pinned_manifest_changes(
+    added: &[String],
+    updated: &[String],
+    before: &[String],
+    after: &[String],
+) -> Vec<serde_json::Value> {
+    let before_map = dependency_spec_map(before);
+    let after_map = dependency_spec_map(after);
+    let mut changes = Vec::new();
+    for name in added.iter().chain(updated) {
+        let Some(before_spec) = before_map.get(name) else {
+            continue;
+        };
+        let Some(after_spec) = after_map.get(name) else {
+            continue;
+        };
+        if before_spec == after_spec {
+            continue;
+        }
+        if is_exact_pin(after_spec) {
+            changes.push(json!({
+                "name": name,
+                "before": before_spec,
+                "after": after_spec,
+            }));
+        }
+    }
+    changes
+}
+
+fn dependency_spec_map(specs: &[String]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for spec in specs {
+        let name = dependency_name(spec);
+        if name.is_empty() {
+            continue;
+        }
+        map.insert(name, spec.clone());
+    }
+    map
+}
+
+fn is_exact_pin(spec: &str) -> bool {
+    let trimmed = crate::strip_wrapping_quotes(spec.trim());
+    let Ok(requirement) = PepRequirement::from_str(trimmed) else {
+        return trimmed.contains("==");
+    };
+    let Some(VersionOrUrl::VersionSpecifier(specifiers)) = requirement.version_or_url else {
+        return false;
+    };
+    let rendered = specifiers.to_string();
+    (rendered.starts_with("==") || rendered.starts_with("===")) && !rendered.contains(',')
 }
 
 pub fn workspace_remove(

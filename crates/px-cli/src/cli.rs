@@ -109,7 +109,7 @@ pub enum CommandGroupCli {
     )]
     Init(InitArgs),
     #[command(
-        about = "Declare direct dependencies and immediately sync px.lock + env.",
+        about = "Declare direct dependencies and immediately sync px.lock + env. By default, px pins direct deps in pyproject.toml for determinism.",
         override_usage = "px add <SPEC> [SPEC ...]"
     )]
     Add(SpecArgs),

@@ -76,6 +76,12 @@ pub fn emit_output(
         }
 
         if !opts.quiet {
+            if info.group == CommandGroup::Add && matches!(outcome.status, CommandStatus::Ok) {
+                for change in details::manifest_change_lines_from_details(&outcome.details) {
+                    let line = format!("px {}: {}", info.name, change);
+                    println!("{}", style_out.info(&line));
+                }
+            }
             if let Some(note) = details::autosync_note_from_details(&outcome.details) {
                 let line = format!("px {}: {}", info.name, note);
                 println!("{}", style_out.info(&line));
