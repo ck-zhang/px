@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use toml_edit::{DocumentMut, Item};
 
+use crate::core::runtime::runtime_manager;
 use crate::{
     install_snapshot, manifest_snapshot_at, refresh_project_site, relative_path_str,
     CommandContext, ExecutionOutcome, InstallUserError,
@@ -13,6 +14,8 @@ use crate::{
 use px_domain::api::{
     discover_project_root, infer_package_name, project_name_from_pyproject, ProjectInitializer,
 };
+
+const DEFAULT_INIT_RUNTIME: &str = "3.12";
 
 #[derive(Clone, Debug)]
 pub struct ProjectInitRequest {
@@ -69,6 +72,25 @@ pub fn project_init(
     let (package, inferred) = infer_package_name(package_arg, &root)?;
     let python_req = resolve_python_requirement_arg(request.python.as_deref());
 
+    if !request.dry_run {
+        let runtimes = runtime_manager::list_runtimes().map_err(|err| {
+            let issues: Vec<String> = err.chain().map(std::string::ToString::to_string).collect();
+            InstallUserError::new(
+                "unable to read px runtime registry",
+                json!({
+                    "reason": "runtime_registry_error",
+                    "error": err.to_string(),
+                    "issues": issues,
+                    "hint": "Repair or delete the px runtime registry file, then re-run the command.",
+                }),
+            )
+        })?;
+        if runtimes.is_empty() {
+            let version = suggested_init_runtime(request.python.as_deref());
+            return Ok(missing_runtime_outcome(&version));
+        }
+    }
+
     let mut files = ProjectInitializer::scaffold(&root, &package, &python_req, request.dry_run)?;
     if request.dry_run {
         let package_name = package.clone();
@@ -103,6 +125,7 @@ pub fn project_init(
         pyproject_preexisting,
         lock_existed,
     );
+    env::remove_var("PX_RUNTIME_PYTHON");
     match install_snapshot(ctx, &snapshot, false, None) {
         Ok(_) => {}
         Err(err) => {
@@ -139,6 +162,32 @@ pub fn project_init(
         format!("initialized project {actual_name}"),
         details,
     ))
+}
+
+fn missing_runtime_outcome(version: &str) -> ExecutionOutcome {
+    ExecutionOutcome::user_error(
+        "no px-managed Python runtime found",
+        json!({
+            "reason": "missing_init_runtime",
+            "install_version": version,
+            "issues": [
+                "px init requires a px-managed Python runtime and will not fall back to system Python on PATH."
+            ],
+            "recommendation": {
+                "command": format!("px python install {version}"),
+                "hint": "Re-run `px init` after the runtime is installed."
+            },
+        }),
+    )
+}
+
+fn suggested_init_runtime(raw: Option<&str>) -> String {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return DEFAULT_INIT_RUNTIME.to_string();
+    };
+    let trimmed = raw.trim_start_matches(['>', '<', '=', '~', '!']);
+    let candidate = trimmed.trim_start().split([',', ' ']).next().unwrap_or(trimmed);
+    runtime_manager::normalize_channel(candidate).unwrap_or_else(|_| DEFAULT_INIT_RUNTIME.to_string())
 }
 
 fn resolve_python_requirement_arg(raw: Option<&str>) -> String {

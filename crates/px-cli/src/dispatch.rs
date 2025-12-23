@@ -1,3 +1,6 @@
+use std::io::{self, BufRead, Write};
+
+use atty::Stream;
 use color_eyre::Result;
 use px_core::api as px_core;
 use px_core::{
@@ -26,7 +29,8 @@ pub fn dispatch_command(
         CommandGroupCli::Init(args) => {
             let info = CommandInfo::new(CommandGroup::Init, "init");
             let request = project_init_request_from_args(args);
-            core_call(info, || px_core::project_init(ctx, &request))
+            let outcome = dispatch_init(ctx, info, &request)?;
+            Ok((info, outcome))
         }
         CommandGroupCli::Add(args) => {
             let info = CommandInfo::new(CommandGroup::Add, "add");
@@ -176,6 +180,84 @@ pub fn dispatch_command(
     }
 }
 
+fn dispatch_init(
+    ctx: &CommandContext,
+    info: CommandInfo,
+    request: &ProjectInitRequest,
+) -> Result<px_core::ExecutionOutcome> {
+    let attempt = core_call_no_spinner(info, || px_core::project_init(ctx, request))?;
+    let Some(version) = init_install_prompt_version(&attempt) else {
+        return Ok(attempt);
+    };
+
+    if request.dry_run || !init_can_prompt_for_runtime(ctx) {
+        return Ok(attempt);
+    }
+
+    eprint!(
+        "No px-managed Python runtime found. Install Python {version} now? (Y/n) "
+    );
+    io::stderr().flush().ok();
+    let mut answer = String::new();
+    let _ = io::stdin().lock().read_line(&mut answer);
+    let answer = answer.trim();
+    let accepted = answer.is_empty()
+        || matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes");
+    if !accepted {
+        return Ok(px_core::ExecutionOutcome::user_error(
+            "px init requires a px-managed Python runtime",
+            serde_json::json!({
+                "reason": "missing_init_runtime",
+                "install_version": version,
+                "recommendation": {
+                    "command": format!("px python install {version}"),
+                    "hint": "Re-run `px init` after the runtime is installed."
+                }
+            }),
+        ));
+    }
+
+    let install = core_call_no_spinner(info, || {
+        px_core::python_install(
+            ctx,
+            &px_core::PythonInstallRequest {
+                version: version.clone(),
+                path: None,
+                set_default: false,
+            },
+        )
+    })?;
+    if install.status != px_core::CommandStatus::Ok {
+        return Ok(install);
+    }
+
+    core_call_no_spinner(info, || px_core::project_init(ctx, request))
+}
+
+fn init_can_prompt_for_runtime(ctx: &CommandContext) -> bool {
+    if ctx.global.json {
+        return false;
+    }
+    if ctx.env_flag_enabled("CI") {
+        return false;
+    }
+    atty::is(Stream::Stdin) && atty::is(Stream::Stdout)
+}
+
+fn init_install_prompt_version(outcome: &px_core::ExecutionOutcome) -> Option<String> {
+    if outcome.status != px_core::CommandStatus::UserError {
+        return None;
+    }
+    let details = outcome.details.as_object()?;
+    if details.get("reason").and_then(serde_json::Value::as_str) != Some("missing_init_runtime") {
+        return None;
+    }
+    details
+        .get("install_version")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
 fn core_call<F>(info: CommandInfo, action: F) -> Result<(CommandInfo, px_core::ExecutionOutcome)>
 where
     F: FnOnce() -> anyhow::Result<px_core::ExecutionOutcome>,
@@ -218,6 +300,40 @@ where
                             "hint": "Re-run with `--debug` for more detail, or open an issue if this persists.",
                         }),
                     ),
+                ))
+            }
+        }
+    }
+}
+
+fn core_call_no_spinner<F>(_info: CommandInfo, action: F) -> Result<px_core::ExecutionOutcome>
+where
+    F: FnOnce() -> anyhow::Result<px_core::ExecutionOutcome>,
+{
+    let outcome = action();
+    match outcome {
+        Ok(result) => Ok(result),
+        Err(err) => {
+            if let Some(outcome) = missing_project_outcome(&err) {
+                Ok(outcome)
+            } else if let Some(outcome) = px_core::manifest_error_outcome(&err) {
+                Ok(outcome)
+            } else if let Some(user) = err.downcast_ref::<px_core::InstallUserError>() {
+                Ok(px_core::ExecutionOutcome::user_error(
+                    user.message().to_string(),
+                    user.details().clone(),
+                ))
+            } else {
+                let issues: Vec<String> =
+                    err.chain().map(std::string::ToString::to_string).collect();
+                Ok(px_core::ExecutionOutcome::failure(
+                    err.to_string(),
+                    serde_json::json!({
+                        "reason": "internal_error",
+                        "error": err.to_string(),
+                        "issues": issues,
+                        "hint": "Re-run with `--debug` for more detail, or open an issue if this persists.",
+                    }),
                 ))
             }
         }
