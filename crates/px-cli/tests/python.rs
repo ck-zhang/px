@@ -106,6 +106,57 @@ fn python_info_surfaces_manifest_errors() {
     );
 }
 
+#[test]
+fn python_list_sorts_newest_versions_first() {
+    let (python_path, _channel) = detect_host_python();
+    let registry_dir = tempdir().expect("registry tempdir");
+    let registry = registry_dir.path().join("runtimes.json");
+    let payload = serde_json::json!({
+        "runtimes": [
+            {
+                "version": "3.10",
+                "full_version": "3.10.13",
+                "path": python_path.to_str().unwrap(),
+                "default": false
+            },
+            {
+                "version": "3.12",
+                "full_version": "3.12.2",
+                "path": python_path.to_str().unwrap(),
+                "default": false
+            },
+            {
+                "version": "3.11",
+                "full_version": "3.11.9",
+                "path": python_path.to_str().unwrap(),
+                "default": true
+            }
+        ]
+    });
+    fs::write(&registry, serde_json::to_string_pretty(&payload).unwrap() + "\n")
+        .expect("write registry");
+
+    let list = cargo_bin_cmd!("px")
+        .env("PX_RUNTIME_REGISTRY", registry.to_str().unwrap())
+        .args(["--json", "python", "list"])
+        .assert()
+        .success();
+    let output = parse_json(&list);
+    let runtimes = output["details"]["runtimes"]
+        .as_array()
+        .expect("runtimes array");
+    let versions: Vec<String> = runtimes
+        .iter()
+        .filter_map(|rt| rt.get("version").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        versions,
+        vec!["3.12".to_string(), "3.11".to_string(), "3.10".to_string()],
+        "expected newest runtimes first, got {versions:?}"
+    );
+}
+
 fn detect_host_python() -> (PathBuf, String) {
     for candidate in ["python3", "python"] {
         if let Ok(output) = Command::new(candidate)

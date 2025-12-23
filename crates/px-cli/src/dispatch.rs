@@ -43,7 +43,7 @@ pub fn dispatch_command(
         CommandGroupCli::Remove(args) => {
             let info = CommandInfo::new(CommandGroup::Remove, "remove");
             let request = ProjectRemoveRequest {
-                specs: args.specs.clone(),
+                specs: args.names.clone(),
                 dry_run: args.common.dry_run,
             };
             core_call(info, || px_core::project_remove(ctx, &request))

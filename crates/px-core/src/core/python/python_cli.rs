@@ -1,6 +1,7 @@
 use anyhow::Result;
 use pep440_rs::{Version, VersionSpecifiers};
 use serde_json::{json, Value};
+use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -41,10 +42,22 @@ pub fn python_list(
     _ctx: &CommandContext,
     _request: &PythonListRequest,
 ) -> Result<ExecutionOutcome> {
-    let runtimes = match runtime_manager::list_runtimes() {
+    let mut runtimes = match runtime_manager::list_runtimes() {
         Ok(runtimes) => runtimes,
         Err(err) => return Ok(runtime_registry_error(err)),
     };
+    runtimes.sort_by(|left, right| {
+        let left_version = Version::from_str(&left.full_version).ok();
+        let right_version = Version::from_str(&right.full_version).ok();
+        match (left_version, right_version) {
+            (Some(left), Some(right)) => right.cmp(&left),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => right.full_version.cmp(&left.full_version),
+        }
+        .then_with(|| right.version.cmp(&left.version))
+        .then_with(|| left.path.cmp(&right.path))
+    });
     let details: Vec<Value> = runtimes.iter().map(runtime_to_json).collect();
     if runtimes.is_empty() {
         return Ok(ExecutionOutcome::success(

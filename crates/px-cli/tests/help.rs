@@ -44,6 +44,20 @@ fn add_help_mentions_manifest_pinning() {
 }
 
 #[test]
+fn remove_help_uses_name_argument() {
+    let output = help_output(&["remove", "--help"]);
+    let upper = output.to_ascii_uppercase();
+    assert!(
+        upper.contains("<NAME>") || upper.contains("[NAME"),
+        "remove help should name the argument NAME, got: {output}"
+    );
+    assert!(
+        !upper.contains("<SPEC>") && !upper.contains("[SPEC"),
+        "remove help should not refer to SPEC, got: {output}"
+    );
+}
+
+#[test]
 fn build_help_mentions_skip_tests_example() {
     let output = help_output(&["build", "--help"]);
     assert!(
@@ -82,7 +96,7 @@ fn sync_help_mentions_lock_resolution_and_flag_help() {
         "sync help should describe dev-mode lock/env behavior: {output}"
     );
     assert!(
-        output.contains("--dry-run") && output.contains("Preview changes without writing files"),
+        output.contains("--dry-run") && output.contains("Preview changes and print a summary"),
         "sync help should describe --dry-run behavior: {output}"
     );
     assert!(

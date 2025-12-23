@@ -121,7 +121,7 @@ pub enum CommandGroupCli {
         about = "Remove direct dependencies and re-sync px.lock + env.",
         override_usage = "px remove <NAME> [NAME ...]"
     )]
-    Remove(SpecArgs),
+    Remove(RemoveArgs),
     #[command(
         about = "Resolve (if needed) and sync env from lock (run after clone or drift).",
         override_usage = "px sync [--frozen]"
@@ -343,7 +343,10 @@ pub struct MigrateArgs {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct CommonFlags {
-    #[arg(long, help = "Preview changes without writing files or building envs")]
+    #[arg(
+        long,
+        help = "Preview changes and print a summary (no file writes or env builds)"
+    )]
     pub dry_run: bool,
 }
 
@@ -372,6 +375,14 @@ pub struct SpecArgs {
     pub common: CommonFlags,
     #[arg(value_name = "SPEC")]
     pub specs: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct RemoveArgs {
+    #[command(flatten)]
+    pub common: CommonFlags,
+    #[arg(value_name = "NAME")]
+    pub names: Vec<String>,
 }
 
 #[derive(Args, Debug)]
