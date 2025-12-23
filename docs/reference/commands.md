@@ -86,7 +86,11 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 ### `px add <pkg>…`
 
 * **Intent**: add dependencies and make them immediately available.
-* **Behavior**: modify `[project].dependencies`, resolve with current runtime, write new `px.lock`, update project env.
+* **Behavior**:
+
+  * Modify `[project].dependencies`.
+  * Resolve with the selected runtime, then pin direct deps in the manifest (e.g. `requests==2.32.5`) for determinism.
+  * Write new `px.lock` (full graph + artifact identity), then update the project env from the lock.
 * **Postconditions**: manifest and lock reflect new deps; env matches lock; project self-consistent.
 * **Failure**: on resolution failure, no changes; error includes copy-pasteable fix.
 
@@ -115,7 +119,7 @@ There is no `px workspace` top-level verb; “workspace” is a higher-level uni
 ### `px update [<pkg>…]`
 
 * **Intent**: upgrade dependencies to newer compatible versions and apply them.
-* **Behavior**: update all deps or named ones within constraints; write updated `px.lock`; rebuild env.
+* **Behavior**: temporarily loosen selected pins, resolve newer versions, then rewrite exact pins back into `pyproject.toml`, update `px.lock`, and rebuild the env.
 * **Failure**: on resolution failure, no change; errors describe conflicting constraints and how to relax them.
 
 ### `px run <target> […args]`

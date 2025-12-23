@@ -19,9 +19,14 @@ If no runtime is registered, `px init` prompts to install a default runtime (TTY
 ## What px manages
 
 * **Runtime** – a Python interpreter px knows about; chosen deterministically from `[tool.px].python`, `[project].requires-python`, or px default.
-* **Manifest** – dependencies in `pyproject.toml`.
-* **Lockfile** – `px.lock`, generated only by px; don’t edit by hand.
+* **Manifest** – direct dependencies in `pyproject.toml`. By default, px pins direct deps in-place (e.g. `requests==2.32.5`) so the manifest itself is deterministic and reviewable.
+* **Lockfile** – `px.lock`, generated only by px; don’t edit by hand. It records the full resolved graph (including transitive deps) plus artifact identity (hashes/URLs), and the env is built from it.
 * **Env** – project-local pointer at `.px/envs/current` to a global env materialization under `~/.px/envs/<profile_oid>` (tied to the lock and runtime).
+
+## Pinning model (manifest + lock)
+
+* `px add` resolves the requested deps, writes exact pins into `pyproject.toml`, then updates `px.lock` and the env.
+* `px update` loosens selected pins, resolves newer versions, then writes the new exact pins back into `pyproject.toml` and rewrites `px.lock`.
 
 ## When things drift
 
