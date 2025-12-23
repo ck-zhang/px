@@ -314,7 +314,7 @@ fn build_user_error(err: &anyhow::Error, py_ctx: &PythonContext) -> Option<Execu
                 "expected_src_init": layout.expected_src_init.display().to_string(),
                 "expected_flat_init": layout.expected_flat_init.display().to_string(),
                 "hint": format!(
-                    "Create `{}` (src layout) or `{}` (flat layout), or configure `[tool.uv.build-backend]` (module-root/module-name).",
+                    "Create `{}` (src layout) or `{}` (flat layout). If you ship a differently-named module/package, configure it in your build backend.",
                     relative_path_str(&layout.expected_src_init, &py_ctx.project_root),
                     relative_path_str(&layout.expected_flat_init, &py_ctx.project_root),
                 ),
@@ -326,14 +326,6 @@ fn build_user_error(err: &anyhow::Error, py_ctx: &PythonContext) -> Option<Execu
         .chain()
         .find_map(|cause| cause.downcast_ref::<uv_build_backend::Error>())?;
 
-    let package = py_ctx.project_name.replace('-', "_");
-    let expected_src_init = py_ctx
-        .project_root
-        .join("src")
-        .join(&package)
-        .join("__init__.py");
-    let expected_flat_init = py_ctx.project_root.join(&package).join("__init__.py");
-
     match uv_err {
         uv_build_backend::Error::MissingInitPy(path) => Some(ExecutionOutcome::user_error(
             "px build: project layout is not buildable",
@@ -342,9 +334,8 @@ fn build_user_error(err: &anyhow::Error, py_ctx: &PythonContext) -> Option<Execu
                 "error": uv_err.to_string(),
                 "missing": path.display().to_string(),
                 "hint": format!(
-                    "Ensure a Python package exists at `{}` (src layout) or `{}` (flat layout), or configure `[tool.uv.build-backend]`.",
-                    relative_path_str(&expected_src_init, &py_ctx.project_root),
-                    relative_path_str(&expected_flat_init, &py_ctx.project_root),
+                    "Create `{}` (an empty file is fine). If you ship a differently-named module/package, configure it in your build backend.",
+                    relative_path_str(path, &py_ctx.project_root),
                 ),
             }),
         )),
