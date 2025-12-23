@@ -367,6 +367,24 @@ fn publish_requires_online_flag_when_artifacts_exist() {
 }
 
 #[test]
+fn non_tty_output_does_not_emit_spinner_frames() {
+    let _guard = common::test_env_guard();
+    let (_tmp, project) = prepare_fixture("output-no-spinner-frames");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["status"])
+        .assert();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout utf8");
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("stderr utf8");
+    assert!(
+        !stdout.contains("\r\x1b[2K") && !stderr.contains("\r\x1b[2K"),
+        "expected no spinner frames on non-TTY, got stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+#[test]
 fn publish_rejects_empty_token_value() {
     let _guard = common::test_env_guard();
     if !require_online() {
