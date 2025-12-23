@@ -154,6 +154,31 @@ fn migrate_reads_requirements_with_json() {
 }
 
 #[test]
+fn migrate_preview_prints_change_preview_lines() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::write(temp.path().join("requirements.txt"), "rich==13.7.1\n").expect("write requirements");
+
+    let assert = px_command_offline(&temp).args(["migrate"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("px migrate: pyproject.toml: + rich==13.7.1"),
+        "expected pyproject preview line, got {stdout:?}"
+    );
+    assert!(
+        stdout.contains("px migrate: px.lock: would change"),
+        "expected lock preview line, got {stdout:?}"
+    );
+    assert!(
+        stdout.contains("px migrate: env: would rebuild"),
+        "expected env preview line, got {stdout:?}"
+    );
+    assert!(
+        stdout.contains("px migrate: tools: would rebuild"),
+        "expected tools preview line, got {stdout:?}"
+    );
+}
+
+#[test]
 fn migrate_ignores_prod_requirements_when_pyproject_present() {
     if !require_online() {
         return;

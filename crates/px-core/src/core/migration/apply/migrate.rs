@@ -17,7 +17,8 @@ use toml_edit::{DocumentMut, Item};
 use px_domain::api::{
     collect_pyproject_packages, collect_requirement_packages, collect_setup_cfg_packages,
     collect_setup_py_packages, plan_autopin, prepare_pyproject_plan, resolve_onboard_path,
-    AutopinEntry, AutopinPending, AutopinState, BackupManager, InstallOverride, PinSpec,
+    plan_autopin_document, AutopinEntry, AutopinPending, AutopinState, BackupManager,
+    InstallOverride, PinSpec,
 };
 
 use crate::core::runtime::runtime_manager;
@@ -393,6 +394,152 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     });
 
     if !write_requested {
+        let before_contents = if pyproject_exists {
+            fs::read_to_string(&pyproject_path).ok()
+        } else {
+            None
+        };
+        let (before_deps, before_dev_deps) =
+            pyproject_dependency_lists(before_contents.as_deref().unwrap_or_default());
+
+        let mut pyproject_plan =
+            prepare_pyproject_plan(&root, &pyproject_path, project_lock_only, &packages)?;
+        if let Some(python) = &python_override_value {
+            pyproject_plan.contents = Some(apply_python_override(&pyproject_plan, python)?.to_string());
+        }
+        let planned_base = if let Some(contents) = &pyproject_plan.contents {
+            contents.clone()
+        } else if let Some(existing) = before_contents.as_ref() {
+            existing.clone()
+        } else {
+            String::new()
+        };
+
+        let (final_contents, resolved_pins, lock_note) = if ctx.config().network.online {
+            let marker_env = Arc::new(ctx.marker_environment()?);
+            let poetry_pins = poetry_lock_versions(&root)?.map(Arc::new);
+            let uv_pins = uv_lock_versions(&root, marker_env.as_ref())?.map(Arc::new);
+            let effects = ctx.shared_effects();
+            let autopin_lock_only =
+                project_lock_only || uv_pins.is_some() || poetry_pins.is_some();
+
+            let doc: DocumentMut = planned_base.parse()?;
+            let autopin_snapshot =
+                px_domain::api::ProjectSnapshot::from_contents(&root, &pyproject_path, &planned_base)?;
+            let resolve_pins = {
+                let uv_pins = uv_pins.clone();
+                let poetry_pins = poetry_pins.clone();
+                let marker_env = marker_env.clone();
+                let effects = effects.clone();
+                move |snap: &ManifestSnapshot, specs: &[String]| -> Result<Vec<PinSpec>> {
+                    let mut pins = Vec::new();
+                    let mut needs_resolution = false;
+                    for spec in specs {
+                        let mut pinned = None;
+                        if let Some(locked) = uv_pins.as_ref() {
+                            match pin_from_locked_versions(
+                                spec,
+                                locked,
+                                marker_env.as_ref(),
+                                "uv.lock",
+                            ) {
+                                LockPinChoice::Reuse { pin, .. } => pinned = Some(*pin),
+                                LockPinChoice::Skip(_) => {}
+                            }
+                        }
+                        if pinned.is_none() {
+                            if let Some(locked) = poetry_pins.as_ref() {
+                                match pin_from_locked_versions(
+                                    spec,
+                                    locked,
+                                    marker_env.as_ref(),
+                                    "poetry.lock",
+                                ) {
+                                    LockPinChoice::Reuse { pin, .. } => pinned = Some(*pin),
+                                    LockPinChoice::Skip(_) => {}
+                                }
+                            }
+                        }
+                        match pinned {
+                            Some(pin) => pins.push(pin),
+                            None => needs_resolution = true,
+                        }
+                    }
+                    if !needs_resolution {
+                        return Ok(pins);
+                    }
+                    let resolved =
+                        resolve_dependencies_with_effects(effects.as_ref(), snap, false)?;
+                    if pins.is_empty() {
+                        return Ok(resolved.pins);
+                    }
+                    merge_pin_sets(&mut pins, resolved.pins);
+                    Ok(pins)
+                }
+            };
+            let autopin_state = plan_autopin_document(
+                &autopin_snapshot,
+                doc,
+                autopin_lock_only,
+                no_autopin,
+                &resolve_pins,
+                marker_env.as_ref(),
+            )?;
+            let final_contents = match autopin_state {
+                AutopinState::Planned(plan) => plan.doc_contents.unwrap_or(planned_base.clone()),
+                _ => planned_base.clone(),
+            };
+
+            let snapshot = px_domain::api::ProjectSnapshot::from_contents(
+                &root,
+                &pyproject_path,
+                &final_contents,
+            )?;
+            let resolved = resolve_dependencies_with_effects(ctx.effects(), &snapshot, false)?;
+            (final_contents, Some(resolved.pins), None)
+        } else {
+            (
+                planned_base,
+                None,
+                Some("PX_ONLINE=1 required to preview px.lock and env changes.".to_string()),
+            )
+        };
+
+        let (after_deps, after_dev_deps) = pyproject_dependency_lists(&final_contents);
+        let mut changes = vec![crate::project::dependency_group_changes(
+            "dependencies",
+            &before_deps,
+            &after_deps,
+        )];
+        changes.push(crate::project::dependency_group_changes(
+            "px-dev",
+            &before_dev_deps,
+            &after_dev_deps,
+        ));
+
+        let lock = px_domain::api::load_lockfile_optional(&root.join("px.lock"))?;
+        let lock_preview = match resolved_pins {
+            Some(pins) => crate::project::lock_preview(lock.as_ref(), &pins),
+            None => crate::project::lock_preview_unresolved(
+                lock.as_ref(),
+                true,
+                lock_note.as_deref().unwrap_or_default(),
+            ),
+        };
+        let env_would_rebuild = lock_preview
+            .get("would_change")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        details["preview"] = json!({
+            "pyproject": {
+                "path": pyproject_path.display().to_string(),
+                "changes": changes,
+            },
+            "lock": lock_preview,
+            "env": { "would_rebuild": env_would_rebuild },
+            "tools": { "would_rebuild": false },
+        });
+
         let mut hint = "Preview confirmed; rerun with --apply to write changes".to_string();
         if let Some(extra) = foreign_hint.as_ref() {
             hint = format!("{hint} • {extra}");
@@ -761,6 +908,37 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
             details,
         ))
     }
+}
+
+fn pyproject_dependency_lists(contents: &str) -> (Vec<String>, Vec<String>) {
+    let Ok(doc) = contents.parse::<DocumentMut>() else {
+        return (Vec::new(), Vec::new());
+    };
+    let deps = doc
+        .get("project")
+        .and_then(Item::as_table)
+        .and_then(|project| project.get("dependencies"))
+        .and_then(Item::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|value| value.as_str().map(std::string::ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let dev = doc
+        .get("project")
+        .and_then(Item::as_table)
+        .and_then(|project| project.get("optional-dependencies"))
+        .and_then(Item::as_table)
+        .and_then(|groups| groups.get("px-dev"))
+        .and_then(Item::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|value| value.as_str().map(std::string::ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    (deps, dev)
 }
 
 fn rollback_failed_migration(backups: &BackupManager, created_files: &[PathBuf]) -> Result<()> {

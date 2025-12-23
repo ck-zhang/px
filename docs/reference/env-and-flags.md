@@ -15,7 +15,7 @@ Rule of thumb: user-facing behavior should be a CLI flag first; env vars stay as
 
 ## Shared command flags to remember
 
-* `--dry-run` – preview changes without writing files or building envs (init/add/remove/update/sync/build/publish).
+* `--dry-run` – preview changes and print a change summary (no file writes or env builds) (init/add/remove/update/sync/build/publish).
 * `--frozen` – fail instead of repairing drift (sync/run/test/fmt); `CI=1` has the same “frozen” effect for run/test and makes `px python use` validation-only.
 * `--force` – currently only meaningful for `px init`; bypasses the dirty-worktree guard when scaffolding a project.
 * `--interactive` / `--non-interactive` – force stdio mode for `px run`; otherwise px chooses based on the target.

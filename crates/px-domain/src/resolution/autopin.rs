@@ -16,25 +16,23 @@ use crate::resolution::project_resolver::{
 
 pub type ResolvePinsFn = dyn Fn(&ProjectSnapshot, &[String]) -> Result<Vec<PinSpec>>;
 
-/// Determine which dependencies require autopinning and plan their updates.
+/// Determine which dependencies require autopinning given an already-parsed `pyproject.toml`.
+///
+/// This is used by callers that want to preview changes without writing files.
 ///
 /// # Errors
 ///
-/// Returns an error when required files cannot be read, dependency resolution
-/// fails, or the resolver omits a pin that is necessary for the plan.
-pub fn plan_autopin(
+/// Returns an error when required data cannot be read from the TOML document,
+/// dependency resolution fails, or the resolver omits a pin that is necessary
+/// for the plan.
+pub fn plan_autopin_document(
     snapshot: &ProjectSnapshot,
-    pyproject_path: &Path,
+    mut doc: DocumentMut,
     lock_only: bool,
     no_autopin: bool,
     resolve_pins: &ResolvePinsFn,
     marker_env: &MarkerEnvironment,
 ) -> Result<AutopinState> {
-    if !pyproject_path.exists() {
-        return Ok(AutopinState::NotNeeded);
-    }
-    let contents = fs::read_to_string(pyproject_path)?;
-    let mut doc: DocumentMut = contents.parse()?;
     let prod_specs = read_dependencies_from_doc(&doc);
     let dev_specs = read_optional_dependency_group(&doc, "px-dev");
     let mut autopin_map = collect_autopin_locations(&prod_specs, &dev_specs, marker_env);
@@ -137,6 +135,28 @@ pub fn plan_autopin(
         autopinned,
         install_override,
     }))
+}
+
+/// Determine which dependencies require autopinning and plan their updates.
+///
+/// # Errors
+///
+/// Returns an error when required files cannot be read, dependency resolution
+/// fails, or the resolver omits a pin that is necessary for the plan.
+pub fn plan_autopin(
+    snapshot: &ProjectSnapshot,
+    pyproject_path: &Path,
+    lock_only: bool,
+    no_autopin: bool,
+    resolve_pins: &ResolvePinsFn,
+    marker_env: &MarkerEnvironment,
+) -> Result<AutopinState> {
+    if !pyproject_path.exists() {
+        return Ok(AutopinState::NotNeeded);
+    }
+    let contents = fs::read_to_string(pyproject_path)?;
+    let doc: DocumentMut = contents.parse()?;
+    plan_autopin_document(snapshot, doc, lock_only, no_autopin, resolve_pins, marker_env)
 }
 
 fn collect_autopin_locations(

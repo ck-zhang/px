@@ -1,6 +1,7 @@
 mod init;
 mod lock;
 mod mutate;
+mod preview;
 mod state;
 mod status;
 mod sync;
@@ -17,5 +18,6 @@ pub use why::{project_why, ProjectWhyRequest};
 
 pub(crate) use lock::ProjectLock;
 pub(crate) use mutate::MutationCommand;
+pub(crate) use preview::{dependency_group_changes, lock_preview, lock_preview_unresolved};
 pub(crate) use state::{ensure_mutation_allowed, evaluate_project_state};
 pub(crate) use status::issue_id_for;

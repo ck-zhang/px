@@ -32,7 +32,8 @@ pub use crate::project::snapshot::{
 pub use crate::project::state::{ProjectStateKind, ProjectStateReport};
 
 pub use crate::resolution::autopin::{
-    plan_autopin, AutopinEntry, AutopinPending, AutopinPlan, AutopinScope, AutopinState,
+    plan_autopin, plan_autopin_document, AutopinEntry, AutopinPending, AutopinPlan, AutopinScope,
+    AutopinState,
 };
 pub use crate::resolution::project_resolver::{
     autopin_pin_key, autopin_spec_key, marker_applies, merge_resolved_dependencies,

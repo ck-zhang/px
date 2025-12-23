@@ -12,11 +12,11 @@ use serde_json::json;
 
 use crate::{
     dependency_name, install_snapshot, is_missing_project_error, manifest_snapshot,
-    persist_resolved_dependencies, refresh_project_site, resolve_dependencies_with_effects,
-    CommandContext, ExecutionOutcome, InstallOutcome, InstallOverride, InstallState,
-    InstallUserError, ManifestSnapshot,
+    manifest_snapshot_at, persist_resolved_dependencies, refresh_project_site,
+    resolve_dependencies_with_effects, CommandContext, ExecutionOutcome, InstallOutcome,
+    InstallOverride, InstallState, InstallUserError, ManifestSnapshot,
 };
-use px_domain::api::ManifestEditor;
+use px_domain::api::{load_lockfile_optional, merge_resolved_dependencies, ManifestEditor};
 
 use crate::workspace::WorkspaceScope;
 use crate::workspace::{
@@ -69,6 +69,7 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
     }
 
     let snapshot = manifest_snapshot()?;
+    let manifest_before = snapshot.dependencies.clone();
     let Some(_lock) = ProjectLock::try_acquire(&snapshot.root)? else {
         return Ok(project_locked_outcome("add"));
     };
@@ -99,7 +100,7 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
     let outcome = (|| -> Result<ExecutionOutcome> {
         let mut editor = ManifestEditor::open(&pyproject_path)?;
         let report = editor.add_specs(&cleaned_specs)?;
-        let dependencies_before = editor.dependencies();
+        let dependencies_after_edit = editor.dependencies();
 
         if report.added.is_empty() && report.updated.is_empty() {
             needs_restore = request.dry_run;
@@ -113,12 +114,47 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
         }
 
         if request.dry_run {
+            let updated_snapshot = manifest_snapshot_at(&root)?;
+            let resolved = match resolve_dependencies_with_effects(ctx.effects(), &updated_snapshot, true) {
+                Ok(resolved) => resolved,
+                Err(err) => match err.downcast::<InstallUserError>() {
+                    Ok(user) => {
+                        return Ok(ExecutionOutcome::user_error(user.message, user.details))
+                    }
+                    Err(err) => {
+                        return Ok(ExecutionOutcome::failure(
+                            "px add failed while planning changes",
+                            json!({ "error": err.to_string() }),
+                        ))
+                    }
+                },
+            };
+            let marker_env = ctx.marker_environment()?;
+            let planned_manifest =
+                merge_resolved_dependencies(&dependencies_after_edit, &resolved.specs, &marker_env);
+            let lock = load_lockfile_optional(&lock_path)?;
+            let lock_preview = super::lock_preview(lock.as_ref(), &resolved.pins);
+            let env_would_rebuild = lock_preview
+                .get("would_change")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
             return Ok(ExecutionOutcome::success(
                 "planned dependency changes (dry-run)",
                 json!({
                     "pyproject": pyproject_path.display().to_string(),
                     "added": report.added,
                     "updated": report.updated,
+                    "preview": json!({
+                        "pyproject": {
+                            "path": pyproject_path.display().to_string(),
+                            "changes": [
+                                super::dependency_group_changes("dependencies", &manifest_before, &planned_manifest),
+                            ],
+                        },
+                        "lock": lock_preview,
+                        "env": { "would_rebuild": env_would_rebuild },
+                        "tools": { "would_rebuild": false },
+                    }),
                     "dry_run": true,
                 }),
             ));
@@ -132,7 +168,7 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
         let dependencies_after =
             ManifestEditor::open(&pyproject_path)?.dependencies();
         let manifest_changes =
-            pinned_manifest_changes(&report.added, &report.updated, &dependencies_before, &dependencies_after);
+            pinned_manifest_changes(&report.added, &report.updated, &dependencies_after_edit, &dependencies_after);
         let message = format!(
             "updated dependencies (added {}, updated {})",
             report.added.len(),
@@ -332,6 +368,7 @@ pub fn project_update(
     }
 
     let snapshot = manifest_snapshot()?;
+    let manifest_before = snapshot.dependencies.clone();
     let Some(_lock) = ProjectLock::try_acquire(&snapshot.root)? else {
         return Ok(project_locked_outcome("update"));
     };
@@ -431,9 +468,60 @@ pub fn project_update(
         }
 
         if request.dry_run {
+            let mut override_snapshot = snapshot.clone();
+            override_snapshot.dependencies = override_specs;
+            override_snapshot.group_dependencies = snapshot.group_dependencies.clone();
+            override_snapshot.dependency_groups = snapshot.dependency_groups.clone();
+            override_snapshot.declared_dependency_groups = snapshot.declared_dependency_groups.clone();
+            override_snapshot.dependency_group_source = snapshot.dependency_group_source;
+            override_snapshot.requirements = override_snapshot.dependencies.clone();
+            override_snapshot
+                .requirements
+                .extend(override_snapshot.group_dependencies.clone());
+            override_snapshot.requirements.sort();
+            override_snapshot.requirements.dedup();
+
+            let resolved =
+                match resolve_dependencies_with_effects(ctx.effects(), &override_snapshot, true) {
+                    Ok(resolved) => resolved,
+                    Err(err) => match err.downcast::<InstallUserError>() {
+                        Ok(user) => {
+                            return Ok(ExecutionOutcome::user_error(user.message, user.details))
+                        }
+                        Err(err) => {
+                            return Ok(ExecutionOutcome::failure(
+                                "px update failed while planning changes",
+                                json!({ "error": err.to_string() }),
+                            ))
+                        }
+                    },
+                };
+            let marker_env = ctx.marker_environment()?;
+            let planned_manifest = merge_resolved_dependencies(
+                &override_snapshot.dependencies,
+                &resolved.specs,
+                &marker_env,
+            );
+            let lock = load_lockfile_optional(&snapshot.lock_path)?;
+            let lock_preview = super::lock_preview(lock.as_ref(), &resolved.pins);
+            let env_would_rebuild = lock_preview
+                .get("would_change")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
             let mut details = json!({
                 "pyproject": pyproject_path.display().to_string(),
                 "targets": ready,
+                "preview": json!({
+                    "pyproject": {
+                        "path": pyproject_path.display().to_string(),
+                        "changes": [
+                            super::dependency_group_changes("dependencies", &manifest_before, &planned_manifest),
+                        ],
+                    },
+                    "lock": lock_preview,
+                    "env": { "would_rebuild": env_would_rebuild },
+                    "tools": { "would_rebuild": false },
+                }),
                 "dry_run": true,
             });
             if !unsupported.is_empty() {
@@ -477,10 +565,16 @@ pub fn project_update(
                 },
             };
 
-        persist_resolved_dependencies(&snapshot, &resolved.specs)?;
+        let marker_env = ctx.marker_environment()?;
+        let updated_deps = merge_resolved_dependencies(
+            &override_snapshot.dependencies,
+            &resolved.specs,
+            &marker_env,
+        );
+        persist_resolved_dependencies(&snapshot, &updated_deps)?;
         let updated_snapshot = manifest_snapshot()?;
         let override_data = InstallOverride {
-            dependencies: resolved.specs.clone(),
+            dependencies: updated_deps,
             pins: resolved.pins.clone(),
         };
 
