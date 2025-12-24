@@ -4,9 +4,21 @@ px is the front door for Python projects: it owns the runtime, dependencies, and
 
 px supports Linux, macOS, and Windows.
 
-## Install (from source)
+## Install
 
-px is currently built from source:
+Recommended: use the installer (downloads a prebuilt binary from GitHub Releases):
+
+```sh
+curl -LsSf https://github.com/ck-zhang/px-dev/releases/latest/download/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://github.com/ck-zhang/px-dev/releases/latest/download/install.ps1 | iex
+```
+
+From source:
 
 ```sh
 cargo install --path crates/px-cli
