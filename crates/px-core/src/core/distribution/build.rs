@@ -78,9 +78,9 @@ fn build_project_outcome(ctx: &CommandContext, request: &BuildRequest) -> Result
         ));
     }
 
-    let first = &artifacts[0];
-    let sha_short: String = first.sha256.chars().take(12).collect();
     let message = if artifacts.len() == 1 {
+        let first = &artifacts[0];
+        let sha_short: String = first.sha256.chars().take(12).collect();
         format!(
             "px build: wrote {} ({}, sha256={}…)",
             first.path,
@@ -88,12 +88,20 @@ fn build_project_outcome(ctx: &CommandContext, request: &BuildRequest) -> Result
             sha_short
         )
     } else {
-        format!(
-            "px build: wrote {} artifacts ({}, sha256={}…)",
-            artifacts.len(),
-            format_bytes(first.bytes),
-            sha_short
-        )
+        let parts = artifacts
+            .iter()
+            .map(|artifact| {
+                let sha_short: String = artifact.sha256.chars().take(12).collect();
+                format!(
+                    "{} ({}, sha256={}…)",
+                    artifact.path,
+                    format_bytes(artifact.bytes),
+                    sha_short
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!("px build: wrote {} artifacts: {parts}", artifacts.len())
     };
     let details = json!({
         "artifacts": artifacts,

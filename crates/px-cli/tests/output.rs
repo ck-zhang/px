@@ -534,6 +534,43 @@ fn built_wheel_is_installable_with_pip() {
     assert!(status.success(), "installed wheel should import correctly");
 }
 
+#[test]
+fn build_success_message_lists_all_artifacts() {
+    let _guard = common::test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let (_tmp, project) = prepare_fixture("output-build-message");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .args(["--json", "build", "both"])
+        .assert()
+        .success();
+
+    let payload = parse_json(&assert);
+    let message = payload["message"].as_str().unwrap_or_default();
+    let artifacts = payload["details"]["artifacts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        artifacts.len() >= 2,
+        "expected multiple artifacts, got {artifacts:?}"
+    );
+    for artifact in &artifacts {
+        let path = artifact["path"].as_str().unwrap_or_default();
+        assert!(
+            !path.trim().is_empty(),
+            "artifact path should be present: {artifact:?}"
+        );
+        assert!(
+            message.contains(path),
+            "build message should mention artifact {path:?}, got {message:?}"
+        );
+    }
+}
+
 fn find_python() -> Option<String> {
     let candidates = [
         std::env::var("PYTHON").ok(),
