@@ -256,16 +256,16 @@ fn ensure_px_gitignored(root: &Path) -> Result<GitignorePxResult> {
 
 fn missing_runtime_outcome(version: &str) -> ExecutionOutcome {
     ExecutionOutcome::user_error(
-        "no px-managed Python runtime found",
+        "no px-registered Python runtime found",
         json!({
             "reason": "missing_init_runtime",
             "install_version": version,
             "issues": [
-                "px init requires a px-managed Python runtime and will not fall back to system Python on PATH."
+                "px init requires a px-registered Python runtime and will not fall back to system Python on PATH."
             ],
             "recommendation": {
                 "command": format!("px python install {version}"),
-                "hint": "Re-run `px init` after the runtime is installed."
+                "hint": format!("If you already have Python {version} installed, register it with `px python install {version} --path /path/to/python{version}`. Re-run `px init` after the runtime is registered."),
             },
         }),
     )

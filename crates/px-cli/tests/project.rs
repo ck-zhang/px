@@ -324,12 +324,16 @@ fn project_init_cleans_up_when_runtime_missing() {
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
-        stderr.contains("no px-managed Python runtime found"),
+        stderr.contains("no px-registered Python runtime found"),
         "expected runtime guidance, got {stderr:?}"
     );
     assert!(
         stderr.contains("px python install 3.12"),
         "expected install command guidance, got {stderr:?}"
+    );
+    assert!(
+        stderr.contains("--path"),
+        "expected guidance for registering an existing interpreter, got {stderr:?}"
     );
     assert!(
         !project_dir.join("pyproject.toml").exists(),
