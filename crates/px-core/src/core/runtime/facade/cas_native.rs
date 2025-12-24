@@ -18,6 +18,7 @@ use super::env_materialize::{
 };
 use super::{
     compute_lock_hash, detect_runtime_metadata, prepare_project_runtime, ManifestSnapshot,
+    RuntimeMetadata,
 };
 use super::{load_project_state, StoredEnvironment};
 
@@ -576,7 +577,19 @@ pub fn ensure_env_matches_lock(
         .into());
     }
 
-    let runtime = detect_runtime_metadata(ctx, snapshot)?;
+    let runtime_selection = prepare_project_runtime(snapshot)?;
+    let runtime = match state.runtime.as_ref().filter(|stored| {
+        stored.path == runtime_selection.record.path
+            && stored.version == runtime_selection.record.full_version
+            && !stored.platform.trim().is_empty()
+    }) {
+        Some(stored) => RuntimeMetadata {
+            path: stored.path.clone(),
+            version: stored.version.clone(),
+            platform: stored.platform.clone(),
+        },
+        None => detect_runtime_metadata(ctx, snapshot)?,
+    };
     if runtime.version != env.python.version || runtime.platform != env.platform {
         return Err(InstallUserError::new(
             format!(

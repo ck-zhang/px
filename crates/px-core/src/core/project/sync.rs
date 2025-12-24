@@ -141,6 +141,19 @@ fn project_sync_outcome(ctx: &CommandContext, frozen: bool) -> Result<ExecutionO
         ));
     }
 
+    if state.is_consistent() {
+        return Ok(ExecutionOutcome::success(
+            "px.lock already up to date".to_string(),
+            json!({
+                "lockfile": snapshot.lock_path.display().to_string(),
+                "project": snapshot.name,
+                "python": snapshot.python_requirement,
+                "state": state.canonical.as_str(),
+                "env_refreshed": false,
+            }),
+        ));
+    }
+
     let outcome = match install_snapshot(ctx, &snapshot, false, None) {
         Ok(ok) => ok,
         Err(err) => match err.downcast::<InstallUserError>() {

@@ -196,7 +196,7 @@ fn ensure_workspace_env_matches(
         ));
     }
     let snapshot = workspace.lock_snapshot();
-    let _ = crate::prepare_project_runtime(&snapshot).map_err(|err| {
+    let runtime_selection = crate::prepare_project_runtime(&snapshot).map_err(|err| {
         InstallUserError::new(
             "workspace runtime unavailable",
             json!({
@@ -206,16 +206,27 @@ fn ensure_workspace_env_matches(
             }),
         )
     })?;
-    let runtime = detect_runtime_metadata(ctx, &snapshot).map_err(|err| {
-        InstallUserError::new(
-            "workspace runtime unavailable",
-            json!({
-                "error": err.to_string(),
-                "hint": "install or select a compatible Python runtime, then rerun",
-                "reason": "runtime_unavailable",
-            }),
-        )
-    })?;
+    let runtime = match env_state.runtime.as_ref().filter(|stored| {
+        stored.path == runtime_selection.record.path
+            && stored.version == runtime_selection.record.full_version
+            && !stored.platform.trim().is_empty()
+    }) {
+        Some(stored) => crate::RuntimeMetadata {
+            path: stored.path.clone(),
+            version: stored.version.clone(),
+            platform: stored.platform.clone(),
+        },
+        None => detect_runtime_metadata(ctx, &snapshot).map_err(|err| {
+            InstallUserError::new(
+                "workspace runtime unavailable",
+                json!({
+                    "error": err.to_string(),
+                    "hint": "install or select a compatible Python runtime, then rerun",
+                    "reason": "runtime_unavailable",
+                }),
+            )
+        })?,
+    };
     if runtime.version != env.python.version || runtime.platform != env.platform {
         return Err(InstallUserError::new(
             format!(
