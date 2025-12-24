@@ -284,6 +284,7 @@ fn pack_image_still_builds_layout() {
         return;
     };
     let (tmp, project) = prepare_traceback_fixture("sandbox-pack");
+    let (backend, _log) = fake_sandbox_backend(tmp.path()).expect("backend script");
     let store_dir = common::sandbox_store_dir("sandbox-store");
     let store = store_dir.path().to_path_buf();
     let out = tmp.path().join("image.tar");
@@ -337,6 +338,7 @@ fn pack_image_still_builds_layout() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_SANDBOX_STORE", &store)
+        .env("PX_SANDBOX_BACKEND", &backend)
         .env("PX_ONLINE", "1")
         .env("PX_RUNTIME_PYTHON", &python)
         .args(["--json", "pack", "image", "--out"])
@@ -379,6 +381,7 @@ fn pack_app_builds_bundle_and_runs() {
     let assert = cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_SANDBOX_STORE", &store)
+        .env("PX_SANDBOX_BACKEND", &backend)
         .env("PX_ONLINE", "1")
         .env("PX_RUNTIME_PYTHON", &python)
         .args(["--json", "pack", "app", "--entrypoint", "python", "--out"])
@@ -461,6 +464,7 @@ fn pack_app_is_deterministic() {
         return;
     };
     let (tmp, project) = prepare_fixture("sandbox-pack-app-deterministic");
+    let (backend, _log) = fake_sandbox_backend(tmp.path()).expect("backend script");
     let store_dir = common::sandbox_store_dir("sandbox-store");
     let store = store_dir.path().to_path_buf();
     let bundle_a = tmp.path().join("a.pxapp");
@@ -478,6 +482,7 @@ fn pack_app_is_deterministic() {
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_SANDBOX_STORE", &store)
+        .env("PX_SANDBOX_BACKEND", &backend)
         .env("PX_ONLINE", "1")
         .env("PX_RUNTIME_PYTHON", &python)
         .args(["pack", "app", "--out"])
@@ -488,6 +493,7 @@ fn pack_app_is_deterministic() {
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_SANDBOX_STORE", &store)
+        .env("PX_SANDBOX_BACKEND", &backend)
         .env("PX_ONLINE", "1")
         .env("PX_RUNTIME_PYTHON", &python)
         .args(["pack", "app", "--out"])
@@ -537,6 +543,7 @@ fn run_pxapp_rejects_incompatible_bundle_version() {
         return;
     };
     let (tmp, project) = prepare_fixture("sandbox-pack-app-incompatible");
+    let (backend, _log) = fake_sandbox_backend(tmp.path()).expect("backend script");
     let store_dir = common::sandbox_store_dir("sandbox-store");
     let store = store_dir.path().to_path_buf();
     let bundle = tmp.path().join("orig.pxapp");
@@ -554,6 +561,7 @@ fn run_pxapp_rejects_incompatible_bundle_version() {
     cargo_bin_cmd!("px")
         .current_dir(&project)
         .env("PX_SANDBOX_STORE", &store)
+        .env("PX_SANDBOX_BACKEND", &backend)
         .env("PX_ONLINE", "1")
         .env("PX_RUNTIME_PYTHON", &python)
         .args(["pack", "app", "--out"])

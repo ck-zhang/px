@@ -293,6 +293,18 @@ log="${PX_FAKE_SANDBOX_LOG:-}"
 cmd="$1"
 shift
 case "$cmd" in
+    create)
+        echo "px-fake-container"
+        exit 0
+        ;;
+    export)
+        # Minimal deterministic tar stream (empty archive) for sandbox base layer exports.
+        dd if=/dev/zero bs=512 count=2 2>/dev/null
+        exit 0
+        ;;
+    rm)
+        exit 0
+        ;;
     image)
         if [ "$1" = "inspect" ]; then
             exit ${PX_FAKE_SANDBOX_INSPECT_EXIT:-1}
