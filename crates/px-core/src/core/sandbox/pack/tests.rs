@@ -124,6 +124,13 @@ fn env_layer_skips_runtime_static_libs() -> Result<()> {
     let pip_root = lib_root.join("site-packages").join("pip");
     fs::create_dir_all(&pip_root)?;
     fs::write(pip_root.join("__init__.py"), b"")?;
+    let test_root = lib_root.join("test");
+    fs::create_dir_all(&test_root)?;
+    fs::write(test_root.join("dummy.py"), b"")?;
+    let pycache_root = lib_root.join("__pycache__");
+    fs::create_dir_all(&pycache_root)?;
+    fs::write(pycache_root.join("dummy.cpython-312.pyc"), vec![0u8; 4])?;
+    fs::write(lib_root.join("orphan.pyc"), vec![0u8; 4])?;
 
     let blobs = temp.path().join("blobs");
     let env_layer = write_env_layer_tar(&env_root, Some(&runtime_root), &blobs)?;
@@ -133,6 +140,9 @@ fn env_layer_skips_runtime_static_libs() -> Result<()> {
     let mut saw_hello = false;
     let mut saw_static = false;
     let mut saw_site_packages = false;
+    let mut saw_test = false;
+    let mut saw_pycache = false;
+    let mut saw_pyc = false;
     for entry in archive.entries()? {
         let entry = entry?;
         let path = entry.path()?.into_owned();
@@ -145,6 +155,15 @@ fn env_layer_skips_runtime_static_libs() -> Result<()> {
         if path == Path::new("px/runtime/lib/python3.12/site-packages/pip/__init__.py") {
             saw_site_packages = true;
         }
+        if path == Path::new("px/runtime/lib/python3.12/test/dummy.py") {
+            saw_test = true;
+        }
+        if path == Path::new("px/runtime/lib/python3.12/__pycache__/dummy.cpython-312.pyc") {
+            saw_pycache = true;
+        }
+        if path == Path::new("px/runtime/lib/python3.12/orphan.pyc") {
+            saw_pyc = true;
+        }
     }
 
     assert!(saw_hello, "runtime file should be present in layer tar");
@@ -153,6 +172,12 @@ fn env_layer_skips_runtime_static_libs() -> Result<()> {
         !saw_site_packages,
         "runtime site-packages should be excluded from layer tar"
     );
+    assert!(!saw_test, "runtime stdlib tests should be excluded from layer tar");
+    assert!(
+        !saw_pycache,
+        "runtime __pycache__ should be excluded from layer tar"
+    );
+    assert!(!saw_pyc, "runtime .pyc files should be excluded from layer tar");
     Ok(())
 }
 

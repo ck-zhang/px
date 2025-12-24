@@ -237,11 +237,41 @@ fn stage_sandbox_runtime(
 }
 
 fn should_skip_runtime_path(rel: &Path) -> bool {
-    if rel.extension().and_then(|ext| ext.to_str()) == Some("a") {
+    if matches!(
+        rel.extension().and_then(|ext| ext.to_str()),
+        Some("a" | "pyc" | "pyo")
+    ) {
         return true;
     }
-    rel.components()
-        .any(|component| component.as_os_str() == "site-packages")
+    if rel.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some("site-packages" | "__pycache__")
+        )
+    }) {
+        return true;
+    }
+    let mut components = rel.components();
+    let Some(first) = components.next() else {
+        return false;
+    };
+    let Some(second) = components.next() else {
+        return false;
+    };
+    let Some(third) = components.next() else {
+        return false;
+    };
+    if matches!(first.as_os_str().to_str(), Some("lib" | "lib64"))
+        && second
+            .as_os_str()
+            .to_str()
+            .map(|s| s.starts_with("python"))
+            .unwrap_or(false)
+        && third.as_os_str() == "test"
+    {
+        return true;
+    }
+    false
 }
 
 #[derive(Clone, Debug)]
