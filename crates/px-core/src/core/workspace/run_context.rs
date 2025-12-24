@@ -35,6 +35,10 @@ pub fn prepare_workspace_run_context(
             let root = workspace.config.root.clone();
             (workspace, root)
         }
+        WorkspaceScope::Root(workspace) if matches!(command, "run" | "test") => {
+            let cwd = env::current_dir().unwrap_or_else(|_| workspace.config.root.clone());
+            (workspace, cwd)
+        }
         _ => return Ok(None),
     };
     let state = evaluate_workspace_state(ctx, &workspace).map_err(|err| {

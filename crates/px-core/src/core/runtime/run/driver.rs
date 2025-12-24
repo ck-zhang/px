@@ -236,48 +236,75 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             member_root,
         }) = scope
         {
-            match prepare_cas_native_workspace_run_context(ctx, &workspace, &member_root) {
-                Ok(native_ctx) => {
-                    let deps = DependencyContext::from_sources(
-                        &workspace.dependencies,
-                        Some(&workspace.lock_path),
-                    );
-                    let mut command_args = json!({
-                        "target": &target,
-                        "args": &request.args,
-                    });
-                    deps.inject(&mut command_args);
-                    let workdir = invocation_workdir(&native_ctx.py_ctx.project_root);
-                    let host_runner = HostCommandRunner::new(ctx);
-                    let plan = plan_run_target(
-                        &native_ctx.py_ctx,
-                        &member_root.join("pyproject.toml"),
-                        &target,
-                        &workdir,
-                    )?;
-                    let outcome = match plan {
-                        RunTargetPlan::Script(path) => run_project_script_cas_native(
-                            ctx,
-                            &host_runner,
-                            &native_ctx,
-                            &path,
-                            &request.args,
-                            &command_args,
+            let workspace_state = workspace
+                .config
+                .root
+                .join(".px")
+                .join("workspace-state.json");
+            let env_pointer = workspace.config.root.join(".px").join("envs").join("current");
+            if workspace_state.exists() && env_pointer.exists() {
+                match prepare_cas_native_workspace_run_context(ctx, &workspace, &member_root) {
+                    Ok(native_ctx) => {
+                        let deps = DependencyContext::from_sources(
+                            &workspace.dependencies,
+                            Some(&workspace.lock_path),
+                        );
+                        let mut command_args = json!({
+                            "target": &target,
+                            "args": &request.args,
+                        });
+                        deps.inject(&mut command_args);
+                        let workdir = invocation_workdir(&native_ctx.py_ctx.project_root);
+                        let host_runner = HostCommandRunner::new(ctx);
+                        let plan = plan_run_target(
+                            &native_ctx.py_ctx,
+                            &member_root.join("pyproject.toml"),
+                            &target,
                             &workdir,
-                            interactive,
-                        )?,
-                        RunTargetPlan::Executable(program) => run_executable_cas_native(
-                            ctx,
-                            &host_runner,
-                            &native_ctx,
-                            &program,
-                            &request.args,
-                            &command_args,
-                            &workdir,
-                            interactive,
-                        )?,
-                    };
-                    if let Some(reason) = cas_native_fallback_reason(&outcome) {
+                        )?;
+                        let outcome = match plan {
+                            RunTargetPlan::Script(path) => run_project_script_cas_native(
+                                ctx,
+                                &host_runner,
+                                &native_ctx,
+                                &path,
+                                &request.args,
+                                &command_args,
+                                &workdir,
+                                interactive,
+                            )?,
+                            RunTargetPlan::Executable(program) => run_executable_cas_native(
+                                ctx,
+                                &host_runner,
+                                &native_ctx,
+                                &program,
+                                &request.args,
+                                &command_args,
+                                &workdir,
+                                interactive,
+                            )?,
+                        };
+                        if let Some(reason) = cas_native_fallback_reason(&outcome) {
+                            if is_integrity_failure(&outcome) {
+                                return Ok(outcome);
+                            }
+                            let summary = cas_native_fallback_summary(&outcome);
+                            debug!(
+                                CAS_NATIVE_FALLBACK = reason.as_str(),
+                                error = %summary,
+                                "CAS_NATIVE_FALLBACK={} falling back to env materialization",
+                                reason.as_str()
+                            );
+                            workspace_cas_native_fallback =
+                                Some(CasNativeFallback { reason, summary });
+                        } else {
+                            return Ok(outcome);
+                        }
+                    }
+                    Err(outcome) => {
+                        let Some(reason) = cas_native_fallback_reason(&outcome) else {
+                            return Ok(outcome);
+                        };
                         if is_integrity_failure(&outcome) {
                             return Ok(outcome);
                         }
@@ -289,25 +316,7 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
                             reason.as_str()
                         );
                         workspace_cas_native_fallback = Some(CasNativeFallback { reason, summary });
-                    } else {
-                        return Ok(outcome);
                     }
-                }
-                Err(outcome) => {
-                    let Some(reason) = cas_native_fallback_reason(&outcome) else {
-                        return Ok(outcome);
-                    };
-                    if is_integrity_failure(&outcome) {
-                        return Ok(outcome);
-                    }
-                    let summary = cas_native_fallback_summary(&outcome);
-                    debug!(
-                        CAS_NATIVE_FALLBACK = reason.as_str(),
-                        error = %summary,
-                        "CAS_NATIVE_FALLBACK={} falling back to env materialization",
-                        reason.as_str()
-                    );
-                    workspace_cas_native_fallback = Some(CasNativeFallback { reason, summary });
                 }
             }
         }

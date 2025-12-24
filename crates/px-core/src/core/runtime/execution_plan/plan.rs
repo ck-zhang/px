@@ -132,11 +132,18 @@ fn plan_execution(
         )
     })?;
 
-    if let Some(WorkspaceScope::Member {
-        workspace,
-        member_root,
-    }) = scope
-    {
+    let workspace_ctx = match scope {
+        Some(WorkspaceScope::Member {
+            workspace,
+            member_root,
+        }) => Some((workspace, member_root)),
+        Some(WorkspaceScope::Root(workspace)) if matches!(command, "run" | "test") => {
+            let cwd = env::current_dir().unwrap_or_else(|_| workspace.config.root.clone());
+            Some((workspace, cwd))
+        }
+        _ => None,
+    };
+    if let Some((workspace, member_root)) = workspace_ctx {
         let state = crate::workspace::evaluate_workspace_state(ctx, &workspace).map_err(|err| {
             ExecutionOutcome::failure(
                 "failed to evaluate workspace state",

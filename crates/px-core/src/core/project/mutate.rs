@@ -18,7 +18,6 @@ use crate::{
 };
 use px_domain::api::{load_lockfile_optional, merge_resolved_dependencies, ManifestEditor};
 
-use crate::workspace::WorkspaceScope;
 use crate::workspace::{
     discover_workspace_scope, workspace_add, workspace_remove, workspace_update,
 };
@@ -63,9 +62,7 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
     }
 
     if let Some(scope) = discover_workspace_scope()? {
-        if let WorkspaceScope::Member { .. } = scope {
-            return workspace_add(ctx, request, scope);
-        }
+        return workspace_add(ctx, request, scope);
     }
 
     let snapshot = manifest_snapshot()?;
@@ -266,9 +263,7 @@ pub fn project_remove(
     }
 
     if let Some(scope) = discover_workspace_scope()? {
-        if let WorkspaceScope::Member { .. } = scope {
-            return workspace_remove(ctx, request, scope);
-        }
+        return workspace_remove(ctx, request, scope);
     }
 
     let snapshot = manifest_snapshot()?;
@@ -362,9 +357,7 @@ pub fn project_update(
     request: &ProjectUpdateRequest,
 ) -> Result<ExecutionOutcome> {
     if let Some(scope) = discover_workspace_scope()? {
-        if let WorkspaceScope::Member { .. } = scope {
-            return workspace_update(ctx, request, scope);
-        }
+        return workspace_update(ctx, request, scope);
     }
 
     let snapshot = manifest_snapshot()?;

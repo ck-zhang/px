@@ -1,6 +1,10 @@
-use std::{fs, process::Command};
+use std::{fs, path::Path, process::Command};
 
 use assert_cmd::cargo::cargo_bin_cmd;
+use px_domain::api::{
+    read_workspace_config, render_lockfile_with_workspace, workspace_manifest_fingerprint,
+    ProjectSnapshot, WorkspaceLock, WorkspaceMember,
+};
 use serde_json::Value;
 use toml_edit::{DocumentMut, Item};
 
@@ -10,6 +14,44 @@ use common::{
     detect_host_python, fake_sandbox_backend, find_python, parse_json, prepare_named_fixture,
     require_online, test_env_guard,
 };
+
+fn write_workspace_lock(root: &Path) {
+    let config = read_workspace_config(root).expect("read workspace config");
+    let members = config
+        .members
+        .iter()
+        .map(|rel| ProjectSnapshot::read_from(config.root.join(rel)).expect("member snapshot"))
+        .collect::<Vec<_>>();
+    let fingerprint =
+        workspace_manifest_fingerprint(&config, &members).expect("workspace fingerprint");
+    let mut lock_snapshot = ProjectSnapshot::read_from(root).expect("workspace snapshot");
+    lock_snapshot.lock_path = root.join("px.workspace.lock");
+    lock_snapshot.manifest_fingerprint = fingerprint;
+
+    let workspace_lock = WorkspaceLock {
+        members: members
+            .iter()
+            .map(|snapshot| {
+                let rel = snapshot
+                    .root
+                    .strip_prefix(&config.root)
+                    .unwrap_or(&snapshot.root)
+                    .display()
+                    .to_string();
+                WorkspaceMember {
+                    name: snapshot.name.clone(),
+                    path: rel,
+                    manifest_fingerprint: snapshot.manifest_fingerprint.clone(),
+                    dependencies: snapshot.requirements.clone(),
+                }
+            })
+            .collect(),
+        owners: Vec::new(),
+    };
+    let lock_contents = render_lockfile_with_workspace(&lock_snapshot, &[], "test", Some(&workspace_lock))
+        .expect("render lockfile");
+    fs::write(root.join("px.workspace.lock"), lock_contents).expect("write workspace lockfile");
+}
 
 #[test]
 fn workspace_sync_writes_workspace_metadata() {
@@ -76,6 +118,123 @@ fn workspace_sync_makes_status_env_clean() {
         Value::String("WNeedsEnv".into())
     );
     assert_eq!(payload["env"]["status"], Value::String("clean".into()));
+}
+
+#[test]
+fn workspace_run_works_from_root_and_non_member_directory() {
+    let _guard = test_env_guard();
+    let (_temp, root) = prepare_named_fixture("workspace_basic", "workspace_root_run");
+
+    write_workspace_lock(&root);
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .args(["run", "python", "-c", "print('root-ok')"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains("root-ok"), "expected output, got {stdout:?}");
+
+    let scratch = root.join("scratch");
+    fs::create_dir_all(&scratch).expect("create scratch dir");
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&scratch)
+        .args(["run", "python", "-c", "print('scratch-ok')"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("scratch-ok"),
+        "expected output, got {stdout:?}"
+    );
+}
+
+#[test]
+#[cfg(not(windows))]
+fn workspace_run_recreates_state_after_px_deleted() {
+    let _guard = test_env_guard();
+    let (_temp, root) = prepare_named_fixture("workspace_basic", "workspace_run_recreate_state");
+    write_workspace_lock(&root);
+
+    cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .env_remove("PX_NO_ENSUREPIP")
+        .args(["sync", "--frozen"])
+        .assert()
+        .success();
+
+    fs::remove_dir_all(root.join(".px")).ok();
+
+    let member = root.join("apps").join("a");
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&member)
+        .args(["run", "python", "-c", "print('ok')"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains("ok"), "expected output, got {stdout:?}");
+
+    assert!(
+        root.join(".px").join("workspace-state.json").exists(),
+        "expected workspace-state.json to be recreated after run"
+    );
+    assert!(
+        root.join(".px").join("envs").join("current").exists(),
+        "expected .px/envs/current to be recreated after run"
+    );
+
+    // Poison PATH python to ensure status uses the selected workspace runtime, not PATH discovery.
+    let bin_dir = tempfile::tempdir().expect("bin dir");
+    let fake_python = bin_dir.path().join("python3");
+    fs::write(
+        &fake_python,
+        r#"#!/bin/sh
+if [ "$1" = "-c" ]; then
+  script="$2"
+  case "$script" in
+    *platform.python_version* )
+      echo '{"version":"0.0.0"}'
+      exit 0
+      ;;
+  esac
+  case "$script" in
+    *sysconfig.get_platform* )
+      echo '{"python":["cp00"],"abi":["none"],"platform":["any"],"tags":[]}'
+      exit 0
+      ;;
+  esac
+  echo '{}'
+  exit 0
+fi
+echo 'Python 0.0.0' >&2
+exit 0
+"#,
+    )
+    .expect("write fake python");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&fake_python)
+            .expect("fake python metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_python, perms).expect("set fake python perms");
+    }
+
+    let path = std::env::var("PATH").unwrap_or_default();
+    let poisoned_path = format!("{}:{}", bin_dir.path().display(), path);
+
+    let status = cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .env("PATH", poisoned_path)
+        .args(["status", "--json"])
+        .assert()
+        .success();
+    let payload = parse_json(&status);
+    assert_ne!(
+        payload["runtime"]["version"],
+        serde_json::Value::String("0.0.0".into())
+    );
 }
 
 #[test]
@@ -149,6 +308,65 @@ fn workspace_python_use_syncs_workspace_runtime() {
     let payload = parse_json(&status);
     assert_eq!(payload["workspace"]["env_clean"], Value::Bool(true));
     assert_eq!(payload["env"]["status"], Value::String("clean".into()));
+}
+
+#[test]
+fn workspace_python_info_prefers_default_runtime_when_multiple_satisfy() {
+    let _guard = test_env_guard();
+    let Some(python) = find_python() else {
+        eprintln!("skipping workspace python info test (python not found)");
+        return;
+    };
+    let Some((python_exe, _channel)) = detect_host_python(&python) else {
+        eprintln!("skipping workspace python info test (unable to inspect python)");
+        return;
+    };
+
+    let (_temp, root) = prepare_named_fixture("workspace_basic", "workspace_python_info_default");
+    for rel in ["pyproject.toml", "apps/a/pyproject.toml", "libs/b/pyproject.toml"] {
+        let path = root.join(rel);
+        let contents = fs::read_to_string(&path).expect("read pyproject");
+        fs::write(
+            &path,
+            contents.replace("requires-python = \">=3.11\"", "requires-python = \">=3.8\""),
+        )
+        .expect("write pyproject");
+    }
+
+    let registry_dir = tempfile::tempdir().expect("registry dir");
+    let registry = registry_dir.path().join("runtimes.json");
+    let payload = serde_json::json!({
+        "runtimes": [
+            {
+                "version": "3.8",
+                "full_version": "3.8.0",
+                "path": &python_exe,
+                "default": true
+            },
+            {
+                "version": "99.0",
+                "full_version": "99.0.0",
+                "path": &python_exe,
+                "default": false
+            }
+        ]
+    });
+    fs::write(&registry, serde_json::to_string_pretty(&payload).unwrap() + "\n")
+        .expect("write registry");
+
+    let status = cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .args(["--json", "python", "info"])
+        .assert()
+        .success();
+    let payload = parse_json(&status);
+    assert_eq!(payload["details"]["project"]["version"], Value::String("3.8".into()));
+    assert_eq!(payload["details"]["default"]["version"], Value::String("3.8".into()));
+    assert_eq!(
+        payload["details"]["project"]["source"],
+        Value::String("Default".into())
+    );
 }
 
 #[test]
@@ -284,6 +502,25 @@ fn workspace_add_rolls_back_on_failure() {
 }
 
 #[test]
+fn workspace_add_from_root_errors_not_inside_member() {
+    let _guard = test_env_guard();
+    let (_temp, root) = prepare_named_fixture("workspace_basic", "workspace_add_from_root");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .args(["--json", "add", "requests"])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    let message = payload["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("not inside a workspace member"),
+        "expected workspace member error, got {message:?}"
+    );
+}
+
+#[test]
 fn workspace_status_handles_empty_members() {
     let _guard = test_env_guard();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -308,6 +545,48 @@ members = []
         json["workspace"]["state"].as_str(),
         Some("WNeedsLock"),
         "empty workspace should report missing lock, not crash"
+    );
+}
+
+#[test]
+fn workspace_python_use_tolerates_root_without_project_table() {
+    let _guard = test_env_guard();
+    let (_temp, root) = prepare_named_fixture("workspace_basic", "workspace_python_use_rootless");
+    let member = root.join("apps").join("a");
+
+    fs::write(
+        root.join("pyproject.toml"),
+        r#"[tool.px.workspace]
+members = ["apps/a", "libs/b"]
+"#,
+    )
+    .expect("rewrite workspace pyproject");
+
+    let Some(python) = find_python() else {
+        eprintln!("skipping workspace python use test (python not found)");
+        return;
+    };
+    let Some((_python_exe, channel)) = detect_host_python(&python) else {
+        eprintln!("skipping workspace python use test (unable to inspect python)");
+        return;
+    };
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&member)
+        .env("CI", "1")
+        .args(["--json", "python", "use", &channel])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    let message = payload["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("workspace runtime is not set"),
+        "expected CI mode error, got {message:?}"
+    );
+    assert!(
+        !message.contains("[project] must be a table"),
+        "should not fail parsing workspace root as a project: {message:?}"
     );
 }
 
