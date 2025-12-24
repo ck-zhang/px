@@ -52,6 +52,7 @@ pub fn manifest_has_workspace(doc: &DocumentMut) -> bool {
 
 /// Parses `[tool.px.workspace]` from `pyproject.toml` at `root`.
 pub fn read_workspace_config(root: &Path) -> Result<WorkspaceConfig> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let manifest_path = root.join("pyproject.toml");
     if !manifest_path.exists() {
         return Err(anyhow!(
@@ -60,15 +61,16 @@ pub fn read_workspace_config(root: &Path) -> Result<WorkspaceConfig> {
         ));
     }
     let contents = fs::read_to_string(&manifest_path)?;
-    read_workspace_config_from_str(root, &contents)
+    read_workspace_config_from_str(&root, &contents)
 }
 
 pub fn read_workspace_config_from_str(root: &Path, contents: &str) -> Result<WorkspaceConfig> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let manifest_path = root.join("pyproject.toml");
     let doc: DocumentMut = contents
         .parse()
         .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
-    workspace_config_from_doc(root, &manifest_path, &doc)
+    workspace_config_from_doc(&root, &manifest_path, &doc)
 }
 
 pub fn workspace_config_from_doc(
@@ -76,6 +78,7 @@ pub fn workspace_config_from_doc(
     manifest_path: &Path,
     doc: &DocumentMut,
 ) -> Result<WorkspaceConfig> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let workspace = doc
         .get("tool")
         .and_then(Item::as_table)
@@ -107,7 +110,7 @@ pub fn workspace_config_from_doc(
         .map(std::string::ToString::to_string);
 
     Ok(WorkspaceConfig {
-        root: root.to_path_buf(),
+        root,
         manifest_path: manifest_path.to_path_buf(),
         members,
         python,
@@ -218,6 +221,34 @@ members = ["apps/a", "libs/b"]
 
         let fp1 = workspace_manifest_fingerprint(&config, &[a.clone(), b.clone()]).unwrap();
         let fp2 = workspace_manifest_fingerprint(&config, &[b, a]).unwrap();
+
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn fingerprint_normalizes_root_path() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let ws_manifest = root.join("pyproject.toml");
+        let manifest = r#"[project]
+name = "ws"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[tool.px.workspace]
+members = ["apps/a", "libs/b"]
+"#;
+        fs::write(&ws_manifest, manifest).unwrap();
+        let canonical = read_workspace_config(root).unwrap();
+        let noncanonical =
+            read_workspace_config(&root.join("..").join(root.file_name().expect("root name")))
+                .unwrap();
+
+        let a = write_member(root, "apps/a", "a", &["requests==2.0.0"]);
+        let b = write_member(root, "libs/b", "b", &["urllib3==1.26.0"]);
+
+        let fp1 = workspace_manifest_fingerprint(&canonical, &[a.clone(), b.clone()]).unwrap();
+        let fp2 = workspace_manifest_fingerprint(&noncanonical, &[a, b]).unwrap();
 
         assert_eq!(fp1, fp2);
     }
