@@ -55,37 +55,13 @@ impl RuntimeRegistry {
             .map(|(_, record)| record)
     }
 
-    fn highest_version(&self, filter: Option<&VersionSpecifiers>) -> Option<RuntimeRecord> {
-        let mut candidates: Vec<(Version, RuntimeRecord)> = self
-            .runtimes
+    fn default_for_requirement(&self, requirement: &VersionSpecifiers) -> Option<RuntimeRecord> {
+        self.runtimes
             .iter()
-            .filter_map(|record| {
-                Version::from_str(&record.full_version)
-                    .ok()
-                    .map(|version| (version, record.clone()))
-            })
-            .collect();
-        if let Some(specs) = filter {
-            candidates.retain(|(version, _)| specs.contains(version));
-        }
-        if candidates.is_empty() {
-            return None;
-        }
-        if let Some((_, record)) = candidates
-            .iter()
-            .find(|(_, record)| record.default)
-            .cloned()
-        {
-            return Some(record);
-        }
-        candidates
-            .into_iter()
-            .max_by(|(left, _), (right, _)| left.cmp(right))
-            .map(|(_, record)| record)
-    }
-
-    fn default_runtime(&self, requirement: Option<&VersionSpecifiers>) -> Option<RuntimeRecord> {
-        self.highest_version(requirement)
+            .find(|record| record.default)
+            .and_then(|record| Version::from_str(&record.full_version).ok().map(|v| (v, record)))
+            .filter(|(version, _)| requirement.contains(version))
+            .map(|(_, record)| record.clone())
     }
 
     fn insert_or_replace(&mut self, record: RuntimeRecord) {
@@ -270,6 +246,17 @@ pub fn resolve_runtime(
         runtimes: managed.clone(),
     };
     let external_registry = RuntimeRegistry { runtimes: external };
+
+    if let Some(record) = managed_registry
+        .default_for_requirement(&specifiers)
+        .or_else(|| external_registry.default_for_requirement(&specifiers))
+    {
+        return Ok(RuntimeSelection {
+            record,
+            source: RuntimeSource::Default,
+        });
+    }
+
     if let Some(record) = managed_registry.best_for_requirement(&specifiers) {
         return Ok(RuntimeSelection {
             record,
@@ -281,20 +268,6 @@ pub fn resolve_runtime(
         return Ok(RuntimeSelection {
             record,
             source: RuntimeSource::Requirement,
-        });
-    }
-
-    if let Some(record) = managed_registry.default_runtime(Some(&specifiers)) {
-        return Ok(RuntimeSelection {
-            record,
-            source: RuntimeSource::Default,
-        });
-    }
-
-    if let Some(record) = external_registry.default_runtime(Some(&specifiers)) {
-        return Ok(RuntimeSelection {
-            record,
-            source: RuntimeSource::Default,
         });
     }
 
@@ -419,7 +392,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn resolve_runtime_prefers_highest_available_default() {
+    fn resolve_runtime_selects_highest_when_no_default_runtime_matches() {
         let temp = TempDir::new().unwrap();
         let (registry, _guard) = registry_path_in(&temp, "runtimes.json");
         write_registry(
@@ -432,6 +405,23 @@ mod tests {
         let selection = resolve_runtime(None, ">=3.9").expect("select runtime");
         assert_eq!(selection.record.version, "3.12");
         assert_eq!(selection.source, RuntimeSource::Requirement);
+    }
+
+    #[test]
+    #[serial]
+    fn resolve_runtime_prefers_default_runtime_when_compatible() {
+        let temp = TempDir::new().unwrap();
+        let (registry, _guard) = registry_path_in(&temp, "runtimes.json");
+        write_registry(
+            &registry,
+            r#"{"runtimes":[
+                {"version":"3.12","full_version":"3.12.2","path":"/usr/bin/python3.12","default":true},
+                {"version":"3.13","full_version":"3.13.0","path":"/usr/bin/python3.13","default":false}
+            ]}"#,
+        );
+        let selection = resolve_runtime(None, ">=3.11").expect("select runtime");
+        assert_eq!(selection.record.version, "3.12");
+        assert_eq!(selection.source, RuntimeSource::Default);
     }
 
     #[test]

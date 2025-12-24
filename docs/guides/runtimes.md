@@ -13,6 +13,8 @@ Order of precedence (deterministic):
 
 If no available runtime satisfies constraints, commands fail with a clear message and suggest installing one. px does not fall back to arbitrary system interpreters once a project is under px management.
 
+If multiple registered runtimes satisfy the chosen constraints, px selects the px default runtime.
+
 ## Managing runtimes
 
 * List known runtimes: `px python list`

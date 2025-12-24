@@ -67,7 +67,13 @@ pub fn python_list(
     }
     let summary = runtimes
         .iter()
-        .map(|rt| format!("{}  {}", rt.version, rt.path))
+        .map(|rt| {
+            if rt.default {
+                format!("{}  {}  (default)", rt.version, rt.path)
+            } else {
+                format!("{}  {}", rt.version, rt.path)
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
     Ok(ExecutionOutcome::success(
@@ -91,7 +97,10 @@ pub fn python_install(
         request.set_default,
     ) {
         Ok(record) => record,
-        Err(err) => return Ok(runtime_install_error(err)),
+        Err(err) => match err.downcast::<InstallUserError>() {
+            Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+            Err(err) => return Ok(runtime_install_error(err)),
+        },
     };
     spinner.finish(format!(
         "Installed Python {} at {}",
@@ -237,17 +246,31 @@ fn python_use_workspace(
     strict: bool,
 ) -> Result<ExecutionOutcome> {
     let workspace_config = read_workspace_config(workspace_root)?;
-    let root_snapshot = ProjectSnapshot::read_from(workspace_root)?;
     let mut violations = Vec::new();
-    if !requirement_allows_runtime_at(
-        &root_snapshot.manifest_path,
-        &root_snapshot.python_requirement,
-        runtime_version,
-    )? {
-        violations.push(json!({
-            "path": root_snapshot.manifest_path.display().to_string(),
-            "requires_python": root_snapshot.python_requirement,
-        }));
+    let root_snapshot = match ProjectSnapshot::read_from(workspace_root) {
+        Ok(snapshot) => Some(snapshot),
+        Err(err) => {
+            let msg = err.to_string();
+            if msg.contains("[project] must be a table")
+                || msg.contains("pyproject missing [project].name")
+            {
+                None
+            } else {
+                return Err(err);
+            }
+        }
+    };
+    if let Some(snapshot) = &root_snapshot {
+        if !requirement_allows_runtime_at(
+            &snapshot.manifest_path,
+            &snapshot.python_requirement,
+            runtime_version,
+        )? {
+            violations.push(json!({
+                "path": snapshot.manifest_path.display().to_string(),
+                "requires_python": snapshot.python_requirement,
+            }));
+        }
     }
     for member_rel in &workspace_config.members {
         let member_root = workspace_config.root.join(member_rel);
@@ -446,6 +469,10 @@ pub fn python_info(
         Err(err) => return Ok(runtime_registry_error(err)),
     };
     let default = runtimes.iter().find(|rt| rt.default).cloned();
+    let default_human = default
+        .as_ref()
+        .map(|record| format!("default: Python {} at {}", record.version, record.path))
+        .unwrap_or_else(|| "default: <none>".to_string());
     if let Some(workspace_root) = discover_workspace_root()? {
         let workspace = load_workspace_snapshot(&workspace_root)?;
         let workspace_runtime = runtime_manager::resolve_runtime(
@@ -467,8 +494,8 @@ pub fn python_info(
             details["project"] = info;
             return Ok(ExecutionOutcome::success(
                 format!(
-                    "workspace runtime: Python {} at {}",
-                    selection.record.version, selection.record.path
+                    "workspace runtime: Python {} at {} ({default_human})",
+                    selection.record.version, selection.record.path,
                 ),
                 details,
             ));
@@ -476,7 +503,7 @@ pub fn python_info(
         details["workspace"] = Value::String(workspace_root.display().to_string());
         details["project"] = Value::Null;
         return Ok(ExecutionOutcome::success(
-            "workspace runtime unavailable",
+            format!("workspace runtime unavailable ({default_human})"),
             details,
         ));
     }
@@ -512,24 +539,21 @@ pub fn python_info(
         }
         Ok(ExecutionOutcome::success(
             format!(
-                "project runtime: Python {} at {}",
-                selection.record.version, selection.record.path
+                "project runtime: Python {} at {} ({default_human})",
+                selection.record.version, selection.record.path,
             ),
             details,
         ))
     } else if let Some(record) = default {
         details["project"] = Value::Null;
         Ok(ExecutionOutcome::success(
-            format!(
-                "default runtime: Python {} at {}",
-                record.version, record.path
-            ),
+            format!("default runtime: Python {} at {}", record.version, record.path),
             details,
         ))
     } else {
         details["project"] = Value::Null;
         Ok(ExecutionOutcome::success(
-            "no px runtimes registered",
+            "no px runtimes registered (default: <none>)",
             details,
         ))
     }

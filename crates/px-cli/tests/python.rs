@@ -3,10 +3,11 @@ use std::{fs, path::PathBuf, process::Command};
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::Value;
 use tempfile::tempdir;
+use toml_edit::{DocumentMut, Item, Value as TomlValue};
 
 mod common;
 
-use common::{parse_json, prepare_fixture};
+use common::{ensure_test_store_env, parse_json, prepare_fixture, test_env_guard};
 
 const INSPECT_SCRIPT: &str = "import json, platform, sys; print(json.dumps({'version': platform.python_version(), 'executable': sys.executable}))";
 
@@ -154,6 +155,91 @@ fn python_list_sorts_newest_versions_first() {
         versions,
         vec!["3.12".to_string(), "3.11".to_string(), "3.10".to_string()],
         "expected newest runtimes first, got {versions:?}"
+    );
+}
+
+#[test]
+fn python_info_prefers_default_runtime_when_multiple_satisfy() {
+    let _guard = test_env_guard();
+    ensure_test_store_env();
+
+    let (python_path, _channel) = detect_host_python();
+    let registry_dir = tempdir().expect("registry tempdir");
+    let registry = registry_dir.path().join("runtimes.json");
+    let payload = serde_json::json!({
+        "runtimes": [
+            {
+                "version": "3.8",
+                "full_version": "3.8.0",
+                "path": python_path.to_str().unwrap(),
+                "default": true
+            },
+            {
+                "version": "99.0",
+                "full_version": "99.0.0",
+                "path": python_path.to_str().unwrap(),
+                "default": false
+            }
+        ]
+    });
+    fs::write(&registry, serde_json::to_string_pretty(&payload).unwrap() + "\n")
+        .expect("write registry");
+
+    let (_tmp, project) = prepare_fixture("python-info-default");
+    let pyproject_path = project.join("pyproject.toml");
+    let mut doc: DocumentMut = fs::read_to_string(&pyproject_path)
+        .expect("read pyproject")
+        .parse()
+        .expect("parse pyproject");
+    doc["project"]["requires-python"] = Item::Value(TomlValue::from(">=3.8"));
+    fs::write(&pyproject_path, doc.to_string()).expect("write pyproject");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .args(["--json", "python", "info"])
+        .assert()
+        .success();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["details"]["project"]["version"], "3.8");
+    assert_eq!(payload["details"]["default"]["version"], "3.8");
+    assert_eq!(payload["details"]["project"]["source"], "Default");
+}
+
+#[test]
+fn python_list_marks_default_runtime_in_human_output() {
+    let (python_path, _channel) = detect_host_python();
+    let registry_dir = tempdir().expect("registry tempdir");
+    let registry = registry_dir.path().join("runtimes.json");
+    let payload = serde_json::json!({
+        "runtimes": [
+            {
+                "version": "3.10",
+                "full_version": "3.10.13",
+                "path": python_path.to_str().unwrap(),
+                "default": false
+            },
+            {
+                "version": "3.11",
+                "full_version": "3.11.9",
+                "path": python_path.to_str().unwrap(),
+                "default": true
+            }
+        ]
+    });
+    fs::write(&registry, serde_json::to_string_pretty(&payload).unwrap() + "\n")
+        .expect("write registry");
+
+    let assert = cargo_bin_cmd!("px")
+        .env("PX_RUNTIME_REGISTRY", registry.to_str().unwrap())
+        .args(["python", "list"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout utf8");
+    assert!(
+        stdout.contains("(default)"),
+        "expected python list to mark default runtime, got {stdout:?}"
     );
 }
 
