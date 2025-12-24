@@ -277,7 +277,14 @@ pub(super) fn materialize_runtime_archive(
     fs::create_dir_all(&tmp)?;
     let decoder = GzDecoder::new(archive);
     let mut tar = Archive::new(decoder);
-    tar.unpack(&tmp)?;
+    for entry in tar.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        if should_skip_runtime_entry(&path) {
+            continue;
+        }
+        entry.unpack_in(&tmp)?;
+    }
     if let Err(err) = fs::rename(&tmp, &root) {
         make_writable_recursive(&root);
         let _ = fs::remove_dir_all(&root);
@@ -293,6 +300,30 @@ pub(super) fn materialize_runtime_archive(
     store.write_runtime_manifest(oid, header)?;
     make_read_only_recursive(&root)?;
     Ok(exe_path)
+}
+
+fn should_skip_runtime_entry(path: &Path) -> bool {
+    if matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("a" | "pyc" | "pyo")
+    ) {
+        return true;
+    }
+    if path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some("site-packages" | "__pycache__")
+        )
+    }) {
+        return true;
+    }
+    let components: Vec<&str> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    components.windows(3).any(|window| {
+        matches!(window[0], "lib" | "lib64") && window[1].starts_with("python") && window[2] == "test"
+    })
 }
 
 fn write_sitecustomize(env_root: &Path, site_packages: Option<&Path>) -> Result<()> {
