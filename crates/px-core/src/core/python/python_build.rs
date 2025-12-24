@@ -382,6 +382,20 @@ fn extract_archive(archive: &Path, dest: &Path, kind: ArchiveKind) -> Result<()>
 }
 
 fn should_skip_python_entry(path: &Path) -> bool {
+    if matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("a" | "pyc" | "pyo")
+    ) {
+        return true;
+    }
+    if path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some("site-packages" | "__pycache__")
+        )
+    }) {
+        return true;
+    }
     let components: Vec<&str> = path
         .components()
         .filter_map(|component| component.as_os_str().to_str())
