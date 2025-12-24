@@ -985,6 +985,22 @@ fn sandbox_bypasses_cas_native_default() {
         ])
         .assert()
         .success();
+    let images_dir = store.join("images");
+    if images_dir.exists() {
+        let mut archives = Vec::new();
+        if let Ok(entries) = fs::read_dir(&images_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path().join("image.tar");
+                if path.exists() {
+                    archives.push(path.display().to_string());
+                }
+            }
+        }
+        assert!(
+            archives.is_empty(),
+            "sandbox run should not require writing OCI archives to disk, found {archives:?}"
+        );
+    }
     assert_envs_non_empty("after sandbox run");
 
     let payload = parse_json(&assert);

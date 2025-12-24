@@ -275,6 +275,7 @@ fn ensure_bundle_image(
         export_output(&oci_dir, &archive, Path::new("/"))?;
     }
     Ok(SandboxImageLayout {
+        oci_dir,
         archive,
         tag: tag.to_string(),
         image_digest: format!("sha256:{manifest_digest}"),

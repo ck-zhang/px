@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_json::json;
+use tar::Builder;
 
 use super::{
     sandbox_error, sandbox_timestamp_string, system_deps_mode, SandboxArtifacts,
@@ -21,6 +23,7 @@ use crate::{InstallUserError, PX_VERSION};
 
 #[derive(Clone, Debug)]
 pub(crate) struct SandboxImageLayout {
+    pub(crate) oci_dir: PathBuf,
     pub(crate) archive: PathBuf,
     pub(crate) tag: String,
     pub(crate) image_digest: String,
@@ -213,19 +216,11 @@ pub(crate) fn ensure_image_layout(
         }
     };
     let archive = archive_path(&oci_dir);
-    if wrote_oci || !archive.exists() {
-        if let Some(parent) = archive.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                sandbox_error(
-                    "PX903",
-                    "failed to prepare sandbox archive directory",
-                    json!({ "path": parent.display().to_string(), "error": err.to_string() }),
-                )
-            })?;
-        }
-        export_output(&oci_dir, &archive, Path::new("/"))?;
+    if wrote_oci && archive.exists() {
+        let _ = fs::remove_file(&archive);
     }
     Ok(SandboxImageLayout {
+        oci_dir,
         archive,
         tag,
         image_digest: artifacts.manifest.image_digest.clone(),
@@ -293,6 +288,11 @@ pub(crate) fn ensure_image_loaded(
     if already_loaded && image_exists(backend, &layout.tag) {
         return Ok(());
     }
+    if try_load_via_stdin(backend, layout)? {
+        let _ = fs::write(&marker, format!("{}\n", layout.image_digest));
+        return Ok(());
+    }
+    ensure_image_archive(layout)?;
     let args = vec![
         "load".to_string(),
         "--input".to_string(),
@@ -326,6 +326,120 @@ pub(crate) fn ensure_image_loaded(
     }
     let _ = fs::write(&marker, format!("{}\n", layout.image_digest));
     Ok(())
+}
+
+fn ensure_image_archive(layout: &SandboxImageLayout) -> Result<(), InstallUserError> {
+    if layout.archive.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = layout.archive.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to prepare sandbox archive directory",
+                json!({ "path": parent.display().to_string(), "error": err.to_string() }),
+            )
+        })?;
+    }
+    export_output(&layout.oci_dir, &layout.archive, Path::new("/"))
+}
+
+fn try_load_via_stdin(
+    backend: &ContainerBackend,
+    layout: &SandboxImageLayout,
+) -> Result<bool, InstallUserError> {
+    let cwd = layout.oci_dir.parent().unwrap_or_else(|| Path::new("."));
+    let mut command = Command::new(&backend.program);
+    command.arg("load");
+    command.current_dir(cwd);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to load sandbox image",
+            json!({
+                "backend": backend_name(backend),
+                "error": err.to_string(),
+                "kind": "stdin",
+            }),
+        )
+    })?;
+    let stdin = child.stdin.take().ok_or_else(|| {
+        sandbox_error(
+            "PX903",
+            "failed to load sandbox image",
+            json!({
+                "backend": backend_name(backend),
+                "reason": "stdin_missing",
+                "kind": "stdin",
+            }),
+        )
+    })?;
+    let mut builder = Builder::new(stdin);
+    let mut tar_errors: Vec<io::Error> = Vec::new();
+    if let Err(err) = builder.append_dir_all(".", &layout.oci_dir) {
+        tar_errors.push(err);
+    }
+    match builder.into_inner() {
+        Ok(_stdin) => {}
+        Err(err) => tar_errors.push(err),
+    }
+
+    let output = child.wait_with_output().map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to load sandbox image",
+            json!({ "backend": backend_name(backend), "error": err.to_string(), "kind": "stdin" }),
+        )
+    })?;
+    let code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if code == 0 {
+        let non_broken_pipe = tar_errors
+            .iter()
+            .any(|err| err.kind() != io::ErrorKind::BrokenPipe);
+        if non_broken_pipe {
+            let errors = tar_errors
+                .iter()
+                .map(|err| err.to_string())
+                .collect::<Vec<_>>();
+            return Err(sandbox_error(
+                "PX903",
+                "failed to stream OCI image to sandbox backend",
+                json!({
+                    "backend": backend_name(backend),
+                    "oci_dir": layout.oci_dir.display().to_string(),
+                    "errors": errors,
+                }),
+            ));
+        }
+        return Ok(true);
+    }
+
+    if !tar_errors.is_empty()
+        && tar_errors
+            .iter()
+            .all(|err| err.kind() == io::ErrorKind::BrokenPipe)
+    {
+        return Ok(false);
+    }
+
+    Err(sandbox_error(
+        "PX903",
+        "failed to load sandbox image",
+        json!({
+            "backend": backend_name(backend),
+            "oci_dir": layout.oci_dir.display().to_string(),
+            "code": code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "kind": "stdin",
+        }),
+    ))
 }
 
 pub(crate) fn run_container(
