@@ -223,6 +223,9 @@ fn stage_sandbox_runtime(
             if rel.as_os_str().is_empty() {
                 continue;
             }
+            if should_skip_runtime_path(rel) {
+                continue;
+            }
             let archive_path = archive_root.join(rel);
             if seen.insert(archive_path.clone()) {
                 append_path(builder, &archive_path, path)?;
@@ -231,6 +234,10 @@ fn stage_sandbox_runtime(
     }
 
     Ok(())
+}
+
+fn should_skip_runtime_path(rel: &Path) -> bool {
+    rel.extension().and_then(|ext| ext.to_str()) == Some("a")
 }
 
 #[derive(Clone, Debug)]

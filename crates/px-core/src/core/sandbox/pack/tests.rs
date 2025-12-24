@@ -105,6 +105,47 @@ fn oci_builder_writes_layer_with_sources() -> Result<()> {
 }
 
 #[test]
+fn env_layer_skips_runtime_static_libs() -> Result<()> {
+    let temp = tempdir()?;
+    let env_root = temp.path().join("env");
+    fs::create_dir_all(&env_root)?;
+    fs::write(
+        env_root.join("pyvenv.cfg"),
+        b"home = /does/not/matter\nversion = 3.12.0\n",
+    )?;
+
+    let runtime_root = temp.path().join("runtime");
+    let lib_root = runtime_root.join("lib").join("python3.12");
+    fs::create_dir_all(&lib_root)?;
+    fs::write(lib_root.join("hello.py"), b"print('hi')\n")?;
+    let config_root = lib_root.join("config-3.12-test");
+    fs::create_dir_all(&config_root)?;
+    fs::write(config_root.join("libpython3.12.a"), vec![0u8; 16])?;
+
+    let blobs = temp.path().join("blobs");
+    let env_layer = write_env_layer_tar(&env_root, Some(&runtime_root), &blobs)?;
+
+    let file = File::open(env_layer.path)?;
+    let mut archive = Archive::new(file);
+    let mut saw_hello = false;
+    let mut saw_static = false;
+    for entry in archive.entries()? {
+        let entry = entry?;
+        let path = entry.path()?.into_owned();
+        if path == Path::new("px/runtime/lib/python3.12/hello.py") {
+            saw_hello = true;
+        }
+        if path == Path::new("px/runtime/lib/python3.12/config-3.12-test/libpython3.12.a") {
+            saw_static = true;
+        }
+    }
+
+    assert!(saw_hello, "runtime file should be present in layer tar");
+    assert!(!saw_static, "static lib should be excluded from layer tar");
+    Ok(())
+}
+
+#[test]
 fn default_tag_uses_manifest_version_when_available() -> Result<()> {
     let temp = tempdir()?;
     let manifest = temp.path().join("pyproject.toml");
