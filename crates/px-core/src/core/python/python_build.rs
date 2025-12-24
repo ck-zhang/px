@@ -338,20 +338,57 @@ fn extract_archive(archive: &Path, dest: &Path, kind: ArchiveKind) -> Result<()>
                 .with_context(|| format!("opening python archive {}", archive.display()))?;
             let decoder = GzDecoder::new(file);
             let mut tar = Archive::new(decoder);
-            tar.unpack(dest)
-                .with_context(|| format!("extracting archive into {}", dest.display()))?;
+            for entry in tar
+                .entries()
+                .with_context(|| format!("reading tar entries from {}", archive.display()))?
+            {
+                let mut entry = entry?;
+                let path = entry.path()?.into_owned();
+                if should_skip_python_entry(&path) {
+                    continue;
+                }
+                entry
+                    .unpack_in(dest)
+                    .with_context(|| format!("failed to unpack `{}` into {}", path.display(), dest.display()))?;
+            }
         }
         ArchiveKind::Zip => {
             let file = File::open(archive)
                 .with_context(|| format!("opening python archive {}", archive.display()))?;
             let mut archive = ZipArchive::new(file)
                 .with_context(|| format!("reading zip archive {}", archive.display()))?;
-            archive
-                .extract(dest)
-                .with_context(|| format!("extracting zip archive into {}", dest.display()))?;
+            for i in 0..archive.len() {
+                let mut entry = archive.by_index(i)?;
+                let Some(name) = entry.enclosed_name() else {
+                    continue;
+                };
+                if should_skip_python_entry(name) {
+                    continue;
+                }
+                let out = dest.join(name);
+                if entry.is_dir() {
+                    fs::create_dir_all(&out)?;
+                    continue;
+                }
+                if let Some(parent) = out.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let mut file = File::create(&out)?;
+                std::io::copy(&mut entry, &mut file)?;
+            }
         }
     }
     Ok(())
+}
+
+fn should_skip_python_entry(path: &Path) -> bool {
+    let components: Vec<&str> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    components
+        .windows(3)
+        .any(|window| matches!(window[0], "lib" | "lib64") && window[1].starts_with("python") && window[2] == "test")
 }
 
 fn locate_python_binary(root: &Path, channel: &str) -> Result<PathBuf> {
