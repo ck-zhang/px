@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -39,4 +39,9 @@ jobs:
         env:
           PX_TEST_TMPDIR: ${{ runner.temp }}/px-test-tmp
           PYTHON: ${{ steps.python.outputs['python-path'] }}
-        run: cargo test --workspace --jobs 1 -- --test-threads=1
+        run: cargo test --locked --workspace --jobs 1 -- --test-threads=1
+
+      - name: Run clippy
+        env:
+          PYTHON: ${{ steps.python.outputs['python-path'] }}
+        run: cargo clippy --locked --workspace -j 1 -- -D warnings
