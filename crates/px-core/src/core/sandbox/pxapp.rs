@@ -5,7 +5,7 @@ use anyhow::Result;
 use serde_json::json;
 
 use super::app_bundle::{bundle_identity, read_pxapp_bundle};
-use super::pack::{export_output, sha256_hex};
+use super::pack::sha256_hex;
 use super::runner::{detect_container_backend, run_container, SandboxImageLayout};
 use super::{default_store_root, sandbox_error, SandboxDefinition, SandboxStore};
 use crate::core::runtime::outcome_from_output;
@@ -183,7 +183,8 @@ fn ensure_bundle_image(
     let config_digest = sha256_hex(&bundle.config_bytes);
     let mut needs_rebuild = !(manifest_path_exists(&blobs, &manifest_digest)
         && manifest_path_exists(&blobs, &config_digest)
-        && archive.exists());
+        && oci_dir.join("index.json").exists()
+        && oci_dir.join("oci-layout").exists());
     if !needs_rebuild {
         for digest in &bundle.metadata.layer_digests {
             if !manifest_path_exists(&blobs, digest) {
@@ -272,7 +273,6 @@ fn ensure_bundle_image(
                 json!({ "path": oci_dir.join("oci-layout").display().to_string(), "error": err.to_string() }),
             )
         })?;
-        export_output(&oci_dir, &archive, Path::new("/"))?;
     }
     Ok(SandboxImageLayout {
         oci_dir,
