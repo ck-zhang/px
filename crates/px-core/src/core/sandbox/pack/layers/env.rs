@@ -237,7 +237,11 @@ fn stage_sandbox_runtime(
 }
 
 fn should_skip_runtime_path(rel: &Path) -> bool {
-    rel.extension().and_then(|ext| ext.to_str()) == Some("a")
+    if rel.extension().and_then(|ext| ext.to_str()) == Some("a") {
+        return true;
+    }
+    rel.components()
+        .any(|component| component.as_os_str() == "site-packages")
 }
 
 #[derive(Clone, Debug)]

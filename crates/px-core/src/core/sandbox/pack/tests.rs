@@ -121,6 +121,9 @@ fn env_layer_skips_runtime_static_libs() -> Result<()> {
     let config_root = lib_root.join("config-3.12-test");
     fs::create_dir_all(&config_root)?;
     fs::write(config_root.join("libpython3.12.a"), vec![0u8; 16])?;
+    let pip_root = lib_root.join("site-packages").join("pip");
+    fs::create_dir_all(&pip_root)?;
+    fs::write(pip_root.join("__init__.py"), b"")?;
 
     let blobs = temp.path().join("blobs");
     let env_layer = write_env_layer_tar(&env_root, Some(&runtime_root), &blobs)?;
@@ -129,6 +132,7 @@ fn env_layer_skips_runtime_static_libs() -> Result<()> {
     let mut archive = Archive::new(file);
     let mut saw_hello = false;
     let mut saw_static = false;
+    let mut saw_site_packages = false;
     for entry in archive.entries()? {
         let entry = entry?;
         let path = entry.path()?.into_owned();
@@ -138,10 +142,17 @@ fn env_layer_skips_runtime_static_libs() -> Result<()> {
         if path == Path::new("px/runtime/lib/python3.12/config-3.12-test/libpython3.12.a") {
             saw_static = true;
         }
+        if path == Path::new("px/runtime/lib/python3.12/site-packages/pip/__init__.py") {
+            saw_site_packages = true;
+        }
     }
 
     assert!(saw_hello, "runtime file should be present in layer tar");
     assert!(!saw_static, "static lib should be excluded from layer tar");
+    assert!(
+        !saw_site_packages,
+        "runtime site-packages should be excluded from layer tar"
+    );
     Ok(())
 }
 
