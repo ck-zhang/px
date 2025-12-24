@@ -4,6 +4,15 @@ px is the front door for Python projects: it owns the runtime, dependencies, and
 
 px supports Linux, macOS, and Windows.
 
+## Install (from source)
+
+px is currently built from source:
+
+```sh
+cargo install --path crates/px-cli
+px --help
+```
+
 ## Quick start (single project)
 
 px-managed projects require a px-registered Python runtime; `px init` never silently adopts whatever `python` is on PATH.

@@ -4,6 +4,10 @@ This documentation is the authoritative source of truth for px. Start here, then
 
 Platform support: px supports Linux, macOS, and Windows.
 
+## Install
+
+See `README.md` for installation instructions.
+
 ## Guides
 
 - [Getting started](./guides/getting-started.md)
