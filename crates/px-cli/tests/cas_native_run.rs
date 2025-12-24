@@ -565,10 +565,14 @@ PyMODINIT_FUNC PyInit_native_ext(void) {
 
     let so_name = format!("native_ext{ext}");
     let so_path = artifacts.join(&so_name);
-    let status = Command::new("cc")
+    let mut cmd = Command::new("cc");
+    if cfg!(target_os = "macos") {
+        cmd.args(["-bundle", "-undefined", "dynamic_lookup"]);
+    } else {
+        cmd.args(["-shared", "-fPIC"]);
+    }
+    let status = cmd
         .args([
-            "-shared",
-            "-fPIC",
             &format!("-I{include}"),
             "-o",
             so_path.to_str().expect("so path"),
