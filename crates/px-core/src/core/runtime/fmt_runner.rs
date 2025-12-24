@@ -1,12 +1,11 @@
-use std::{env, io::IsTerminal, path::Path};
+use std::{env, path::Path};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use walkdir::WalkDir;
 
 use super::fmt_plan::{
-    load_quality_tools, missing_module_error, QualityConfigSource, QualityKind, QualityTool,
-    QualityToolConfig,
+    load_quality_tools, missing_module_error, QualityKind, QualityTool, QualityToolConfig,
 };
 use crate::{
     build_pythonpath, ensure_project_environment_synced, is_missing_project_error,
@@ -326,7 +325,10 @@ fn prepare_tool_run(
                 Ok(outcome) => outcome,
                 Err(err) => match err.downcast::<InstallUserError>() {
                     Ok(user) => {
-                        return Err(ExecutionOutcome::user_error(user.message, user.details));
+                        return Err(rewrite_tool_install_outcome(
+                            ExecutionOutcome::user_error(user.message, user.details),
+                            tool,
+                        ));
                     }
                     Err(other) => {
                         return Err(ExecutionOutcome::failure(
@@ -342,7 +344,7 @@ fn prepare_tool_run(
                 },
             };
             if outcome.status != CommandStatus::Ok {
-                return Err(outcome);
+                return Err(rewrite_tool_install_outcome(outcome, tool));
             }
             load_installed_tool(tool.install_name()).map_err(|err| {
                 ExecutionOutcome::failure(
@@ -422,6 +424,8 @@ fn prepare_tool_run(
         match err.downcast::<InstallUserError>() {
             Ok(user) => {
                 if request.frozen {
+                    let hint = tool.install_command();
+                    let details = override_hint(user.details, &hint);
                     return Err(ExecutionOutcome::user_error(
                         format!(
                             "px {}: tool '{}' is not ready",
@@ -433,8 +437,8 @@ fn prepare_tool_run(
                             "tool": descriptor.name,
                             "module": tool.module,
                             "config_source": env.config.source.as_str(),
-                            "details": user.details,
-                            "hint": tool.install_command(),
+                            "details": details,
+                            "hint": hint,
                         }),
                     ));
                 }
@@ -443,6 +447,8 @@ fn prepare_tool_run(
                     if let Err(err) =
                         repair_tool_env_from_lock(env.ctx, &descriptor.root, &runtime_selection)
                     {
+                        let hint = tool.install_command();
+                        let details = override_hint(user.details, &hint);
                         return Err(ExecutionOutcome::user_error(
                             format!(
                                 "px {}: tool '{}' is not ready",
@@ -453,9 +459,9 @@ fn prepare_tool_run(
                                 "tool": descriptor.name,
                                 "module": tool.module,
                                 "config_source": env.config.source.as_str(),
-                                "details": user.details,
+                                "details": details,
                                 "error": err.to_string(),
-                                "hint": tool.install_command(),
+                                "hint": hint,
                             }),
                         ));
                     }
@@ -464,9 +470,9 @@ fn prepare_tool_run(
                         Ok(outcome) => outcome,
                         Err(err) => match err.downcast::<InstallUserError>() {
                             Ok(user) => {
-                                return Err(ExecutionOutcome::user_error(
-                                    user.message,
-                                    user.details,
+                                return Err(rewrite_tool_install_outcome(
+                                    ExecutionOutcome::user_error(user.message, user.details),
+                                    tool,
                                 ));
                             }
                             Err(other) => {
@@ -486,7 +492,7 @@ fn prepare_tool_run(
                         },
                     };
                     if outcome.status != CommandStatus::Ok {
-                        return Err(outcome);
+                        return Err(rewrite_tool_install_outcome(outcome, tool));
                     }
                     snapshot = ProjectSnapshot::read_from(&descriptor.root).map_err(|err| {
                         ExecutionOutcome::failure(
@@ -511,20 +517,24 @@ fn prepare_tool_run(
                 })?;
                 if let Err(err) = ensure_project_environment_synced(env.ctx, &snapshot) {
                     return match err.downcast::<InstallUserError>() {
-                        Ok(user) => Err(ExecutionOutcome::user_error(
-                            format!(
-                                "px {}: tool '{}' is not ready",
-                                kind.section_name(),
-                                descriptor.name
-                            ),
-                            json!({
-                                "tool": descriptor.name,
-                                "module": tool.module,
-                                "config_source": env.config.source.as_str(),
-                                "details": user.details,
-                                "hint": tool.install_command(),
-                            }),
-                        )),
+                        Ok(user) => {
+                            let hint = tool.install_command();
+                            let details = override_hint(user.details, &hint);
+                            Err(ExecutionOutcome::user_error(
+                                format!(
+                                    "px {}: tool '{}' is not ready",
+                                    kind.section_name(),
+                                    descriptor.name
+                                ),
+                                json!({
+                                    "tool": descriptor.name,
+                                    "module": tool.module,
+                                    "config_source": env.config.source.as_str(),
+                                    "details": details,
+                                    "hint": hint,
+                                }),
+                            ))
+                        }
                         Err(other) => Err(ExecutionOutcome::failure(
                             "failed to prepare tool environment",
                             json!({
@@ -625,7 +635,29 @@ fn tool_install_python_override() -> Option<String> {
 }
 
 fn should_announce_tool_install(ctx: &CommandContext) -> bool {
-    !ctx.global.json && !ctx.global.quiet && std::io::stderr().is_terminal()
+    !ctx.global.json && !ctx.global.quiet
+}
+
+fn rewrite_tool_install_outcome(mut outcome: ExecutionOutcome, tool: &QualityTool) -> ExecutionOutcome {
+    if let Value::Object(map) = &mut outcome.details {
+        map.remove("code");
+    }
+    if outcome.status == CommandStatus::UserError
+        && outcome.details.get("reason").and_then(Value::as_str) == Some("offline")
+    {
+        outcome.message = format!(
+            "{} is not available in the local cache (offline)",
+            tool.display_name()
+        );
+    }
+    outcome
+}
+
+fn override_hint(mut details: Value, hint: &str) -> Value {
+    if let Value::Object(map) = &mut details {
+        map.insert("hint".into(), Value::String(hint.to_string()));
+    }
+    details
 }
 
 fn missing_module_outcome(
@@ -660,7 +692,7 @@ fn build_success_details(
     runs: &[QualityRunRecord],
     pyproject: &Path,
     config: &QualityToolConfig,
-    kind: QualityKind,
+    _kind: QualityKind,
     request: &FmtRequest,
 ) -> Value {
     let mut details = json!({
@@ -683,13 +715,6 @@ fn build_success_details(
     }
     if !request.args.is_empty() {
         details["forwarded_args"] = json!(&request.args);
-    }
-    if config.source == QualityConfigSource::Default {
-        details["hint"] = json!(
-            "Configure [tool.px.".to_owned()
-                + kind.section_name()
-                + "] to override the default Ruff runner"
-        );
     }
     details
 }

@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 mod common;
-use common::require_online;
+use common::{init_empty_project, parse_json, require_online, test_env_guard};
 
 fn find_python() -> Option<String> {
     let candidates = [
@@ -45,6 +45,36 @@ fn px_test_no_tests_is_non_failing_in_dev() {
     assert!(
         stdout.contains("NO TESTS"),
         "expected no-tests summary, got stdout: {stdout:?}"
+    );
+}
+
+#[test]
+fn px_test_offline_missing_pytest_tool_reports_cache_miss() {
+    let _guard = test_env_guard();
+    let (_tmp, project) = init_empty_project("test-offline-missing-pytest");
+
+    let tools_dir = tempfile::tempdir().expect("tools dir");
+    let store_dir = tempfile::tempdir().expect("store dir");
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_TOOLS_DIR", tools_dir.path())
+        .env("PX_TOOL_STORE", store_dir.path())
+        .args(["--offline", "--json", "test"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(payload["details"]["reason"], "offline");
+    let message = payload["message"].as_str().unwrap_or_default();
+    assert!(
+        message.to_ascii_lowercase().contains("pytest")
+            && message.to_ascii_lowercase().contains("offline"),
+        "expected tool-specific offline cache miss, got {message:?}"
+    );
+    assert!(
+        !message.to_ascii_lowercase().contains("dependency resolution failed"),
+        "expected offline tool message, got {message:?}"
     );
 }
 

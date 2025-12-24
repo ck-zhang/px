@@ -6,8 +6,8 @@ use tempfile::tempdir;
 mod common;
 
 use common::{
-    ensure_test_store_env, parse_json, prepare_fixture, require_online, reset_test_store_env,
-    test_env_guard, test_temp_root,
+    detect_host_python_details, ensure_test_store_env, init_empty_project, parse_json,
+    prepare_fixture, require_online, reset_test_store_env, test_env_guard, test_temp_root,
 };
 
 #[test]
@@ -165,6 +165,89 @@ fn fmt_frozen_refuses_to_auto_install_tools() {
 }
 
 #[test]
+fn fmt_frozen_overrides_nested_tool_hint() {
+    let _guard = test_env_guard();
+    let (_tmp, project) = prepare_fixture("fmt-frozen-hint-override");
+
+    let candidates = ["python3.12", "python3", "python"];
+    let python = candidates.iter().find_map(|candidate| {
+        Command::new(candidate)
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|_| candidate.to_string())
+    });
+    let Some(python) = python else {
+        eprintln!("skipping fmt hint test (python binary not found)");
+        return;
+    };
+    let Some((python_exe, channel, version)) = detect_host_python_details(&python) else {
+        eprintln!("skipping fmt hint test (unable to inspect python)");
+        return;
+    };
+
+    let tools_dir = tempdir().expect("tools dir");
+    let tool_root = tools_dir.path().join("ruff");
+    fs::create_dir_all(&tool_root).expect("tool root");
+    fs::write(
+        tool_root.join("pyproject.toml"),
+        r#"[project]
+name = "ruff"
+version = "0.0.0"
+requires-python = ">=3.8"
+dependencies = []
+
+[tool.px]
+"#,
+    )
+    .expect("write tool pyproject");
+    fs::write(
+        tool_root.join("tool.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "name": "ruff",
+            "spec": "ruff",
+            "entry": "ruff",
+            "console_scripts": {},
+            "runtime_version": channel,
+            "runtime_full_version": version,
+            "runtime_path": python_exe,
+            "installed_spec": "ruff",
+            "created_at": "1970-01-01T00:00:00Z",
+            "updated_at": "1970-01-01T00:00:00Z",
+        }))
+        .expect("encode tool.json")
+            + "\n",
+    )
+    .expect("write tool.json");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_TOOLS_DIR", tools_dir.path())
+        .args(["--json", "fmt", "--frozen"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(payload["details"]["reason"], "tool_not_ready");
+    let hint = payload["details"]["hint"].as_str().unwrap_or_default();
+    let nested_hint = payload["details"]["details"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("px tool install ruff"),
+        "expected hint to recommend tool install, got {hint:?}"
+    );
+    assert!(
+        nested_hint.contains("px tool install ruff"),
+        "expected nested hint to match tool install, got {nested_hint:?}"
+    );
+    assert!(
+        !nested_hint.contains("px sync"),
+        "nested hint should not suggest px sync for tools, got {nested_hint:?}"
+    );
+}
+
+#[test]
 fn fmt_empty_project_reports_nothing_to_format() {
     let _guard = test_env_guard();
     reset_test_store_env();
@@ -196,5 +279,40 @@ version = "0.1.0"
     assert!(
         stdout.to_ascii_lowercase().contains("nothing to format"),
         "expected a no-op fmt message, got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("Tip:"),
+        "no-op fmt output should avoid boilerplate tips, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn fmt_offline_missing_tool_reports_cache_miss() {
+    let _guard = test_env_guard();
+    let (_tmp, project) = init_empty_project("fmt-offline-missing-tool");
+    fs::write(project.join("hello.py"), "print('hi')\n").expect("write python file");
+
+    let tools_dir = tempdir().expect("tools dir");
+    let store_dir = tempdir().expect("store dir");
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_TOOLS_DIR", tools_dir.path())
+        .env("PX_TOOL_STORE", store_dir.path())
+        .args(["--offline", "--json", "fmt"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(payload["details"]["reason"], "offline");
+    let message = payload["message"].as_str().unwrap_or_default();
+    assert!(
+        message.to_ascii_lowercase().contains("ruff")
+            && message.to_ascii_lowercase().contains("offline"),
+        "expected tool-specific offline cache miss, got {message:?}"
+    );
+    assert!(
+        !message.to_ascii_lowercase().contains("dependency resolution failed"),
+        "expected offline tool message, got {message:?}"
     );
 }

@@ -1,5 +1,4 @@
 use super::*;
-use std::io::IsTerminal;
 
 use super::builtin::run_builtin_tests;
 use super::env::{append_allowed_paths, append_pythonpath, run_python_command};
@@ -138,7 +137,10 @@ fn ensure_pytest_tool(
         Ok(outcome) => outcome,
         Err(err) => match err.downcast::<InstallUserError>() {
             Ok(user) => {
-                return Err(ExecutionOutcome::user_error(user.message, user.details));
+                return Err(rewrite_pytest_tool_install_outcome(ExecutionOutcome::user_error(
+                    user.message,
+                    user.details,
+                )));
             }
             Err(other) => {
                 return Err(ExecutionOutcome::failure(
@@ -152,7 +154,7 @@ fn ensure_pytest_tool(
         },
     };
     if outcome.status != CommandStatus::Ok {
-        return Err(outcome);
+        return Err(rewrite_pytest_tool_install_outcome(outcome));
     }
     let tool = load_installed_tool("pytest").map_err(|err| {
         ExecutionOutcome::failure(
@@ -196,7 +198,19 @@ fn append_tool_env_paths(
 }
 
 fn should_announce_tool_install(ctx: &CommandContext) -> bool {
-    !ctx.global.json && !ctx.global.quiet && std::io::stderr().is_terminal()
+    !ctx.global.json && !ctx.global.quiet
+}
+
+fn rewrite_pytest_tool_install_outcome(mut outcome: ExecutionOutcome) -> ExecutionOutcome {
+    if let serde_json::Value::Object(map) = &mut outcome.details {
+        map.remove("code");
+    }
+    if outcome.status == CommandStatus::UserError
+        && outcome.details.get("reason").and_then(serde_json::Value::as_str) == Some("offline")
+    {
+        outcome.message = "pytest is not available in the local cache (offline)".to_string();
+    }
+    outcome
 }
 
 pub(in crate::core::runtime::run) fn build_pytest_invocation(
