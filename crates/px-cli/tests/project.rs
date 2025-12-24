@@ -818,16 +818,125 @@ fn project_add_inserts_dependency() {
 }
 
 #[test]
-fn project_add_autopins_and_reports_manifest_change() {
+fn project_add_writes_unpinned_manifest_by_default() {
     let _guard = test_env_guard();
     if !require_online() {
         return;
     }
     let temp = tempfile::tempdir().expect("tempdir");
-    scaffold_demo(&temp, "demo_add_autopin");
+    scaffold_demo(&temp, "demo_add_default_unpinned");
     let project_dir = temp.path();
 
     let assert = px_cmd()
+        .current_dir(project_dir)
+        .args(["add", "requests"])
+        .assert()
+        .success();
+
+    let lock_path = project_dir.join("px.lock");
+    let lock: DocumentMut = fs::read_to_string(&lock_path)
+        .expect("read lockfile")
+        .parse()
+        .expect("parse lockfile");
+    let deps = lock["dependencies"]
+        .as_array_of_tables()
+        .expect("dependencies array");
+    let requests = deps
+        .iter()
+        .find(|entry| entry.get("name").and_then(toml_edit::Item::as_str) == Some("requests"))
+        .expect("requests dependency in lock");
+    let specifier = requests
+        .get("specifier")
+        .and_then(toml_edit::Item::as_str)
+        .expect("requests specifier");
+    assert!(
+        specifier.contains("=="),
+        "expected lock specifier to be pinned, got {specifier:?}"
+    );
+
+    let deps = read_dependencies(project_dir.join("pyproject.toml"));
+    assert!(
+        deps.iter().any(|dep| dep == "requests"),
+        "pyproject.toml should contain unpinned requests by default; deps={deps:?}"
+    );
+    assert!(
+        deps.iter()
+            .all(|dep| !dep.starts_with("requests==") && !dep.starts_with("requests===")),
+        "pyproject.toml should not pin requests by default; deps={deps:?}"
+    );
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout utf8");
+    assert!(
+        stdout.contains("px add: pyproject.toml: + requests"),
+        "expected px add to show manifest change, got {stdout:?}"
+    );
+    assert!(
+        stdout.contains("px add: px.lock: changed (packages:"),
+        "expected px add to summarize lock changes, got {stdout:?}"
+    );
+}
+
+#[test]
+fn project_add_pin_flag_pins_manifest_entry() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    scaffold_demo(&temp, "demo_add_pin_flag");
+    let project_dir = temp.path();
+
+    px_cmd()
+        .current_dir(project_dir)
+        .args(["add", "--pin", "requests"])
+        .assert()
+        .success();
+
+    let lock_path = project_dir.join("px.lock");
+    let lock: DocumentMut = fs::read_to_string(&lock_path)
+        .expect("read lockfile")
+        .parse()
+        .expect("parse lockfile");
+    let deps = lock["dependencies"]
+        .as_array_of_tables()
+        .expect("dependencies array");
+    let requests = deps
+        .iter()
+        .find(|entry| entry.get("name").and_then(toml_edit::Item::as_str) == Some("requests"))
+        .expect("requests dependency in lock");
+    let specifier = requests
+        .get("specifier")
+        .and_then(toml_edit::Item::as_str)
+        .expect("requests specifier");
+    assert!(
+        specifier.contains("=="),
+        "expected lock specifier to be pinned, got {specifier:?}"
+    );
+
+    let deps = read_dependencies(project_dir.join("pyproject.toml"));
+    assert!(
+        deps.iter().any(|dep| dep == specifier),
+        "pyproject.toml should contain pinned spec {specifier:?}; deps={deps:?}"
+    );
+}
+
+#[test]
+fn project_add_respects_pin_manifest_config() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    scaffold_demo(&temp, "demo_add_pin_manifest_config");
+    let project_dir = temp.path();
+
+    let pyproject_path = project_dir.join("pyproject.toml");
+    let contents = fs::read_to_string(&pyproject_path).expect("read pyproject");
+    let mut doc: DocumentMut = contents.parse().expect("parse pyproject");
+    doc["tool"]["px"]["pin-manifest"] = toml_edit::value(true);
+    fs::write(&pyproject_path, doc.to_string()).expect("write pyproject");
+
+    px_cmd()
         .current_dir(project_dir)
         .args(["add", "requests"])
         .assert()
@@ -853,15 +962,48 @@ fn project_add_autopins_and_reports_manifest_change() {
     let deps = read_dependencies(project_dir.join("pyproject.toml"));
     assert!(
         deps.iter().any(|dep| dep == specifier),
-        "pyproject.toml should contain pinned spec {specifier:?}; deps={deps:?}"
+        "expected pin-manifest=true to pin requests; deps={deps:?}"
+    );
+}
+
+#[test]
+fn project_add_json_includes_change_summary() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    scaffold_demo(&temp, "demo_add_json_change_summary");
+    let project_dir = temp.path();
+
+    let assert = px_cmd()
+        .current_dir(project_dir)
+        .args(["--json", "add", "requests==2.32.3"])
+        .assert()
+        .success();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+
+    let manifest_added = payload["details"]["manifest_added"]
+        .as_array()
+        .expect("manifest_added array");
+    assert!(
+        manifest_added
+            .iter()
+            .any(|spec| spec.as_str() == Some("requests==2.32.3")),
+        "expected manifest_added to include requests pin, got {manifest_added:?}"
     );
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout utf8");
-    assert!(
-        stdout.contains(&format!(
-            "px add: pyproject.toml: requests -> {specifier}"
-        )),
-        "expected px add to show manifest pin change, got {stdout:?}"
+    let lock_changes = payload["details"]["lock_changes"]
+        .as_object()
+        .expect("lock_changes object");
+    assert_eq!(
+        lock_changes
+            .get("changed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        true,
+        "expected lock_changes.changed=true, got {lock_changes:?}"
     );
 }
 
@@ -947,6 +1089,64 @@ fn project_update_restores_manifest_on_failure() {
     assert!(
         lock_contents.contains("packaging==23.0"),
         "lockfile should remain untouched on failure"
+    );
+}
+
+#[test]
+fn project_update_prints_lock_version_changes() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let (_temp, root) = common::init_empty_project("px-update-change-summary");
+    px_cmd()
+        .current_dir(&root)
+        .args(["add", "requests==2.31.0"])
+        .assert()
+        .success();
+
+    fn requests_version(lock_path: &Path) -> String {
+        let lock: DocumentMut = fs::read_to_string(lock_path)
+            .expect("read lockfile")
+            .parse()
+            .expect("parse lockfile");
+        let deps = lock["dependencies"]
+            .as_array_of_tables()
+            .expect("dependencies array");
+        let requests = deps
+            .iter()
+            .find(|entry| entry.get("name").and_then(toml_edit::Item::as_str) == Some("requests"))
+            .expect("requests dependency in lock");
+        let specifier = requests
+            .get("specifier")
+            .and_then(toml_edit::Item::as_str)
+            .expect("requests specifier");
+        specifier
+            .split_once("==")
+            .map(|(_, version)| version.trim())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    let lock_path = root.join("px.lock");
+    let before = requests_version(&lock_path);
+
+    let assert = px_cmd()
+        .current_dir(&root)
+        .args(["update", "requests"])
+        .assert()
+        .success();
+
+    let after = requests_version(&lock_path);
+    assert_ne!(
+        before, after,
+        "expected px update to pick a newer requests version"
+    );
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout utf8");
+    assert!(
+        stdout.contains(&format!("px update: px.lock: ~ requests {before} -> {after}")),
+        "expected px update to show version diff, got {stdout:?}"
     );
 }
 

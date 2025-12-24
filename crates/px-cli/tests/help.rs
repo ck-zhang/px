@@ -38,8 +38,10 @@ fn init_help_lists_examples() {
 fn add_help_mentions_manifest_pinning() {
     let output = help_output(&["add", "--help"]);
     assert!(
-        output.to_ascii_lowercase().contains("pins direct") && output.contains("pyproject.toml"),
-        "add help should mention manifest pinning, got: {output}"
+        output.to_ascii_lowercase().contains("ranges/unpinned")
+            && output.to_ascii_lowercase().contains("px.lock pins")
+            && output.contains("--pin"),
+        "add help should mention default range semantics and the --pin flag, got: {output}"
     );
 }
 

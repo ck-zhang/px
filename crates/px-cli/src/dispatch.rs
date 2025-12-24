@@ -36,6 +36,7 @@ pub fn dispatch_command(
             let info = CommandInfo::new(CommandGroup::Add, "add");
             let request = ProjectAddRequest {
                 specs: args.specs.clone(),
+                pin: args.pin,
                 dry_run: args.common.dry_run,
             };
             core_call(info, || px_core::project_add(ctx, &request))

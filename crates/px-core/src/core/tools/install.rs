@@ -99,7 +99,7 @@ pub fn tool_install(
         pins: resolved.pins.clone(),
     };
     let install_outcome =
-        match install_snapshot(ctx, &updated_snapshot, false, Some(&install_override)) {
+        match install_snapshot(ctx, &updated_snapshot, false, false, Some(&install_override)) {
             Ok(outcome) => outcome,
             Err(err) => match err.downcast::<InstallUserError>() {
                 Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),

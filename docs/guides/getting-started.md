@@ -20,14 +20,21 @@ If no runtime is registered, `px init` prompts to install a default runtime (TTY
 
 * **Runtime** – a Python interpreter px knows about; chosen deterministically from `[tool.px].python`, `[project].requires-python`, or px default.
   * If multiple runtimes satisfy constraints, px uses the px default runtime.
-* **Manifest** – direct dependencies in `pyproject.toml`. By default, px pins direct deps in-place (e.g. `requests==2.32.5`) so the manifest itself is deterministic and reviewable.
+* **Manifest** – direct dependency intent in `pyproject.toml` (ranges or unpinned). Exact pins live in `px.lock` so you can keep intent and determinism separate.
 * **Lockfile** – `px.lock`, generated only by px; don’t edit by hand. It records the full resolved graph (including transitive deps) plus artifact identity (hashes/URLs), and the env is built from it. `px.lock` is portable and commit-safe: it contains no absolute paths, usernames, or local cache layout.
 * **Env** – project-local pointer at `.px/envs/current` to a global env materialization under `~/.px/envs/<profile_oid>` (tied to the lock and runtime). `.px/` is machine-local and is not meant for source control.
 
-## Pinning model (manifest + lock)
+## Dependency model (manifest + lock)
 
-* `px add` resolves the requested deps, writes exact pins into `pyproject.toml`, then updates `px.lock` and the env.
-* `px update` loosens selected pins, resolves newer versions, then writes the new exact pins back into `pyproject.toml` and rewrites `px.lock`.
+* `px add` updates `pyproject.toml`, then updates `px.lock` and the env.
+* `px update` re-resolves and rewrites `px.lock`, then syncs the env (without churning `pyproject.toml` unless you opt in).
+
+### Opt into manifest pinning
+
+* Per command: `px add --pin <pkg>` writes an exact pin into `pyproject.toml`.
+* Per project: set `[tool.px].pin-manifest = true` to pin direct dependencies in `pyproject.toml` by default.
+
+Determinism comes from committing `px.lock` (exact versions + hashes) and using `--frozen`/`CI=1`, not from pinning the manifest.
 
 ## When things drift
 

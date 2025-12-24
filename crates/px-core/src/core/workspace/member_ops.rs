@@ -33,7 +33,7 @@ pub fn workspace_add(
     if request.specs.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "provide at least one dependency",
-            json!({ "hint": "run `px add name==version`" }),
+            json!({ "hint": "run `px add requests`" }),
         ));
     }
     let cleaned_specs: Vec<String> = request
@@ -45,7 +45,7 @@ pub fn workspace_add(
     if cleaned_specs.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "provide at least one dependency",
-            json!({ "hint": "run `px add name==version`" }),
+            json!({ "hint": "run `px add requests`" }),
         ));
     }
     let manifest_path = member_root.join("pyproject.toml");

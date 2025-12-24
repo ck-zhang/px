@@ -128,7 +128,7 @@ pub fn project_init(
         lock_existed,
     );
     env::remove_var("PX_RUNTIME_PYTHON");
-    match install_snapshot(ctx, &snapshot, false, None) {
+    match install_snapshot(ctx, &snapshot, false, false, None) {
         Ok(_) => {}
         Err(err) => {
             rollback.rollback();

@@ -400,6 +400,7 @@ fn build_env_marks_available_plugins() -> Result<()> {
             manage_command: Some("self".into()),
             plugin_imports: vec!["json".into()],
             env_vars: BTreeMap::new(),
+            pin_manifest: false,
         },
     };
 
@@ -436,6 +437,7 @@ fn build_env_marks_missing_plugins() -> Result<()> {
             manage_command: None,
             plugin_imports: vec!["px_missing_plugin_mod".into()],
             env_vars: BTreeMap::new(),
+            pin_manifest: false,
         },
     };
 

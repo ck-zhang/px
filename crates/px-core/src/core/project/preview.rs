@@ -72,6 +72,39 @@ pub(crate) fn lock_preview_unresolved(lock: Option<&LockSnapshot>, would_change:
     })
 }
 
+pub(crate) fn lock_changes(before: Option<&LockSnapshot>, after: Option<&LockSnapshot>) -> Value {
+    let before_map = before.map(lock_pin_map).unwrap_or_default();
+    let after_map = after.map(lock_pin_map).unwrap_or_default();
+    let before_count = before_map.len();
+    let after_count = after_map.len();
+
+    let mut added = 0usize;
+    let mut updated = 0usize;
+    for (name, version) in &after_map {
+        match before_map.get(name) {
+            None => added += 1,
+            Some(existing) if existing != version => updated += 1,
+            _ => {}
+        }
+    }
+    let removed = before_map.keys().filter(|name| !after_map.contains_key(*name)).count();
+    let changed = added > 0 || removed > 0 || updated > 0;
+
+    json!({
+        "path": "px.lock",
+        "changed": changed,
+        "packages": {
+            "before": before_count,
+            "after": after_count,
+            "added": added,
+            "removed": removed,
+            "updated": updated,
+        },
+        "direct": lock_direct_changes(before, after, &before_map, &after_map),
+        "updated_versions": lock_version_updates(&before_map, &after_map),
+    })
+}
+
 struct SpecChanges {
     added: Vec<String>,
     removed: Vec<String>,
@@ -190,6 +223,76 @@ fn lock_highlights(
     for name in keys {
         let before = current.get(&name).cloned();
         let after = planned.get(&name).cloned();
+        if before == after {
+            continue;
+        }
+        out.push(json!({
+            "name": name,
+            "from": before,
+            "to": after,
+        }));
+    }
+    out
+}
+
+fn lock_direct_changes(
+    before: Option<&LockSnapshot>,
+    after: Option<&LockSnapshot>,
+    before_map: &HashMap<String, String>,
+    after_map: &HashMap<String, String>,
+) -> Vec<Value> {
+    let mut keys = HashSet::new();
+    if let Some(lock) = before {
+        for dep in lock.resolved.iter().filter(|dep| dep.direct) {
+            keys.insert(canonicalize_package_name(&dep.name));
+        }
+    }
+    if let Some(lock) = after {
+        for dep in lock.resolved.iter().filter(|dep| dep.direct) {
+            keys.insert(canonicalize_package_name(&dep.name));
+        }
+    }
+
+    let mut ordered = keys.into_iter().collect::<Vec<_>>();
+    ordered.sort();
+    ordered.dedup();
+
+    let mut out = Vec::new();
+    for name in ordered {
+        let before = before_map.get(&name).cloned();
+        let after = after_map.get(&name).cloned();
+        if before == after {
+            continue;
+        }
+        out.push(json!({
+            "name": name,
+            "from": before,
+            "to": after,
+        }));
+    }
+    out
+}
+
+fn lock_version_updates(
+    before_map: &HashMap<String, String>,
+    after_map: &HashMap<String, String>,
+) -> Vec<Value> {
+    let mut keys = before_map
+        .keys()
+        .chain(after_map.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+
+    let mut out = Vec::new();
+    for name in keys {
+        let Some(before) = before_map.get(&name) else {
+            continue;
+        };
+        let Some(after) = after_map.get(&name) else {
+            continue;
+        };
         if before == after {
             continue;
         }

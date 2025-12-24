@@ -1,8 +1,9 @@
 use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 use crate::core::system_deps::{system_deps_from_names, write_sys_deps_metadata};
 
@@ -97,10 +98,60 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
     }
     fs::create_dir_all(&dist_dir)?;
 
-    let builder = build_with_container_builder(request, &sdist_path, &dist_dir, &build_root)?;
-    let build_method = BuildMethod::BuilderWheel;
-    let build_python_path = builder.python_path.clone();
-    let builder_env_root = Some(builder.env_root.clone());
+    fn build_with_host_pip_wheel(
+        python: &str,
+        sdist_path: &Path,
+        dist_dir: &Path,
+        build_root: &Path,
+    ) -> Result<()> {
+        let mut cmd = Command::new(python);
+        cmd.current_dir(build_root)
+            .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+            .env("PIP_NO_INPUT", "1")
+            .env("PIP_PROGRESS_BAR", "off")
+            .args(["-m", "pip", "wheel", "--no-deps", "--wheel-dir"])
+            .arg(dist_dir)
+            .arg(sdist_path);
+        let output = cmd
+            .output()
+            .with_context(|| format!("failed to run `{python} -m pip wheel`"))?;
+        if !output.status.success() {
+            bail!(
+                "pip wheel failed (code {}):\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    let (build_method, build_python_path, builder_env_root) =
+        match build_with_container_builder(request, &sdist_path, &dist_dir, &build_root) {
+            Ok(builder) => (
+                BuildMethod::BuilderWheel,
+                builder.python_path.clone(),
+                Some(builder.env_root.clone()),
+            ),
+            Err(container_err) => {
+                if dist_dir.exists() {
+                    let _ = fs::remove_dir_all(&dist_dir);
+                }
+                fs::create_dir_all(&dist_dir)?;
+                build_with_host_pip_wheel(
+                    request.python_path,
+                    &sdist_path,
+                    &dist_dir,
+                    &build_root,
+                )
+                .map_err(|host_err| {
+                    anyhow!(
+                        "sdist build failed via container builder ({container_err}); fallback pip wheel also failed ({host_err})"
+                    )
+                })?;
+                (BuildMethod::PipWheel, Path::new(request.python_path).to_path_buf(), None)
+            }
+        };
     let mut system_deps = load_builder_system_deps(&build_root);
     if system_deps.is_empty() {
         system_deps = system_deps_from_names([request.normalized_name]);
@@ -211,6 +262,9 @@ fn cache_hit_matches(request: &SdistRequest<'_>, built: &BuiltWheel) -> Result<b
     if built.build_options_hash.is_empty() {
         return Ok(false);
     }
-    let expected = compute_build_options_hash(request.python_path, built.build_method)?;
+    let mut expected = compute_build_options_hash(request.python_path, built.build_method)?;
+    if let Some(fingerprint) = built.system_deps.fingerprint() {
+        expected = format!("{expected}-sys{fingerprint}");
+    }
     Ok(built.build_options_hash == expected)
 }

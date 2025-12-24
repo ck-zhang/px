@@ -693,6 +693,7 @@ fn profile_env_vars_merge_snapshot_and_env_override() -> Result<()> {
             manage_command: None,
             plugin_imports: vec![],
             env_vars: BTreeMap::from([("FROM_SNAPSHOT".to_string(), "snap".to_string())]),
+            pin_manifest: false,
         },
         manifest_fingerprint: "fp".to_string(),
     };

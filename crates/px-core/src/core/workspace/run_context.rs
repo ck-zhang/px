@@ -1,4 +1,5 @@
 use std::env;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use serde_json::json;
@@ -17,6 +18,10 @@ pub fn prepare_workspace_run_context(
     command: &str,
     _sandbox: bool,
 ) -> Result<Option<WorkspaceRunContext>, ExecutionOutcome> {
+    let allow_lock_autosync = !strict
+        && matches!(command, "run" | "test")
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal();
     let scope = discover_workspace_scope().map_err(|err| {
         ExecutionOutcome::failure(
             "failed to detect workspace",
@@ -26,6 +31,7 @@ pub fn prepare_workspace_run_context(
     let Some(scope) = scope else {
         return Ok(None);
     };
+    let scope_for_sync = scope.clone();
     let (workspace, member_root) = match scope {
         WorkspaceScope::Member {
             workspace,
@@ -47,13 +53,84 @@ pub fn prepare_workspace_run_context(
             json!({ "error": err.to_string() }),
         )
     })?;
+    let mut state = state;
+    let mut sync_report = None;
     if !state.lock_exists {
-        return Err(workspace_violation(
-            command,
-            &workspace,
-            &state,
-            StateViolation::MissingLock,
-        ));
+        if allow_lock_autosync {
+            eprintln!("px ▸ px.workspace.lock missing; syncing…");
+            let outcome = super::sync::workspace_sync(
+                ctx,
+                scope_for_sync.clone(),
+                &super::WorkspaceSyncRequest {
+                    frozen: false,
+                    dry_run: false,
+                    force_resolve: false,
+                },
+            )
+            .map_err(|err| {
+                ExecutionOutcome::failure(
+                    "failed to sync workspace lock",
+                    json!({ "error": err.to_string() }),
+                )
+            })?;
+            if outcome.status != crate::CommandStatus::Ok {
+                return Err(outcome);
+            }
+            sync_report = Some(crate::EnvironmentSyncReport::new(crate::EnvironmentIssue::MissingLock));
+            state = evaluate_workspace_state(ctx, &workspace).map_err(|err| {
+                ExecutionOutcome::failure(
+                    "failed to evaluate workspace state",
+                    json!({ "error": err.to_string() }),
+                )
+            })?;
+        } else {
+            return Err(workspace_violation(
+                command,
+                &workspace,
+                &state,
+                StateViolation::MissingLock,
+            ));
+        }
+    }
+    if !state.manifest_clean {
+        if allow_lock_autosync {
+            eprintln!("px ▸ Manifest changed; syncing…");
+            let outcome = super::sync::workspace_sync(
+                ctx,
+                scope_for_sync.clone(),
+                &super::WorkspaceSyncRequest {
+                    frozen: false,
+                    dry_run: false,
+                    force_resolve: false,
+                },
+            )
+            .map_err(|err| {
+                ExecutionOutcome::failure(
+                    "failed to sync workspace lock",
+                    json!({ "error": err.to_string() }),
+                )
+            })?;
+            if outcome.status != crate::CommandStatus::Ok {
+                return Err(outcome);
+            }
+            if sync_report.is_none() {
+                sync_report =
+                    Some(crate::EnvironmentSyncReport::new(crate::EnvironmentIssue::LockDrift));
+            }
+            state = evaluate_workspace_state(ctx, &workspace).map_err(|err| {
+                ExecutionOutcome::failure(
+                    "failed to evaluate workspace state",
+                    json!({ "error": err.to_string() }),
+                )
+            })?;
+        } else {
+            return Err(workspace_violation(
+                command,
+                &workspace,
+                &state,
+                StateViolation::LockDrift,
+            ));
+        }
     }
     if matches!(state.canonical, WorkspaceStateKind::NeedsLock) {
         return Err(workspace_violation(
@@ -73,8 +150,7 @@ pub fn prepare_workspace_run_context(
         ));
     }
 
-    let mut sync_report = None;
-    if !strict && !state.env_clean {
+    if sync_report.is_none() && !strict && !state.env_clean {
         eprintln!("px ▸ Syncing workspace environment…");
         refresh_workspace_site(ctx, &workspace).map_err(|err| {
             ExecutionOutcome::failure(

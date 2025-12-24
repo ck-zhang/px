@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::Value;
-use toml_edit::DocumentMut;
+use toml_edit::{ArrayOfTables, DocumentMut, Item};
 
 mod common;
 
@@ -134,6 +134,80 @@ fn project_status_detects_manifest_drift() {
     assert_eq!(payload["project"]["state"], "NeedsLock");
     assert_eq!(payload["next_action"]["kind"], "sync");
     assert_eq!(payload["env"]["status"], "stale");
+}
+
+#[test]
+fn project_status_detects_incomplete_lock_closure() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let (_tmp, root) = common::init_empty_project("status-incomplete-closure");
+    let cache = root.join(".px-cache");
+    let store = cache.join("store");
+    let envs = cache.join("envs");
+    fs::create_dir_all(&envs).expect("create envs dir");
+    let Some(python) = find_python() else {
+        eprintln!("skipping status test (python binary not found)");
+        return;
+    };
+
+    cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
+        .args(["add", "requests==2.32.3"])
+        .assert()
+        .success();
+
+    let lock_path = root.join("px.lock");
+    let mut doc: DocumentMut = fs::read_to_string(&lock_path)
+        .expect("read px.lock")
+        .parse()
+        .expect("parse px.lock");
+    let deps = doc["dependencies"]
+        .as_array_of_tables()
+        .expect("dependencies array")
+        .clone();
+    let mut kept = ArrayOfTables::new();
+    for dep in deps.iter() {
+        let name = dep.get("name").and_then(Item::as_str).unwrap_or_default();
+        if matches!(
+            name,
+            "urllib3" | "certifi" | "idna" | "charset-normalizer"
+        ) {
+            continue;
+        }
+        kept.push(dep.clone());
+    }
+    doc["dependencies"] = Item::ArrayOfTables(kept);
+    fs::write(&lock_path, doc.to_string()).expect("write px.lock");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&root)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_CACHE_PATH", &cache)
+        .env("PX_STORE_PATH", &store)
+        .env("PX_ENVS_PATH", &envs)
+        .env("PX_RUNTIME_HOST_ONLY", "1")
+        .args(["--json", "status"])
+        .assert()
+        .failure();
+    let payload = parse_json(&assert);
+    assert_eq!(payload["project"]["state"], "NeedsLock");
+    let issues = payload["project"]["lock_issue"]
+        .as_array()
+        .expect("lock_issue array");
+    assert!(
+        issues.iter().any(|issue| issue
+            .as_str()
+            .unwrap_or_default()
+            .contains("urllib3")),
+        "expected closure issue mentioning urllib3, got {issues:?}"
+    );
 }
 
 #[test]

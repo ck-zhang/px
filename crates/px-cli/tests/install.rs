@@ -128,7 +128,7 @@ fn install_pinned_fetches_artifact() {
 }
 
 #[test]
-fn install_autopins_unpinned_specs() {
+fn install_keeps_manifest_constraints_and_pins_in_lock() {
     if !common::require_online() {
         return;
     }
@@ -169,9 +169,33 @@ fn install_autopins_unpinned_specs() {
         .success();
 
     let manifest = fs::read_to_string(project_root.join("pyproject.toml")).expect("read pyproject");
+    let doc: DocumentMut = manifest.parse().expect("parse pyproject");
+    let deps = doc["project"]["dependencies"]
+        .as_array()
+        .expect("dependencies array");
     assert!(
-        manifest.contains("packaging=="),
-        "expected `px add` to autopin the dependency, got manifest:\n{manifest}"
+        deps.iter()
+            .filter_map(|item| item.as_str())
+            .any(|spec| spec.starts_with("packaging>=")),
+        "expected pyproject.toml to keep the packaging constraint, got:\n{manifest}"
+    );
+
+    let lock_path = project_root.join("px.lock");
+    let lock_doc: DocumentMut = fs::read_to_string(&lock_path)
+        .expect("lock readable")
+        .parse()
+        .expect("valid lock toml");
+    let deps = lock_doc["dependencies"]
+        .as_array_of_tables()
+        .expect("dependencies array");
+    let dep = deps
+        .iter()
+        .find(|entry| entry.get("name").and_then(toml_edit::Item::as_str) == Some("packaging"))
+        .expect("packaging in lock");
+    let specifier = dep["specifier"].as_str().expect("specifier");
+    assert!(
+        specifier.starts_with("packaging=="),
+        "expected px.lock to contain an exact pin for packaging, got {specifier:?}"
     );
 }
 

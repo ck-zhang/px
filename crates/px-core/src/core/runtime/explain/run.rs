@@ -770,6 +770,7 @@ pub fn explain_run(ctx: &CommandContext, request: &RunRequest) -> AnyhowResult<E
     let plan = match execution_plan::plan_run_execution(
         ctx,
         strict,
+        false,
         request.sandbox,
         &target,
         &request.args,

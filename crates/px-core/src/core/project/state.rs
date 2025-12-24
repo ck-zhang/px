@@ -5,7 +5,8 @@ use crate::{
     CommandContext, ExecutionOutcome, InstallUserError, ManifestSnapshot,
 };
 use px_domain::api::{
-    detect_lock_drift, load_lockfile_optional, verify_locked_artifacts, ProjectStateReport,
+    detect_lock_drift, load_lockfile_optional, validate_lock_closure, verify_locked_artifacts,
+    ProjectStateReport,
 };
 use serde_json::json;
 
@@ -27,9 +28,10 @@ pub(crate) fn evaluate_project_state(
     let mut lock_issue = None;
     if manifest_exists && lock_exists {
         if let Some(lock) = &lock {
-            let drift = detect_lock_drift(snapshot, lock, marker_env.as_ref());
-            if !drift.is_empty() {
-                lock_issue = Some(drift);
+            let mut issues = detect_lock_drift(snapshot, lock, marker_env.as_ref());
+            issues.extend(validate_lock_closure(lock, marker_env.as_ref()));
+            if !issues.is_empty() {
+                lock_issue = Some(issues);
             }
         }
         manifest_clean = match (&manifest_fingerprint, &lock_fingerprint) {

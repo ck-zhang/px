@@ -816,11 +816,38 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
             return Err(err);
         }
     };
-    let lock_needs_backup = snapshot.lock_path.exists() && !lock_is_fresh(&snapshot)?;
+
+    if let Some(override_data) = install_override.as_mut() {
+        let mut override_snapshot = snapshot.clone();
+        override_snapshot.dependencies.clone_from(&override_data.dependencies);
+        override_snapshot.requirements = override_snapshot.dependencies.clone();
+        override_snapshot
+            .requirements
+            .extend(override_snapshot.group_dependencies.clone());
+        override_snapshot.requirements.sort();
+        override_snapshot.requirements.dedup();
+        let resolved =
+            match resolve_dependencies_with_effects(ctx.effects(), &override_snapshot, false) {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    if pyproject_modified {
+                        rollback_failed_migration(&backups, &created_files)?;
+                    }
+                    match err.downcast::<InstallUserError>() {
+                        Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                        Err(other) => return Err(other),
+                    }
+                }
+            };
+        override_data.pins = resolved.pins;
+    }
+
+    let lock_needs_backup = snapshot.lock_path.exists() && !lock_is_fresh(ctx, &snapshot)?;
     if lock_needs_backup {
         backups.backup(&snapshot.lock_path)?;
     }
-    let install_outcome = match install_snapshot(ctx, &snapshot, false, install_override.as_ref()) {
+    let install_outcome =
+        match install_snapshot(ctx, &snapshot, false, false, install_override.as_ref()) {
         Ok(ok) => ok,
         Err(err) => {
             if pyproject_modified {

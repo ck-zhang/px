@@ -490,7 +490,12 @@ fn map_resolution_to_specifiers(
                     requirement_for_edge(&graph[parent_idx], &child_builder.normalized, index)
                 {
                     if child_builder.marker.is_none() {
-                        child_builder.marker = requirement_marker(&requirement);
+                        let marker = requirement_marker(&requirement);
+                        if marker.as_deref().is_some_and(marker_mentions_extra) {
+                            child_builder.marker = None;
+                        } else {
+                            child_builder.marker = marker;
+                        }
                     }
                     if child_builder.extras.is_empty() {
                         let mut extras = requirement
@@ -633,6 +638,12 @@ fn requirement_marker(requirement: &UvPepRequirement) -> Option<String> {
         .map(|(_, marker)| marker.trim().to_string())
 }
 
+fn marker_mentions_extra(marker: &str) -> bool {
+    marker
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .any(|token| token == "extra")
+}
+
 #[derive(Debug)]
 struct SpecBuilder {
     name: String,
@@ -768,6 +779,112 @@ fn resolved_dist_source(dist: &ResolvedDist) -> Option<ResolvedDistSource> {
                 })
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod extras_tests {
+    use std::env;
+
+    use super::*;
+
+    fn require_online() -> bool {
+        if env::var("PX_ONLINE").ok().as_deref() == Some("1") {
+            true
+        } else {
+            eprintln!("skipping resolver extras tests (PX_ONLINE!=1)");
+            false
+        }
+    }
+
+    fn dummy_env() -> ResolverEnv {
+        ResolverEnv {
+            implementation_name: "cpython".to_string(),
+            implementation_version: "3.13.0".to_string(),
+            os_name: "posix".to_string(),
+            platform_machine: "x86_64".to_string(),
+            platform_python_implementation: "CPython".to_string(),
+            platform_release: "0".to_string(),
+            platform_system: "Linux".to_string(),
+            platform_version: "0".to_string(),
+            python_full_version: "3.13.0".to_string(),
+            python_version: "3.13".to_string(),
+            sys_platform: "linux".to_string(),
+        }
+    }
+
+    #[test]
+    fn resolver_includes_extra_dependencies_for_requests_socks() -> Result<()> {
+        if !require_online() {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache_dir = temp.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).expect("cache dir");
+        let request = ResolveRequest {
+            project: "demo".to_string(),
+            root: temp.path().to_path_buf(),
+            requirements: vec!["requests[socks]==2.32.3".to_string()],
+            tags: ResolverTags::default(),
+            env: dummy_env(),
+            indexes: vec!["https://pypi.org/simple".to_string()],
+            cache_dir,
+            python: "/usr/bin/python3".to_string(),
+        };
+        let resolved = resolve(&request)?;
+        let pysocks = resolved.iter().find(|spec| spec.normalized == "pysocks");
+        assert!(
+            pysocks.is_some(),
+            "expected PySocks to be part of the resolved closure, got {:?}",
+            resolved
+                .iter()
+                .map(|spec| spec.normalized.as_str())
+                .collect::<Vec<_>>()
+        );
+        let pysocks = pysocks.expect("pysocks resolved");
+        assert!(
+            !pysocks.marker.as_deref().is_some_and(marker_mentions_extra),
+            "expected pysocks marker to exclude `extra`, got {:?}",
+            pysocks.marker
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolver_includes_extra_dependencies_for_cachecontrol_filecache() -> Result<()> {
+        if !require_online() {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache_dir = temp.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).expect("cache dir");
+        let request = ResolveRequest {
+            project: "demo".to_string(),
+            root: temp.path().to_path_buf(),
+            requirements: vec!["cachecontrol[filecache]==0.14.3".to_string()],
+            tags: ResolverTags::default(),
+            env: dummy_env(),
+            indexes: vec!["https://pypi.org/simple".to_string()],
+            cache_dir,
+            python: "/usr/bin/python3".to_string(),
+        };
+        let resolved = resolve(&request)?;
+        let filelock = resolved.iter().find(|spec| spec.normalized == "filelock");
+        assert!(
+            filelock.is_some(),
+            "expected filelock to be part of the resolved closure, got {:?}",
+            resolved
+                .iter()
+                .map(|spec| spec.normalized.as_str())
+                .collect::<Vec<_>>()
+        );
+        let filelock = filelock.expect("filelock resolved");
+        assert!(
+            !filelock.marker.as_deref().is_some_and(marker_mentions_extra),
+            "expected filelock marker to exclude `extra`, got {:?}",
+            filelock.marker
+        );
+        Ok(())
     }
 }
 

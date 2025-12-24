@@ -1,9 +1,9 @@
-use std::{cell::RefCell, env, fs, path::PathBuf, process::Command};
+use std::{cell::RefCell, collections::HashSet, env, fs, path::PathBuf, process::Command};
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::Value;
 use tempfile::TempDir;
-use toml_edit::DocumentMut;
+use toml_edit::{DocumentMut, Item};
 
 mod common;
 
@@ -39,13 +39,33 @@ fn px_command(temp: &TempDir) -> assert_cmd::Command {
     let base = shared_cache_base();
     let cache_path = base.join("cache");
     let store_path = base.join("store");
+    let runtime_registry = base.join("runtimes.json");
     let python = common::find_python().unwrap_or_else(|| "python3".to_string());
+    if !runtime_registry.exists() {
+        if let Some((executable, channel, full_version)) =
+            common::detect_host_python_details(&python)
+        {
+            let payload = serde_json::json!({
+                "runtimes": [{
+                    "version": channel,
+                    "full_version": full_version,
+                    "path": executable,
+                    "default": true,
+                }],
+            });
+            let _ = fs::write(
+                &runtime_registry,
+                serde_json::to_string_pretty(&payload).unwrap() + "\n",
+            );
+        }
+    }
     let mut cmd = cargo_bin_cmd!("px");
     cmd.current_dir(temp.path())
         .env("PX_ONLINE", "1")
         .env("PX_CACHE_PATH", &cache_path)
         .env("PX_STORE_PATH", &store_path)
         .env("PX_RUNTIME_HOST_ONLY", "1")
+        .env("PX_RUNTIME_REGISTRY", &runtime_registry)
         .env("PX_RUNTIME_PYTHON", python);
     cmd
 }
@@ -54,13 +74,33 @@ fn px_command_offline(temp: &TempDir) -> assert_cmd::Command {
     let base = shared_cache_base();
     let cache_path = base.join("cache");
     let store_path = base.join("store");
+    let runtime_registry = base.join("runtimes.json");
     let python = common::find_python().unwrap_or_else(|| "python3".to_string());
+    if !runtime_registry.exists() {
+        if let Some((executable, channel, full_version)) =
+            common::detect_host_python_details(&python)
+        {
+            let payload = serde_json::json!({
+                "runtimes": [{
+                    "version": channel,
+                    "full_version": full_version,
+                    "path": executable,
+                    "default": true,
+                }],
+            });
+            let _ = fs::write(
+                &runtime_registry,
+                serde_json::to_string_pretty(&payload).unwrap() + "\n",
+            );
+        }
+    }
     let mut cmd = cargo_bin_cmd!("px");
     cmd.current_dir(temp.path())
         .env("PX_ONLINE", "0")
         .env("PX_CACHE_PATH", &cache_path)
         .env("PX_STORE_PATH", &store_path)
         .env("PX_RUNTIME_HOST_ONLY", "1")
+        .env("PX_RUNTIME_REGISTRY", &runtime_registry)
         .env("PX_RUNTIME_PYTHON", python);
     cmd
 }
@@ -106,6 +146,122 @@ fn command_output(assert: &assert_cmd::assert::Assert) -> String {
         buffer.push_str(&String::from_utf8_lossy(&out.stderr));
     }
     buffer
+}
+
+#[test]
+fn migrate_apply_locks_transitive_closure_and_env_matches() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(&temp, "requirements.txt", "requests==2.32.3\n");
+
+    px_command(&temp)
+        .args(["--json", "migrate", "--apply", "--allow-dirty"])
+        .assert()
+        .success();
+
+    let lock_path = temp.path().join("px.lock");
+    assert!(lock_path.exists(), "expected px.lock to be written");
+    let lock: DocumentMut = fs::read_to_string(&lock_path)
+        .expect("read px.lock")
+        .parse()
+        .expect("parse px.lock");
+    let tables = lock["dependencies"]
+        .as_array_of_tables()
+        .expect("dependencies tables");
+    let names: HashSet<String> = tables
+        .iter()
+        .filter_map(|entry| entry.get("name").and_then(Item::as_str))
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    for expected in [
+        "requests",
+        "urllib3",
+        "certifi",
+        "idna",
+        "charset-normalizer",
+    ] {
+        assert!(
+            names.contains(expected),
+            "expected {expected} in lock closure; got names={names:?}"
+        );
+    }
+
+    let assert = px_command(&temp)
+        .args([
+            "--json",
+            "run",
+            "python",
+            "--",
+            "-c",
+            "import requests,urllib3,certifi,idna,charset_normalizer; print('OK')",
+        ])
+        .assert()
+        .success();
+    let payload: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("run json output");
+    assert_eq!(payload["status"], "ok");
+    let stdout = payload["details"]["stdout"].as_str().unwrap_or_default();
+    assert!(
+        stdout.contains("OK"),
+        "expected env to import transitive deps; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn status_reports_needs_lock_when_lock_closure_is_incomplete() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(&temp, "requirements.txt", "requests==2.32.3\n");
+
+    px_command(&temp)
+        .args(["--json", "migrate", "--apply", "--allow-dirty"])
+        .assert()
+        .success();
+
+    let lock_path = temp.path().join("px.lock");
+    let lock_contents = fs::read_to_string(&lock_path).expect("read px.lock");
+    let mut lock: DocumentMut = lock_contents.parse().expect("parse px.lock");
+    let tables = lock["dependencies"]
+        .as_array_of_tables_mut()
+        .expect("dependencies tables");
+    let mut to_remove = None;
+    for (idx, entry) in tables.iter().enumerate() {
+        if entry.get("name").and_then(Item::as_str) == Some("urllib3") {
+            to_remove = Some(idx);
+            break;
+        }
+    }
+    let idx = to_remove.expect("urllib3 should exist in lock before mutation");
+    tables.remove(idx);
+    fs::write(&lock_path, lock.to_string()).expect("write incomplete lock");
+
+    let assert = px_command(&temp).args(["--json", "status"]).assert().failure();
+    let payload: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("status json output");
+    let state = payload["project"]["state"].as_str().unwrap_or_default();
+    assert_ne!(
+        state, "Consistent",
+        "status must not report Consistent when lock closure is incomplete"
+    );
+    assert_eq!(
+        state, "NeedsLock",
+        "expected NeedsLock due to missing transitive deps; payload={payload:?}"
+    );
+    let issues = payload["project"]["lock_issue"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    assert!(
+        issues.iter().any(|msg| msg.contains("missing transitive dependency `urllib3`")),
+        "expected lock_issue to mention missing urllib3; issues={issues:?}"
+    );
 }
 
 #[test]
@@ -485,6 +641,73 @@ source = { registry = "https://pypi.org/simple" }
         lock_contents.contains("click==8.1.7"),
         "px.lock should reuse versions from uv.lock"
     );
+}
+
+#[test]
+fn migrate_apply_locks_full_dependency_closure_from_uv_lock() {
+    if !require_online() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_file(
+        &temp,
+        "pyproject.toml",
+        r#"[project]
+name = "uv-lock-closure-demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["requests>=2.30,<3"]
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+"#,
+    );
+    write_file(
+        &temp,
+        "uv.lock",
+        r#"version = 1
+requires-python = ">=3.11"
+
+[[package]]
+name = "requests"
+version = "2.32.3"
+source = { registry = "https://pypi.org/simple" }
+"#,
+    );
+
+    px_command(&temp)
+        .args(["migrate", "--apply", "--allow-dirty"])
+        .assert()
+        .success();
+
+    let pyproject = fs::read_to_string(temp.path().join("pyproject.toml")).expect("pyproject");
+    assert!(
+        pyproject.contains("requests>=2.30,<3"),
+        "uv.lock migration should not pin manifest dependencies"
+    );
+
+    let lock_contents = fs::read_to_string(temp.path().join("px.lock")).expect("px.lock");
+    assert!(
+        lock_contents.contains("requests==2.32.3"),
+        "px.lock should reuse versions from uv.lock"
+    );
+    for dep in ["urllib3==", "certifi==", "idna==", "charset-normalizer=="] {
+        assert!(
+            lock_contents.contains(dep),
+            "px.lock should include transitive dependency {dep}"
+        );
+    }
+
+    px_command(&temp)
+        .args([
+            "run",
+            "python",
+            "-c",
+            "import requests, urllib3, certifi, idna, charset_normalizer; print('ok')",
+        ])
+        .assert()
+        .success();
 }
 
 #[test]

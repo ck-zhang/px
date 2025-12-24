@@ -113,10 +113,10 @@ pub enum CommandGroupCli {
     )]
     Init(InitArgs),
     #[command(
-        about = "Declare direct dependencies and immediately sync px.lock + env. By default, px pins direct deps in pyproject.toml for determinism.",
-        override_usage = "px add <SPEC> [SPEC ...]"
+        about = "Declare direct dependencies and immediately sync px.lock + env. By default, pyproject.toml expresses intent (ranges/unpinned) and px.lock pins exact versions. Prints a concise change summary.",
+        override_usage = "px add [--pin] <SPEC> [SPEC ...]"
     )]
-    Add(SpecArgs),
+    Add(AddArgs),
     #[command(
         about = "Remove direct dependencies and re-sync px.lock + env.",
         override_usage = "px remove <NAME> [NAME ...]"
@@ -128,7 +128,7 @@ pub enum CommandGroupCli {
     )]
     Sync(SyncArgs),
     #[command(
-        about = "Resolve newer versions, rewrite px.lock, then sync the env.",
+        about = "Resolve newer versions, rewrite px.lock, then sync the env. Prints a concise change summary (use -v for more).",
         override_usage = "px update [<SPEC> ...]"
     )]
     Update(SpecArgs),
@@ -373,6 +373,16 @@ pub struct InitArgs {
 pub struct SpecArgs {
     #[command(flatten)]
     pub common: CommonFlags,
+    #[arg(value_name = "SPEC")]
+    pub specs: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AddArgs {
+    #[command(flatten)]
+    pub common: CommonFlags,
+    #[arg(long, help = "Pin added dependencies to exact versions in pyproject.toml")]
+    pub pin: bool,
     #[arg(value_name = "SPEC")]
     pub specs: Vec<String>,
 }

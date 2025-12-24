@@ -17,6 +17,8 @@ pub(in crate::core::runtime::run) fn test_project_outcome(
     request: &TestRequest,
 ) -> Result<ExecutionOutcome> {
     let strict = request.frozen || ctx.env_flag_enabled("CI");
+    let allow_lock_autosync =
+        !strict && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
     if request.ephemeral {
         return super::super::ephemeral::test_ephemeral_outcome(ctx, request, strict);
@@ -27,8 +29,13 @@ pub(in crate::core::runtime::run) fn test_project_outcome(
     }
     let mut sandbox: Option<SandboxRunContext> = None;
 
-    let plan =
-        match execution_plan::plan_test_execution(ctx, strict, request.sandbox, &request.args) {
+    let plan = match execution_plan::plan_test_execution(
+        ctx,
+        strict,
+        allow_lock_autosync,
+        request.sandbox,
+        &request.args,
+    ) {
             Ok(plan) => plan,
             Err(outcome) => return Ok(outcome),
         };
@@ -239,7 +246,7 @@ pub(in crate::core::runtime::run) fn test_project_outcome(
         Ok(report) => report,
         Err(outcome) => return Ok(outcome),
     };
-    let guard = match guard_for_execution(strict, &snapshot, &state_report, "test") {
+    let guard = match guard_for_execution(strict, allow_lock_autosync, &snapshot, &state_report, "test") {
         Ok(guard) => guard,
         Err(outcome) => return Ok(outcome),
     };

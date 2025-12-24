@@ -11,7 +11,7 @@ use crate::{
     compute_lock_hash, detect_runtime_metadata, CommandContext, ExecutionOutcome, InstallUserError,
     StoredEnvironment, StoredRuntime,
 };
-use px_domain::api::{detect_lock_drift, load_lockfile_optional};
+use px_domain::api::{detect_lock_drift, load_lockfile_optional, validate_lock_closure};
 
 use super::{WorkspaceSnapshot, WorkspaceStateKind, WorkspaceStateReport};
 
@@ -93,16 +93,18 @@ pub(crate) fn evaluate_workspace_state(
         if let Some(lock) = load_lockfile_optional(&workspace.lock_path)? {
             lock_fingerprint = lock.manifest_fingerprint.clone();
             let marker_env = ctx.marker_environment().ok();
-            let drift = detect_lock_drift(&workspace.lock_snapshot(), &lock, marker_env.as_ref());
-            if drift.is_empty()
+            let mut issues =
+                detect_lock_drift(&workspace.lock_snapshot(), &lock, marker_env.as_ref());
+            issues.extend(validate_lock_closure(&lock, marker_env.as_ref()));
+            if issues.is_empty()
                 && lock
                     .manifest_fingerprint
                     .as_deref()
                     .is_some_and(|fp| fp == workspace.manifest_fingerprint)
             {
                 manifest_clean = true;
-            } else if !drift.is_empty() {
-                lock_issue = Some(drift);
+            } else if !issues.is_empty() {
+                lock_issue = Some(issues);
             }
             lock_id = Some(
                 lock.lock_id

@@ -16,7 +16,10 @@ use crate::{
     resolve_dependencies_with_effects, CommandContext, ExecutionOutcome, InstallOutcome,
     InstallOverride, InstallState, InstallUserError, ManifestSnapshot,
 };
-use px_domain::api::{load_lockfile_optional, merge_resolved_dependencies, ManifestEditor};
+use px_domain::api::{
+    autopin_pin_key, autopin_spec_key, load_lockfile_optional, marker_applies,
+    merge_resolved_dependencies, parse_lockfile, spec_requires_pin, ManifestEditor, PinSpec,
+};
 
 use crate::workspace::{
     discover_workspace_scope, workspace_add, workspace_remove, workspace_update,
@@ -27,6 +30,7 @@ use super::{ensure_mutation_allowed, evaluate_project_state, ProjectLock};
 #[derive(Clone, Debug)]
 pub struct ProjectAddRequest {
     pub specs: Vec<String>,
+    pub pin: bool,
     pub dry_run: bool,
 }
 
@@ -57,7 +61,7 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
     if request.specs.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "provide at least one dependency",
-            json!({ "hint": "run `px add name==version`" }),
+            json!({ "hint": "run `px add requests`" }),
         ));
     }
 
@@ -86,9 +90,11 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
     if cleaned_specs.is_empty() {
         return Ok(ExecutionOutcome::user_error(
             "provide at least one dependency",
-            json!({ "hint": "run `px add name==version`" }),
+            json!({ "hint": "run `px add requests`" }),
         ));
     }
+    let allow_targeted_pin = request.pin && !snapshot.px_options.pin_manifest;
+    let pin_targets = allow_targeted_pin.then(|| dependency_target_names(&cleaned_specs));
 
     let lock_path = root.join("px.lock");
     let backup = ManifestLockBackup::capture(&pyproject_path, &lock_path)?;
@@ -98,8 +104,16 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
         let mut editor = ManifestEditor::open(&pyproject_path)?;
         let report = editor.add_specs(&cleaned_specs)?;
         let dependencies_after_edit = editor.dependencies();
+        let pin_needed = pin_targets.as_ref().is_some_and(|targets| {
+            let after_map = dependency_spec_map(&dependencies_after_edit);
+            targets.iter().any(|name| {
+                after_map
+                    .get(name)
+                    .is_some_and(|spec| !is_exact_pin(spec))
+            })
+        });
 
-        if report.added.is_empty() && report.updated.is_empty() {
+        if report.added.is_empty() && report.updated.is_empty() && !pin_needed {
             needs_restore = request.dry_run;
             return Ok(ExecutionOutcome::success(
                 "dependencies already satisfied",
@@ -127,8 +141,19 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
                 },
             };
             let marker_env = ctx.marker_environment()?;
-            let planned_manifest =
-                merge_resolved_dependencies(&dependencies_after_edit, &resolved.specs, &marker_env);
+            let planned_manifest = if updated_snapshot.px_options.pin_manifest {
+                merge_resolved_dependencies(&dependencies_after_edit, &resolved.specs, &marker_env)
+            } else if let Some(targets) = pin_targets.as_ref() {
+                pin_dependencies_for_targets(
+                    &dependencies_after_edit,
+                    targets,
+                    &resolved.pins,
+                    &marker_env,
+                )
+                .0
+            } else {
+                dependencies_after_edit.clone()
+            };
             let lock = load_lockfile_optional(&lock_path)?;
             let lock_preview = super::lock_preview(lock.as_ref(), &resolved.pins);
             let env_would_rebuild = lock_preview
@@ -157,29 +182,117 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
             ));
         }
 
-        let (snapshot, _install) = match sync_manifest_environment(ctx) {
-            Ok(result) => result,
-            Err(outcome) => return Ok(outcome),
+        let snapshot = if pin_needed {
+            let updated_snapshot = manifest_snapshot_at(&root)?;
+            let resolved =
+                match resolve_dependencies_with_effects(ctx.effects(), &updated_snapshot, true) {
+                    Ok(resolved) => resolved,
+                    Err(err) => match err.downcast::<InstallUserError>() {
+                        Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                        Err(err) => {
+                            return Ok(ExecutionOutcome::failure(
+                                "px add failed",
+                                json!({ "error": err.to_string() }),
+                            ))
+                        }
+                    },
+                };
+            let marker_env = ctx.marker_environment()?;
+            let targets = pin_targets.as_ref().expect("pin_targets when pin_needed");
+            let (pinned_deps, _) =
+                pin_dependencies_for_targets(&updated_snapshot.dependencies, targets, &resolved.pins, &marker_env);
+            persist_resolved_dependencies(&updated_snapshot, &pinned_deps)?;
+            let updated_snapshot = manifest_snapshot_at(&root)?;
+            let override_data = InstallOverride {
+                dependencies: pinned_deps,
+                pins: resolved.pins.clone(),
+            };
+            let install_outcome =
+                match install_snapshot(ctx, &updated_snapshot, false, false, Some(&override_data)) {
+                    Ok(outcome) => outcome,
+                    Err(err) => match err.downcast::<InstallUserError>() {
+                        Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                        Err(err) => {
+                            return Ok(ExecutionOutcome::failure(
+                                "px add failed",
+                                json!({ "error": err.to_string() }),
+                            ))
+                        }
+                    },
+                };
+            if let Err(err) = refresh_project_site(&updated_snapshot, ctx) {
+                return Ok(ExecutionOutcome::failure(
+                    "px add failed to refresh environment",
+                    json!({ "error": err.to_string() }),
+                ));
+            }
+            match install_outcome.state {
+                InstallState::Installed | InstallState::UpToDate => {}
+                InstallState::Drift | InstallState::MissingLock => {
+                    return Ok(ExecutionOutcome::failure(
+                        "px add failed to refresh px.lock",
+                        json!({ "lockfile": updated_snapshot.lock_path.display().to_string() }),
+                    ))
+                }
+            }
+            updated_snapshot
+        } else {
+            let (snapshot, _install) = match sync_manifest_environment(ctx) {
+                Ok(result) => result,
+                Err(outcome) => return Ok(outcome),
+            };
+            snapshot
         };
         needs_restore = false;
         let dependencies_after =
             ManifestEditor::open(&pyproject_path)?.dependencies();
-        let manifest_changes =
-            pinned_manifest_changes(&report.added, &report.updated, &dependencies_after_edit, &dependencies_after);
-        let message = format!(
-            "updated dependencies (added {}, updated {})",
-            report.added.len(),
-            report.updated.len()
+        let added_specs = {
+            let after_map = dependency_spec_map(&dependencies_after);
+            let mut out = Vec::new();
+            for name in &report.added {
+                if let Some(spec) = after_map.get(name) {
+                    out.push(spec.clone());
+                }
+            }
+            out.sort();
+            out.dedup();
+            out
+        };
+        let manifest_changes = pinned_manifest_changes(
+            &report.added,
+            &report.updated,
+            pin_targets.as_ref(),
+            &dependencies_after_edit,
+            &dependencies_after,
         );
+        let message = if report.added.is_empty() && report.updated.is_empty() {
+            "pinned dependencies".to_string()
+        } else {
+            format!(
+                "updated dependencies (added {}, updated {})",
+                report.added.len(),
+                report.updated.len()
+            )
+        };
         let mut details = json!({
             "pyproject": pyproject_path.display().to_string(),
             "lockfile": snapshot.lock_path.display().to_string(),
             "added": report.added,
             "updated": report.updated,
         });
+        if !added_specs.is_empty() {
+            details["manifest_added"] = json!(added_specs);
+        }
         if !manifest_changes.is_empty() {
             details["manifest_changes"] = json!(manifest_changes);
         }
+        let before_lock =
+            backup
+                .lock_contents
+                .as_deref()
+                .and_then(|contents| parse_lockfile(contents).ok());
+        let after_lock = load_lockfile_optional(&snapshot.lock_path)?;
+        details["lock_changes"] = super::lock_changes(before_lock.as_ref(), after_lock.as_ref());
         Ok(ExecutionOutcome::success(
             message,
             details,
@@ -196,13 +309,25 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
 fn pinned_manifest_changes(
     added: &[String],
     updated: &[String],
+    pinned: Option<&HashSet<String>>,
     before: &[String],
     after: &[String],
 ) -> Vec<serde_json::Value> {
     let before_map = dependency_spec_map(before);
     let after_map = dependency_spec_map(after);
     let mut changes = Vec::new();
+    let mut targets = Vec::new();
     for name in added.iter().chain(updated) {
+        targets.push(name);
+    }
+    if let Some(extra) = pinned {
+        for name in extra {
+            targets.push(name);
+        }
+    }
+    targets.sort();
+    targets.dedup();
+    for name in targets {
         let Some(before_spec) = before_map.get(name) else {
             continue;
         };
@@ -221,6 +346,92 @@ fn pinned_manifest_changes(
         }
     }
     changes
+}
+
+fn dependency_target_names(specs: &[String]) -> HashSet<String> {
+    let mut targets = HashSet::new();
+    for spec in specs {
+        let name = dependency_name(spec);
+        if name.is_empty() {
+            continue;
+        }
+        targets.insert(name);
+    }
+    targets
+}
+
+fn pin_dependencies_for_targets(
+    dependencies: &[String],
+    targets: &HashSet<String>,
+    pins: &[PinSpec],
+    marker_env: &pep508_rs::MarkerEnvironment,
+) -> (Vec<String>, bool) {
+    let mut pinned_lookup = HashMap::new();
+    for pin in pins {
+        pinned_lookup.insert(autopin_pin_key(pin), pin.specifier.clone());
+    }
+    let mut updated = Vec::with_capacity(dependencies.len());
+    let mut changed = false;
+    for spec in dependencies {
+        let name = dependency_name(spec);
+        if name.is_empty() || !targets.contains(&name) {
+            updated.push(spec.clone());
+            continue;
+        }
+        if !spec_requires_pin(spec) || !marker_applies(spec, marker_env) {
+            updated.push(spec.clone());
+            continue;
+        }
+        let key = autopin_spec_key(spec);
+        if let Some(pinned) = pinned_lookup.get(&key) {
+            if pinned != spec {
+                changed = true;
+                updated.push(pinned.clone());
+            } else {
+                updated.push(spec.clone());
+            }
+        } else {
+            updated.push(spec.clone());
+        }
+    }
+    (updated, changed)
+}
+
+fn update_exact_pins_for_targets(
+    dependencies: &[String],
+    targets: &HashSet<String>,
+    pins: &[PinSpec],
+    marker_env: &pep508_rs::MarkerEnvironment,
+) -> (Vec<String>, bool) {
+    let mut pinned_lookup = HashMap::new();
+    for pin in pins {
+        pinned_lookup.insert(autopin_pin_key(pin), pin.specifier.clone());
+    }
+    let mut updated = Vec::with_capacity(dependencies.len());
+    let mut changed = false;
+    for spec in dependencies {
+        let name = dependency_name(spec);
+        if name.is_empty() || !targets.contains(&name) || !is_exact_pin(spec) {
+            updated.push(spec.clone());
+            continue;
+        }
+        if !marker_applies(spec, marker_env) {
+            updated.push(spec.clone());
+            continue;
+        }
+        let key = autopin_spec_key(spec);
+        if let Some(pinned) = pinned_lookup.get(&key) {
+            if pinned != spec {
+                changed = true;
+                updated.push(pinned.clone());
+            } else {
+                updated.push(spec.clone());
+            }
+        } else {
+            updated.push(spec.clone());
+        }
+    }
+    (updated, changed)
 }
 
 fn dependency_spec_map(specs: &[String]) -> HashMap<String, String> {
@@ -490,11 +701,30 @@ pub fn project_update(
                     },
                 };
             let marker_env = ctx.marker_environment()?;
-            let planned_manifest = merge_resolved_dependencies(
-                &override_snapshot.dependencies,
-                &resolved.specs,
-                &marker_env,
-            );
+            let planned_manifest = if snapshot.px_options.pin_manifest {
+                merge_resolved_dependencies(&override_snapshot.dependencies, &resolved.specs, &marker_env)
+            } else {
+                let mut pinned_targets = HashSet::new();
+                for spec in &snapshot.dependencies {
+                    if !is_exact_pin(spec) {
+                        continue;
+                    }
+                    let name = dependency_name(spec);
+                    if name.is_empty() {
+                        continue;
+                    }
+                    if update_all || targets.contains(&name) {
+                        pinned_targets.insert(name);
+                    }
+                }
+                update_exact_pins_for_targets(
+                    &snapshot.dependencies,
+                    &pinned_targets,
+                    &resolved.pins,
+                    &marker_env,
+                )
+                .0
+            };
             let lock = load_lockfile_optional(&snapshot.lock_path)?;
             let lock_preview = super::lock_preview(lock.as_ref(), &resolved.pins);
             let env_would_rebuild = lock_preview
@@ -559,20 +789,43 @@ pub fn project_update(
             };
 
         let marker_env = ctx.marker_environment()?;
-        let updated_deps = merge_resolved_dependencies(
-            &override_snapshot.dependencies,
-            &resolved.specs,
-            &marker_env,
-        );
-        persist_resolved_dependencies(&snapshot, &updated_deps)?;
-        let updated_snapshot = manifest_snapshot()?;
+        let (updated_deps, manifest_written) = if snapshot.px_options.pin_manifest {
+            let deps = merge_resolved_dependencies(&override_snapshot.dependencies, &resolved.specs, &marker_env);
+            persist_resolved_dependencies(&snapshot, &deps)?;
+            (deps, true)
+        } else {
+            let mut pinned_targets = HashSet::new();
+            for spec in &snapshot.dependencies {
+                if !is_exact_pin(spec) {
+                    continue;
+                }
+                let name = dependency_name(spec);
+                if name.is_empty() {
+                    continue;
+                }
+                if update_all || targets.contains(&name) {
+                    pinned_targets.insert(name);
+                }
+            }
+            let (deps, changed) =
+                update_exact_pins_for_targets(&snapshot.dependencies, &pinned_targets, &resolved.pins, &marker_env);
+            if changed {
+                persist_resolved_dependencies(&snapshot, &deps)?;
+            }
+            (deps, changed)
+        };
+        let updated_snapshot = if manifest_written {
+            manifest_snapshot()?
+        } else {
+            snapshot.clone()
+        };
         let override_data = InstallOverride {
             dependencies: updated_deps,
             pins: resolved.pins.clone(),
         };
 
         let install_outcome =
-            match install_snapshot(ctx, &updated_snapshot, false, Some(&override_data)) {
+            match install_snapshot(ctx, &updated_snapshot, false, true, Some(&override_data)) {
                 Ok(result) => result,
                 Err(err) => match err.downcast::<InstallUserError>() {
                     Ok(user) => {
@@ -604,6 +857,13 @@ pub fn project_update(
             "lockfile": updated_snapshot.lock_path.display().to_string(),
             "targets": ready,
         });
+        let before_lock =
+            backup
+                .lock_contents
+                .as_deref()
+                .and_then(|contents| parse_lockfile(contents).ok());
+        let after_lock = load_lockfile_optional(&updated_snapshot.lock_path)?;
+        details["lock_changes"] = super::lock_changes(before_lock.as_ref(), after_lock.as_ref());
         if !unsupported.is_empty() {
             details["skipped"] = json!(unsupported);
             details["hint"] = json!("Dependencies pinned via direct URLs must be updated manually");
@@ -661,7 +921,13 @@ fn loosen_dependency_spec(spec: &str) -> Result<LoosenOutcome> {
     let requirement = PepRequirement::from_str(trimmed)
         .map_err(|err| anyhow!("unable to parse dependency spec `{spec}`: {err}"))?;
     match requirement.version_or_url {
-        Some(VersionOrUrl::VersionSpecifier(_)) => {
+        Some(VersionOrUrl::VersionSpecifier(ref specifiers)) => {
+            let rendered = specifiers.to_string();
+            let exact = (rendered.starts_with("==") || rendered.starts_with("==="))
+                && !rendered.contains(',');
+            if !exact {
+                return Ok(LoosenOutcome::AlreadyLoose);
+            }
             let mut unlocked = requirement.clone();
             unlocked.version_or_url = None;
             Ok(LoosenOutcome::Modified(unlocked.to_string()))
@@ -786,7 +1052,7 @@ fn sync_manifest_environment(
             ));
         }
     };
-    let outcome = match install_snapshot(ctx, &snapshot, false, None) {
+    let outcome = match install_snapshot(ctx, &snapshot, false, false, None) {
         Ok(outcome) => outcome,
         Err(err) => match err.downcast::<InstallUserError>() {
             Ok(user) => return Err(ExecutionOutcome::user_error(user.message, user.details)),

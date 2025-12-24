@@ -94,6 +94,7 @@ impl StateViolation {
 
 pub(crate) fn guard_for_execution(
     strict: bool,
+    allow_lock_autosync: bool,
     snapshot: &ProjectSnapshot,
     state_report: &ProjectStateReport,
     command: &'static str,
@@ -112,7 +113,16 @@ pub(crate) fn guard_for_execution(
     }
 
     if !state_report.lock_exists {
+        if allow_lock_autosync {
+            return Ok(crate::EnvGuard::AutoSync);
+        }
         return Err(StateViolation::MissingLock.into_outcome(snapshot, command, state_report));
+    }
+    if !state_report.manifest_clean {
+        if allow_lock_autosync {
+            return Ok(crate::EnvGuard::AutoSync);
+        }
+        return Err(StateViolation::LockDrift.into_outcome(snapshot, command, state_report));
     }
     if matches!(state_report.canonical, ProjectStateKind::NeedsLock) {
         return Err(StateViolation::LockDrift.into_outcome(snapshot, command, state_report));
@@ -225,7 +235,7 @@ mod tests {
     fn guard_blocks_env_drift_in_strict() {
         let snap = dummy_snapshot();
         let rpt = report(true, true, true, true, false);
-        let outcome = guard_for_execution(true, &snap, &rpt, "run").unwrap_err();
+        let outcome = guard_for_execution(true, false, &snap, &rpt, "run").unwrap_err();
         assert_eq!(outcome.status, CommandStatus::UserError);
     }
 
@@ -249,7 +259,8 @@ mod tests {
     fn guard_allows_autosync_for_needs_env_in_dev() {
         let snap = dummy_snapshot();
         let rpt = report(true, true, true, true, false);
-        let guard = guard_for_execution(false, &snap, &rpt, "run").expect("auto-sync allowed");
+        let guard =
+            guard_for_execution(false, false, &snap, &rpt, "run").expect("auto-sync allowed");
         assert!(matches!(guard, crate::EnvGuard::AutoSync));
     }
 
@@ -257,24 +268,25 @@ mod tests {
     fn guard_requires_env_in_frozen_mode() {
         let snap = dummy_snapshot();
         let rpt = report(true, true, true, true, false);
-        let outcome = guard_for_execution(true, &snap, &rpt, "test").unwrap_err();
+        let outcome = guard_for_execution(true, false, &snap, &rpt, "test").unwrap_err();
         assert_eq!(outcome.status, CommandStatus::UserError);
-        let guard = guard_for_execution(false, &snap, &rpt, "test").expect("dev accepts autosync");
+        let guard =
+            guard_for_execution(false, false, &snap, &rpt, "test").expect("dev accepts autosync");
         assert!(matches!(guard, crate::EnvGuard::AutoSync));
     }
 
     #[test]
-    fn guard_blocks_missing_lock_even_in_dev() {
+    fn guard_blocks_missing_lock_without_autosync() {
         let snap = dummy_snapshot();
         let rpt = report(true, false, false, false, false);
-        let outcome = guard_for_execution(false, &snap, &rpt, "run").unwrap_err();
+        let outcome = guard_for_execution(false, false, &snap, &rpt, "run").unwrap_err();
         assert_eq!(outcome.status, CommandStatus::UserError);
-        let outcome = guard_for_execution(true, &snap, &rpt, "run").unwrap_err();
+        let outcome = guard_for_execution(true, false, &snap, &rpt, "run").unwrap_err();
         assert_eq!(outcome.status, CommandStatus::UserError);
     }
 
     #[test]
-    fn guard_blocks_lock_drift_even_in_dev() {
+    fn guard_blocks_lock_drift_without_autosync() {
         let snap = dummy_snapshot();
         let rpt = ProjectStateReport::new(
             true,
@@ -290,9 +302,26 @@ mod tests {
             None,
         );
         assert_eq!(rpt.canonical, ProjectStateKind::NeedsLock);
-        let outcome = guard_for_execution(false, &snap, &rpt, "run").unwrap_err();
+        let outcome = guard_for_execution(false, false, &snap, &rpt, "run").unwrap_err();
         assert_eq!(outcome.status, CommandStatus::UserError);
-        let outcome = guard_for_execution(true, &snap, &rpt, "test").unwrap_err();
+        let outcome = guard_for_execution(true, false, &snap, &rpt, "test").unwrap_err();
         assert_eq!(outcome.status, CommandStatus::UserError);
+    }
+
+    #[test]
+    fn guard_allows_lock_bootstrap_when_autosync_enabled() {
+        let snap = dummy_snapshot();
+        let rpt = report(true, false, false, false, false);
+        let guard = guard_for_execution(false, true, &snap, &rpt, "run").expect("autosync");
+        assert!(matches!(guard, crate::EnvGuard::AutoSync));
+    }
+
+    #[test]
+    fn guard_allows_lock_drift_repair_when_autosync_enabled_and_manifest_changed() {
+        let snap = dummy_snapshot();
+        let rpt = report(true, true, true, false, true);
+        assert_eq!(rpt.canonical, ProjectStateKind::NeedsLock);
+        let guard = guard_for_execution(false, true, &snap, &rpt, "run").expect("autosync");
+        assert!(matches!(guard, crate::EnvGuard::AutoSync));
     }
 }

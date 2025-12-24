@@ -85,5 +85,8 @@ pub fn manifest_fingerprint(
             hasher.update(b"\n");
         }
     }
+    if options.pin_manifest {
+        hasher.update(b"pin-manifest:1\n");
+    }
     Ok(format!("{:x}", hasher.finalize()))
 }

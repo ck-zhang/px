@@ -303,7 +303,7 @@ fn sandbox_run_requires_consistent_env() {
 }
 
 #[test]
-fn test_bootstraps_lock_before_running_tests() {
+fn test_refuses_lock_bootstrap_without_tty() {
     let _guard = test_env_guard();
     if !require_online() {
         return;
@@ -325,24 +325,24 @@ fn test_bootstraps_lock_before_running_tests() {
         .env("PX_TEST_FALLBACK_STD", "1")
         .args(["--json", "test"])
         .assert()
-        .success();
+        .failure();
 
     let payload = parse_json(&assert);
-    assert_eq!(payload["status"], "ok");
-    let autosync = payload["details"]
-        .get("autosync")
-        .and_then(serde_json::Value::as_object)
-        .expect("autosync details present");
-    assert_eq!(
-        autosync.get("action").and_then(serde_json::Value::as_str),
-        Some("lock-bootstrap"),
-        "expected missing lock to trigger bootstrap"
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(payload["details"]["reason"], "missing_lock");
+    assert!(
+        payload["details"]["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains("px sync"),
+        "expected hint to recommend px sync, got {:?}",
+        payload["details"]["hint"]
     );
-    assert!(lock.exists(), "px.lock should be created during autosync");
 }
 
 #[test]
-fn run_bootstraps_lock_before_execution() {
+fn run_refuses_lock_bootstrap_without_tty() {
     let _guard = test_env_guard();
     if !require_online() {
         return;
@@ -363,10 +363,68 @@ fn run_bootstraps_lock_before_execution() {
         .env("PX_RUNTIME_PYTHON", &python)
         .args(["--json", "run", "python", "--", "-c", "print('ok')"])
         .assert()
-        .success();
+        .failure();
 
     let payload = parse_json(&assert);
-    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(payload["details"]["reason"], "missing_lock");
+    assert!(
+        payload["details"]["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains("px sync"),
+        "expected hint to recommend px sync, got {:?}",
+        payload["details"]["hint"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_bootstraps_lock_before_running_tests_under_tty() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let (_tmp, project) = prepare_fixture("test-missing-lock-tty");
+    let lock = project.join("px.lock");
+    if lock.exists() {
+        fs::remove_file(&lock).expect("remove px.lock");
+    }
+    fs::remove_dir_all(project.join(".px")).ok();
+    let Some(python) = find_python() else {
+        eprintln!("skipping test tty autosync test (python binary not found)");
+        return;
+    };
+
+    let script_ok = Command::new("script")
+        .args(["-q", "-e", "-c", "true", "/dev/null"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !script_ok {
+        eprintln!("skipping test tty autosync test (script command unavailable)");
+        return;
+    }
+
+    let px = assert_cmd::cargo::cargo_bin!("px");
+    let command = format!("{} --json test", px.display());
+    let output = Command::new("script")
+        .args(["-q", "-e", "-c", &command, "/dev/null"])
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_TEST_FALLBACK_STD", "1")
+        .output()
+        .expect("spawn script");
+
+    assert!(
+        output.status.success(),
+        "tty autosync test should succeed, stdout: {:?}, stderr: {:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(payload["status"], Value::String("ok".into()));
     let autosync = payload["details"]
         .get("autosync")
         .and_then(serde_json::Value::as_object)
@@ -376,7 +434,336 @@ fn run_bootstraps_lock_before_execution() {
         Some("lock-bootstrap"),
         "expected missing lock to trigger bootstrap"
     );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("px.lock missing; syncing"),
+        "expected lock bootstrap message on stderr, got {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(lock.exists(), "px.lock should be created during autosync");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_autosyncs_manifest_drift_under_tty() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let (_tmp, project) = prepare_fixture("test-drift-tty");
+    let Some(python) = find_python() else {
+        eprintln!("skipping test tty drift autosync test (python binary not found)");
+        return;
+    };
+
+    let script_ok = Command::new("script")
+        .args(["-q", "-e", "-c", "true", "/dev/null"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !script_ok {
+        eprintln!("skipping test tty drift autosync test (script command unavailable)");
+        return;
+    }
+
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let pyproject = project.join("pyproject.toml");
+    let mut doc: toml_edit::DocumentMut = fs::read_to_string(&pyproject)
+        .expect("read pyproject")
+        .parse()
+        .expect("parse pyproject");
+    doc["project"]["dependencies"]
+        .as_array_mut()
+        .expect("dependencies array")
+        .push("requests==2.32.3");
+    fs::write(&pyproject, doc.to_string()).expect("write pyproject");
+
+    let px = assert_cmd::cargo::cargo_bin!("px");
+    let command = format!("{} --json test", px.display());
+    let output = Command::new("script")
+        .args(["-q", "-e", "-c", &command, "/dev/null"])
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .env("PX_TEST_FALLBACK_STD", "1")
+        .output()
+        .expect("spawn script");
+
+    assert!(
+        output.status.success(),
+        "tty autosync test should succeed, stdout: {:?}, stderr: {:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(payload["status"], Value::String("ok".into()));
+    let autosync = payload["details"]
+        .get("autosync")
+        .and_then(serde_json::Value::as_object)
+        .expect("autosync details present");
+    assert_eq!(
+        autosync.get("action").and_then(serde_json::Value::as_str),
+        Some("lock-sync"),
+        "expected manifest drift to trigger lock-sync autosync"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Manifest changed; syncing"),
+        "expected drift message on stderr, got {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn run_bootstraps_lock_before_execution_under_tty() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let (_tmp, project) = prepare_fixture("run-missing-lock-tty");
+    let lock = project.join("px.lock");
+    if lock.exists() {
+        fs::remove_file(&lock).expect("remove px.lock");
+    }
+    fs::remove_dir_all(project.join(".px")).ok();
+    let Some(python) = find_python() else {
+        eprintln!("skipping run tty autosync test (python binary not found)");
+        return;
+    };
+
+    let script_ok = Command::new("script")
+        .args(["-q", "-e", "-c", "true", "/dev/null"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !script_ok {
+        eprintln!("skipping run tty autosync test (script command unavailable)");
+        return;
+    }
+
+    let px = assert_cmd::cargo::cargo_bin!("px");
+    let command = format!("{} --json run python -- -c \"print('ok')\"", px.display());
+    let output = Command::new("script")
+        .args(["-q", "-e", "-c", &command, "/dev/null"])
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .output()
+        .expect("spawn script");
+
+    assert!(
+        output.status.success(),
+        "tty autosync run should succeed, stdout: {:?}, stderr: {:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(payload["status"], Value::String("ok".into()));
+    let autosync = payload["details"]
+        .get("autosync")
+        .and_then(serde_json::Value::as_object)
+        .expect("autosync details present");
+    assert_eq!(
+        autosync.get("action").and_then(serde_json::Value::as_str),
+        Some("lock-bootstrap"),
+        "expected missing lock to trigger bootstrap"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("px.lock missing; syncing"),
+        "expected lock bootstrap message on stderr, got {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(lock.exists(), "px.lock should be created during autosync");
+}
+
+#[cfg(unix)]
+#[test]
+fn run_autosyncs_manifest_drift_under_tty() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let (_tmp, project) = prepare_fixture("run-drift-tty");
+    let Some(python) = find_python() else {
+        eprintln!("skipping run tty drift autosync test (python binary not found)");
+        return;
+    };
+
+    let script_ok = Command::new("script")
+        .args(["-q", "-e", "-c", "true", "/dev/null"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !script_ok {
+        eprintln!("skipping run tty drift autosync test (script command unavailable)");
+        return;
+    }
+
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let pyproject = project.join("pyproject.toml");
+    let mut doc: toml_edit::DocumentMut = fs::read_to_string(&pyproject)
+        .expect("read pyproject")
+        .parse()
+        .expect("parse pyproject");
+    doc["project"]["dependencies"]
+        .as_array_mut()
+        .expect("dependencies array")
+        .push("requests==2.32.3");
+    fs::write(&pyproject, doc.to_string()).expect("write pyproject");
+
+    let px = assert_cmd::cargo::cargo_bin!("px");
+    let command = format!("{} --json run python -- -c \"print('ok')\"", px.display());
+    let output = Command::new("script")
+        .args(["-q", "-e", "-c", &command, "/dev/null"])
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .output()
+        .expect("spawn script");
+
+    assert!(
+        output.status.success(),
+        "tty autosync run should succeed, stdout: {:?}, stderr: {:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(payload["status"], Value::String("ok".into()));
+    let autosync = payload["details"]
+        .get("autosync")
+        .and_then(serde_json::Value::as_object)
+        .expect("autosync details present");
+    assert_eq!(
+        autosync.get("action").and_then(serde_json::Value::as_str),
+        Some("lock-sync"),
+        "expected manifest drift to trigger lock-sync autosync"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Manifest changed; syncing"),
+        "expected drift message on stderr, got {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn run_refuses_manifest_drift_without_tty() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let (_tmp, project) = prepare_fixture("run-drift-non-tty");
+    let Some(python) = find_python() else {
+        eprintln!("skipping run drift test (python binary not found)");
+        return;
+    };
+
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let pyproject = project.join("pyproject.toml");
+    let mut doc: toml_edit::DocumentMut = fs::read_to_string(&pyproject)
+        .expect("read pyproject")
+        .parse()
+        .expect("parse pyproject");
+    doc["project"]["dependencies"]
+        .as_array_mut()
+        .expect("dependencies array")
+        .push("requests==2.32.3");
+    fs::write(&pyproject, doc.to_string()).expect("write pyproject");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["--json", "run", "python", "--", "-c", "print('ok')"])
+        .assert()
+        .failure();
+
+    let payload = parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(payload["details"]["reason"], "lock_drift");
+    assert!(
+        payload["details"]["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains("px sync"),
+        "expected hint to recommend px sync, got {:?}",
+        payload["details"]["hint"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn run_refuses_manifest_drift_in_ci_even_under_tty() {
+    let _guard = test_env_guard();
+    if !require_online() {
+        return;
+    }
+    let (_tmp, project) = prepare_fixture("run-drift-ci-tty");
+    let Some(python) = find_python() else {
+        eprintln!("skipping run drift ci test (python binary not found)");
+        return;
+    };
+
+    let script_ok = Command::new("script")
+        .args(["-q", "-e", "-c", "true", "/dev/null"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !script_ok {
+        eprintln!("skipping run drift ci test (script command unavailable)");
+        return;
+    }
+
+    cargo_bin_cmd!("px")
+        .current_dir(&project)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let pyproject = project.join("pyproject.toml");
+    let mut doc: toml_edit::DocumentMut = fs::read_to_string(&pyproject)
+        .expect("read pyproject")
+        .parse()
+        .expect("parse pyproject");
+    doc["project"]["dependencies"]
+        .as_array_mut()
+        .expect("dependencies array")
+        .push("requests==2.32.3");
+    fs::write(&pyproject, doc.to_string()).expect("write pyproject");
+
+    let px = assert_cmd::cargo::cargo_bin!("px");
+    let command = format!("{} --json run python -- -c \"print('ok')\"", px.display());
+    let output = Command::new("script")
+        .args(["-q", "-e", "-c", &command, "/dev/null"])
+        .current_dir(&project)
+        .env("CI", "1")
+        .env("PX_RUNTIME_PYTHON", &python)
+        .output()
+        .expect("spawn script");
+
+    assert!(
+        !output.status.success(),
+        "ci run should refuse drift, stdout: {:?}, stderr: {:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(payload["status"], Value::String("user-error".into()));
+    assert_eq!(payload["details"]["reason"], Value::String("lock_drift".into()));
 }
 
 #[test]

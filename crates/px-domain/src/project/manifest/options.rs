@@ -5,6 +5,7 @@ pub struct PxOptions {
     pub manage_command: Option<String>,
     pub plugin_imports: Vec<String>,
     pub env_vars: BTreeMap<String, String>,
+    pub pin_manifest: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +75,9 @@ pub fn px_options_from_doc(doc: &DocumentMut) -> PxOptions {
                     }
                 }
             }
+        }
+        if let Some(pin_manifest) = px.get("pin-manifest").and_then(Item::as_bool) {
+            options.pin_manifest = pin_manifest;
         }
     }
     options

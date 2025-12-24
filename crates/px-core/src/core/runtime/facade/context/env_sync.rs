@@ -45,13 +45,21 @@ pub(crate) fn auto_sync_environment(
     snapshot: &ManifestSnapshot,
     issue: EnvironmentIssue,
 ) -> Result<Option<EnvironmentSyncReport>> {
-    if issue.needs_lock_resolution() {
-        if let Some(message) = issue.lock_message() {
-            log_autosync_step(message);
+    match issue {
+        EnvironmentIssue::MissingLock => log_autosync_step("px.lock missing; syncing…"),
+        EnvironmentIssue::LockDrift => log_autosync_step("Manifest changed; syncing…"),
+        _ => {
+            if issue.needs_lock_resolution() {
+                if let Some(message) = issue.lock_message() {
+                    log_autosync_step(message);
+                }
+            }
+            log_autosync_step(issue.env_message());
         }
-        install_snapshot(ctx, snapshot, false, None)?;
     }
-    log_autosync_step(issue.env_message());
+    if issue.needs_lock_resolution() {
+        install_snapshot(ctx, snapshot, false, false, None)?;
+    }
     refresh_project_site(snapshot, ctx)?;
     Ok(Some(EnvironmentSyncReport::new(issue)))
 }

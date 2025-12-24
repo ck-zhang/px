@@ -403,6 +403,17 @@ fn project_bullets(
         "NeedsLock" => {
             if !project.lock_exists {
                 bullets.push("px.lock missing".to_string());
+            } else if let Some(issues) = project.lock_issue.as_ref().filter(|i| !i.is_empty()) {
+                let max = 3usize;
+                for issue in issues.iter().take(max) {
+                    bullets.push(issue.clone());
+                }
+                if issues.len() > max {
+                    bullets.push(format!(
+                        "… (+{} more issues; use `px status --json`)",
+                        issues.len() - max
+                    ));
+                }
             } else {
                 bullets.push(
                     "pyproject.toml dependencies changed since px.lock was created".to_string(),
@@ -440,6 +451,17 @@ fn workspace_bullets(
                 bullets.push("px.workspace.lock missing".to_string());
             } else if has_member_errors {
                 bullets.push("one or more workspace members cannot be parsed".to_string());
+            } else if let Some(issues) = workspace.lock_issue.as_ref().filter(|i| !i.is_empty()) {
+                let max = 3usize;
+                for issue in issues.iter().take(max) {
+                    bullets.push(issue.clone());
+                }
+                if issues.len() > max {
+                    bullets.push(format!(
+                        "… (+{} more issues; use `px status --json`)",
+                        issues.len() - max
+                    ));
+                }
             } else {
                 bullets.push(
                     "member manifests changed since px.workspace.lock was created".to_string(),

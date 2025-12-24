@@ -20,7 +20,7 @@ pub fn explain_entrypoint(ctx: &CommandContext, name: &str) -> AnyhowResult<Exec
     }
 
     let strict = ctx.env_flag_enabled("CI");
-    let plan = match execution_plan::plan_run_execution(ctx, strict, false, "python", &[]) {
+    let plan = match execution_plan::plan_run_execution(ctx, strict, false, false, "python", &[]) {
         Ok(plan) => plan,
         Err(outcome) => return Ok(outcome),
     };

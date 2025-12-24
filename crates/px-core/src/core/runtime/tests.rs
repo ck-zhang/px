@@ -89,6 +89,7 @@ fn base_env_exports_manage_command_alias() -> Result<()> {
             manage_command: Some("self".to_string()),
             plugin_imports: Vec::new(),
             env_vars: BTreeMap::new(),
+            pin_manifest: false,
         },
     };
     // Seed existing PATH and proxy vars to verify overrides

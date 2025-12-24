@@ -5,6 +5,60 @@ pub(crate) fn refresh_project_site(
     snapshot: &ManifestSnapshot,
     ctx: &CommandContext,
 ) -> Result<()> {
+    fn pyproject_requires_setuptools(ctx: &CommandContext, manifest_path: &Path) -> bool {
+        let contents = match ctx.fs().read_to_string(manifest_path) {
+            Ok(contents) => contents,
+            Err(_) => return false,
+        };
+        let doc: DocumentMut = match contents.parse() {
+            Ok(doc) => doc,
+            Err(_) => return false,
+        };
+        let Some(build_system) = doc.get("build-system").and_then(Item::as_table) else {
+            return false;
+        };
+
+        if build_system
+            .get("build-backend")
+            .and_then(Item::as_str)
+            .is_some_and(|backend| {
+                let backend = backend.trim();
+                backend == "setuptools.build_meta"
+                    || backend.starts_with("setuptools.build_meta:")
+                    || backend.starts_with("setuptools.")
+            })
+        {
+            return true;
+        }
+
+        let Some(requires) = build_system.get("requires").and_then(Item::as_array) else {
+            return false;
+        };
+        for item in requires.iter() {
+            let Some(spec) = item.as_str() else {
+                continue;
+            };
+            let name = spec
+                .split(|ch: char| {
+                    ch == '['
+                        || ch == '<'
+                        || ch == '>'
+                        || ch == '='
+                        || ch == '!'
+                        || ch == '~'
+                        || ch == ';'
+                        || ch.is_whitespace()
+                })
+                .next()
+                .unwrap_or_default()
+                .trim();
+            if canonicalize_package_name(name) == "setuptools" {
+                return true;
+            }
+        }
+        false
+    }
+
     let previous_env = load_project_state(ctx.fs(), &snapshot.root)
         .ok()
         .and_then(|state| state.current_env);
@@ -32,7 +86,8 @@ pub(crate) fn refresh_project_site(
         &cas_profile.runtime_path,
         ctx.fs(),
     )?;
-    let setuptools_required = !lock.resolved.is_empty();
+    let setuptools_required = !lock.resolved.is_empty()
+        || pyproject_requires_setuptools(ctx, &snapshot.manifest_path);
     ensure_project_pip(
         ctx,
         snapshot,

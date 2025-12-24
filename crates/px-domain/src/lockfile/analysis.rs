@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use anyhow::{bail, Result};
 use pep440_rs::{Version, VersionSpecifiers};
-use pep508_rs::{MarkerEnvironment, VersionOrUrl};
+use pep508_rs::{ExtraName, MarkerEnvironment, Requirement as PepRequirement, VersionOrUrl};
 use serde_json::Value;
 
 use crate::project::snapshot::ProjectSnapshot;
@@ -242,6 +242,85 @@ pub fn verify_locked_artifacts(lock: &LockSnapshot) -> Vec<String> {
     issues
 }
 
+/// Validate that the lockfile contains a complete transitive closure for the active marker env.
+///
+/// A lock is considered incomplete when any active locked dependency declares an active `requires`
+/// entry whose name is missing from the active lock set.
+#[must_use]
+pub fn validate_lock_closure(
+    lock: &LockSnapshot,
+    marker_env: Option<&MarkerEnvironment>,
+) -> Vec<String> {
+    if lock.dependencies.is_empty() || lock.resolved.is_empty() {
+        return Vec::new();
+    }
+
+    let mut spec_lookup = HashMap::new();
+    for spec in &lock.dependencies {
+        spec_lookup.insert(dependency_name(spec), spec.clone());
+    }
+
+    let mut active_names: HashSet<String> = HashSet::with_capacity(lock.resolved.len());
+    let mut extras_lookup: HashMap<String, Vec<ExtraName>> =
+        HashMap::with_capacity(lock.resolved.len());
+    for dep in &lock.resolved {
+        let canonical = dependency_name(&dep.name);
+        if canonical.is_empty() {
+            continue;
+        }
+        let specifier = spec_lookup
+            .get(&canonical)
+            .cloned()
+            .unwrap_or_else(|| canonical.clone());
+        if marker_env.is_some_and(|env| !super::spec::marker_applies(&specifier, env)) {
+            continue;
+        }
+        active_names.insert(canonical.clone());
+        let (extras, _) = super::spec::parse_spec_metadata(&specifier);
+        extras_lookup.insert(
+            canonical,
+            extras
+                .into_iter()
+                .filter_map(|extra| ExtraName::from_str(&extra).ok())
+                .collect(),
+        );
+    }
+
+    let mut issues = Vec::new();
+    for dep in &lock.resolved {
+        let canonical = dependency_name(&dep.name);
+        if canonical.is_empty() || !active_names.contains(&canonical) {
+            continue;
+        }
+        let extras = extras_lookup.get(&canonical).cloned().unwrap_or_default();
+        for req in &dep.requires {
+            if let Some(env) = marker_env {
+                if let Ok(requirement) =
+                    PepRequirement::from_str(strip_wrapping_quotes(req.trim()))
+                {
+                    if !requirement.evaluate_markers(env, &extras) {
+                        continue;
+                    }
+                }
+            }
+            let required_name = dependency_name(req);
+            if required_name.is_empty() || required_name == canonical {
+                continue;
+            }
+            if !active_names.contains(&required_name) {
+                issues.push(format!(
+                    "px.lock missing transitive dependency `{required_name}` (required by `{}`)",
+                    canonical
+                ));
+            }
+        }
+    }
+
+    issues.sort();
+    issues.dedup();
+    issues
+}
+
 #[derive(Default)]
 pub struct LockDiffReport {
     pub added: Vec<DiffEntry>,
@@ -422,7 +501,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::api::{DependencyGroupSource, ProjectSnapshot};
-    use crate::lockfile::types::{LockSnapshot, LOCK_MODE_PINNED, LOCK_VERSION};
+    use crate::lockfile::types::{LockSnapshot, LockedDependency, LOCK_MODE_PINNED, LOCK_VERSION};
 
     #[test]
     fn drift_detects_missing_dependency_group_entries() {
@@ -462,5 +541,100 @@ mod tests {
                 .any(|entry| entry.contains("pytest") || entry.contains("added")),
             "dependency group entries should participate in lock drift detection"
         );
+    }
+
+    #[test]
+    fn closure_reports_missing_transitive_dependency() {
+        let lock = LockSnapshot {
+            version: LOCK_VERSION,
+            project_name: Some("demo".into()),
+            python_requirement: Some(">=3.11".into()),
+            manifest_fingerprint: Some("mf".into()),
+            lock_id: Some("lock-demo".into()),
+            dependencies: vec!["requests==1.0.0".to_string()],
+            mode: Some(LOCK_MODE_PINNED.into()),
+            resolved: vec![LockedDependency {
+                name: "requests".into(),
+                direct: true,
+                artifact: None,
+                requires: vec!["urllib3>=2".to_string()],
+                source: None,
+            }],
+            graph: None,
+            workspace: None,
+        };
+
+        let issues = validate_lock_closure(&lock, None);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("urllib3"));
+        assert!(issues[0].contains("requests"));
+    }
+
+    #[test]
+    fn closure_accepts_complete_lock() {
+        let lock = LockSnapshot {
+            version: LOCK_VERSION,
+            project_name: Some("demo".into()),
+            python_requirement: Some(">=3.11".into()),
+            manifest_fingerprint: Some("mf".into()),
+            lock_id: Some("lock-demo".into()),
+            dependencies: vec!["requests==1.0.0".to_string(), "urllib3==2.0.0".to_string()],
+            mode: Some(LOCK_MODE_PINNED.into()),
+            resolved: vec![
+                LockedDependency {
+                    name: "requests".into(),
+                    direct: true,
+                    artifact: None,
+                    requires: vec!["urllib3>=2".to_string()],
+                    source: None,
+                },
+                LockedDependency {
+                    name: "urllib3".into(),
+                    direct: false,
+                    artifact: None,
+                    requires: Vec::new(),
+                    source: None,
+                },
+            ],
+            graph: None,
+            workspace: None,
+        };
+
+        let issues = validate_lock_closure(&lock, None);
+        assert!(issues.is_empty(), "unexpected closure issues: {issues:?}");
+    }
+
+    #[test]
+    fn closure_normalizes_names_for_matching() {
+        let lock = LockSnapshot {
+            version: LOCK_VERSION,
+            project_name: Some("demo".into()),
+            python_requirement: Some(">=3.11".into()),
+            manifest_fingerprint: Some("mf".into()),
+            lock_id: Some("lock-demo".into()),
+            dependencies: vec!["requests==1.0.0".to_string(), "PySocks==1.7.1".to_string()],
+            mode: Some(LOCK_MODE_PINNED.into()),
+            resolved: vec![
+                LockedDependency {
+                    name: "requests".into(),
+                    direct: true,
+                    artifact: None,
+                    requires: vec!["pysocks".to_string()],
+                    source: None,
+                },
+                LockedDependency {
+                    name: "PySocks".into(),
+                    direct: false,
+                    artifact: None,
+                    requires: Vec::new(),
+                    source: None,
+                },
+            ],
+            graph: None,
+            workspace: None,
+        };
+
+        let issues = validate_lock_closure(&lock, None);
+        assert!(issues.is_empty(), "unexpected closure issues: {issues:?}");
     }
 }

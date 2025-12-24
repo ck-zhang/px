@@ -4,8 +4,9 @@ use anyhow::Result;
 
 use crate::workspace::{discover_workspace_scope, workspace_sync, WorkspaceSyncRequest};
 use crate::{
-    install_snapshot, manifest_snapshot, refresh_project_site, resolve_dependencies_with_effects,
-    CommandContext, ExecutionOutcome, InstallState, InstallUserError,
+    install_snapshot, lock_is_fresh, manifest_snapshot, refresh_project_site,
+    resolve_dependencies_with_effects, CommandContext, ExecutionOutcome, InstallState,
+    InstallUserError,
 };
 
 use super::evaluate_project_state;
@@ -141,7 +142,7 @@ fn project_sync_outcome(ctx: &CommandContext, frozen: bool) -> Result<ExecutionO
         ));
     }
 
-    if state.is_consistent() {
+    if state.is_consistent() && lock_is_fresh(ctx, &snapshot)? {
         return Ok(ExecutionOutcome::success(
             "px.lock already up to date".to_string(),
             json!({
@@ -154,7 +155,7 @@ fn project_sync_outcome(ctx: &CommandContext, frozen: bool) -> Result<ExecutionO
         ));
     }
 
-    let outcome = match install_snapshot(ctx, &snapshot, false, None) {
+    let outcome = match install_snapshot(ctx, &snapshot, false, false, None) {
         Ok(ok) => ok,
         Err(err) => match err.downcast::<InstallUserError>() {
             Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),

@@ -120,6 +120,7 @@ fn default_target_resolution(executable: &str, target: &str, args: &[String]) ->
 fn plan_execution(
     ctx: &CommandContext,
     strict: bool,
+    allow_lock_autosync: bool,
     sandbox: bool,
     command: &'static str,
     target: &str,
@@ -150,7 +151,7 @@ fn plan_execution(
                 json!({ "error": err.to_string() }),
             )
         })?;
-        if !state.lock_exists {
+        if !state.lock_exists && !allow_lock_autosync {
             return Err(crate::workspace::workspace_violation(
                 command,
                 &workspace,
@@ -158,10 +159,15 @@ fn plan_execution(
                 crate::workspace::StateViolation::MissingLock,
             ));
         }
-        if matches!(
-            state.canonical,
-            crate::workspace::WorkspaceStateKind::NeedsLock
-        ) {
+        if !state.manifest_clean && !allow_lock_autosync {
+            return Err(crate::workspace::workspace_violation(
+                command,
+                &workspace,
+                &state,
+                crate::workspace::StateViolation::LockDrift,
+            ));
+        }
+        if matches!(state.canonical, crate::workspace::WorkspaceStateKind::NeedsLock) {
             return Err(crate::workspace::workspace_violation(
                 command,
                 &workspace,
@@ -245,7 +251,8 @@ fn plan_execution(
                 }
             }
         }
-        let would_repair_env = !strict && !state.env_clean;
+        let would_repair_env =
+            !strict && (!state.lock_exists || !state.manifest_clean || !state.env_clean);
 
         let env_id = if matches!(engine.mode, EngineMode::MaterializedEnv) {
             state.lock_id.as_deref().and_then(|lock_id| {
@@ -347,7 +354,8 @@ fn plan_execution(
         }
     })?;
     let state_report = state_guard::state_or_violation(ctx, &snapshot, command)?;
-    let guard = state_guard::guard_for_execution(strict, &snapshot, &state_report, command)?;
+    let guard =
+        state_guard::guard_for_execution(strict, allow_lock_autosync, &snapshot, &state_report, command)?;
 
     let _ = prepare_project_runtime(&snapshot).map_err(|err| {
         ExecutionOutcome::failure(
@@ -497,20 +505,22 @@ fn plan_execution(
 pub(crate) fn plan_run_execution(
     ctx: &CommandContext,
     strict: bool,
+    allow_lock_autosync: bool,
     sandbox: bool,
     target: &str,
     args: &[String],
 ) -> Result<ExecutionPlan, ExecutionOutcome> {
-    plan_execution(ctx, strict, sandbox, "run", target, args)
+    plan_execution(ctx, strict, allow_lock_autosync, sandbox, "run", target, args)
 }
 
 pub(crate) fn plan_test_execution(
     ctx: &CommandContext,
     strict: bool,
+    allow_lock_autosync: bool,
     sandbox: bool,
     args: &[String],
 ) -> Result<ExecutionPlan, ExecutionOutcome> {
     // Placeholder target resolution for tests; the runner is selected at execution time.
     let target = "pytest";
-    plan_execution(ctx, strict, sandbox, "test", target, args)
+    plan_execution(ctx, strict, allow_lock_autosync, sandbox, "test", target, args)
 }

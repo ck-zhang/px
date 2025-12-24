@@ -20,9 +20,9 @@ use pep508_rs::MarkerEnvironment;
 use px_domain::api::{
     analyze_lock_diff, autopin_pin_key, autopin_spec_key, canonicalize_package_name,
     canonicalize_spec, detect_lock_drift, format_specifier, load_lockfile_optional, marker_applies,
-    merge_resolved_dependencies, render_lockfile, resolve, spec_requires_pin,
-    verify_locked_artifacts, AutopinEntry, InstallOverride, PinSpec, ProjectSnapshot,
-    ResolverRequest, ResolverTags,
+    merge_resolved_dependencies, parse_lockfile, render_lockfile, resolve, spec_requires_pin,
+    validate_lock_closure, verify_locked_artifacts, AutopinEntry, InstallOverride, PinSpec,
+    ProjectSnapshot, ResolverRequest, ResolverTags,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -51,7 +51,7 @@ pub(crate) enum InstallState {
     MissingLock,
 }
 
-pub fn lock_is_fresh(snapshot: &ManifestSnapshot) -> Result<bool> {
+pub fn lock_is_fresh(ctx: &CommandContext, snapshot: &ManifestSnapshot) -> Result<bool> {
     fn artifact_supported_by_runtime(
         tags: &crate::python_sys::InterpreterTags,
         artifact: &px_domain::api::LockedArtifact,
@@ -115,6 +115,21 @@ pub fn lock_is_fresh(snapshot: &ManifestSnapshot) -> Result<bool> {
             if !detect_lock_drift(snapshot, &lock, marker_env.as_ref()).is_empty() {
                 return Ok(false);
             }
+            if !validate_lock_closure(&lock, marker_env.as_ref()).is_empty() {
+                return Ok(false);
+            }
+            if ctx.config().resolver.force_sdist
+                && lock
+                    .resolved
+                    .iter()
+                    .filter(|dep| dep.source.is_none())
+                    .any(|dep| match dep.artifact.as_ref() {
+                        Some(artifact) => !artifact.is_direct_url && artifact.build_options_hash.is_empty(),
+                        None => true,
+                    })
+            {
+                return Ok(false);
+            }
             if let Ok(runtime) = prepare_project_runtime(snapshot) {
                 if let Ok(tags) = detect_interpreter_tags(&runtime.record.path) {
                     if lock
@@ -174,6 +189,7 @@ pub(crate) fn install_snapshot(
     ctx: &CommandContext,
     snapshot: &ManifestSnapshot,
     frozen: bool,
+    force_resolve: bool,
     override_pins: Option<&InstallOverride>,
 ) -> Result<InstallOutcome> {
     let inline = is_inline_snapshot(ctx, snapshot);
@@ -185,7 +201,7 @@ pub(crate) fn install_snapshot(
         return verify_lock(&snapshot);
     }
 
-    if lock_is_fresh(&snapshot)? {
+    if !force_resolve && lock_is_fresh(ctx, &snapshot)? {
         Ok(InstallOutcome {
             state: InstallState::UpToDate,
             lockfile,
@@ -226,7 +242,11 @@ pub(crate) fn install_snapshot(
             }
         } else {
             let resolved = resolve_dependencies(ctx, &snapshot)?;
-            if !resolved.specs.is_empty() && !inline && !has_foreign_lock {
+            if snapshot.px_options.pin_manifest
+                && !resolved.specs.is_empty()
+                && !inline
+                && !has_foreign_lock
+            {
                 manifest_dependencies = merge_resolved_dependencies(
                     &manifest_dependencies,
                     &resolved.specs,
@@ -252,6 +272,20 @@ pub(crate) fn install_snapshot(
             ctx.config().resolver.force_sdist,
         )?;
         let contents = render_lockfile(&snapshot, &resolved, PX_VERSION)?;
+        let parsed = parse_lockfile(&contents)?;
+        let closure_issues = validate_lock_closure(&parsed, Some(&marker_env));
+        if !closure_issues.is_empty() {
+            return Err(InstallUserError::new(
+                "generated px.lock is missing transitive dependencies",
+                json!({
+                    "reason": "incomplete_lock",
+                    "lockfile": snapshot.lock_path.display().to_string(),
+                    "issues": closure_issues,
+                    "hint": "run `px sync` to regenerate px.lock",
+                }),
+            )
+            .into());
+        }
         fs::write(&snapshot.lock_path, contents)?;
         Ok(InstallOutcome {
             state: InstallState::Installed,
@@ -332,6 +366,7 @@ fn verify_lock(snapshot: &ManifestSnapshot) -> Result<InstallOutcome> {
         Some(lock) => {
             let report = analyze_lock_diff(snapshot, &lock, marker_env.as_ref());
             let mut drift = report.to_messages();
+            drift.extend(validate_lock_closure(&lock, marker_env.as_ref()));
             if drift.is_empty() {
                 drift = verify_locked_artifacts(&lock);
             }

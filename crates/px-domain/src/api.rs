@@ -1,5 +1,6 @@
 pub use crate::lockfile::analysis::{
-    analyze_lock_diff, collect_resolved_dependencies, detect_lock_drift, verify_locked_artifacts,
+    analyze_lock_diff, collect_resolved_dependencies, detect_lock_drift, validate_lock_closure,
+    verify_locked_artifacts,
 };
 pub use crate::lockfile::io::{
     load_lockfile, load_lockfile_optional, parse_lockfile, render_lockfile,

@@ -129,7 +129,17 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
                         ))
                     }
                 };
-                let guard = match guard_for_execution(strict, &snapshot, &state_report, "run") {
+                let allow_lock_autosync = !strict
+                    && request.interactive != Some(false)
+                    && std::io::stdin().is_terminal()
+                    && std::io::stdout().is_terminal();
+                let guard = match guard_for_execution(
+                    strict,
+                    allow_lock_autosync,
+                    &snapshot,
+                    &state_report,
+                    "run",
+                ) {
                     Ok(guard) => guard,
                     Err(outcome) => return Ok(outcome),
                 };
@@ -180,9 +190,14 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             }
         }
     }
+    let allow_lock_autosync = !strict
+        && request.interactive != Some(false)
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal();
     let plan = match super::super::execution_plan::plan_run_execution(
         ctx,
         strict,
+        allow_lock_autosync,
         request.sandbox,
         &target,
         &request.args,
@@ -540,7 +555,7 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             }
         }
     }
-    let guard = match guard_for_execution(strict, &snapshot, &state_report, "run") {
+    let guard = match guard_for_execution(strict, allow_lock_autosync, &snapshot, &state_report, "run") {
         Ok(guard) => guard,
         Err(outcome) => return Ok(outcome),
     };

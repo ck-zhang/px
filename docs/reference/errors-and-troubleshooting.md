@@ -20,6 +20,7 @@ Color: code + summary in error color; “Why” bullets normal; “Fix” bullet
 
 * **No project found** – suggest `px init`.
 * **Lock missing / out-of-sync** – suggest `px sync` (fail under `--frozen`).
+* **Lock closure incomplete** – if `px status` reports “px.lock missing transitive dependency …”, run `px sync` to regenerate `px.lock` and rebuild the env.
 * **Missing import in `px run`** – suggest `px add <pkg>` or `px sync` depending on whether `<pkg>` is already in M/L.
 * **Wrong interpreter (user ran `python` directly)** – suggest `px run python ...`.
 * **Suspect wrong Python / wrong entrypoint / unexpected engine path** – use `px explain run ...` (and `-v/-vv` for fallback codes) or `px explain entrypoint <name>` to see what px would execute without running anything.

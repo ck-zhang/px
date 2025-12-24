@@ -58,16 +58,110 @@ pub(super) fn manifest_change_lines_from_details(details: &Value) -> Vec<String>
         let Some(obj) = entry.as_object() else {
             continue;
         };
-        let Some(before) = obj.get("before").and_then(Value::as_str) else {
-            continue;
-        };
+        let Some(before) = obj.get("before").and_then(Value::as_str) else { continue };
         let Some(after) = obj.get("after").and_then(Value::as_str) else {
             continue;
         };
         if before.trim().is_empty() || after.trim().is_empty() {
             continue;
         }
-        lines.push(format!("pyproject.toml: {before} -> {after}"));
+        lines.push(format!("pyproject.toml: ~ {before} -> {after}"));
+    }
+    lines
+}
+
+pub(super) fn manifest_add_lines_from_details(details: &Value) -> Vec<String> {
+    let Some(specs) = details
+        .as_object()
+        .and_then(|map| map.get("manifest_added"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+
+    let mut lines = Vec::new();
+    for spec in specs.iter().filter_map(Value::as_str) {
+        let trimmed = spec.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        lines.push(format!("pyproject.toml: + {trimmed}"));
+    }
+    lines
+}
+
+pub(super) fn lock_change_summary_line_from_details(details: &Value) -> Option<String> {
+    let lock = details.get("lock_changes").and_then(Value::as_object)?;
+    let changed = lock
+        .get("changed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !changed {
+        return Some("px.lock: no changes".to_string());
+    }
+    let packages = lock.get("packages").and_then(Value::as_object)?;
+    let before = packages.get("before").and_then(Value::as_u64)?;
+    let after = packages.get("after").and_then(Value::as_u64)?;
+    let added = packages.get("added").and_then(Value::as_u64)?;
+    let removed = packages.get("removed").and_then(Value::as_u64)?;
+    let updated = packages.get("updated").and_then(Value::as_u64)?;
+    Some(format!(
+        "px.lock: changed (packages: {before} -> {after}; +{added} -{removed} ~{updated})"
+    ))
+}
+
+pub(super) fn lock_direct_change_lines_from_details(details: &Value, verbose: u8) -> Vec<String> {
+    lock_highlight_lines(details, "direct", verbose)
+}
+
+pub(super) fn lock_updated_version_lines_from_details(
+    details: &Value,
+    verbose: u8,
+) -> Vec<String> {
+    lock_highlight_lines(details, "updated_versions", verbose)
+}
+
+fn lock_highlight_lines(details: &Value, key: &str, verbose: u8) -> Vec<String> {
+    let Some(entries) = details
+        .get("lock_changes")
+        .and_then(Value::as_object)
+        .and_then(|map| map.get(key))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+
+    let mut lines = Vec::new();
+    for entry in entries {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        let Some(name) = obj.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let from = obj.get("from").and_then(Value::as_str);
+        let to = obj.get("to").and_then(Value::as_str);
+        let line = match (from, to) {
+            (Some(from), Some(to)) => format!("px.lock: ~ {name} {from} -> {to}"),
+            (None, Some(to)) => format!("px.lock: + {name}=={to}"),
+            (Some(from), None) => format!("px.lock: - {name}=={from}"),
+            (None, None) => continue,
+        };
+        lines.push(line);
+    }
+
+    if verbose > 0 {
+        return lines;
+    }
+
+    let max = match key {
+        "updated_versions" => 10usize,
+        _ => 3usize,
+    };
+    if lines.len() > max {
+        let remaining = lines.len() - max;
+        lines.truncate(max);
+        lines.push(format!("px.lock: … (+{remaining} more; use -v)"));
     }
     lines
 }

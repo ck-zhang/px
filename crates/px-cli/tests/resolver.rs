@@ -224,10 +224,27 @@ fn add_dependency(project: &Path, spec: &str) {
 fn px_cmd(project: &Path) -> assert_cmd::Command {
     let python = common::find_python().unwrap_or_else(|| "python3".to_string());
     let cache = project.join(".px-cache");
+    let registry = cache.join("runtimes.json");
+    if !registry.exists() {
+        let _ = fs::create_dir_all(&cache);
+        if let Some((executable, channel, full_version)) = common::detect_host_python_details(&python)
+        {
+            let payload = serde_json::json!({
+                "runtimes": [{
+                    "version": channel,
+                    "full_version": full_version,
+                    "path": executable,
+                    "default": true,
+                }],
+            });
+            let _ = fs::write(&registry, serde_json::to_string_pretty(&payload).unwrap() + "\n");
+        }
+    }
     let mut cmd = cargo_bin_cmd!("px");
     cmd.current_dir(project)
         .env("PX_ONLINE", "1")
         .env("PX_CACHE_PATH", &cache)
+        .env("PX_RUNTIME_REGISTRY", &registry)
         .env("PX_NO_ENSUREPIP", "1")
         .env("PX_RUNTIME_HOST_ONLY", "1")
         .env("PX_RUNTIME_PYTHON", python)
