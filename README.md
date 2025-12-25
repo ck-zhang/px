@@ -84,7 +84,7 @@ px test --frozen
 `px run` supports pinned GitHub and `git+...` references. This runs from a cached snapshot and does not adopt the current directory.
 
 ```sh
-px run "git+file://$PWD@$(git rev-parse HEAD):fixtures/run_by_reference_demo/scripts/hello.py"
+px run https://github.com/ck-zhang/px/blob/504a607e8d60f512f2882d9de641d56f5868a713/fixtures/run_by_reference_demo/scripts/hello.py
 ```
 
 ### One-file scripts with inline deps (PEP 723)
