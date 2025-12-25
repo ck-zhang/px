@@ -401,7 +401,7 @@ fn inline_strict_outcome(script_path: &Path, issue: EnvironmentIssue) -> Executi
     )
 }
 
-fn prepare_inline_snapshot(
+pub(crate) fn prepare_inline_snapshot(
     ctx: &CommandContext,
     script: &InlineScript,
 ) -> Result<ManifestSnapshot, ExecutionOutcome> {

@@ -11,14 +11,35 @@ cargo install --path crates/px-cli --locked
 px --version
 ```
 
+## Try it (no clone, no project)
+
+If you don’t have a px-managed Python runtime yet, px will offer to install one on first use.
+
+Run a script straight from this repo’s `HEAD` (default is commit-pinned; `--allow-floating` allows `HEAD`/branches):
+
+```sh
+px run --allow-floating https://github.com/ck-zhang/px/blob/HEAD/fixtures/run_by_reference_demo/scripts/whereami.py
+```
+
+Run the same script in a Linux sandbox (requires podman or docker; first run may take longer):
+
+```sh
+px run --allow-floating --sandbox https://github.com/ck-zhang/px/blob/HEAD/fixtures/run_by_reference_demo/scripts/whereami.py
+```
+
 ## Quick start
 
 In a Python project directory:
 
 ```sh
-px python install 3.12
 px init
 px add requests rich
+mkdir -p tests
+cat > tests/test_smoke.py <<'PY'
+def test_smoke():
+    import requests, rich
+    assert True
+PY
 px test
 px run python -c "import requests, rich; print('ok')"
 ```
@@ -26,7 +47,6 @@ px run python -c "import requests, rich; print('ok')"
 If you cloned a repo that does not use px:
 
 ```sh
-px python install 3.12
 px migrate --apply
 px test
 ```
@@ -78,14 +98,6 @@ px test --frozen
 ```
 
 ## More things you can do
-
-### Run a script from a GitHub repo snapshot (no clone, no checkout)
-
-`px run` supports GitHub URL targets and `gh:`/`git+...` run-by-reference forms. By default, refs must be pinned to a full commit SHA; use `--allow-floating` to run from `HEAD`/branches.
-
-```sh
-px run --allow-floating https://github.com/ck-zhang/px/blob/HEAD/fixtures/run_by_reference_demo/scripts/hello.py
-```
 
 ### One-file scripts with inline deps (PEP 723)
 

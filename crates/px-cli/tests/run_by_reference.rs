@@ -161,6 +161,124 @@ fn run_by_reference_pinned_git_file_works_and_offline_hits_cache() {
 }
 
 #[test]
+#[cfg(not(windows))]
+fn run_by_reference_sandbox_executes_via_container_backend() {
+    let _guard = common::test_env_guard();
+    common::reset_test_store_env();
+    common::ensure_test_store_env();
+
+    if !git_available() {
+        eprintln!("skipping run-by-reference sandbox test (git not found)");
+        return;
+    }
+    let Some(python) = common::find_python() else {
+        eprintln!("skipping run-by-reference sandbox test (python binary not found)");
+        return;
+    };
+    let Some(requires) = python_requirement(&python) else {
+        eprintln!("skipping run-by-reference sandbox test (unable to determine python version)");
+        return;
+    };
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo dir");
+    init_git_repo(&repo);
+    write_script(&repo, &requires);
+    let commit = commit_all(&repo, "add script");
+
+    let locator = common::git_file_locator(&repo);
+    let target = format!("{locator}@{commit}:scripts/hello.py");
+
+    let caller = temp.path().join("caller");
+    fs::create_dir_all(&caller).expect("create caller dir");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&caller)
+        .env("PX_RUNTIME_PYTHON", &python)
+        .env_remove("CI")
+        .args(["--json", "run", &target])
+        .assert()
+        .success();
+    let payload = common::parse_json(&assert);
+    let snapshot_root = payload["details"]["repo_snapshot_materialized_root"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !snapshot_root.is_empty(),
+        "expected repo_snapshot_materialized_root in response: {payload:?}"
+    );
+
+    let (backend, log) = common::fake_sandbox_backend(temp.path()).expect("backend script");
+    let store_dir = common::sandbox_store_dir("sandbox-store");
+    let store = store_dir.path().to_path_buf();
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&caller)
+        .env("PX_SANDBOX_STORE", &store)
+        .env("PX_SANDBOX_BACKEND", &backend)
+        .env("PX_FAKE_SANDBOX_LOG", &log)
+        .env("PX_FAKE_SANDBOX_PROJECT_ROOT", &snapshot_root)
+        .env("PX_FAKE_SANDBOX_INSPECT_EXIT", "1")
+        .env("PX_RUNTIME_PYTHON", &python)
+        .env_remove("CI")
+        .args(["--json", "run", "--sandbox", &target])
+        .assert()
+        .success();
+
+    let payload = common::parse_json(&assert);
+    assert_eq!(payload["status"], "ok");
+    assert!(payload["details"]["sandbox"].is_object());
+
+    let log_contents = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        log_contents.contains("run:"),
+        "sandbox backend should have handled run: log={log_contents:?}"
+    );
+}
+
+#[test]
+fn run_by_reference_missing_runtime_reports_install_version() {
+    let _guard = common::test_env_guard();
+    common::reset_test_store_env();
+    common::ensure_test_store_env();
+
+    if !git_available() {
+        eprintln!("skipping run-by-reference runtime prompt test (git not found)");
+        return;
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo dir");
+    init_git_repo(&repo);
+    write_script(&repo, ">=3.12");
+    let commit = commit_all(&repo, "add script");
+
+    let locator = common::git_file_locator(&repo);
+    let target = format!("{locator}@{commit}:scripts/hello.py");
+
+    let caller = temp.path().join("caller");
+    fs::create_dir_all(&caller).expect("create caller dir");
+    let registry = temp.path().join("runtimes.json");
+
+    let assert = cargo_bin_cmd!("px")
+        .current_dir(&caller)
+        .env("PX_RUNTIME_REGISTRY", &registry)
+        .env_remove("PX_RUNTIME_PYTHON")
+        .env_remove("CI")
+        .args(["--json", "run", &target])
+        .assert()
+        .failure();
+
+    let payload = common::parse_json(&assert);
+    assert_eq!(payload["status"], "user-error");
+    assert_eq!(payload["details"]["reason"], "missing_runtime");
+    assert_eq!(payload["details"]["install_version"], "3.12");
+}
+
+#[test]
 fn run_by_reference_relative_imports_work_from_snapshot_root() {
     let _guard = common::test_env_guard();
     common::reset_test_store_env();

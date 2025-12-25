@@ -46,9 +46,17 @@ pub(crate) fn prepare_project_runtime(
         &snapshot.python_requirement,
     )
     .map_err(|err| {
+        let requirement = snapshot
+            .python_override
+            .as_deref()
+            .unwrap_or(&snapshot.python_requirement);
+        let install_version = suggest_install_runtime_version(requirement);
         InstallUserError::new(
             "python runtime unavailable",
             json!({
+                "install_version": install_version,
+                "python_requirement": snapshot.python_requirement.as_str(),
+                "python_override": snapshot.python_override.as_deref(),
                 "hint": err.to_string(),
                 "reason": "missing_runtime",
             }),
@@ -56,6 +64,22 @@ pub(crate) fn prepare_project_runtime(
     })?;
     env::set_var("PX_RUNTIME_PYTHON", &selection.record.path);
     Ok(selection)
+}
+
+fn suggest_install_runtime_version(requirement: &str) -> String {
+    const DEFAULT: &str = "3.12";
+    let Some(specs) = runtime_requirement_specs(requirement) else {
+        return DEFAULT.to_string();
+    };
+    for channel in ["3.12", "3.13", "3.11", "3.10", "3.9", "3.8"] {
+        let candidate = format!("{channel}.0");
+        if let Ok(version) = pep440_rs::Version::from_str(&candidate) {
+            if specs.contains(&version) {
+                return channel.to_string();
+            }
+        }
+    }
+    DEFAULT.to_string()
 }
 
 fn runtime_requirement_specs(requirement: &str) -> Option<pep440_rs::VersionSpecifiers> {

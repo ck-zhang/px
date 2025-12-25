@@ -52,6 +52,30 @@ pub fn dispatch_command(
         CommandGroupCli::Sync(args) => {
             let info = CommandInfo::new(CommandGroup::Sync, "sync");
             let request = project_sync_request_from_args(args);
+            let (info, attempt) = core_call(info, || px_core::project_sync(ctx, &request))?;
+            let Some(version) = install_prompt_version(&attempt, "missing_runtime") else {
+                return Ok((info, attempt));
+            };
+            if request.dry_run || request.frozen || !can_prompt_for_runtime(ctx) {
+                return Ok((info, attempt));
+            }
+            if !prompt_install_runtime(&version) {
+                return Ok((info, attempt));
+            }
+            let install = core_call_no_spinner(CommandInfo::new(CommandGroup::Python, "install"), || {
+                px_core::python_install(
+                    ctx,
+                    &px_core::PythonInstallRequest {
+                        version: version.clone(),
+                        path: None,
+                        set_default: false,
+                    },
+                )
+            })?;
+            if install.status != px_core::CommandStatus::Ok {
+                return Ok((info, install));
+            }
+            let info = CommandInfo::new(CommandGroup::Sync, "sync");
             core_call(info, || px_core::project_sync(ctx, &request))
         }
         CommandGroupCli::Update(args) => {
@@ -65,11 +89,59 @@ pub fn dispatch_command(
         CommandGroupCli::Run(args) => {
             let info = CommandInfo::new(CommandGroup::Run, "run");
             let request = run_request_from_args(args);
+            let (info, attempt) = core_call(info, || px_core::run_project(ctx, &request))?;
+            let Some(version) = install_prompt_version(&attempt, "missing_runtime") else {
+                return Ok((info, attempt));
+            };
+            if request.frozen || !can_prompt_for_runtime(ctx) {
+                return Ok((info, attempt));
+            }
+            if !prompt_install_runtime(&version) {
+                return Ok((info, attempt));
+            }
+            let install = core_call_no_spinner(CommandInfo::new(CommandGroup::Python, "install"), || {
+                px_core::python_install(
+                    ctx,
+                    &px_core::PythonInstallRequest {
+                        version: version.clone(),
+                        path: None,
+                        set_default: false,
+                    },
+                )
+            })?;
+            if install.status != px_core::CommandStatus::Ok {
+                return Ok((info, install));
+            }
+            let info = CommandInfo::new(CommandGroup::Run, "run");
             core_call(info, || px_core::run_project(ctx, &request))
         }
         CommandGroupCli::Test(args) => {
             let info = CommandInfo::new(CommandGroup::Test, "test");
             let request = test_request_from_args(args);
+            let (info, attempt) = core_call(info, || px_core::test_project(ctx, &request))?;
+            let Some(version) = install_prompt_version(&attempt, "missing_runtime") else {
+                return Ok((info, attempt));
+            };
+            if request.frozen || !can_prompt_for_runtime(ctx) {
+                return Ok((info, attempt));
+            }
+            if !prompt_install_runtime(&version) {
+                return Ok((info, attempt));
+            }
+            let install = core_call_no_spinner(CommandInfo::new(CommandGroup::Python, "install"), || {
+                px_core::python_install(
+                    ctx,
+                    &px_core::PythonInstallRequest {
+                        version: version.clone(),
+                        path: None,
+                        set_default: false,
+                    },
+                )
+            })?;
+            if install.status != px_core::CommandStatus::Ok {
+                return Ok((info, install));
+            }
+            let info = CommandInfo::new(CommandGroup::Test, "test");
             core_call(info, || px_core::test_project(ctx, &request))
         }
         CommandGroupCli::Fmt(args) => {
@@ -117,6 +189,30 @@ pub fn dispatch_command(
         CommandGroupCli::Migrate(args) => {
             let info = CommandInfo::new(CommandGroup::Migrate, "migrate");
             let request = migrate_request_from_args(args);
+            let (info, attempt) = core_call(info, || px_core::migrate(ctx, &request))?;
+            let Some(version) = install_prompt_version(&attempt, "missing_runtime") else {
+                return Ok((info, attempt));
+            };
+            if !can_prompt_for_runtime(ctx) {
+                return Ok((info, attempt));
+            }
+            if !prompt_install_runtime(&version) {
+                return Ok((info, attempt));
+            }
+            let install = core_call_no_spinner(CommandInfo::new(CommandGroup::Python, "install"), || {
+                px_core::python_install(
+                    ctx,
+                    &px_core::PythonInstallRequest {
+                        version: version.clone(),
+                        path: None,
+                        set_default: false,
+                    },
+                )
+            })?;
+            if install.status != px_core::CommandStatus::Ok {
+                return Ok((info, install));
+            }
+            let info = CommandInfo::new(CommandGroup::Migrate, "migrate");
             core_call(info, || px_core::migrate(ctx, &request))
         }
         CommandGroupCli::Why(args) => {
@@ -187,24 +283,15 @@ fn dispatch_init(
     request: &ProjectInitRequest,
 ) -> Result<px_core::ExecutionOutcome> {
     let attempt = core_call_no_spinner(info, || px_core::project_init(ctx, request))?;
-    let Some(version) = init_install_prompt_version(&attempt) else {
+    let Some(version) = install_prompt_version(&attempt, "missing_init_runtime") else {
         return Ok(attempt);
     };
 
-    if request.dry_run || !init_can_prompt_for_runtime(ctx) {
+    if request.dry_run || !can_prompt_for_runtime(ctx) {
         return Ok(attempt);
     }
 
-    eprint!(
-        "No px-managed Python runtime found. Install Python {version} now? (Y/n) "
-    );
-    io::stderr().flush().ok();
-    let mut answer = String::new();
-    let _ = io::stdin().lock().read_line(&mut answer);
-    let answer = answer.trim();
-    let accepted = answer.is_empty()
-        || matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes");
-    if !accepted {
+    if !prompt_install_runtime(&version) {
         return Ok(px_core::ExecutionOutcome::user_error(
             "px init requires a px-managed Python runtime",
             serde_json::json!({
@@ -235,7 +322,7 @@ fn dispatch_init(
     core_call_no_spinner(info, || px_core::project_init(ctx, request))
 }
 
-fn init_can_prompt_for_runtime(ctx: &CommandContext) -> bool {
+fn can_prompt_for_runtime(ctx: &CommandContext) -> bool {
     if ctx.global.json {
         return false;
     }
@@ -245,12 +332,21 @@ fn init_can_prompt_for_runtime(ctx: &CommandContext) -> bool {
     atty::is(Stream::Stdin) && atty::is(Stream::Stdout)
 }
 
-fn init_install_prompt_version(outcome: &px_core::ExecutionOutcome) -> Option<String> {
+fn prompt_install_runtime(version: &str) -> bool {
+    eprint!("No px-managed Python runtime found. Install Python {version} now? (Y/n) ");
+    io::stderr().flush().ok();
+    let mut answer = String::new();
+    let _ = io::stdin().lock().read_line(&mut answer);
+    let answer = answer.trim();
+    answer.is_empty() || matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+fn install_prompt_version(outcome: &px_core::ExecutionOutcome, reason: &str) -> Option<String> {
     if outcome.status != px_core::CommandStatus::UserError {
         return None;
     }
     let details = outcome.details.as_object()?;
-    if details.get("reason").and_then(serde_json::Value::as_str) != Some("missing_init_runtime") {
+    if details.get("reason").and_then(serde_json::Value::as_str) != Some(reason) {
         return None;
     }
     details

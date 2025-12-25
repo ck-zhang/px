@@ -11,8 +11,11 @@ use toml_edit::DocumentMut;
 use tracing::{debug, warn};
 
 use super::RunRequest;
-use crate::core::runtime::script::{load_inline_python_script, run_inline_script};
-use crate::{CommandContext, ExecutionOutcome};
+use crate::core::runtime::facade::{ensure_environment_with_guard, EnvGuard};
+use crate::core::runtime::script::{
+    load_inline_python_script, prepare_inline_snapshot, run_inline_script,
+};
+use crate::{attach_autosync_details, CommandContext, ExecutionOutcome};
 
 #[derive(Clone, Debug)]
 pub(crate) enum RunReferenceTarget {
@@ -808,15 +811,6 @@ fn run_reference_script_target(
             }),
         ));
     }
-    if request.sandbox {
-        return Ok(ExecutionOutcome::user_error(
-            "px run <ref>:<script> does not support --sandbox",
-            json!({
-                "reason": "run_reference_sandbox_unsupported",
-                "hint": "omit --sandbox for run-by-reference targets",
-            }),
-        ));
-    }
 
     let (header, oid, materialized_root, provenance_log) = match prepare_repo_snapshot(
         ctx,
@@ -835,6 +829,32 @@ fn run_reference_script_target(
         Ok(inline) => inline,
         Err(outcome) => return Ok(outcome),
     };
+    let mut sandbox = None;
+    let mut sandbox_sync_report = None;
+    if request.sandbox {
+        let snapshot = match prepare_inline_snapshot(ctx, &inline) {
+            Ok(snapshot) => snapshot,
+            Err(outcome) => return Ok(outcome),
+        };
+        let guard = if strict {
+            EnvGuard::Strict
+        } else {
+            EnvGuard::AutoSync
+        };
+        sandbox_sync_report = match ensure_environment_with_guard(ctx, &snapshot, guard) {
+            Ok(report) => report,
+            Err(err) => {
+                return Ok(super::install_error_outcome(
+                    err,
+                    "failed to prepare run-by-reference environment",
+                ))
+            }
+        };
+        sandbox = match super::prepare_project_sandbox(ctx, &snapshot) {
+            Ok(sbx) => Some(sbx),
+            Err(outcome) => return Ok(outcome),
+        };
+    }
     let command_args = json!({
         "target": requested_target,
         "args": &request.args,
@@ -847,7 +867,7 @@ fn run_reference_script_target(
     });
     let mut outcome = match run_inline_script(
         ctx,
-        None,
+        sandbox.as_mut(),
         inline,
         &request.args,
         &command_args,
@@ -857,6 +877,12 @@ fn run_reference_script_target(
         Ok(outcome) => outcome,
         Err(outcome) => outcome,
     };
+    if sandbox_sync_report.is_some() && outcome.details.get("autosync").is_none() {
+        attach_autosync_details(&mut outcome, sandbox_sync_report);
+    }
+    if let Some(ref sbx) = sandbox {
+        super::attach_sandbox_details(&mut outcome, sbx);
+    }
     attach_reference_details(
         &mut outcome,
         &header,
@@ -886,15 +912,6 @@ fn run_reference_repo_target(
             json!({
                 "reason": "run_reference_at_ref_unsupported",
                 "hint": "omit --at for URL targets; pin the repository commit in the URL instead",
-            }),
-        ));
-    }
-    if request.sandbox {
-        return Ok(ExecutionOutcome::user_error(
-            "px run <url> does not support --sandbox",
-            json!({
-                "reason": "run_reference_sandbox_unsupported",
-                "hint": "omit --sandbox for URL targets",
             }),
         ));
     }
@@ -965,54 +982,84 @@ fn run_reference_repo_target(
     let workdir = super::invocation_workdir(&invocation_root);
     let host_runner = super::HostCommandRunner::new(ctx);
 
-    let cas_native_fallback =
-        match super::prepare_cas_native_run_context(ctx, &snapshot, &invocation_root) {
-            Ok(native_ctx) => {
-                let deps = super::DependencyContext::from_sources(
-                    &snapshot.requirements,
-                    Some(&snapshot.lock_path),
-                );
-                let mut command_args = json!({
-                    "target": requested_target,
-                    "entrypoint": &entrypoint,
-                    "args": &forwarded_args,
-                    "repo_snapshot": {
-                        "oid": &oid,
-                        "locator": &header.locator,
-                        "commit": &header.commit,
-                        "subdir": subdir.map(|p| p.to_string_lossy()).unwrap_or_default(),
-                    },
-                });
-                deps.inject(&mut command_args);
-                let plan = super::plan_run_target(
-                    &native_ctx.py_ctx,
-                    &snapshot.manifest_path,
-                    &entrypoint,
-                    &workdir,
-                )?;
-                let outcome = match plan {
-                    super::RunTargetPlan::Script(path) => super::run_project_script_cas_native(
-                        ctx,
-                        &host_runner,
-                        &native_ctx,
-                        &path,
-                        &forwarded_args,
-                        &command_args,
+    let mut cas_native_fallback = None;
+    if !request.sandbox {
+        cas_native_fallback =
+            match super::prepare_cas_native_run_context(ctx, &snapshot, &invocation_root) {
+                Ok(native_ctx) => {
+                    let deps = super::DependencyContext::from_sources(
+                        &snapshot.requirements,
+                        Some(&snapshot.lock_path),
+                    );
+                    let mut command_args = json!({
+                        "target": requested_target,
+                        "entrypoint": &entrypoint,
+                        "args": &forwarded_args,
+                        "repo_snapshot": {
+                            "oid": &oid,
+                            "locator": &header.locator,
+                            "commit": &header.commit,
+                            "subdir": subdir.map(|p| p.to_string_lossy()).unwrap_or_default(),
+                        },
+                    });
+                    deps.inject(&mut command_args);
+                    let plan = super::plan_run_target(
+                        &native_ctx.py_ctx,
+                        &snapshot.manifest_path,
+                        &entrypoint,
                         &workdir,
-                        interactive,
-                    )?,
-                    super::RunTargetPlan::Executable(program) => super::run_executable_cas_native(
-                        ctx,
-                        &host_runner,
-                        &native_ctx,
-                        &program,
-                        &forwarded_args,
-                        &command_args,
-                        &workdir,
-                        interactive,
-                    )?,
-                };
-                if let Some(reason) = super::cas_native_fallback_reason(&outcome) {
+                    )?;
+                    let outcome = match plan {
+                        super::RunTargetPlan::Script(path) => super::run_project_script_cas_native(
+                            ctx,
+                            &host_runner,
+                            &native_ctx,
+                            &path,
+                            &forwarded_args,
+                            &command_args,
+                            &workdir,
+                            interactive,
+                        )?,
+                        super::RunTargetPlan::Executable(program) => {
+                            super::run_executable_cas_native(
+                                ctx,
+                                &host_runner,
+                                &native_ctx,
+                                &program,
+                                &forwarded_args,
+                                &command_args,
+                                &workdir,
+                                interactive,
+                            )?
+                        }
+                    };
+                    if let Some(reason) = super::cas_native_fallback_reason(&outcome) {
+                        if super::is_integrity_failure(&outcome) {
+                            return Ok(outcome);
+                        }
+                        Some(super::CasNativeFallback {
+                            reason,
+                            summary: super::cas_native_fallback_summary(&outcome),
+                        })
+                    } else {
+                        let mut outcome = outcome;
+                        super::attach_autosync_details(&mut outcome, sync_report);
+                        attach_reference_details(
+                            &mut outcome,
+                            &header,
+                            &oid,
+                            &materialized_root,
+                            None,
+                            None,
+                            None,
+                        );
+                        return Ok(outcome);
+                    }
+                }
+                Err(outcome) => {
+                    let Some(reason) = super::cas_native_fallback_reason(&outcome) else {
+                        return Ok(outcome);
+                    };
                     if super::is_integrity_failure(&outcome) {
                         return Ok(outcome);
                     }
@@ -1020,34 +1067,9 @@ fn run_reference_repo_target(
                         reason,
                         summary: super::cas_native_fallback_summary(&outcome),
                     })
-                } else {
-                    let mut outcome = outcome;
-                    super::attach_autosync_details(&mut outcome, sync_report);
-                    attach_reference_details(
-                        &mut outcome,
-                        &header,
-                        &oid,
-                        &materialized_root,
-                        None,
-                        None,
-                        None,
-                    );
-                    return Ok(outcome);
                 }
-            }
-            Err(outcome) => {
-                let Some(reason) = super::cas_native_fallback_reason(&outcome) else {
-                    return Ok(outcome);
-                };
-                if super::is_integrity_failure(&outcome) {
-                    return Ok(outcome);
-                }
-                Some(super::CasNativeFallback {
-                    reason,
-                    summary: super::cas_native_fallback_summary(&outcome),
-                })
-            }
-        };
+            };
+    }
 
     let py_ctx = match super::ephemeral::ephemeral_python_context(
         ctx,
@@ -1074,21 +1096,40 @@ fn run_reference_repo_target(
     });
     deps.inject(&mut command_args);
     let plan = super::plan_run_target(&py_ctx, &snapshot.manifest_path, &entrypoint, &workdir)?;
+    let mut sandbox = None;
+    if request.sandbox {
+        sandbox = match super::prepare_project_sandbox(ctx, &snapshot) {
+            Ok(sbx) => Some(sbx),
+            Err(outcome) => return Ok(outcome),
+        };
+    }
+    let sandbox_runner = match sandbox.as_mut() {
+        Some(ref mut sbx) => match super::sandbox_runner_for_context(&py_ctx, sbx, &workdir) {
+            Ok(runner) => Some(runner),
+            Err(outcome) => return Ok(outcome),
+        },
+        None => None,
+    };
+    let runner: &dyn super::CommandRunner = match sandbox_runner.as_ref() {
+        Some(runner) => runner,
+        None => &host_runner,
+    };
+    let sandboxed = sandbox.is_some();
     let mut outcome = match plan {
         super::RunTargetPlan::Script(path) => super::run_project_script(
             ctx,
-            &host_runner,
+            runner,
             &py_ctx,
             &path,
             &forwarded_args,
             &command_args,
             &workdir,
             interactive,
-            &py_ctx.python,
+            if sandboxed { "python" } else { &py_ctx.python },
         )?,
         super::RunTargetPlan::Executable(program) => super::run_executable(
             ctx,
-            &host_runner,
+            runner,
             &py_ctx,
             &program,
             &forwarded_args,
@@ -1100,6 +1141,9 @@ fn run_reference_repo_target(
     super::attach_autosync_details(&mut outcome, sync_report);
     if let Some(ref fallback) = cas_native_fallback {
         super::attach_cas_native_fallback(&mut outcome, fallback);
+    }
+    if let Some(ref sbx) = sandbox {
+        super::attach_sandbox_details(&mut outcome, sbx);
     }
     attach_reference_details(
         &mut outcome,
