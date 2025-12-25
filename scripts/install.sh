@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-REPO="${PX_REPO:-ck-zhang/px-dev}"
+REPO="${PX_REPO:-ck-zhang/px}"
 VERSION="${PX_VERSION:-}"
 INSTALL_DIR="${PX_INSTALL_DIR:-$HOME/.local/bin}"
 

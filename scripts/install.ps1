@@ -1,7 +1,7 @@
 Param(
   [string]$Version = $env:PX_VERSION,
   [string]$InstallDir = $(if ($env:PX_INSTALL_DIR) { $env:PX_INSTALL_DIR } else { Join-Path $env:USERPROFILE ".local\\bin" }),
-  [string]$Repo = $(if ($env:PX_REPO) { $env:PX_REPO } else { "ck-zhang/px-dev" })
+  [string]$Repo = $(if ($env:PX_REPO) { $env:PX_REPO } else { "ck-zhang/px" })
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,4 +60,3 @@ try {
 } finally {
   Remove-Item -Recurse -Force $tmp
 }
-

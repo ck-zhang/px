@@ -9,13 +9,13 @@ px supports Linux, macOS, and Windows.
 Recommended: use the installer (downloads a prebuilt binary from GitHub Releases):
 
 ```sh
-curl -LsSf https://github.com/ck-zhang/px-dev/releases/latest/download/install.sh | sh
+curl -LsSf https://github.com/ck-zhang/px/releases/latest/download/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://github.com/ck-zhang/px-dev/releases/latest/download/install.ps1 | iex
+irm https://github.com/ck-zhang/px/releases/latest/download/install.ps1 | iex
 ```
 
 From source:
