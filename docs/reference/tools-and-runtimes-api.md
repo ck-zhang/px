@@ -24,7 +24,7 @@ Tools live under a global location (e.g. `~/.px/tools/`):
   * Bind to a chosen runtime (default: px’s default runtime; or explicit `--python`).
   * Materialize env for the tool.
 
-* `px tool run <name> [-- …args]`
+* `px tool run <name> [args...]`
 
   * Look up tool by name.
   * Ensure the bound runtime is available and compatible.

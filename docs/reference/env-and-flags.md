@@ -36,7 +36,7 @@ Rule of thumb: user-facing behavior should be a CLI flag first; env vars stay as
 * `px migrate` – `--python VERSION`, `--apply/--write`, `--yes`, `--no-input`, `--source PATH`, `--dev-source PATH`, `--allow-dirty`, `--lock-only`, `--no-autopin`.
 * `px why` – `--issue ID` (mutually exclusive with package arg).
 * `px tool install` – `--python VERSION`, `--module MODULE`.
-* `px tool run` – `--console SCRIPT` (args after the tool name are forwarded; use `--` if you want to pass flags without ambiguity).
+* `px tool run` – `--console SCRIPT` (args after the tool name are forwarded; `--` is only needed if you need to pass a flag that would otherwise be parsed as a px option).
 * `px tool upgrade` – `--python VERSION`.
 * `px python install` – `--path /path/to/python`, `--default`.
 * `px completions` – `bash|zsh|fish|powershell` (positional).

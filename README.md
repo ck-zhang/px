@@ -118,7 +118,7 @@ px run dist/myapp.pxapp
 
 ```sh
 px tool install black
-px tool run black -- --check .
+px tool run black --check .
 ```
 
 ## Troubleshooting
@@ -130,4 +130,3 @@ px tool run black -- --check .
 ## Docs
 
 * `docs/index.md`
-

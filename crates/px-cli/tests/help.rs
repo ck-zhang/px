@@ -132,3 +132,16 @@ fn top_level_help_describes_build_sources() {
         "top-level help should describe build accurately: {output}"
     );
 }
+
+#[test]
+fn tool_run_help_does_not_require_double_dash() {
+    let output = help_output(&["tool", "run", "--help"]);
+    assert!(
+        output.contains("px tool run <NAME> [ARG...]") || output.contains("px tool run <name> [arg...]"),
+        "tool run usage should not require --, got: {output}"
+    );
+    assert!(
+        !output.contains("[-- <ARG>...]") && !output.contains("[-- <arg>...]"),
+        "tool run help should not imply -- is required, got: {output}"
+    );
+}

@@ -62,7 +62,7 @@ fn tool_run_requires_install_and_guides_user() {
     let assert = cargo_bin_cmd!("px")
         .env("PX_TOOLS_DIR", tools_dir.path())
         .env("PX_TOOL_STORE", store_dir.path())
-        .args(["--json", "tool", "run", "ruff", "--", "--version"])
+        .args(["--json", "tool", "run", "ruff", "--version"])
         .assert()
         .failure();
 
@@ -191,7 +191,7 @@ fn tool_run_executes_happy_path_environment() {
         .env("PX_TOOL_STORE", store_dir.path())
         .env("PX_RUNTIME_PYTHON", &info.executable)
         .env("PX_RUNTIME_HOST_ONLY", "1")
-        .args(["--json", "tool", "run", "ruff", "--", "hello"])
+        .args(["--json", "tool", "run", "ruff", "hello"])
         .assert();
 
     let output = assert.get_output();
@@ -338,7 +338,7 @@ fn tool_run_falls_back_to_recorded_runtime_path_when_registry_missing() {
         .env("PX_TOOLS_DIR", tools_dir.path())
         .env("PX_TOOL_STORE", tool_store.path())
         .env("HOME", home_dir.path())
-        .args(["--json", "tool", "run", "ruff", "--", "hello"])
+        .args(["--json", "tool", "run", "ruff", "hello"])
         .assert()
         .success();
 
@@ -428,7 +428,7 @@ fn tool_install_then_run_is_immediately_ready() {
         .env_remove("PX_RUNTIME_PYTHON")
         .env_remove("PX_NO_ENSUREPIP")
         .env("HOME", home_dir.path())
-        .args(["--json", "tool", "run", "ruff", "--", "--version"])
+        .args(["--json", "tool", "run", "ruff", "--version"])
         .assert()
         .success();
 
@@ -541,7 +541,7 @@ fn tool_run_repairs_deleted_environment_offline() {
         .env_remove("PX_RUNTIME_PYTHON")
         .env_remove("PX_NO_ENSUREPIP")
         .env("HOME", home_dir.path())
-        .args(["--json", "tool", "run", "ruff", "--", "--version"])
+        .args(["--json", "tool", "run", "ruff", "--version"])
         .assert()
         .success();
 
@@ -579,7 +579,7 @@ fn tool_run_repairs_deleted_environment_offline() {
         .env("PX_INDEX_URL", "http://127.0.0.1:9/simple")
         .env("PIP_INDEX_URL", "http://127.0.0.1:9/simple")
         .env("HOME", home_dir.path())
-        .args(["--json", "tool", "run", "ruff", "--", "--version"])
+        .args(["--json", "tool", "run", "ruff", "--version"])
         .assert()
         .success();
 

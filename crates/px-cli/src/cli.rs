@@ -262,8 +262,8 @@ pub enum ToolCommand {
     )]
     Install(ToolInstallArgs),
     #[command(
-        about = "Run an installed tool (forwards arguments after --).",
-        override_usage = "px tool run <NAME> [-- <ARG>...]"
+        about = "Run an installed tool (arguments after NAME are forwarded to the tool).",
+        override_usage = "px tool run <NAME> [ARG...]"
     )]
     Run(ToolRunArgs),
     #[command(about = "List installed px-managed tools.")]
@@ -559,7 +559,9 @@ pub struct ToolRunArgs {
     #[arg(
         value_name = "ARG",
         trailing_var_arg = true,
-        allow_hyphen_values = true
+        allow_hyphen_values = true,
+        num_args = 0..,
+        help = "Arguments forwarded to the tool"
     )]
     pub args: Vec<String>,
 }
