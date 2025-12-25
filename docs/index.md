@@ -6,7 +6,7 @@ Platform support: px supports Linux, macOS, and Windows.
 
 ## Install
 
-See [README](../README.md) for installation instructions.
+See [Getting started](./guides/getting-started.md) for installation instructions.
 
 ## Guides
 
