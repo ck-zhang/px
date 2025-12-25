@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde_json::json;
-use tar::{Builder, Header};
+use tar::{Builder, EntryType, Header};
 use walkdir::WalkDir;
 
 use crate::core::sandbox::sandbox_error;
@@ -168,7 +168,19 @@ fn stage_sandbox_runtime(
             append_path(builder, &archive_bin, &bin_dir)?;
         }
 
+        fn is_python_interpreter_entry(name: &str) -> bool {
+            if !name.starts_with("python") {
+                return false;
+            }
+            let rest = &name["python".len()..];
+            if rest.is_empty() {
+                return true;
+            }
+            rest.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+        }
+
         let mut python_entries = Vec::new();
+        let mut python_names = HashSet::<String>::new();
         let entries = fs::read_dir(&bin_dir).map_err(|err| {
             sandbox_error(
                 "PX903",
@@ -179,7 +191,8 @@ fn stage_sandbox_runtime(
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy().to_string();
-            if name_str.starts_with("python") {
+            if is_python_interpreter_entry(&name_str) {
+                python_names.insert(name_str.clone());
                 python_entries.push((name_str, entry.path()));
             }
         }
@@ -189,6 +202,46 @@ fn stage_sandbox_runtime(
             if seen.insert(archive_path.clone()) {
                 append_path(builder, &archive_path, &path)?;
             }
+        }
+
+        let primary_python = if python_names.contains("python") {
+            Some("python".to_string())
+        } else if let Some(version) = runtime_version {
+            let exact = format!("python{version}");
+            if python_names.contains(&exact) {
+                Some(exact)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+        .or_else(|| {
+            if python_names.contains("python3") {
+                Some("python3".to_string())
+            } else {
+                python_names.iter().cloned().min()
+            }
+        });
+
+        let Some(primary_python) = primary_python else {
+            return Ok(());
+        };
+
+        for alias in ["python", "python3"] {
+            if python_names.contains(alias) {
+                continue;
+            }
+            let archive_path = archive_root.join("bin").join(alias);
+            if !seen.insert(archive_path.clone()) {
+                continue;
+            }
+            append_symlink_deterministic(
+                builder,
+                &archive_path,
+                Path::new(&primary_python),
+                Some(0o777),
+            )?;
         }
     }
 
@@ -539,4 +592,33 @@ fn append_bytes_deterministic(
             json!({ "path": archive_path.display().to_string(), "error": err.to_string() }),
         )
     })
+}
+
+fn append_symlink_deterministic(
+    builder: &mut Builder<impl Write>,
+    archive_path: &Path,
+    target: &Path,
+    mode: Option<u32>,
+) -> Result<(), InstallUserError> {
+    let mut header = Header::new_gnu();
+    header.set_entry_type(EntryType::Symlink);
+    header.set_size(0);
+    header.set_mode(mode.unwrap_or(0o777));
+    header.set_mtime(0);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_cksum();
+    builder
+        .append_link(&mut header, archive_path, target)
+        .map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to add symlink to sandbox layer",
+                json!({
+                    "path": archive_path.display().to_string(),
+                    "target": target.display().to_string(),
+                    "error": err.to_string(),
+                }),
+            )
+        })
 }

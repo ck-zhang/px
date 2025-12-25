@@ -5,6 +5,10 @@ pub(crate) fn refresh_project_site(
     snapshot: &ManifestSnapshot,
     ctx: &CommandContext,
 ) -> Result<()> {
+    fn is_inline_snapshot(ctx: &CommandContext, snapshot: &ManifestSnapshot) -> bool {
+        snapshot.root.starts_with(ctx.cache().path.join("scripts"))
+    }
+
     fn pyproject_requires_setuptools(ctx: &CommandContext, manifest_path: &Path) -> bool {
         let contents = match ctx.fs().read_to_string(manifest_path) {
             Ok(contents) => contents,
@@ -88,22 +92,29 @@ pub(crate) fn refresh_project_site(
     )?;
     let setuptools_required = !lock.resolved.is_empty()
         || pyproject_requires_setuptools(ctx, &snapshot.manifest_path);
-    ensure_project_pip(
-        ctx,
-        snapshot,
-        &cas_profile.env_path,
-        &runtime,
-        &env_python,
-        setuptools_required,
-    )?;
-    ensure_project_wheel_scripts(
-        &ctx.cache().path,
-        snapshot,
-        &cas_profile.env_path,
-        &runtime,
-        &env_owner,
-        Some(&cas_profile.profile_oid),
-    )?;
+    let skip_tool_seeding = is_inline_snapshot(ctx, snapshot)
+        && lock.resolved.is_empty()
+        && !setuptools_required
+        && !uv_seed_required(snapshot)
+        && !uses_maturin_backend(&snapshot.manifest_path)?;
+    if !skip_tool_seeding {
+        ensure_project_pip(
+            ctx,
+            snapshot,
+            &cas_profile.env_path,
+            &runtime,
+            &env_python,
+            setuptools_required,
+        )?;
+        ensure_project_wheel_scripts(
+            &ctx.cache().path,
+            snapshot,
+            &cas_profile.env_path,
+            &runtime,
+            &env_owner,
+            Some(&cas_profile.profile_oid),
+        )?;
+    }
     let runtime_state = StoredRuntime {
         path: cas_profile.runtime_path.display().to_string(),
         version: runtime.version.clone(),

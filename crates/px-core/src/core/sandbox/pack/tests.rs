@@ -7,7 +7,7 @@ use std::env;
 use std::fs;
 use std::fs::File;
 use std::path::Path;
-use tar::Archive;
+use tar::{Archive, EntryType};
 use tempfile::tempdir;
 
 #[test]
@@ -178,6 +178,83 @@ fn env_layer_skips_runtime_static_libs() -> Result<()> {
         "runtime __pycache__ should be excluded from layer tar"
     );
     assert!(!saw_pyc, "runtime .pyc files should be excluded from layer tar");
+    Ok(())
+}
+
+#[test]
+fn env_layer_stages_runtime_python_aliases() -> Result<()> {
+    let temp = tempdir()?;
+    let env_root = temp.path().join("env");
+    fs::create_dir_all(&env_root)?;
+    fs::write(
+        env_root.join("pyvenv.cfg"),
+        b"home = /does/not/matter\nversion = 3.12.0\n",
+    )?;
+
+    let runtime_root = temp.path().join("runtime");
+    let runtime_bin = runtime_root.join("bin");
+    fs::create_dir_all(&runtime_bin)?;
+    let interpreter = runtime_bin.join("python3.12");
+    fs::write(&interpreter, b"#!/bin/sh\nexit 0\n")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&interpreter)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&interpreter, perms)?;
+    }
+
+    let blobs = temp.path().join("blobs");
+    let env_layer = write_env_layer_tar(&env_root, Some(&runtime_root), &blobs)?;
+
+    let file = File::open(env_layer.path)?;
+    let mut archive = Archive::new(file);
+    let mut saw_python = None::<String>;
+    let mut saw_python3 = None::<String>;
+    let mut saw_python312 = false;
+    for entry in archive.entries()? {
+        let entry = entry?;
+        let path = entry.path()?.into_owned();
+        if path == Path::new("px/runtime/bin/python3.12") {
+            saw_python312 = true;
+        }
+        if path == Path::new("px/runtime/bin/python") {
+            assert_eq!(
+                entry.header().entry_type(),
+                EntryType::Symlink,
+                "px/runtime/bin/python should be a symlink"
+            );
+            let target = entry
+                .link_name()?
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_default();
+            saw_python = Some(target);
+        }
+        if path == Path::new("px/runtime/bin/python3") {
+            assert_eq!(
+                entry.header().entry_type(),
+                EntryType::Symlink,
+                "px/runtime/bin/python3 should be a symlink"
+            );
+            let target = entry
+                .link_name()?
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_default();
+            saw_python3 = Some(target);
+        }
+    }
+
+    assert!(saw_python312, "runtime interpreter should be present in layer tar");
+    assert_eq!(
+        saw_python.as_deref(),
+        Some("python3.12"),
+        "sandbox runtime should provide /px/runtime/bin/python symlink"
+    );
+    assert_eq!(
+        saw_python3.as_deref(),
+        Some("python3.12"),
+        "sandbox runtime should provide /px/runtime/bin/python3 symlink"
+    );
     Ok(())
 }
 

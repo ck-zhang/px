@@ -14,4 +14,5 @@ pub(crate) use install::ensure_tool_env_scripts;
 pub(crate) use install::repair_tool_env_from_lock;
 pub(crate) use install::resolve_runtime;
 pub(crate) use metadata::{load_installed_tool, MIN_PYTHON_REQUIREMENT};
+pub(crate) use paths::tools_root;
 pub(crate) use run::disable_proxy_env;

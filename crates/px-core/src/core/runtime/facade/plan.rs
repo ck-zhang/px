@@ -221,6 +221,17 @@ pub(crate) fn install_snapshot(
             snapshot.dependencies.clone()
         };
         let requirements = merge_requirements(&manifest_dependencies, &snapshot.group_dependencies);
+        if requirements.is_empty() {
+            let contents = render_lockfile(&snapshot, &[], PX_VERSION)?;
+            fs::write(&snapshot.lock_path, contents)?;
+            return Ok(InstallOutcome {
+                state: InstallState::Installed,
+                lockfile,
+                drift: Vec::new(),
+                verified: false,
+            });
+        }
+
         let marker_env = ctx.marker_environment()?;
         let pins = if let Some(override_data) = override_pins {
             let filtered_pins: Vec<PinSpec> = override_data

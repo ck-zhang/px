@@ -534,6 +534,28 @@ pub(crate) fn sandbox_runner_for_context(
     };
     let container_pyc_cache_prefix = PathBuf::from("/px/cache/pyc").join(&profile_oid);
     let mut mounts = sandbox_mounts(py_ctx, workdir, &sandbox.artifacts.env_root);
+    if let Ok(envs_root) = crate::core::runtime::cas_env::default_envs_root() {
+        let envs_root = canonical_path(envs_root.as_path());
+        mounts.push(Mount {
+            host: envs_root.clone(),
+            guest: envs_root,
+            read_only: true,
+        });
+    }
+    if let Ok(tools_root) = crate::core::tools::tools_root() {
+        let tools_root = canonical_path(tools_root.as_path());
+        mounts.push(Mount {
+            host: tools_root.clone(),
+            guest: tools_root,
+            read_only: true,
+        });
+    }
+    let store_root = canonical_path(crate::store::cas::global_store().root());
+    mounts.push(Mount {
+        host: store_root.clone(),
+        guest: store_root,
+        read_only: true,
+    });
     mounts.push(Mount {
         host: canonical_path(&host_pyc_cache_prefix),
         guest: container_pyc_cache_prefix.clone(),

@@ -79,12 +79,12 @@ px test --frozen
 
 ## More things you can do
 
-### Run a pinned script from a repo snapshot (no clone, no checkout)
+### Run a script from a GitHub repo snapshot (no clone, no checkout)
 
-`px run` supports pinned GitHub and `git+...` references. This runs from a cached snapshot and does not adopt the current directory.
+`px run` supports GitHub URL targets and `gh:`/`git+...` run-by-reference forms. By default, refs must be pinned to a full commit SHA; use `--allow-floating` to run from `HEAD`/branches.
 
 ```sh
-px run https://github.com/ck-zhang/px/blob/504a607e8d60f512f2882d9de641d56f5868a713/fixtures/run_by_reference_demo/scripts/hello.py
+px run --allow-floating https://github.com/ck-zhang/px/blob/HEAD/fixtures/run_by_reference_demo/scripts/hello.py
 ```
 
 ### One-file scripts with inline deps (PEP 723)
@@ -103,7 +103,7 @@ px run path/to/script.py
 ### Run with sandboxing (optional)
 
 ```sh
-px run --sandbox python -c "import psycopg; print('ok')"
+px run --sandbox python -c "print('ok')"
 px test --sandbox
 ```
 
