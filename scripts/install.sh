@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+set -eu
 
 REPO="${PX_REPO:-ck-zhang/px-dev}"
 VERSION="${PX_VERSION:-}"
@@ -103,4 +103,3 @@ echo "px: installed to ${INSTALL_DIR}/px"
 if ! command -v px >/dev/null 2>&1; then
   echo "px: note: add ${INSTALL_DIR} to your PATH"
 fi
-
