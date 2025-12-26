@@ -30,6 +30,7 @@ mod workspace_member;
 
 pub(crate) use base_image::runtime_home_from_env;
 pub(crate) use layers::{write_base_os_layer, write_env_layer_tar, write_system_deps_layer};
+pub(crate) use oci::ensure_docker_archive_layout;
 pub(crate) use oci::{build_oci_image, export_output, load_layer_from_blobs, sha256_hex, LayerTar};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -8,6 +8,7 @@ use oci_distribution::client::{Client, ClientConfig, Config as OciConfig, ImageL
 use oci_distribution::manifest::OciImageManifest;
 use oci_distribution::secrets::RegistryAuth;
 use oci_distribution::Reference;
+use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tar::Builder;
@@ -29,6 +30,140 @@ pub(crate) struct BuiltImage {
     pub(crate) manifest_bytes: Vec<u8>,
     pub(crate) config_bytes: Vec<u8>,
     pub(crate) layers: Vec<LayerTar>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct OciDescriptor {
+    digest: String,
+    #[serde(default)]
+    size: u64,
+    #[serde(default)]
+    media_type: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct OciManifest {
+    config: OciDescriptor,
+    layers: Vec<OciDescriptor>,
+}
+
+fn split_docker_tag(tag: &str) -> (String, String) {
+    if let Some((repo, _digest)) = tag.split_once('@') {
+        return (repo.to_string(), "latest".to_string());
+    }
+    if let Some((repo, tag_name)) = tag.rsplit_once(':') {
+        if !tag_name.contains('/') {
+            return (repo.to_string(), tag_name.to_string());
+        }
+    }
+    (tag.to_string(), "latest".to_string())
+}
+
+fn strip_sha256_prefix(digest: &str) -> &str {
+    digest.trim_start_matches("sha256:")
+}
+
+fn write_docker_archive_metadata(
+    oci_root: &Path,
+    tag: &str,
+    config_digest: &str,
+    layers: &[OciDescriptor],
+) -> Result<(), InstallUserError> {
+    let (repo, tag_name) = split_docker_tag(tag);
+    let repo_tag = format!("{repo}:{tag_name}");
+    let layers_paths: Vec<String> = layers
+        .iter()
+        .map(|layer| format!("blobs/sha256/{}", strip_sha256_prefix(&layer.digest)))
+        .collect();
+    let layer_sources = layers.iter().map(|layer| {
+        let digest = layer.digest.clone();
+        (
+            digest.clone(),
+            json!({
+                "mediaType": layer
+                    .media_type
+                    .as_deref()
+                    .unwrap_or("application/vnd.oci.image.layer.v1.tar"),
+                "size": layer.size,
+                "digest": digest,
+            }),
+        )
+    });
+    let manifest = json!([{
+        "Config": format!("blobs/sha256/{config_digest}"),
+        "RepoTags": [repo_tag],
+        "Layers": layers_paths,
+        "LayerSources": serde_json::Map::from_iter(layer_sources),
+    }]);
+    fs::write(
+        oci_root.join("manifest.json"),
+        serde_json::to_vec(&manifest).map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to encode docker archive manifest",
+                json!({ "error": err.to_string() }),
+            )
+        })?,
+    )
+    .map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to write docker archive manifest",
+            json!({ "path": oci_root.join("manifest.json").display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    let top_layer = layers
+        .last()
+        .map(|layer| strip_sha256_prefix(&layer.digest).to_string())
+        .unwrap_or_default();
+    let repositories = json!({ repo: { tag_name: top_layer } });
+    fs::write(
+        oci_root.join("repositories"),
+        serde_json::to_vec(&repositories).map_err(|err| {
+            sandbox_error(
+                "PX903",
+                "failed to encode docker archive repositories",
+                json!({ "error": err.to_string() }),
+            )
+        })?,
+    )
+    .map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to write docker archive repositories",
+            json!({ "path": oci_root.join("repositories").display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    Ok(())
+}
+
+pub(crate) fn ensure_docker_archive_layout(
+    oci_root: &Path,
+    tag: &str,
+    image_digest: &str,
+) -> Result<(), InstallUserError> {
+    if oci_root.join("manifest.json").exists() && oci_root.join("repositories").exists() {
+        return Ok(());
+    }
+    let manifest_digest = strip_sha256_prefix(image_digest);
+    let manifest_path = oci_root.join("blobs").join("sha256").join(manifest_digest);
+    let manifest_bytes = fs::read(&manifest_path).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to read OCI manifest for docker archive export",
+            json!({ "path": manifest_path.display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    let manifest: OciManifest = serde_json::from_slice(&manifest_bytes).map_err(|err| {
+        sandbox_error(
+            "PX903",
+            "failed to parse OCI manifest for docker archive export",
+            json!({ "path": manifest_path.display().to_string(), "error": err.to_string() }),
+        )
+    })?;
+    let config_digest = strip_sha256_prefix(&manifest.config.digest).to_string();
+    let layers = manifest.layers;
+    write_docker_archive_metadata(oci_root, tag, &config_digest, &layers)
 }
 
 pub(crate) fn build_oci_image(
@@ -205,6 +340,17 @@ pub(crate) fn build_oci_image(
             json!({ "path": oci_root.join("oci-layout").display().to_string(), "error": err.to_string() }),
         )
     })?;
+    if let Some(tag) = tag {
+        let descriptors: Vec<OciDescriptor> = image_layers
+            .iter()
+            .map(|layer| OciDescriptor {
+                digest: format!("sha256:{}", layer.digest),
+                size: layer.size,
+                media_type: Some("application/vnd.oci.image.layer.v1.tar".to_string()),
+            })
+            .collect();
+        write_docker_archive_metadata(oci_root, tag, &config_digest, &descriptors)?;
+    }
     Ok(BuiltImage {
         manifest_digest,
         manifest_bytes,

@@ -16,8 +16,8 @@ use crate::core::runtime::{
     run_command, run_command_passthrough, run_command_streaming, run_command_with_stdin, RunOutput,
 };
 use crate::core::sandbox::pack::{
-    build_oci_image, export_output, load_layer_from_blobs, write_base_os_layer,
-    write_env_layer_tar, write_system_deps_layer,
+    build_oci_image, ensure_docker_archive_layout, export_output, load_layer_from_blobs,
+    write_base_os_layer, write_env_layer_tar, write_system_deps_layer,
 };
 use crate::{InstallUserError, PX_VERSION};
 
@@ -276,6 +276,9 @@ pub(crate) fn ensure_image_loaded(
     backend: &ContainerBackend,
     layout: &SandboxImageLayout,
 ) -> Result<(), InstallUserError> {
+    if matches!(backend.kind, BackendKind::Docker) {
+        ensure_docker_archive_layout(&layout.oci_dir, &layout.tag, &layout.image_digest)?;
+    }
     let marker = layout
         .archive
         .parent()

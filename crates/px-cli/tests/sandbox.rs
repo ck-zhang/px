@@ -349,6 +349,55 @@ fn pack_image_still_builds_layout() {
     let payload = parse_json(&assert);
     assert_eq!(payload["status"], "ok");
     assert!(out.exists(), "pack should write oci archive");
+    let file = fs::File::open(&out).expect("open image archive");
+    let mut archive = Archive::new(file);
+    let mut index_bytes: Option<Vec<u8>> = None;
+    for entry in archive.entries().expect("tar entries") {
+        let mut entry = entry.expect("tar entry");
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).expect("read entry");
+        let path = entry.path().expect("path").into_owned();
+        let normalized = path.to_string_lossy().trim_start_matches("./").to_string();
+        if normalized == "index.json" {
+            index_bytes = Some(buf);
+            break;
+        }
+    }
+    let index_bytes = index_bytes.expect("index.json present in archive");
+    let index: Value = serde_json::from_slice(&index_bytes).expect("index json");
+    let manifest_digest = index["manifests"][0]["digest"]
+        .as_str()
+        .unwrap_or_default()
+        .trim_start_matches("sha256:")
+        .to_string();
+    assert!(
+        !manifest_digest.is_empty(),
+        "manifest digest should be present"
+    );
+    let file = fs::File::open(&out).expect("open image archive");
+    let mut archive = Archive::new(file);
+    let mut manifest_bytes: Option<Vec<u8>> = None;
+    for entry in archive.entries().expect("tar entries") {
+        let mut entry = entry.expect("tar entry");
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).expect("read entry");
+        let path = entry.path().expect("path").into_owned();
+        let normalized = path.to_string_lossy().trim_start_matches("./").to_string();
+        if normalized == format!("blobs/sha256/{manifest_digest}") {
+            manifest_bytes = Some(buf);
+            break;
+        }
+    }
+    let manifest_bytes = manifest_bytes.expect("manifest blob present in archive");
+    let manifest: Value = serde_json::from_slice(&manifest_bytes).expect("manifest json");
+    let layer_count = manifest["layers"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or_default();
+    assert!(
+        layer_count >= 3,
+        "expected base+env+app layers (>=3), got {layer_count}"
+    );
     let sbx = payload["details"]
         .get("sbx_id")
         .and_then(|v| v.as_str())
@@ -392,6 +441,49 @@ fn pack_app_builds_bundle_and_runs() {
     let payload = parse_json(&assert);
     assert_eq!(payload["status"], "ok");
     assert!(bundle.exists(), "bundle should be written to disk");
+    let data = fs::read(&bundle).expect("read bundle");
+    let cursor = Cursor::new(data);
+    let mut archive = Archive::new(cursor);
+    let mut metadata: Option<Value> = None;
+    let mut manifest: Option<Value> = None;
+    for entry in archive.entries().expect("tar entries") {
+        let mut entry = entry.expect("tar entry");
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).expect("read entry");
+        let path = entry.path().expect("path").into_owned();
+        match path.to_string_lossy().as_ref() {
+            "metadata.json" => {
+                metadata = Some(serde_json::from_slice(&buf).expect("metadata json"));
+            }
+            "manifest.json" => {
+                manifest = Some(serde_json::from_slice(&buf).expect("manifest json"));
+            }
+            _ => {}
+        }
+    }
+    let metadata = metadata.expect("metadata.json present in bundle");
+    let digests = metadata["layer_digests"]
+        .as_array()
+        .expect("metadata.layer_digests array");
+    assert!(
+        digests.len() >= 3,
+        "expected base+env+app layer digests (>=3), got {}",
+        digests.len()
+    );
+    let manifest = manifest.expect("manifest.json present in bundle");
+    let layer_count = manifest["layers"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or_default();
+    assert!(
+        layer_count >= 3,
+        "expected base+env+app layers (>=3), got {layer_count}"
+    );
+    assert_eq!(
+        layer_count,
+        digests.len(),
+        "bundle manifest and metadata should agree on layer count"
+    );
 
     let shim_dir = tmp.path().join("shim");
     fs::create_dir_all(&shim_dir).expect("shim dir");

@@ -138,6 +138,15 @@ pub(super) fn pack_workspace_member(
         .oci_dir(&artifacts.definition.sbx_id())
         .join("blobs")
         .join("sha256");
+    let base_digest = match artifacts.manifest.base_layer_digest.clone() {
+        Some(digest) => digest,
+        None => {
+            return Ok(ExecutionOutcome::failure(
+                "sandbox image metadata missing base layer",
+                json!({ "code": "PX904" }),
+            ))
+        }
+    };
     let env_digest = match artifacts.manifest.env_layer_digest.clone() {
         Some(digest) => digest,
         None => {
@@ -147,8 +156,10 @@ pub(super) fn pack_workspace_member(
             ))
         }
     };
+    let base_layer = load_layer_from_blobs(&base_blobs, &base_digest)?;
     let env_layer = load_layer_from_blobs(&base_blobs, &env_digest)?;
     let mut layers = Vec::new();
+    layers.push(base_layer);
     if let Some(sys_digest) = artifacts.manifest.system_layer_digest.clone() {
         let sys_layer = load_layer_from_blobs(&base_blobs, &sys_digest)?;
         layers.push(sys_layer);
