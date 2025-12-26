@@ -50,7 +50,7 @@ Prefer the flags above for interactive use; env vars remain for CI/automation or
 * `PX_ONLINE` – defaults to online; values `0/false/no/off/""` disable network access. Some operations (`px publish`, `px migrate --apply`) require `PX_ONLINE=1`.
 * `PX_FORCE_SDIST=1` – prefer building from sdists even when wheels exist.
 * `PX_INDEX_URL` (or `PIP_INDEX_URL`/`PIP_EXTRA_INDEX_URL`) – override package index URLs used for resolution.
-* `PX_DOWNLOADS` – max concurrent artifact downloads (clamped 1–16; defaults to available CPUs).
+* `PX_DOWNLOADS` – max concurrent artifact downloads (clamped 1–16; defaults to 1).
 * `PX_PROGRESS` – set `0` to disable spinners/progress; set `1` to force-enable (even in CI/non-TTY). Default: enabled only when stderr is a TTY and `CI` is not truthy.
 * `PX_KEEP_PROXIES` – control proxy use for px’s own HTTP requests and build subprocesses. Default: enabled when `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` are set. Set `PX_KEEP_PROXIES=0` to ignore proxy env vars.
 

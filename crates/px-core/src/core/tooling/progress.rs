@@ -323,11 +323,7 @@ pub(crate) fn download_concurrency(total: usize) -> usize {
     let requested = env::var("PX_DOWNLOADS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok());
-    let available = thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(4)
-        .max(1);
-    let max_workers = requested.unwrap_or(available).clamp(1, 16);
+    let max_workers = requested.unwrap_or(1).clamp(1, 16);
     max_workers.min(total.max(1))
 }
 

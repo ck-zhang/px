@@ -50,6 +50,13 @@ fn px_is_online() -> bool {
     }
 }
 
+fn px_download_concurrency_limit() -> usize {
+    let requested = env::var("PX_DOWNLOADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok());
+    requested.unwrap_or(1).clamp(1, 16)
+}
+
 pub fn resolve(request: &ResolveRequest) -> Result<Vec<ResolvedSpecifier>> {
     if request.requirements.is_empty() {
         return Ok(Vec::new());
@@ -116,7 +123,11 @@ async fn resolve_with_uv(request: &ResolveRequest) -> Result<Vec<ResolvedSpecifi
     let hashes = HashStrategy::default();
     let exclude_newer = ExcludeNewer::default();
     let sources = SourceStrategy::default();
-    let concurrency = Concurrency::default();
+    let concurrency = Concurrency {
+        downloads: px_download_concurrency_limit(),
+        builds: 1,
+        installs: 1,
+    };
 
     let base_builder = BaseClientBuilder::default().connectivity(if px_is_online() {
         uv_client::Connectivity::Online
