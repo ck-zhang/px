@@ -360,7 +360,11 @@ pub struct InitArgs {
         help = "Package module name (defaults to sanitized directory name)"
     )]
     pub package: Option<String>,
-    #[arg(long = "py", value_name = "VERSION", help = "Python version requirement (e.g. 3.11)")]
+    #[arg(
+        long = "py",
+        value_name = "VERSION",
+        help = "Python version requirement (e.g. 3.11)"
+    )]
     pub py: Option<String>,
     #[arg(
         long,
@@ -381,7 +385,10 @@ pub struct SpecArgs {
 pub struct AddArgs {
     #[command(flatten)]
     pub common: CommonFlags,
-    #[arg(long, help = "Pin added dependencies to exact versions in pyproject.toml")]
+    #[arg(
+        long,
+        help = "Pin added dependencies to exact versions in pyproject.toml"
+    )]
     pub pin: bool,
     #[arg(value_name = "SPEC")]
     pub specs: Vec<String>,
@@ -676,7 +683,11 @@ pub struct PublishArgs {
         conflicts_with = "dry_run"
     )]
     pub upload: bool,
-    #[arg(long, value_name = "NAME", help = "Registry name or upload URL (default: pypi)")]
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Registry name or upload URL (default: pypi)"
+    )]
     pub registry: Option<String>,
     #[arg(
         long = "token-env",

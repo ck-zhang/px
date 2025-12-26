@@ -5,4 +5,13 @@ devnote/
 tmp/
 __pycache__/
 *.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+.env
 node_modules/
+dist/
+.DS_Store
+.idea/
+.vscode/

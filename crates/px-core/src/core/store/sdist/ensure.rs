@@ -126,19 +126,23 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
         Ok(())
     }
 
-    let (build_method, build_python_path, builder_env_root) =
-        match build_with_container_builder(request, &sdist_path, &dist_dir, &build_root) {
-            Ok(builder) => (
-                BuildMethod::BuilderWheel,
-                builder.python_path.clone(),
-                Some(builder.env_root.clone()),
-            ),
-            Err(container_err) => {
-                if dist_dir.exists() {
-                    let _ = fs::remove_dir_all(&dist_dir);
-                }
-                fs::create_dir_all(&dist_dir)?;
-                build_with_host_pip_wheel(
+    let (build_method, build_python_path, builder_env_root) = match build_with_container_builder(
+        request,
+        &sdist_path,
+        &dist_dir,
+        &build_root,
+    ) {
+        Ok(builder) => (
+            BuildMethod::BuilderWheel,
+            builder.python_path.clone(),
+            Some(builder.env_root.clone()),
+        ),
+        Err(container_err) => {
+            if dist_dir.exists() {
+                let _ = fs::remove_dir_all(&dist_dir);
+            }
+            fs::create_dir_all(&dist_dir)?;
+            build_with_host_pip_wheel(
                     request.python_path,
                     &sdist_path,
                     &dist_dir,
@@ -149,9 +153,13 @@ pub fn ensure_sdist_build(cache_root: &Path, request: &SdistRequest<'_>) -> Resu
                         "sdist build failed via container builder ({container_err}); fallback pip wheel also failed ({host_err})"
                     )
                 })?;
-                (BuildMethod::PipWheel, Path::new(request.python_path).to_path_buf(), None)
-            }
-        };
+            (
+                BuildMethod::PipWheel,
+                Path::new(request.python_path).to_path_buf(),
+                None,
+            )
+        }
+    };
     let mut system_deps = load_builder_system_deps(&build_root);
     if system_deps.is_empty() {
         system_deps = system_deps_from_names([request.normalized_name]);

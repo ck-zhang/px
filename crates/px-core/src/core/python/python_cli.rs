@@ -16,7 +16,9 @@ use crate::{
     is_missing_project_error, manifest_snapshot, progress::ProgressReporter, CommandContext,
     ExecutionOutcome, InstallUserError,
 };
-use px_domain::api::{discover_workspace_root, read_workspace_config, ManifestEditor, ProjectSnapshot};
+use px_domain::api::{
+    discover_workspace_root, read_workspace_config, ManifestEditor, ProjectSnapshot,
+};
 
 pub struct PythonListRequest;
 
@@ -185,7 +187,10 @@ pub fn python_use(ctx: &CommandContext, request: &PythonUseRequest) -> Result<Ex
             .into());
         }
         let state = evaluate_project_state(ctx, &snapshot)?;
-        if !matches!(state.canonical, px_domain::api::ProjectStateKind::Consistent) {
+        if !matches!(
+            state.canonical,
+            px_domain::api::ProjectStateKind::Consistent
+        ) {
             return Err(InstallUserError::new(
                 "project is not consistent under CI=1",
                 json!({
@@ -229,7 +234,13 @@ pub fn python_use(ctx: &CommandContext, request: &PythonUseRequest) -> Result<Ex
         } else {
             format!("project already targets Python {normalized}; synced lock/env")
         };
-        Ok(python_use_outcome(message, &record, &pyproject, None, sync_outcome))
+        Ok(python_use_outcome(
+            message,
+            &record,
+            &pyproject,
+            None,
+            sync_outcome,
+        ))
     })();
     if needs_restore {
         backup.restore()?;
@@ -547,7 +558,10 @@ pub fn python_info(
     } else if let Some(record) = default {
         details["project"] = Value::Null;
         Ok(ExecutionOutcome::success(
-            format!("default runtime: Python {} at {}", record.version, record.path),
+            format!(
+                "default runtime: Python {} at {}",
+                record.version, record.path
+            ),
             details,
         ))
     } else {

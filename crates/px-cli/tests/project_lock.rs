@@ -21,6 +21,7 @@ fn add_fails_fast_when_project_lock_held() {
     let lock_file_path = root.join(".px").join("project.lock");
     let lock_file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_file_path)

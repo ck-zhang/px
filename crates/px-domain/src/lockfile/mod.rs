@@ -91,7 +91,10 @@ build-backend = "setuptools.build_meta"
         std::fs::write(dir_b.path().join("pyproject.toml"), pyproject)?;
         let snapshot_a = ProjectSnapshot::read_from(dir_a.path())?;
         let snapshot_b = ProjectSnapshot::read_from(dir_b.path())?;
-        assert_eq!(snapshot_a.manifest_fingerprint, snapshot_b.manifest_fingerprint);
+        assert_eq!(
+            snapshot_a.manifest_fingerprint,
+            snapshot_b.manifest_fingerprint
+        );
 
         let lock_a = io::render_lockfile(&snapshot_a, &resolved(), "0.1.0")?;
         let lock_b = io::render_lockfile(&snapshot_b, &resolved(), "0.1.0")?;
@@ -158,10 +161,16 @@ cached_path = "{cached_path}"
         let parsed_a = io::parse_lockfile(&lock_contents(lock_a_path))?;
         let parsed_b = io::parse_lockfile(&lock_contents(lock_b_path))?;
 
-        let rendered_a =
-            io::render_lockfile(&snapshot, &analysis::collect_resolved_dependencies(&parsed_a), "0.1.0")?;
-        let rendered_b =
-            io::render_lockfile(&snapshot, &analysis::collect_resolved_dependencies(&parsed_b), "0.1.0")?;
+        let rendered_a = io::render_lockfile(
+            &snapshot,
+            &analysis::collect_resolved_dependencies(&parsed_a),
+            "0.1.0",
+        )?;
+        let rendered_b = io::render_lockfile(
+            &snapshot,
+            &analysis::collect_resolved_dependencies(&parsed_b),
+            "0.1.0",
+        )?;
 
         assert_eq!(rendered_a, rendered_b);
         assert!(

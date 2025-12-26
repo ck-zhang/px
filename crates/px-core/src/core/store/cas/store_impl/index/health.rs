@@ -89,8 +89,7 @@ impl ContentAddressableStore {
     }
 
     fn run_integrity_check(&self, conn: &Connection) -> Result<()> {
-        let _timing =
-            crate::tooling::timings::TimingGuard::new("cas_index_integrity_check");
+        let _timing = crate::tooling::timings::TimingGuard::new("cas_index_integrity_check");
         let mut stmt = conn.prepare("PRAGMA integrity_check")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {

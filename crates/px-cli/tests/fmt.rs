@@ -232,7 +232,9 @@ dependencies = []
     assert_eq!(payload["status"], "user-error");
     assert_eq!(payload["details"]["reason"], "tool_not_ready");
     let hint = payload["details"]["hint"].as_str().unwrap_or_default();
-    let nested_hint = payload["details"]["details"]["hint"].as_str().unwrap_or_default();
+    let nested_hint = payload["details"]["details"]["hint"]
+        .as_str()
+        .unwrap_or_default();
     assert!(
         hint.contains("px tool install ruff"),
         "expected hint to recommend tool install, got {hint:?}"
@@ -312,7 +314,9 @@ fn fmt_offline_missing_tool_reports_cache_miss() {
         "expected tool-specific offline cache miss, got {message:?}"
     );
     assert!(
-        !message.to_ascii_lowercase().contains("dependency resolution failed"),
+        !message
+            .to_ascii_lowercase()
+            .contains("dependency resolution failed"),
         "expected offline tool message, got {message:?}"
     );
 }

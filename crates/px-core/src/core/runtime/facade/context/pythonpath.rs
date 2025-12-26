@@ -91,10 +91,7 @@ fn discover_code_generator_paths(
                 extras.push(path.clone());
                 continue;
             }
-            if name
-                .to_str()
-                .is_some_and(should_skip_dir)
-            {
+            if name.to_str().is_some_and(should_skip_dir) {
                 continue;
             }
             if depth < max_depth {

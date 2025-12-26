@@ -167,7 +167,10 @@ fn plan_execution(
                 crate::workspace::StateViolation::LockDrift,
             ));
         }
-        if matches!(state.canonical, crate::workspace::WorkspaceStateKind::NeedsLock) {
+        if matches!(
+            state.canonical,
+            crate::workspace::WorkspaceStateKind::NeedsLock
+        ) {
             return Err(crate::workspace::workspace_violation(
                 command,
                 &workspace,
@@ -354,8 +357,13 @@ fn plan_execution(
         }
     })?;
     let state_report = state_guard::state_or_violation(ctx, &snapshot, command)?;
-    let guard =
-        state_guard::guard_for_execution(strict, allow_lock_autosync, &snapshot, &state_report, command)?;
+    let guard = state_guard::guard_for_execution(
+        strict,
+        allow_lock_autosync,
+        &snapshot,
+        &state_report,
+        command,
+    )?;
 
     let _ = prepare_project_runtime(&snapshot).map_err(|err| {
         ExecutionOutcome::failure(
@@ -510,7 +518,15 @@ pub(crate) fn plan_run_execution(
     target: &str,
     args: &[String],
 ) -> Result<ExecutionPlan, ExecutionOutcome> {
-    plan_execution(ctx, strict, allow_lock_autosync, sandbox, "run", target, args)
+    plan_execution(
+        ctx,
+        strict,
+        allow_lock_autosync,
+        sandbox,
+        "run",
+        target,
+        args,
+    )
 }
 
 pub(crate) fn plan_test_execution(
@@ -522,5 +538,13 @@ pub(crate) fn plan_test_execution(
 ) -> Result<ExecutionPlan, ExecutionOutcome> {
     // Placeholder target resolution for tests; the runner is selected at execution time.
     let target = "pytest";
-    plan_execution(ctx, strict, allow_lock_autosync, sandbox, "test", target, args)
+    plan_execution(
+        ctx,
+        strict,
+        allow_lock_autosync,
+        sandbox,
+        "test",
+        target,
+        args,
+    )
 }

@@ -58,7 +58,9 @@ pub(super) fn manifest_change_lines_from_details(details: &Value) -> Vec<String>
         let Some(obj) = entry.as_object() else {
             continue;
         };
-        let Some(before) = obj.get("before").and_then(Value::as_str) else { continue };
+        let Some(before) = obj.get("before").and_then(Value::as_str) else {
+            continue;
+        };
         let Some(after) = obj.get("after").and_then(Value::as_str) else {
             continue;
         };
@@ -114,10 +116,7 @@ pub(super) fn lock_direct_change_lines_from_details(details: &Value, verbose: u8
     lock_highlight_lines(details, "direct", verbose)
 }
 
-pub(super) fn lock_updated_version_lines_from_details(
-    details: &Value,
-    verbose: u8,
-) -> Vec<String> {
+pub(super) fn lock_updated_version_lines_from_details(details: &Value, verbose: u8) -> Vec<String> {
     lock_highlight_lines(details, "updated_versions", verbose)
 }
 

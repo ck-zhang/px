@@ -94,7 +94,9 @@ pub(crate) fn ensure_profile_manifest(
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let python_size = fs::metadata(&runtime.path).map(|meta| meta.len()).unwrap_or(0);
+    let python_size = fs::metadata(&runtime.path)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
     let runtime_lookup_key = format!(
         "runtime|v1|{}|{}|{}|{}|{}|{}|{}|{}",
         hex::encode(Sha256::digest(runtime.path.as_bytes())),
@@ -722,10 +724,7 @@ fn inferred_version_from_filename(filename: &str) -> String {
     }
 }
 
-fn ensure_cached_wheel(
-    cache_root: &Path,
-    header: &SourceHeader,
-) -> Result<PathBuf> {
+fn ensure_cached_wheel(cache_root: &Path, header: &SourceHeader) -> Result<PathBuf> {
     let dest = wheel_path(cache_root, &header.name, &header.version, &header.filename);
     if dest.exists() {
         return Ok(dest);

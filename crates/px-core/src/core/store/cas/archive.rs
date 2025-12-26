@@ -153,7 +153,11 @@ pub fn archive_dir_canonical(root: &Path) -> Result<Vec<u8>> {
 
 /// Archive a subset of paths under a shared root, skipping unreadable entries and any entry
 /// rejected by `filter_entry`.
-pub fn archive_selected_filtered<F>(root: &Path, paths: &[PathBuf], mut filter_entry: F) -> Result<Vec<u8>>
+pub fn archive_selected_filtered<F>(
+    root: &Path,
+    paths: &[PathBuf],
+    mut filter_entry: F,
+) -> Result<Vec<u8>>
 where
     F: FnMut(&walkdir::DirEntry) -> bool,
 {

@@ -638,7 +638,10 @@ fn should_announce_tool_install(ctx: &CommandContext) -> bool {
     !ctx.global.json && !ctx.global.quiet
 }
 
-fn rewrite_tool_install_outcome(mut outcome: ExecutionOutcome, tool: &QualityTool) -> ExecutionOutcome {
+fn rewrite_tool_install_outcome(
+    mut outcome: ExecutionOutcome,
+    tool: &QualityTool,
+) -> ExecutionOutcome {
     if let Value::Object(map) = &mut outcome.details {
         map.remove("code");
     }

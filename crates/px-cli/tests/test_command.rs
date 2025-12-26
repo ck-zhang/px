@@ -73,7 +73,9 @@ fn px_test_offline_missing_pytest_tool_reports_cache_miss() {
         "expected tool-specific offline cache miss, got {message:?}"
     );
     assert!(
-        !message.to_ascii_lowercase().contains("dependency resolution failed"),
+        !message
+            .to_ascii_lowercase()
+            .contains("dependency resolution failed"),
         "expected offline tool message, got {message:?}"
     );
 }

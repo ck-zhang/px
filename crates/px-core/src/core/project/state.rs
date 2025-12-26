@@ -80,9 +80,8 @@ pub(crate) fn evaluate_project_state(
         }
         if env_issue.is_none() {
             if let Some(lock_id) = lock_id.as_deref() {
-                let setuptools_required = lock
-                    .as_ref()
-                    .is_some_and(|lock| !lock.resolved.is_empty());
+                let setuptools_required =
+                    lock.as_ref().is_some_and(|lock| !lock.resolved.is_empty());
                 match ensure_env_matches_lock(ctx, snapshot, lock_id, setuptools_required) {
                     Ok(()) => env_clean = true,
                     Err(err) => match err.downcast::<InstallUserError>() {

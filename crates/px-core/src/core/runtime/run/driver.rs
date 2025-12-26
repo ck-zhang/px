@@ -256,7 +256,12 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
                 .root
                 .join(".px")
                 .join("workspace-state.json");
-            let env_pointer = workspace.config.root.join(".px").join("envs").join("current");
+            let env_pointer = workspace
+                .config
+                .root
+                .join(".px")
+                .join("envs")
+                .join("current");
             if workspace_state.exists() && env_pointer.exists() {
                 match prepare_cas_native_workspace_run_context(ctx, &workspace, &member_root) {
                     Ok(native_ctx) => {
@@ -555,10 +560,11 @@ fn run_project_outcome(ctx: &CommandContext, request: &RunRequest) -> Result<Exe
             }
         }
     }
-    let guard = match guard_for_execution(strict, allow_lock_autosync, &snapshot, &state_report, "run") {
-        Ok(guard) => guard,
-        Err(outcome) => return Ok(outcome),
-    };
+    let guard =
+        match guard_for_execution(strict, allow_lock_autosync, &snapshot, &state_report, "run") {
+            Ok(guard) => guard,
+            Err(outcome) => return Ok(outcome),
+        };
     let (py_ctx, sync_report) = match python_context_with_mode(ctx, guard) {
         Ok(result) => result,
         Err(outcome) => return Ok(outcome),

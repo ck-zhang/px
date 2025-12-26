@@ -15,13 +15,13 @@ use tar::Archive;
 use tempfile::tempdir;
 
 use crate::core::runtime::facade::RuntimeMetadata;
-#[cfg(unix)]
-use crate::{api::GlobalOptions, api::SystemEffects, CommandContext};
 use crate::store::cas::{
     archive_dir_canonical, global_store, ObjectPayload, PkgBuildHeader, ProfileHeader,
     ProfilePackage, RuntimeHeader, MATERIALIZED_PKG_BUILDS_DIR,
 };
 use crate::ManifestSnapshot;
+#[cfg(unix)]
+use crate::{api::GlobalOptions, api::SystemEffects, CommandContext};
 
 #[cfg(not(windows))]
 use super::write_python_shim;
@@ -91,7 +91,7 @@ fn runtime_archive_ignores_scripts_dir_from_probe() -> Result<()> {
         "include": include.display().to_string(),
         "scripts": tools.display().to_string(),
     });
-    let shim = format!("#!/bin/sh\ncat <<'JSON'\n{}\nJSON\n", payload.to_string());
+    let shim = format!("#!/bin/sh\ncat <<'JSON'\n{}\nJSON\n", payload);
     fs::write(&python, shim)?;
     #[cfg(unix)]
     {
@@ -182,7 +182,7 @@ fn ensure_profile_manifest_reuses_cached_runtime_archive() -> Result<()> {
         "platstdlib": lib.display().to_string(),
         "include": include.display().to_string(),
     });
-    let shim = format!("#!/bin/sh\ncat <<'JSON'\n{}\nJSON\n", payload.to_string());
+    let shim = format!("#!/bin/sh\ncat <<'JSON'\n{}\nJSON\n", payload);
     fs::write(&python, shim)?;
     #[cfg(unix)]
     {
@@ -249,7 +249,8 @@ fn ensure_profile_manifest_reuses_cached_runtime_archive() -> Result<()> {
         owner_id: "demo".to_string(),
     };
 
-    let first = profile::ensure_profile_manifest(&ctx, &snapshot, &lock, &runtime_meta, &env_owner)?;
+    let first =
+        profile::ensure_profile_manifest(&ctx, &snapshot, &lock, &runtime_meta, &env_owner)?;
 
     struct PermissionGuard {
         path: PathBuf,
@@ -276,7 +277,8 @@ fn ensure_profile_manifest_reuses_cached_runtime_archive() -> Result<()> {
     fs::set_permissions(&lib, fs::Permissions::from_mode(0o000))?;
     fs::set_permissions(&include, fs::Permissions::from_mode(0o000))?;
 
-    let second = profile::ensure_profile_manifest(&ctx, &snapshot, &lock, &runtime_meta, &env_owner)?;
+    let second =
+        profile::ensure_profile_manifest(&ctx, &snapshot, &lock, &runtime_meta, &env_owner)?;
 
     assert_eq!(
         first.header.runtime_oid, second.header.runtime_oid,

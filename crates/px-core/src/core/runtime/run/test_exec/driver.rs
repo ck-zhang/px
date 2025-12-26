@@ -36,9 +36,9 @@ pub(in crate::core::runtime::run) fn test_project_outcome(
         request.sandbox,
         &request.args,
     ) {
-            Ok(plan) => plan,
-            Err(outcome) => return Ok(outcome),
-        };
+        Ok(plan) => plan,
+        Err(outcome) => return Ok(outcome),
+    };
 
     let mut workspace_cas_native_fallback: Option<CasNativeFallback> = None;
     if matches!(plan.context, execution_plan::PlanContext::Workspace { .. })
@@ -246,7 +246,13 @@ pub(in crate::core::runtime::run) fn test_project_outcome(
         Ok(report) => report,
         Err(outcome) => return Ok(outcome),
     };
-    let guard = match guard_for_execution(strict, allow_lock_autosync, &snapshot, &state_report, "test") {
+    let guard = match guard_for_execution(
+        strict,
+        allow_lock_autosync,
+        &snapshot,
+        &state_report,
+        "test",
+    ) {
         Ok(guard) => guard,
         Err(outcome) => return Ok(outcome),
     };

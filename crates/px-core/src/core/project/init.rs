@@ -276,8 +276,13 @@ fn suggested_init_runtime(raw: Option<&str>) -> String {
         return DEFAULT_INIT_RUNTIME.to_string();
     };
     let trimmed = raw.trim_start_matches(['>', '<', '=', '~', '!']);
-    let candidate = trimmed.trim_start().split([',', ' ']).next().unwrap_or(trimmed);
-    runtime_manager::normalize_channel(candidate).unwrap_or_else(|_| DEFAULT_INIT_RUNTIME.to_string())
+    let candidate = trimmed
+        .trim_start()
+        .split([',', ' '])
+        .next()
+        .unwrap_or(trimmed);
+    runtime_manager::normalize_channel(candidate)
+        .unwrap_or_else(|_| DEFAULT_INIT_RUNTIME.to_string())
 }
 
 fn resolve_python_requirement_arg(raw: Option<&str>) -> String {
@@ -342,7 +347,8 @@ fn detect_init_conflict(pyproject_path: &Path) -> Result<Option<InitConflict>> {
     if project_dependencies_declared(&doc) {
         return Ok(Some(InitConflict::ExistingDependencies));
     }
-    if doc.get("tool")
+    if doc
+        .get("tool")
         .and_then(Item::as_table)
         .and_then(|tool| tool.get("px"))
         .is_none()

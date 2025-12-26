@@ -347,7 +347,10 @@ struct DownloadArtifactContext<'a> {
     force_sdist: bool,
 }
 
-fn download_artifact(ctx: &DownloadArtifactContext<'_>, pin: PinSpec) -> Result<ResolvedDependency> {
+fn download_artifact(
+    ctx: &DownloadArtifactContext<'_>,
+    pin: PinSpec,
+) -> Result<ResolvedDependency> {
     let builder = builder_identity_from_tags(ctx.tags);
     let default_build_hash = wheel_build_options_hash(ctx.python)?;
     let artifact = match pin.source.as_ref() {

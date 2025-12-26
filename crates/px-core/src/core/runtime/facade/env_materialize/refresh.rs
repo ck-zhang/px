@@ -90,8 +90,8 @@ pub(crate) fn refresh_project_site(
         &cas_profile.runtime_path,
         ctx.fs(),
     )?;
-    let setuptools_required = !lock.resolved.is_empty()
-        || pyproject_requires_setuptools(ctx, &snapshot.manifest_path);
+    let setuptools_required =
+        !lock.resolved.is_empty() || pyproject_requires_setuptools(ctx, &snapshot.manifest_path);
     let skip_tool_seeding = is_inline_snapshot(ctx, snapshot)
         && lock.resolved.is_empty()
         && !setuptools_required

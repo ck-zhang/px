@@ -299,10 +299,7 @@ fn ensure_uv_build_backend_module_root(pyproject_path: &Path, module_root: &str)
     }
     let build_table = build_entry.as_table_mut().expect("build-backend table");
 
-    build_table.insert(
-        "module-root",
-        Item::Value(TomlValue::from(module_root)),
-    );
+    build_table.insert("module-root", Item::Value(TomlValue::from(module_root)));
 
     fs::write(pyproject_path, doc.to_string())
         .with_context(|| format!("writing {}", pyproject_path.display()))?;
@@ -434,10 +431,7 @@ mod tests {
             "prepare_build_root must not create src/ in the project"
         );
         assert!(
-            staged_path
-                .join("proj")
-                .join("__init__.py")
-                .exists(),
+            staged_path.join("proj").join("__init__.py").exists(),
             "staged build root should contain the real package"
         );
         assert!(

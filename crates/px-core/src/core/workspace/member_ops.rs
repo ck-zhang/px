@@ -10,8 +10,8 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::{dependency_name, CommandContext, ExecutionOutcome};
-use px_domain::api::ManifestEditor;
 use pep508_rs::{Requirement as PepRequirement, VersionOrUrl};
+use px_domain::api::ManifestEditor;
 
 use super::{workspace_sync, WorkspaceScope, WorkspaceSyncRequest};
 
@@ -90,8 +90,12 @@ pub fn workspace_add(
         )?;
         needs_restore = false;
         let dependencies_after = ManifestEditor::open(&manifest_path)?.dependencies();
-        let manifest_changes =
-            pinned_manifest_changes(&report.added, &report.updated, &dependencies_before, &dependencies_after);
+        let manifest_changes = pinned_manifest_changes(
+            &report.added,
+            &report.updated,
+            &dependencies_before,
+            &dependencies_after,
+        );
         let mut details = json!({
             "pyproject": manifest_path.display().to_string(),
             "lockfile": workspace.lock_path.display().to_string(),

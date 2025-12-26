@@ -104,10 +104,8 @@ pub fn ensure_test_store_env() {
                 env::set_var("PX_RUNTIME_PYTHON", python);
             }
         }
-        if let Some(python) = env::var("PX_RUNTIME_PYTHON").ok() {
-            if let Some((executable, channel, full_version)) =
-                detect_host_python_details(&python)
-            {
+        if let Ok(python) = env::var("PX_RUNTIME_PYTHON") {
+            if let Some((executable, channel, full_version)) = detect_host_python_details(&python) {
                 let payload = serde_json::json!({
                     "runtimes": [{
                         "version": channel,

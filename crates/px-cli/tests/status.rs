@@ -175,10 +175,7 @@ fn project_status_detects_incomplete_lock_closure() {
     let mut kept = ArrayOfTables::new();
     for dep in deps.iter() {
         let name = dep.get("name").and_then(Item::as_str).unwrap_or_default();
-        if matches!(
-            name,
-            "urllib3" | "certifi" | "idna" | "charset-normalizer"
-        ) {
+        if matches!(name, "urllib3" | "certifi" | "idna" | "charset-normalizer") {
             continue;
         }
         kept.push(dep.clone());
@@ -202,10 +199,9 @@ fn project_status_detects_incomplete_lock_closure() {
         .as_array()
         .expect("lock_issue array");
     assert!(
-        issues.iter().any(|issue| issue
-            .as_str()
-            .unwrap_or_default()
-            .contains("urllib3")),
+        issues
+            .iter()
+            .any(|issue| issue.as_str().unwrap_or_default().contains("urllib3")),
         "expected closure issue mentioning urllib3, got {issues:?}"
     );
 }

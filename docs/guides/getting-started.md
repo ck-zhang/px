@@ -21,7 +21,7 @@ irm https://github.com/ck-zhang/px/releases/latest/download/install.ps1 | iex
 From source:
 
 ```sh
-cargo install --path crates/px-cli
+cargo install --path crates/px-cli --locked
 px --help
 ```
 

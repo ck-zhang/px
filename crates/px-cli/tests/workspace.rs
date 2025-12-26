@@ -48,8 +48,9 @@ fn write_workspace_lock(root: &Path) {
             .collect(),
         owners: Vec::new(),
     };
-    let lock_contents = render_lockfile_with_workspace(&lock_snapshot, &[], "test", Some(&workspace_lock))
-        .expect("render lockfile");
+    let lock_contents =
+        render_lockfile_with_workspace(&lock_snapshot, &[], "test", Some(&workspace_lock))
+            .expect("render lockfile");
     fs::write(root.join("px.workspace.lock"), lock_contents).expect("write workspace lockfile");
 }
 
@@ -133,7 +134,10 @@ fn workspace_run_works_from_root_and_non_member_directory() {
         .assert()
         .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
-    assert!(stdout.contains("root-ok"), "expected output, got {stdout:?}");
+    assert!(
+        stdout.contains("root-ok"),
+        "expected output, got {stdout:?}"
+    );
 
     let scratch = root.join("scratch");
     fs::create_dir_all(&scratch).expect("create scratch dir");
@@ -294,7 +298,10 @@ fn workspace_python_use_syncs_workspace_runtime() {
         .parse()
         .expect("parse member pyproject");
     assert!(
-        member_doc["tool"]["px"].as_table().and_then(|table| table.get("python")).is_none(),
+        member_doc["tool"]["px"]
+            .as_table()
+            .and_then(|table| table.get("python"))
+            .is_none(),
         "px python use in a workspace should not set per-member [tool.px].python"
     );
 
@@ -323,12 +330,19 @@ fn workspace_python_info_prefers_default_runtime_when_multiple_satisfy() {
     };
 
     let (_temp, root) = prepare_named_fixture("workspace_basic", "workspace_python_info_default");
-    for rel in ["pyproject.toml", "apps/a/pyproject.toml", "libs/b/pyproject.toml"] {
+    for rel in [
+        "pyproject.toml",
+        "apps/a/pyproject.toml",
+        "libs/b/pyproject.toml",
+    ] {
         let path = root.join(rel);
         let contents = fs::read_to_string(&path).expect("read pyproject");
         fs::write(
             &path,
-            contents.replace("requires-python = \">=3.11\"", "requires-python = \">=3.8\""),
+            contents.replace(
+                "requires-python = \">=3.11\"",
+                "requires-python = \">=3.8\"",
+            ),
         )
         .expect("write pyproject");
     }
@@ -351,8 +365,11 @@ fn workspace_python_info_prefers_default_runtime_when_multiple_satisfy() {
             }
         ]
     });
-    fs::write(&registry, serde_json::to_string_pretty(&payload).unwrap() + "\n")
-        .expect("write registry");
+    fs::write(
+        &registry,
+        serde_json::to_string_pretty(&payload).unwrap() + "\n",
+    )
+    .expect("write registry");
 
     let status = cargo_bin_cmd!("px")
         .current_dir(&root)
@@ -361,8 +378,14 @@ fn workspace_python_info_prefers_default_runtime_when_multiple_satisfy() {
         .assert()
         .success();
     let payload = parse_json(&status);
-    assert_eq!(payload["details"]["project"]["version"], Value::String("3.8".into()));
-    assert_eq!(payload["details"]["default"]["version"], Value::String("3.8".into()));
+    assert_eq!(
+        payload["details"]["project"]["version"],
+        Value::String("3.8".into())
+    );
+    assert_eq!(
+        payload["details"]["default"]["version"],
+        Value::String("3.8".into())
+    );
     assert_eq!(
         payload["details"]["project"]["source"],
         Value::String("Default".into())

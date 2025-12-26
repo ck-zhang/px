@@ -1,8 +1,4 @@
-use std::{
-    fs,
-    path::Path,
-    process::Command,
-};
+use std::{fs, path::Path, process::Command};
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::{json, Value};
@@ -175,7 +171,10 @@ fn project_init_git_repo_adds_px_to_gitignore_and_prints_message() {
         .success();
 
     let gitignore = project_dir.join(".gitignore");
-    assert!(gitignore.exists(), ".gitignore should be created in a git repo");
+    assert!(
+        gitignore.exists(),
+        ".gitignore should be created in a git repo"
+    );
     let contents = fs::read_to_string(&gitignore).expect("read .gitignore");
     assert!(
         contents.lines().any(|line| line.trim() == ".px/"),
@@ -212,7 +211,10 @@ fn project_init_git_repo_does_not_duplicate_px_gitignore_entry() {
         .success();
 
     let contents = fs::read_to_string(project_dir.join(".gitignore")).expect("read .gitignore");
-    let px_entries = contents.lines().filter(|line| line.trim() == ".px/").count();
+    let px_entries = contents
+        .lines()
+        .filter(|line| line.trim() == ".px/")
+        .count();
     assert_eq!(
         px_entries, 1,
         "expected single .px/ entry, got:\n{contents}"
@@ -373,8 +375,7 @@ fn project_init_prompts_to_install_runtime_on_tty() {
         eprintln!("skipping tty init test (python not found)");
         return;
     };
-    let Some((python_exe, channel, _full_version)) =
-        common::detect_host_python_details(&python)
+    let Some((python_exe, channel, _full_version)) = common::detect_host_python_details(&python)
     else {
         eprintln!("skipping tty init test (unable to inspect python)");
         return;
@@ -493,9 +494,7 @@ fn project_init_prompts_to_install_runtime_on_tty() {
     let mut child = cmd.spawn().expect("spawn script");
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
-        stdin
-            .write_all(b"Y\n")
-            .expect("write confirmation");
+        stdin.write_all(b"Y\n").expect("write confirmation");
     }
     let output = child.wait_with_output().expect("wait");
     assert!(
@@ -997,12 +996,11 @@ fn project_add_json_includes_change_summary() {
     let lock_changes = payload["details"]["lock_changes"]
         .as_object()
         .expect("lock_changes object");
-    assert_eq!(
+    assert!(
         lock_changes
             .get("changed")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        true,
         "expected lock_changes.changed=true, got {lock_changes:?}"
     );
 }
@@ -1145,7 +1143,9 @@ fn project_update_prints_lock_version_changes() {
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout utf8");
     assert!(
-        stdout.contains(&format!("px update: px.lock: ~ requests {before} -> {after}")),
+        stdout.contains(&format!(
+            "px update: px.lock: ~ requests {before} -> {after}"
+        )),
         "expected px update to show version diff, got {stdout:?}"
     );
 }
@@ -1323,7 +1323,11 @@ fn init_refuses_and_recommends_migrate_when_pyproject_exists_without_px_metadata
     )
     .expect("write pyproject");
 
-    let assert = px_cmd().current_dir(temp.path()).arg("init").assert().failure();
+    let assert = px_cmd()
+        .current_dir(temp.path())
+        .arg("init")
+        .assert()
+        .failure();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(
         stderr.contains("px migrate"),

@@ -20,9 +20,7 @@ pub(crate) fn lock_preview(lock: Option<&LockSnapshot>, planned_pins: &[PinSpec]
     let planned = planned_pin_map(planned_pins);
     let planned_count = planned.len();
 
-    let current = lock
-        .map(lock_pin_map)
-        .unwrap_or_default();
+    let current = lock.map(lock_pin_map).unwrap_or_default();
     let current_count = current.len();
 
     let mut added = 0usize;
@@ -34,7 +32,10 @@ pub(crate) fn lock_preview(lock: Option<&LockSnapshot>, planned_pins: &[PinSpec]
             _ => {}
         }
     }
-    let removed = current.keys().filter(|name| !planned.contains_key(*name)).count();
+    let removed = current
+        .keys()
+        .filter(|name| !planned.contains_key(*name))
+        .count();
     let would_change = added > 0 || removed > 0 || updated > 0;
 
     let highlights = lock_highlights(lock, &current, planned_pins);
@@ -53,10 +54,12 @@ pub(crate) fn lock_preview(lock: Option<&LockSnapshot>, planned_pins: &[PinSpec]
     })
 }
 
-pub(crate) fn lock_preview_unresolved(lock: Option<&LockSnapshot>, would_change: bool, note: &str) -> Value {
-    let current = lock
-        .map(lock_pin_map)
-        .unwrap_or_default();
+pub(crate) fn lock_preview_unresolved(
+    lock: Option<&LockSnapshot>,
+    would_change: bool,
+    note: &str,
+) -> Value {
+    let current = lock.map(lock_pin_map).unwrap_or_default();
     json!({
         "path": "px.lock",
         "would_change": would_change,
@@ -87,7 +90,10 @@ pub(crate) fn lock_changes(before: Option<&LockSnapshot>, after: Option<&LockSna
             _ => {}
         }
     }
-    let removed = before_map.keys().filter(|name| !after_map.contains_key(*name)).count();
+    let removed = before_map
+        .keys()
+        .filter(|name| !after_map.contains_key(*name))
+        .count();
     let changed = added > 0 || removed > 0 || updated > 0;
 
     json!({

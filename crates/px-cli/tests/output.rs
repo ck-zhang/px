@@ -102,7 +102,9 @@ fn build_outputs_do_not_synthesize_src_packages() {
     let expected_module = format!("{normalized}/__init__.py");
     let unexpected_module = format!("src/{normalized}/__init__.py");
     assert!(
-        sdist_paths.iter().any(|path| path.ends_with(&expected_module)),
+        sdist_paths
+            .iter()
+            .any(|path| path.ends_with(&expected_module)),
         "sdist should contain {expected_module}, got {sdist_paths:?}"
     );
     assert!(

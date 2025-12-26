@@ -137,10 +137,9 @@ fn ensure_pytest_tool(
         Ok(outcome) => outcome,
         Err(err) => match err.downcast::<InstallUserError>() {
             Ok(user) => {
-                return Err(rewrite_pytest_tool_install_outcome(ExecutionOutcome::user_error(
-                    user.message,
-                    user.details,
-                )));
+                return Err(rewrite_pytest_tool_install_outcome(
+                    ExecutionOutcome::user_error(user.message, user.details),
+                ));
             }
             Err(other) => {
                 return Err(ExecutionOutcome::failure(
@@ -206,7 +205,11 @@ fn rewrite_pytest_tool_install_outcome(mut outcome: ExecutionOutcome) -> Executi
         map.remove("code");
     }
     if outcome.status == CommandStatus::UserError
-        && outcome.details.get("reason").and_then(serde_json::Value::as_str) == Some("offline")
+        && outcome
+            .details
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            == Some("offline")
     {
         outcome.message = "pytest is not available in the local cache (offline)".to_string();
     }

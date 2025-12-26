@@ -8,9 +8,7 @@ use serde_json::Value;
 
 use crate::project::snapshot::ProjectSnapshot;
 
-use super::spec::{
-    dependency_name, spec_map, strip_wrapping_quotes, version_from_specifier,
-};
+use super::spec::{dependency_name, spec_map, strip_wrapping_quotes, version_from_specifier};
 use super::types::{
     LockPrefetchSpec, LockSnapshot, LockedArtifact, ResolvedDependency, LOCK_MODE_PINNED,
     LOCK_VERSION,
@@ -230,13 +228,22 @@ pub fn verify_locked_artifacts(lock: &LockSnapshot) -> Vec<String> {
             continue;
         };
         if artifact.filename.is_empty() {
-            issues.push(format!("dependency `{}` missing artifact filename in lock", dep.name));
+            issues.push(format!(
+                "dependency `{}` missing artifact filename in lock",
+                dep.name
+            ));
         }
         if artifact.url.is_empty() {
-            issues.push(format!("dependency `{}` missing artifact url in lock", dep.name));
+            issues.push(format!(
+                "dependency `{}` missing artifact url in lock",
+                dep.name
+            ));
         }
         if artifact.sha256.is_empty() {
-            issues.push(format!("dependency `{}` missing artifact sha256 in lock", dep.name));
+            issues.push(format!(
+                "dependency `{}` missing artifact sha256 in lock",
+                dep.name
+            ));
         }
     }
     issues
@@ -295,8 +302,7 @@ pub fn validate_lock_closure(
         let extras = extras_lookup.get(&canonical).cloned().unwrap_or_default();
         for req in &dep.requires {
             if let Some(env) = marker_env {
-                if let Ok(requirement) =
-                    PepRequirement::from_str(strip_wrapping_quotes(req.trim()))
+                if let Ok(requirement) = PepRequirement::from_str(strip_wrapping_quotes(req.trim()))
                 {
                     if !requirement.evaluate_markers(env, &extras) {
                         continue;

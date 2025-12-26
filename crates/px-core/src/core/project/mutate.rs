@@ -106,11 +106,9 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
         let dependencies_after_edit = editor.dependencies();
         let pin_needed = pin_targets.as_ref().is_some_and(|targets| {
             let after_map = dependency_spec_map(&dependencies_after_edit);
-            targets.iter().any(|name| {
-                after_map
-                    .get(name)
-                    .is_some_and(|spec| !is_exact_pin(spec))
-            })
+            targets
+                .iter()
+                .any(|name| after_map.get(name).is_some_and(|spec| !is_exact_pin(spec)))
         });
 
         if report.added.is_empty() && report.updated.is_empty() && !pin_needed {
@@ -126,20 +124,21 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
 
         if request.dry_run {
             let updated_snapshot = manifest_snapshot_at(&root)?;
-            let resolved = match resolve_dependencies_with_effects(ctx.effects(), &updated_snapshot, true) {
-                Ok(resolved) => resolved,
-                Err(err) => match err.downcast::<InstallUserError>() {
-                    Ok(user) => {
-                        return Ok(ExecutionOutcome::user_error(user.message, user.details))
-                    }
-                    Err(err) => {
-                        return Ok(ExecutionOutcome::failure(
-                            "px add failed while planning changes",
-                            json!({ "error": err.to_string() }),
-                        ))
-                    }
-                },
-            };
+            let resolved =
+                match resolve_dependencies_with_effects(ctx.effects(), &updated_snapshot, true) {
+                    Ok(resolved) => resolved,
+                    Err(err) => match err.downcast::<InstallUserError>() {
+                        Ok(user) => {
+                            return Ok(ExecutionOutcome::user_error(user.message, user.details))
+                        }
+                        Err(err) => {
+                            return Ok(ExecutionOutcome::failure(
+                                "px add failed while planning changes",
+                                json!({ "error": err.to_string() }),
+                            ))
+                        }
+                    },
+                };
             let marker_env = ctx.marker_environment()?;
             let planned_manifest = if updated_snapshot.px_options.pin_manifest {
                 merge_resolved_dependencies(&dependencies_after_edit, &resolved.specs, &marker_env)
@@ -188,7 +187,9 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
                 match resolve_dependencies_with_effects(ctx.effects(), &updated_snapshot, true) {
                     Ok(resolved) => resolved,
                     Err(err) => match err.downcast::<InstallUserError>() {
-                        Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                        Ok(user) => {
+                            return Ok(ExecutionOutcome::user_error(user.message, user.details))
+                        }
                         Err(err) => {
                             return Ok(ExecutionOutcome::failure(
                                 "px add failed",
@@ -199,27 +200,38 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
                 };
             let marker_env = ctx.marker_environment()?;
             let targets = pin_targets.as_ref().expect("pin_targets when pin_needed");
-            let (pinned_deps, _) =
-                pin_dependencies_for_targets(&updated_snapshot.dependencies, targets, &resolved.pins, &marker_env);
+            let (pinned_deps, _) = pin_dependencies_for_targets(
+                &updated_snapshot.dependencies,
+                targets,
+                &resolved.pins,
+                &marker_env,
+            );
             persist_resolved_dependencies(&updated_snapshot, &pinned_deps)?;
             let updated_snapshot = manifest_snapshot_at(&root)?;
             let override_data = InstallOverride {
                 dependencies: pinned_deps,
                 pins: resolved.pins.clone(),
             };
-            let install_outcome =
-                match install_snapshot(ctx, &updated_snapshot, false, false, Some(&override_data)) {
-                    Ok(outcome) => outcome,
-                    Err(err) => match err.downcast::<InstallUserError>() {
-                        Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
-                        Err(err) => {
-                            return Ok(ExecutionOutcome::failure(
-                                "px add failed",
-                                json!({ "error": err.to_string() }),
-                            ))
-                        }
-                    },
-                };
+            let install_outcome = match install_snapshot(
+                ctx,
+                &updated_snapshot,
+                false,
+                false,
+                Some(&override_data),
+            ) {
+                Ok(outcome) => outcome,
+                Err(err) => match err.downcast::<InstallUserError>() {
+                    Ok(user) => {
+                        return Ok(ExecutionOutcome::user_error(user.message, user.details))
+                    }
+                    Err(err) => {
+                        return Ok(ExecutionOutcome::failure(
+                            "px add failed",
+                            json!({ "error": err.to_string() }),
+                        ))
+                    }
+                },
+            };
             if let Err(err) = refresh_project_site(&updated_snapshot, ctx) {
                 return Ok(ExecutionOutcome::failure(
                     "px add failed to refresh environment",
@@ -244,8 +256,7 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
             snapshot
         };
         needs_restore = false;
-        let dependencies_after =
-            ManifestEditor::open(&pyproject_path)?.dependencies();
+        let dependencies_after = ManifestEditor::open(&pyproject_path)?.dependencies();
         let added_specs = {
             let after_map = dependency_spec_map(&dependencies_after);
             let mut out = Vec::new();
@@ -286,17 +297,13 @@ pub fn project_add(ctx: &CommandContext, request: &ProjectAddRequest) -> Result<
         if !manifest_changes.is_empty() {
             details["manifest_changes"] = json!(manifest_changes);
         }
-        let before_lock =
-            backup
-                .lock_contents
-                .as_deref()
-                .and_then(|contents| parse_lockfile(contents).ok());
+        let before_lock = backup
+            .lock_contents
+            .as_deref()
+            .and_then(|contents| parse_lockfile(contents).ok());
         let after_lock = load_lockfile_optional(&snapshot.lock_path)?;
         details["lock_changes"] = super::lock_changes(before_lock.as_ref(), after_lock.as_ref());
-        Ok(ExecutionOutcome::success(
-            message,
-            details,
-        ))
+        Ok(ExecutionOutcome::success(message, details))
     })();
 
     if needs_restore {
@@ -676,7 +683,8 @@ pub fn project_update(
             override_snapshot.dependencies = override_specs;
             override_snapshot.group_dependencies = snapshot.group_dependencies.clone();
             override_snapshot.dependency_groups = snapshot.dependency_groups.clone();
-            override_snapshot.declared_dependency_groups = snapshot.declared_dependency_groups.clone();
+            override_snapshot.declared_dependency_groups =
+                snapshot.declared_dependency_groups.clone();
             override_snapshot.dependency_group_source = snapshot.dependency_group_source;
             override_snapshot.requirements = override_snapshot.dependencies.clone();
             override_snapshot
@@ -702,7 +710,11 @@ pub fn project_update(
                 };
             let marker_env = ctx.marker_environment()?;
             let planned_manifest = if snapshot.px_options.pin_manifest {
-                merge_resolved_dependencies(&override_snapshot.dependencies, &resolved.specs, &marker_env)
+                merge_resolved_dependencies(
+                    &override_snapshot.dependencies,
+                    &resolved.specs,
+                    &marker_env,
+                )
             } else {
                 let mut pinned_targets = HashSet::new();
                 for spec in &snapshot.dependencies {
@@ -790,7 +802,11 @@ pub fn project_update(
 
         let marker_env = ctx.marker_environment()?;
         let (updated_deps, manifest_written) = if snapshot.px_options.pin_manifest {
-            let deps = merge_resolved_dependencies(&override_snapshot.dependencies, &resolved.specs, &marker_env);
+            let deps = merge_resolved_dependencies(
+                &override_snapshot.dependencies,
+                &resolved.specs,
+                &marker_env,
+            );
             persist_resolved_dependencies(&snapshot, &deps)?;
             (deps, true)
         } else {
@@ -807,8 +823,12 @@ pub fn project_update(
                     pinned_targets.insert(name);
                 }
             }
-            let (deps, changed) =
-                update_exact_pins_for_targets(&snapshot.dependencies, &pinned_targets, &resolved.pins, &marker_env);
+            let (deps, changed) = update_exact_pins_for_targets(
+                &snapshot.dependencies,
+                &pinned_targets,
+                &resolved.pins,
+                &marker_env,
+            );
             if changed {
                 persist_resolved_dependencies(&snapshot, &deps)?;
             }
@@ -857,11 +877,10 @@ pub fn project_update(
             "lockfile": updated_snapshot.lock_path.display().to_string(),
             "targets": ready,
         });
-        let before_lock =
-            backup
-                .lock_contents
-                .as_deref()
-                .and_then(|contents| parse_lockfile(contents).ok());
+        let before_lock = backup
+            .lock_contents
+            .as_deref()
+            .and_then(|contents| parse_lockfile(contents).ok());
         let after_lock = load_lockfile_optional(&updated_snapshot.lock_path)?;
         details["lock_changes"] = super::lock_changes(before_lock.as_ref(), after_lock.as_ref());
         if !unsupported.is_empty() {

@@ -227,7 +227,8 @@ fn px_cmd(project: &Path) -> assert_cmd::Command {
     let registry = cache.join("runtimes.json");
     if !registry.exists() {
         let _ = fs::create_dir_all(&cache);
-        if let Some((executable, channel, full_version)) = common::detect_host_python_details(&python)
+        if let Some((executable, channel, full_version)) =
+            common::detect_host_python_details(&python)
         {
             let payload = serde_json::json!({
                 "runtimes": [{
@@ -237,7 +238,10 @@ fn px_cmd(project: &Path) -> assert_cmd::Command {
                     "default": true,
                 }],
             });
-            let _ = fs::write(&registry, serde_json::to_string_pretty(&payload).unwrap() + "\n");
+            let _ = fs::write(
+                &registry,
+                serde_json::to_string_pretty(&payload).unwrap() + "\n",
+            );
         }
     }
     let mut cmd = cargo_bin_cmd!("px");

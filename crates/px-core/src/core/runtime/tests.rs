@@ -357,8 +357,15 @@ fn materialize_project_site_writes_cached_paths() {
         .join("test-env")
         .join("site");
     let site_packages = site_packages_dir(&site_dir, "3.11.0");
-    materialize_project_site(&cache_root, &site_dir, &site_packages, &lock, None, effects.fs())
-        .expect("materialize site");
+    materialize_project_site(
+        &cache_root,
+        &site_dir,
+        &site_packages,
+        &lock,
+        None,
+        effects.fs(),
+    )
+    .expect("materialize site");
 
     let pxpth = site_dir.join("px.pth");
     assert!(
@@ -440,8 +447,15 @@ fn materialize_project_site_skips_missing_artifacts() {
         .join("test-env")
         .join("site");
     let site_packages = site_packages_dir(&site_dir, "3.11.0");
-    materialize_project_site(&cache_root, &site_dir, &site_packages, &lock, None, effects.fs())
-        .expect("materialize site with gap");
+    materialize_project_site(
+        &cache_root,
+        &site_dir,
+        &site_packages,
+        &lock,
+        None,
+        effects.fs(),
+    )
+    .expect("materialize site with gap");
     let pxpth = site_dir.join("px.pth");
     assert!(pxpth.exists(), "px.pth should still be created");
     let contents = fs::read_to_string(pxpth).expect("read px.pth");

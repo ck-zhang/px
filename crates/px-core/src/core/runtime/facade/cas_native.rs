@@ -656,8 +656,8 @@ fn ensure_packaging_seeds_present(
     };
     let env_python = PathBuf::from(&env.python.path);
     let envs = project_site_env(ctx, snapshot, &site_dir, &env_python)?;
-    let setuptools_ok = !setuptools_required
-        || module_available(ctx, snapshot, &env_python, &envs, "setuptools")?;
+    let setuptools_ok =
+        !setuptools_required || module_available(ctx, snapshot, &env_python, &envs, "setuptools")?;
     let uv_needed = uv_seed_required(snapshot);
     let uv_ok = !uv_needed
         || has_uv_cli(&site_dir)

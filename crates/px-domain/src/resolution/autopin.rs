@@ -156,7 +156,14 @@ pub fn plan_autopin(
     }
     let contents = fs::read_to_string(pyproject_path)?;
     let doc: DocumentMut = contents.parse()?;
-    plan_autopin_document(snapshot, doc, lock_only, no_autopin, resolve_pins, marker_env)
+    plan_autopin_document(
+        snapshot,
+        doc,
+        lock_only,
+        no_autopin,
+        resolve_pins,
+        marker_env,
+    )
 }
 
 fn collect_autopin_locations(

@@ -56,7 +56,8 @@ pub fn materialize_project_site(
             .get(&dep.name.to_ascii_lowercase())
             .cloned()
             .unwrap_or_else(|| inferred_version_from_filename(&artifact.filename));
-        let wheel_path = crate::store::wheel_path(cache_root, &dep.name, &version, &artifact.filename);
+        let wheel_path =
+            crate::store::wheel_path(cache_root, &dep.name, &version, &artifact.filename);
         if !wheel_path.exists() {
             continue;
         }

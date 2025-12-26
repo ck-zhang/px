@@ -94,21 +94,27 @@ pub fn emit_output(
                     let line = format!("px {}: {}", info.name, change);
                     println!("{}", style_out.info(&line));
                 }
-                if let Some(lock) = details::lock_change_summary_line_from_details(&outcome.details) {
+                if let Some(lock) = details::lock_change_summary_line_from_details(&outcome.details)
+                {
                     let line = format!("px {}: {}", info.name, lock);
                     println!("{}", style_out.info(&line));
                 }
-                for change in details::lock_direct_change_lines_from_details(&outcome.details, opts.verbose) {
+                for change in
+                    details::lock_direct_change_lines_from_details(&outcome.details, opts.verbose)
+                {
                     let line = format!("px {}: {}", info.name, change);
                     println!("{}", style_out.info(&line));
                 }
             }
             if info.group == CommandGroup::Update && matches!(outcome.status, CommandStatus::Ok) {
-                if let Some(lock) = details::lock_change_summary_line_from_details(&outcome.details) {
+                if let Some(lock) = details::lock_change_summary_line_from_details(&outcome.details)
+                {
                     let line = format!("px {}: {}", info.name, lock);
                     println!("{}", style_out.info(&line));
                 }
-                for change in details::lock_updated_version_lines_from_details(&outcome.details, opts.verbose) {
+                for change in
+                    details::lock_updated_version_lines_from_details(&outcome.details, opts.verbose)
+                {
                     let line = format!("px {}: {}", info.name, change);
                     println!("{}", style_out.info(&line));
                 }

@@ -239,7 +239,10 @@ fn status_reports_needs_lock_when_lock_closure_is_incomplete() {
     tables.remove(idx);
     fs::write(&lock_path, lock.to_string()).expect("write incomplete lock");
 
-    let assert = px_command(&temp).args(["--json", "status"]).assert().failure();
+    let assert = px_command(&temp)
+        .args(["--json", "status"])
+        .assert()
+        .failure();
     let payload: Value =
         serde_json::from_slice(&assert.get_output().stdout).expect("status json output");
     let state = payload["project"]["state"].as_str().unwrap_or_default();
@@ -259,7 +262,9 @@ fn status_reports_needs_lock_when_lock_closure_is_incomplete() {
         .filter_map(|v| v.as_str().map(str::to_string))
         .collect::<Vec<_>>();
     assert!(
-        issues.iter().any(|msg| msg.contains("missing transitive dependency `urllib3`")),
+        issues
+            .iter()
+            .any(|msg| msg.contains("missing transitive dependency `urllib3`")),
         "expected lock_issue to mention missing urllib3; issues={issues:?}"
     );
 }
@@ -314,7 +319,10 @@ fn migrate_preview_prints_change_preview_lines() {
     let temp = tempfile::tempdir().expect("tempdir");
     fs::write(temp.path().join("requirements.txt"), "rich==13.7.1\n").expect("write requirements");
 
-    let assert = px_command_offline(&temp).args(["migrate"]).assert().success();
+    let assert = px_command_offline(&temp)
+        .args(["migrate"])
+        .assert()
+        .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
         stdout.contains("px migrate: pyproject.toml: + rich==13.7.1"),

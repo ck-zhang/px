@@ -763,7 +763,10 @@ fn run_refuses_manifest_drift_in_ci_even_under_tty() {
     );
     let payload: Value = serde_json::from_slice(&output.stdout).expect("valid json");
     assert_eq!(payload["status"], Value::String("user-error".into()));
-    assert_eq!(payload["details"]["reason"], Value::String("lock_drift".into()));
+    assert_eq!(
+        payload["details"]["reason"],
+        Value::String("lock_drift".into())
+    );
 }
 
 #[test]

@@ -62,16 +62,17 @@ pub fn dispatch_command(
             if !prompt_install_runtime(&version) {
                 return Ok((info, attempt));
             }
-            let install = core_call_no_spinner(CommandInfo::new(CommandGroup::Python, "install"), || {
-                px_core::python_install(
-                    ctx,
-                    &px_core::PythonInstallRequest {
-                        version: version.clone(),
-                        path: None,
-                        set_default: false,
-                    },
-                )
-            })?;
+            let install =
+                core_call_no_spinner(CommandInfo::new(CommandGroup::Python, "install"), || {
+                    px_core::python_install(
+                        ctx,
+                        &px_core::PythonInstallRequest {
+                            version: version.clone(),
+                            path: None,
+                            set_default: false,
+                        },
+                    )
+                })?;
             if install.status != px_core::CommandStatus::Ok {
                 return Ok((info, install));
             }
@@ -99,16 +100,17 @@ pub fn dispatch_command(
             if !prompt_install_runtime(&version) {
                 return Ok((info, attempt));
             }
-            let install = core_call_no_spinner(CommandInfo::new(CommandGroup::Python, "install"), || {
-                px_core::python_install(
-                    ctx,
-                    &px_core::PythonInstallRequest {
-                        version: version.clone(),
-                        path: None,
-                        set_default: false,
-                    },
-                )
-            })?;
+            let install =
+                core_call_no_spinner(CommandInfo::new(CommandGroup::Python, "install"), || {
+                    px_core::python_install(
+                        ctx,
+                        &px_core::PythonInstallRequest {
+                            version: version.clone(),
+                            path: None,
+                            set_default: false,
+                        },
+                    )
+                })?;
             if install.status != px_core::CommandStatus::Ok {
                 return Ok((info, install));
             }
@@ -128,16 +130,17 @@ pub fn dispatch_command(
             if !prompt_install_runtime(&version) {
                 return Ok((info, attempt));
             }
-            let install = core_call_no_spinner(CommandInfo::new(CommandGroup::Python, "install"), || {
-                px_core::python_install(
-                    ctx,
-                    &px_core::PythonInstallRequest {
-                        version: version.clone(),
-                        path: None,
-                        set_default: false,
-                    },
-                )
-            })?;
+            let install =
+                core_call_no_spinner(CommandInfo::new(CommandGroup::Python, "install"), || {
+                    px_core::python_install(
+                        ctx,
+                        &px_core::PythonInstallRequest {
+                            version: version.clone(),
+                            path: None,
+                            set_default: false,
+                        },
+                    )
+                })?;
             if install.status != px_core::CommandStatus::Ok {
                 return Ok((info, install));
             }
@@ -199,16 +202,17 @@ pub fn dispatch_command(
             if !prompt_install_runtime(&version) {
                 return Ok((info, attempt));
             }
-            let install = core_call_no_spinner(CommandInfo::new(CommandGroup::Python, "install"), || {
-                px_core::python_install(
-                    ctx,
-                    &px_core::PythonInstallRequest {
-                        version: version.clone(),
-                        path: None,
-                        set_default: false,
-                    },
-                )
-            })?;
+            let install =
+                core_call_no_spinner(CommandInfo::new(CommandGroup::Python, "install"), || {
+                    px_core::python_install(
+                        ctx,
+                        &px_core::PythonInstallRequest {
+                            version: version.clone(),
+                            path: None,
+                            set_default: false,
+                        },
+                    )
+                })?;
             if install.status != px_core::CommandStatus::Ok {
                 return Ok((info, install));
             }

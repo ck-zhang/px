@@ -172,12 +172,18 @@ fn env_layer_skips_runtime_static_libs() -> Result<()> {
         !saw_site_packages,
         "runtime site-packages should be excluded from layer tar"
     );
-    assert!(!saw_test, "runtime stdlib tests should be excluded from layer tar");
+    assert!(
+        !saw_test,
+        "runtime stdlib tests should be excluded from layer tar"
+    );
     assert!(
         !saw_pycache,
         "runtime __pycache__ should be excluded from layer tar"
     );
-    assert!(!saw_pyc, "runtime .pyc files should be excluded from layer tar");
+    assert!(
+        !saw_pyc,
+        "runtime .pyc files should be excluded from layer tar"
+    );
     Ok(())
 }
 
@@ -244,7 +250,10 @@ fn env_layer_stages_runtime_python_aliases() -> Result<()> {
         }
     }
 
-    assert!(saw_python312, "runtime interpreter should be present in layer tar");
+    assert!(
+        saw_python312,
+        "runtime interpreter should be present in layer tar"
+    );
     assert_eq!(
         saw_python.as_deref(),
         Some("python3.12"),

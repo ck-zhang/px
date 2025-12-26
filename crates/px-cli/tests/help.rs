@@ -137,7 +137,8 @@ fn top_level_help_describes_build_sources() {
 fn tool_run_help_does_not_require_double_dash() {
     let output = help_output(&["tool", "run", "--help"]);
     assert!(
-        output.contains("px tool run <NAME> [ARG...]") || output.contains("px tool run <name> [arg...]"),
+        output.contains("px tool run <NAME> [ARG...]")
+            || output.contains("px tool run <name> [arg...]"),
         "tool run usage should not require --, got: {output}"
     );
     assert!(

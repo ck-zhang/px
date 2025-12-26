@@ -134,8 +134,11 @@ fn python_list_sorts_newest_versions_first() {
             }
         ]
     });
-    fs::write(&registry, serde_json::to_string_pretty(&payload).unwrap() + "\n")
-        .expect("write registry");
+    fs::write(
+        &registry,
+        serde_json::to_string_pretty(&payload).unwrap() + "\n",
+    )
+    .expect("write registry");
 
     let list = cargo_bin_cmd!("px")
         .env("PX_RUNTIME_REGISTRY", registry.to_str().unwrap())
@@ -182,8 +185,11 @@ fn python_info_prefers_default_runtime_when_multiple_satisfy() {
             }
         ]
     });
-    fs::write(&registry, serde_json::to_string_pretty(&payload).unwrap() + "\n")
-        .expect("write registry");
+    fs::write(
+        &registry,
+        serde_json::to_string_pretty(&payload).unwrap() + "\n",
+    )
+    .expect("write registry");
 
     let (_tmp, project) = prepare_fixture("python-info-default");
     let pyproject_path = project.join("pyproject.toml");
@@ -227,8 +233,11 @@ fn python_list_marks_default_runtime_in_human_output() {
             }
         ]
     });
-    fs::write(&registry, serde_json::to_string_pretty(&payload).unwrap() + "\n")
-        .expect("write registry");
+    fs::write(
+        &registry,
+        serde_json::to_string_pretty(&payload).unwrap() + "\n",
+    )
+    .expect("write registry");
 
     let assert = cargo_bin_cmd!("px")
         .env("PX_RUNTIME_REGISTRY", registry.to_str().unwrap())

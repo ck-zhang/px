@@ -16,8 +16,8 @@ use toml_edit::{DocumentMut, Item};
 
 use px_domain::api::{
     collect_pyproject_packages, collect_requirement_packages, collect_setup_cfg_packages,
-    collect_setup_py_packages, plan_autopin, prepare_pyproject_plan, resolve_onboard_path,
-    plan_autopin_document, AutopinEntry, AutopinPending, AutopinState, BackupManager,
+    collect_setup_py_packages, plan_autopin, plan_autopin_document, prepare_pyproject_plan,
+    resolve_onboard_path, AutopinEntry, AutopinPending, AutopinState, BackupManager,
     InstallOverride, PinSpec,
 };
 
@@ -405,7 +405,8 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
         let mut pyproject_plan =
             prepare_pyproject_plan(&root, &pyproject_path, project_lock_only, &packages)?;
         if let Some(python) = &python_override_value {
-            pyproject_plan.contents = Some(apply_python_override(&pyproject_plan, python)?.to_string());
+            pyproject_plan.contents =
+                Some(apply_python_override(&pyproject_plan, python)?.to_string());
         }
         let planned_base = if let Some(contents) = &pyproject_plan.contents {
             contents.clone()
@@ -420,12 +421,14 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
             let poetry_pins = poetry_lock_versions(&root)?.map(Arc::new);
             let uv_pins = uv_lock_versions(&root, marker_env.as_ref())?.map(Arc::new);
             let effects = ctx.shared_effects();
-            let autopin_lock_only =
-                project_lock_only || uv_pins.is_some() || poetry_pins.is_some();
+            let autopin_lock_only = project_lock_only || uv_pins.is_some() || poetry_pins.is_some();
 
             let doc: DocumentMut = planned_base.parse()?;
-            let autopin_snapshot =
-                px_domain::api::ProjectSnapshot::from_contents(&root, &pyproject_path, &planned_base)?;
+            let autopin_snapshot = px_domain::api::ProjectSnapshot::from_contents(
+                &root,
+                &pyproject_path,
+                &planned_base,
+            )?;
             let resolve_pins = {
                 let uv_pins = uv_pins.clone();
                 let poetry_pins = poetry_pins.clone();
@@ -819,7 +822,9 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
 
     if let Some(override_data) = install_override.as_mut() {
         let mut override_snapshot = snapshot.clone();
-        override_snapshot.dependencies.clone_from(&override_data.dependencies);
+        override_snapshot
+            .dependencies
+            .clone_from(&override_data.dependencies);
         override_snapshot.requirements = override_snapshot.dependencies.clone();
         override_snapshot
             .requirements
@@ -834,7 +839,9 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
                         rollback_failed_migration(&backups, &created_files)?;
                     }
                     match err.downcast::<InstallUserError>() {
-                        Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
+                        Ok(user) => {
+                            return Ok(ExecutionOutcome::user_error(user.message, user.details))
+                        }
                         Err(other) => return Err(other),
                     }
                 }
@@ -848,17 +855,19 @@ pub fn migrate(ctx: &CommandContext, request: &MigrateRequest) -> Result<Executi
     }
     let install_outcome =
         match install_snapshot(ctx, &snapshot, false, false, install_override.as_ref()) {
-        Ok(ok) => ok,
-        Err(err) => {
-            if pyproject_modified {
-                rollback_failed_migration(&backups, &created_files)?;
+            Ok(ok) => ok,
+            Err(err) => {
+                if pyproject_modified {
+                    rollback_failed_migration(&backups, &created_files)?;
+                }
+                match err.downcast::<InstallUserError>() {
+                    Ok(user) => {
+                        return Ok(ExecutionOutcome::user_error(user.message, user.details))
+                    }
+                    Err(err) => return Err(err),
+                }
             }
-            match err.downcast::<InstallUserError>() {
-                Ok(user) => return Ok(ExecutionOutcome::user_error(user.message, user.details)),
-                Err(err) => return Err(err),
-            }
-        }
-    };
+        };
 
     if let Err(err) = refresh_project_site(&snapshot, ctx) {
         if pyproject_modified {

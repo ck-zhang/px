@@ -347,9 +347,13 @@ fn extract_archive(archive: &Path, dest: &Path, kind: ArchiveKind) -> Result<()>
                 if should_skip_python_entry(&path) {
                     continue;
                 }
-                entry
-                    .unpack_in(dest)
-                    .with_context(|| format!("failed to unpack `{}` into {}", path.display(), dest.display()))?;
+                entry.unpack_in(dest).with_context(|| {
+                    format!(
+                        "failed to unpack `{}` into {}",
+                        path.display(),
+                        dest.display()
+                    )
+                })?;
             }
         }
         ArchiveKind::Zip => {
@@ -400,9 +404,11 @@ fn should_skip_python_entry(path: &Path) -> bool {
         .components()
         .filter_map(|component| component.as_os_str().to_str())
         .collect();
-    components
-        .windows(3)
-        .any(|window| matches!(window[0], "lib" | "lib64") && window[1].starts_with("python") && window[2] == "test")
+    components.windows(3).any(|window| {
+        matches!(window[0], "lib" | "lib64")
+            && window[1].starts_with("python")
+            && window[2] == "test"
+    })
 }
 
 fn locate_python_binary(root: &Path, channel: &str) -> Result<PathBuf> {

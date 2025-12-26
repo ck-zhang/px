@@ -322,7 +322,9 @@ fn should_skip_runtime_entry(path: &Path) -> bool {
         .filter_map(|component| component.as_os_str().to_str())
         .collect();
     components.windows(3).any(|window| {
-        matches!(window[0], "lib" | "lib64") && window[1].starts_with("python") && window[2] == "test"
+        matches!(window[0], "lib" | "lib64")
+            && window[1].starts_with("python")
+            && window[2] == "test"
     })
 }
 

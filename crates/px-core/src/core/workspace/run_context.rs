@@ -76,7 +76,9 @@ pub fn prepare_workspace_run_context(
             if outcome.status != crate::CommandStatus::Ok {
                 return Err(outcome);
             }
-            sync_report = Some(crate::EnvironmentSyncReport::new(crate::EnvironmentIssue::MissingLock));
+            sync_report = Some(crate::EnvironmentSyncReport::new(
+                crate::EnvironmentIssue::MissingLock,
+            ));
             state = evaluate_workspace_state(ctx, &workspace).map_err(|err| {
                 ExecutionOutcome::failure(
                     "failed to evaluate workspace state",
@@ -114,8 +116,9 @@ pub fn prepare_workspace_run_context(
                 return Err(outcome);
             }
             if sync_report.is_none() {
-                sync_report =
-                    Some(crate::EnvironmentSyncReport::new(crate::EnvironmentIssue::LockDrift));
+                sync_report = Some(crate::EnvironmentSyncReport::new(
+                    crate::EnvironmentIssue::LockDrift,
+                ));
             }
             state = evaluate_workspace_state(ctx, &workspace).map_err(|err| {
                 ExecutionOutcome::failure(

@@ -59,7 +59,11 @@ impl RuntimeRegistry {
         self.runtimes
             .iter()
             .find(|record| record.default)
-            .and_then(|record| Version::from_str(&record.full_version).ok().map(|v| (v, record)))
+            .and_then(|record| {
+                Version::from_str(&record.full_version)
+                    .ok()
+                    .map(|v| (v, record))
+            })
             .filter(|(version, _)| requirement.contains(version))
             .map(|(_, record)| record.clone())
     }
@@ -191,17 +195,15 @@ pub fn resolve_runtime(
     override_version: Option<&str>,
     requirement: &str,
 ) -> Result<RuntimeSelection> {
-    let specifiers = VersionSpecifiers::from_str(requirement)
-        .or_else(|err| {
-            if let Ok(channel) = normalize_channel(requirement) {
-                let spec = format!("=={channel}.*");
-                VersionSpecifiers::from_str(&spec).map_err(|err| {
-                    anyhow!("invalid requires-python `{requirement}`: {err}")
-                })
-            } else {
-                Err(anyhow!("invalid requires-python `{requirement}`: {err}"))
-            }
-        })?;
+    let specifiers = VersionSpecifiers::from_str(requirement).or_else(|err| {
+        if let Ok(channel) = normalize_channel(requirement) {
+            let spec = format!("=={channel}.*");
+            VersionSpecifiers::from_str(&spec)
+                .map_err(|err| anyhow!("invalid requires-python `{requirement}`: {err}"))
+        } else {
+            Err(anyhow!("invalid requires-python `{requirement}`: {err}"))
+        }
+    })?;
     let registry = load_registry()?;
     let mut managed: Vec<RuntimeRecord> = Vec::new();
     let mut external: Vec<RuntimeRecord> = Vec::new();

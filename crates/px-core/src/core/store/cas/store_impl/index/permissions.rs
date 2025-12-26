@@ -41,8 +41,7 @@ impl ContentAddressableStore {
     }
 
     fn harden_store_permissions(&self) -> Result<()> {
-        let _timing =
-            crate::tooling::timings::TimingGuard::new("harden_store_permissions");
+        let _timing = crate::tooling::timings::TimingGuard::new("harden_store_permissions");
         let objects_root = self.root.join(OBJECTS_DIR);
         if objects_root.exists() {
             for entry in walkdir::WalkDir::new(&objects_root)

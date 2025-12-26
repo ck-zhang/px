@@ -880,7 +880,10 @@ mod extras_tests {
         );
         let filelock = filelock.expect("filelock resolved");
         assert!(
-            !filelock.marker.as_deref().is_some_and(marker_mentions_extra),
+            !filelock
+                .marker
+                .as_deref()
+                .is_some_and(marker_mentions_extra),
             "expected filelock marker to exclude `extra`, got {:?}",
             filelock.marker
         );
@@ -990,7 +993,10 @@ version = "0.1.0"
     #[test]
     #[ignore]
     fn debug_airflow_workspace_constraints_include_sphinx_theme() -> anyhow::Result<()> {
-        let root = std::path::Path::new("/home/toxictoast/test/pythonstress/airflow");
+        let Some(root) = std::env::var_os("PX_DEBUG_AIRFLOW_ROOT") else {
+            return Ok(());
+        };
+        let root = std::path::Path::new(&root);
         if !root.exists() {
             return Ok(());
         }

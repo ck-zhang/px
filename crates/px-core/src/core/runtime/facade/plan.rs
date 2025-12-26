@@ -124,7 +124,9 @@ pub fn lock_is_fresh(ctx: &CommandContext, snapshot: &ManifestSnapshot) -> Resul
                     .iter()
                     .filter(|dep| dep.source.is_none())
                     .any(|dep| match dep.artifact.as_ref() {
-                        Some(artifact) => !artifact.is_direct_url && artifact.build_options_hash.is_empty(),
+                        Some(artifact) => {
+                            !artifact.is_direct_url && artifact.build_options_hash.is_empty()
+                        }
                         None => true,
                     })
             {
