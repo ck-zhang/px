@@ -1,27 +1,27 @@
-# px (Python eXact)
+# px - Python eXact
 
 px manages Python project dependencies using **immutable environment profiles**.
 
-Instead of treating "the environment" as a directory you activate and mutate, px builds a profile into a **global, content-addressed store** and can run directly from it. A traditional on-disk environment (venv-style) or a sandbox is optional and can be generated when needed.
+Instead of treating "the environment" as a directory you activate and mutate, px builds a profile into a **global, content-addressed store** and can run directly from it. A venv-style on-disk env or a sandbox is optional and generated on demand.
 
-## Install (from source)
+## Install from source
 
 ```sh
 cargo install --path crates/px-cli --locked
 px --version
 ```
 
-## Try it (no clone, no project)
+## Try it without cloning
 
-If you don’t have a px-managed Python runtime yet, px will offer to install one on first use.
+If you don't have a px-managed Python runtime yet, px will offer to install one on first use. This demo script requires Python >=3.12.
 
-Run a script straight from this repo’s `HEAD` (default is commit-pinned; `--allow-floating` allows `HEAD`/branches):
+Run a script straight from this repo's `HEAD`. Default is commit-pinned; `--allow-floating` allows `HEAD` and branches:
 
 ```sh
 px run --allow-floating https://github.com/ck-zhang/px/blob/HEAD/fixtures/run_by_reference_demo/scripts/whereami.py
 ```
 
-Run the same script in a Linux sandbox (requires podman or docker; first run may take longer):
+Run the same script in a Linux sandbox. Requires podman or docker; first run may take longer:
 
 ```sh
 px run --allow-floating --sandbox https://github.com/ck-zhang/px/blob/HEAD/fixtures/run_by_reference_demo/scripts/whereami.py
@@ -53,19 +53,19 @@ px test
 
 ### What to commit
 
-* `pyproject.toml` (declared intent)
-* `px.lock` (resolved, exact set)
+* `pyproject.toml` - declared intent
+* `px.lock` - resolved, exact set
 
 ### What not to commit
 
-* `.px/` (local state/logs). Built artifacts live under `~/.px/`.
+* `.px/` - local state and logs. Built artifacts live under `~/.px/`.
 
 ## Common commands
 
-* `px add <pkg>...` / `px remove <pkg>...` — update dependencies
-* `px run <target> [...args]` — run commands
-* `px test` — run tests
-* `px sync` — ensure the local profile matches the lockfile (`--frozen` in CI)
+* `px add <pkg>...` / `px remove <pkg>...` - update dependencies
+* `px run <target> [...args]` - run commands
+* `px test` - run tests
+* `px sync` - ensure the local profile matches the lockfile; use `--frozen` in CI
 
 ## How px differs
 
@@ -77,7 +77,7 @@ px executes from a content-addressed store of built artifacts:
 * no accidental mutation via ad-hoc installs
 * identical dependency graphs can reuse the same artifacts across projects
 
-If a directory-based layout is required (compatibility or sandboxing), px can materialize one, but it's a generated view and not the source of truth.
+If you need a directory-based layout for compatibility or sandboxing, px can materialize one. It's a generated view and not the source of truth.
 
 ### 2) Native builds are pinned
 
@@ -99,7 +99,7 @@ px test --frozen
 
 ## More things you can do
 
-### One-file scripts with inline deps (PEP 723)
+### One-file scripts with inline deps, PEP 723
 
 ```py
 # /// script
@@ -112,7 +112,7 @@ px test --frozen
 px run path/to/script.py
 ```
 
-### Run with sandboxing (optional)
+### Run with sandboxing
 
 ```sh
 px run --sandbox python -c "print('ok')"
@@ -126,6 +126,8 @@ px pack app --out dist/myapp.pxapp
 px run dist/myapp.pxapp
 ```
 
+Tip: for library-only projects, set an entrypoint with `px pack app --entrypoint "python -m your_module"`.
+
 ### Install tools separately from projects
 
 ```sh
@@ -135,9 +137,9 @@ px tool run black --check .
 
 ## Troubleshooting
 
-* `px status` — check whether manifest / lock / profile agree
-* `px explain run ...` — show what px would run (and why)
-* `px why <package>` — show why a dependency is present
+* `px status` - check whether manifest / lock / profile agree
+* `px explain run ...` - show what px would run and why
+* `px why <package>` - show why a dependency is present
 
 ## Docs
 
